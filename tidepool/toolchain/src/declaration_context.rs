@@ -1035,7 +1035,7 @@ impl OriginalCompilerInputs {
 pub(crate) struct RequestCompilerInputs {
     // Retained availability outlives the transport subset consumed by this request.
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
-    pub(crate) metadata: CompilerArtifactMetadata,
+    metadata: CompilerArtifactMetadata,
     native_selection: NativeInputSelection,
     original_sources: Arc<crate::certified_products::RetainedOriginalSources>,
     // Only cold World-primary capture sets this owner. A generic request may
@@ -3186,6 +3186,10 @@ impl RequestCompilerInputs {
             original_sources: Arc::clone(&self.original_sources),
             world_primary_context: Some(context),
         }))
+    }
+
+    pub(crate) fn metadata(&self) -> &CompilerArtifactMetadata {
+        &self.metadata
     }
 
     pub(crate) fn shared_compiler_source_support(
@@ -9540,11 +9544,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 }
             }
         }
-        let demand = cold.source_support.demanded_compiler_projection(
-            &cold.metadata.retained,
-            &roots,
-            operation,
-        )?;
+        let demand = cold.demanded_compiler_projection(&roots, operation)?;
         cold.demanded_native_inputs(demand, &native_roots, operation)
             .map_err(|error| match error {
                 DemandNativeInputsError::Compiler(error) => error,
@@ -19891,12 +19891,7 @@ mod tests {
             let cold = demanded_native_fixture(32, mode, false);
             let mut validation = PackageInterfaceValidation::default();
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(
-                    &cold.metadata.retained,
-                    &roots,
-                    &validation.inventory,
-                )
+                .demanded_compiler_projection(&roots, &validation.inventory)
                 .unwrap();
             let selected = cold
                 .demanded_native_inputs(demand, &roots, &validation.inventory)
@@ -20035,8 +20030,7 @@ mod tests {
         let operation = InventoryOperation::new(Default::default());
         let mut validation = PackageInterfaceValidation::default();
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         let mut selected = cold
             .demanded_native_inputs(demand, &roots, &operation)
@@ -20083,8 +20077,7 @@ mod tests {
         // The same narrowed rows are refused when the demand owner has issued
         // no delta for them: echoed facts alone are not permission.
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         let mut unissued = cold
             .demanded_native_inputs(demand, &roots, &operation)
@@ -20186,8 +20179,7 @@ mod tests {
                 let cold = demanded_native_fixture(unrelated, mode, partial);
                 let operation = InventoryOperation::new(Default::default());
                 let demand = cold
-                    .source_support
-                    .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                    .demanded_compiler_projection(&roots, &operation)
                     .unwrap();
                 NativeOfferContribution::take_group_binding_scope_visits();
                 let selected = cold
@@ -20244,12 +20236,7 @@ mod tests {
                     ..Default::default()
                 });
                 let demand = cold
-                    .source_support
-                    .demanded_compiler_projection(
-                        &cold.metadata.retained,
-                        &BTreeSet::new(),
-                        &empty_operation,
-                    )
+                    .demanded_compiler_projection(&BTreeSet::new(), &empty_operation)
                     .unwrap();
                 let empty = cold
                     .demanded_native_inputs(demand, &BTreeSet::new(), &empty_operation)
@@ -20260,8 +20247,7 @@ mod tests {
                 assert_eq!(empty_operation.work_usage().unwrap(), (0, 0));
 
                 let demand = cold
-                    .source_support
-                    .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                    .demanded_compiler_projection(&roots, &operation)
                     .unwrap();
                 let exhausted = InventoryOperation::new(InventoryDecodeLimits {
                     max_work: 0,
@@ -20511,8 +20497,7 @@ mod tests {
 
         let roots = BTreeSet::from([parent_owner]);
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         let other = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
         assert!(matches!(
@@ -20520,8 +20505,7 @@ mod tests {
             Err(DemandNativeInputsError::ForeignBasis)
         ));
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         assert!(matches!(
             cold.demanded_native_inputs(
@@ -20588,8 +20572,7 @@ mod tests {
             );
             let operation = InventoryOperation::new(Default::default());
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(&cold.metadata.retained, &role_roots, &operation)
+                .demanded_compiler_projection(&role_roots, &operation)
                 .unwrap();
             let dependency_only = cold
                 .demanded_native_inputs(demand, &BTreeSet::from([parent_owner.clone()]), &operation)
@@ -20601,8 +20584,7 @@ mod tests {
                 .0
                 .contains_key(&child_owner));
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(&cold.metadata.retained, &role_roots, &operation)
+                .demanded_compiler_projection(&role_roots, &operation)
                 .unwrap();
             let explicit = cold
                 .demanded_native_inputs(demand, &role_roots, &operation)
@@ -20671,8 +20653,7 @@ mod tests {
             let mut cold = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
             let operation = InventoryOperation::new(Default::default());
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                .demanded_compiler_projection(&roots, &operation)
                 .unwrap();
             let id = cold.projection().snapshot_roles()[roots.first().unwrap()]
                 .original()
@@ -20704,8 +20685,7 @@ mod tests {
         let roots = BTreeSet::from([identity("fixture", "Joined")]);
         let operation = InventoryOperation::new(Default::default());
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         assert!(matches!(
             cold.demanded_native_inputs(demand, &roots, &operation),

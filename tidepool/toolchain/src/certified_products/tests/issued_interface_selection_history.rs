@@ -168,7 +168,7 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
         let expected = BTreeSet::from(["Fresh", if chosen == 1 { "Side" } else { "Other" }]);
         assert_eq!(
             effective
-                .metadata
+                .metadata()
                 .entries
                 .keys()
                 .map(|owner| owner.module.as_str())
@@ -176,9 +176,9 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
             expected,
             "unselected interface acquired a compiler role: chosen={chosen}"
         );
-        assert_eq!(effective.metadata.entries.len(), 2);
-        assert_eq!(effective.metadata.retained.artifacts.len(), 4);
-        let chosen_entry = &effective.metadata.entries[&entries[chosen].descriptor.owner];
+        assert_eq!(effective.metadata().entries.len(), 2);
+        assert_eq!(effective.metadata().retained.artifacts.len(), 4);
+        let chosen_entry = &effective.metadata().entries[&entries[chosen].descriptor.owner];
         assert_eq!(chosen_entry.descriptor.id, entries[chosen].descriptor.id);
         assert_eq!(
             chosen_entry.descriptor.interface_sha256,

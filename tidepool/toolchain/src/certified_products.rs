@@ -18668,7 +18668,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(next
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .retained
                 .selected_native_groups
                 .is_empty());
@@ -22714,7 +22714,7 @@ pub(crate) mod tests {
                 .all(|artifact| artifact.product.is_none()));
             let selected = request
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .entries
                 .values()
                 .find(|entry| entry.descriptor.owner.module == "Fresh")
@@ -24197,7 +24197,7 @@ None,
             assert!(request.groups.is_empty());
             assert!(request
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .retained
                 .selected_native_groups
                 .is_empty());
@@ -24205,7 +24205,7 @@ None,
             let effective = request.compiler_inputs();
             assert_eq!(
                 effective
-                    .metadata
+                    .metadata()
                     .retained
                     .artifacts
                     .values()
@@ -24597,7 +24597,7 @@ None,
                 assert!(cached_request.groups.is_empty());
                 assert!(cached_request
                     .compiler_inputs()
-                    .metadata
+                    .metadata()
                     .retained
                     .selected_native_groups
                     .is_empty());

@@ -688,7 +688,7 @@ fn replay_native_transport_history(
         .unwrap();
     coverage.joined_preparations += 1;
     let inputs = request.compiler_inputs();
-    assert!(inputs.metadata.retained.selected_native_groups.is_empty());
+    assert!(inputs.metadata().retained.selected_native_groups.is_empty());
     assert_eq!(
         inputs.projection().snapshot_roles()[&entries[1].descriptor.owner].original(),
         Some(entries[1].descriptor.id)
@@ -1012,7 +1012,7 @@ fn replay_native_transport_history(
         .unwrap();
     let continued_inputs = continued_request.compiler_inputs();
     assert!(continued_inputs
-        .metadata
+        .metadata()
         .retained
         .selected_native_groups
         .is_empty());
