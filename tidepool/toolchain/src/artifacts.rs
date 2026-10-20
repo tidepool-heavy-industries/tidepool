@@ -3401,7 +3401,81 @@ impl SealedOriginalEvidence {
     }
 }
 
+/// Compiler-output membership facts only. Neither case grants a runtime
+/// source lease, an executable group, or permission to publish a binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSourceProductMembership {
+    CurrentProduct,
+    Historical,
+}
+
+/// Borrowed native facts from one complete sealed output acquisition.
+/// Runtime source custody must be paired by its runtime producer separately.
+pub struct NativeSourceProductRef<'a> {
+    artifact: crate::artifact_inventory::ArtifactId,
+    product: &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
+    membership: NativeSourceProductMembership,
+}
+
+impl NativeSourceProductRef<'_> {
+    pub fn artifact(&self) -> crate::artifact_inventory::ArtifactId {
+        self.artifact
+    }
+
+    pub fn membership(&self) -> NativeSourceProductMembership {
+        self.membership
+    }
+
+    pub fn group_sites(&self) -> impl Iterator<Item = (u32, impl Iterator<Item = u64> + '_)> + '_ {
+        self.product
+            .original_native()
+            .into_iter()
+            .flat_map(|native| {
+                native
+                    .inventory_facts()
+                    .native_group_ordinals
+                    .iter()
+                    .map(|ordinal| {
+                        let group = crate::certified_products::original_native_group_definitions(
+                            self.product,
+                            *ordinal,
+                        )
+                        .expect("sealed native ordinal has authenticated definitions");
+                        (*ordinal, group.sites().iter().map(|site| site.site))
+                    })
+            })
+    }
+}
+
 impl SealedTurnProducts {
+    /// Project the actual physical cohort without reconstructing membership
+    /// from recovery inventory, product labels, or an existing group proof.
+    pub fn native_source_products(&self) -> Result<Vec<NativeSourceProductRef<'_>>, CompileError> {
+        let mut current = self
+            .source_selection()
+            .physical_current_originals()
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let mut products = Vec::new();
+        for (artifact, product) in self.artifact_view().native_original_payloads() {
+            let membership = if current.remove(&artifact) {
+                NativeSourceProductMembership::CurrentProduct
+            } else {
+                NativeSourceProductMembership::Historical
+            };
+            products.push(NativeSourceProductRef {
+                artifact,
+                product,
+                membership,
+            });
+        }
+        if !current.is_empty() {
+            return Err(CompileError::ExtractFailed(
+                "sealed physical current originals lack product custody".into(),
+            ));
+        }
+        Ok(products)
+    }
+
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
         match &self.original {
             SealedOriginalEvidence::Exact { output, .. } => output.artifacts(),

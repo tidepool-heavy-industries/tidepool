@@ -3009,6 +3009,25 @@ impl CertifiedSourceSelection {
         }))
     }
 
+    /// Physical output membership is independent of native reuse labels and
+    /// already-issued group bindings. Only this output's bound producer rows
+    /// qualify; retained input availability cannot become a current product.
+    pub(crate) fn physical_current_originals(
+        &self,
+    ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
+        self.modules
+            .values()
+            .filter_map(ReceiptSourceSelection::native)
+            .filter(|native| matches!(native.origin, ReceiptNativeOrigin::NewProduct))
+            .map(|native| match native.original {
+                ReceiptOriginalIdentity::Bound(original) => Ok(original),
+                ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
+                    "physical current original identity is not bound",
+                )),
+            })
+            .collect()
+    }
+
     /// Encoding bases borrow immutable facts only; native decisions still come
     /// from this selection's checked continuation and physical output.
     pub(crate) fn native_fact_base(
@@ -17375,6 +17394,14 @@ pub(crate) mod tests {
             item.issued_native_availability().next().unwrap(),
             &issued
         ));
+        assert_eq!(
+            physical.physical_current_originals().unwrap(),
+            BTreeSet::from([native.descriptor.id]),
+        );
+        assert_eq!(
+            item.physical_current_originals().unwrap(),
+            physical.physical_current_originals().unwrap()
+        );
         let private = OriginalCompilerInputs::from_selection(&item, &item_view).unwrap();
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
@@ -17393,6 +17420,15 @@ pub(crate) mod tests {
         .prepare_compilation_with_private_input(root.path(), producer_bytes, None, Some(private))
         .unwrap();
         let inputs = request.compiler_inputs();
+        let inherited = CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
+        assert!(
+            inherited.physical_current_originals().unwrap().is_empty(),
+            "carrying actual Full availability cannot restamp physical output membership"
+        );
         assert!(inputs
             .native_availability(native.descriptor.id)
             .unwrap()
