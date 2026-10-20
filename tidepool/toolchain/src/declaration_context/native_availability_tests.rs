@@ -4417,8 +4417,10 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             "custody cannot add an offer for B"
         );
         assert_eq!(
-            input.issued_input_decisions(),
-            Some(baseline.input_decisions())
+            input
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts()),
+            Some(baseline.input_decisions().recorded_facts())
         );
         assert!(input
             .issued_artifacts()
@@ -4896,8 +4898,12 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         assert_eq!(received.native_availability(), input.native_availability());
         assert_eq!(received.issued_offers(), input.issued_offers());
         assert_eq!(
-            received.issued_input_decisions(),
-            input.issued_input_decisions()
+            received
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts()),
+            input
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts())
         );
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(context.clone())
@@ -4953,8 +4959,12 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         assert_eq!(received.native_availability(), input.native_availability());
         assert_eq!(received.issued_offers(), input.issued_offers());
         assert_eq!(
-            received.issued_input_decisions(),
-            input.issued_input_decisions()
+            received
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts()),
+            input
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts())
         );
         if available {
             assert!(

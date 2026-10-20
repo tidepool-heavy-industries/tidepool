@@ -88,7 +88,8 @@ impl PublicationNativeAuthority {
             &facts.input_decisions,
         )?;
         if let PublicationNativeState::Acquired(inputs) = &self.0 {
-            restored.input_decisions = inputs.decisions
+            restored.input_decisions = inputs
+                .decisions
                 .with_recorded_facts(restored.input_decisions.facts.clone());
         }
         Ok(Self(PublicationNativeState::Acquired(Arc::new(
@@ -465,7 +466,11 @@ impl SelectedNativeSupport {
             }
         }
         if changed || missing != matches!(self, Self::Missing(_)) {
-            *self = if missing { Self::Missing(acquired.into()) } else { Self::Acquired(acquired.into()) };
+            *self = if missing {
+                Self::Missing(acquired.into())
+            } else {
+                Self::Acquired(acquired.into())
+            };
             true
         } else {
             false
@@ -484,9 +489,16 @@ impl IssuedInputNativeDecisions {
         &self,
         facts: imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,
     ) -> Self {
-        let roots = facts.values().flat_map(|fact| fact.groups.values().copied()).collect::<BTreeSet<_>>();
+        let roots = facts
+            .values()
+            .flat_map(|fact| fact.groups.values().copied())
+            .collect::<BTreeSet<_>>();
         let mut selected = self.selected.clone();
-        let removed = selected.keys().filter(|group| !roots.contains(group)).copied().collect::<Vec<_>>();
+        let removed = selected
+            .keys()
+            .filter(|group| !roots.contains(group))
+            .copied()
+            .collect::<Vec<_>>();
         for group in removed {
             selected.remove(&group);
         }
@@ -501,13 +513,29 @@ impl IssuedInputNativeDecisions {
     /// Transfer only this source's selected roots for the same winning role.
     /// Availability and retained custody cannot add an acquisition here.
     pub(super) fn carry_selected_from(&mut self, source: &Self, owner: &ExactModuleIdentity) {
-        let Some(fact) = self.facts.get(owner) else { return };
-        let Some(prior) = source.facts.get(owner).filter(|prior| prior.role == fact.role) else { return };
-        let groups = fact.groups.iter().filter_map(|(ordinal, group)|
-            (prior.groups.get(ordinal) == Some(group)).then_some(*group)
-        ).collect::<Vec<_>>();
+        let Some(fact) = self.facts.get(owner) else {
+            return;
+        };
+        let Some(prior) = source
+            .facts
+            .get(owner)
+            .filter(|prior| prior.role == fact.role)
+        else {
+            return;
+        };
+        let groups = fact
+            .groups
+            .iter()
+            .filter_map(|(ordinal, group)| {
+                (prior.groups.get(ordinal) == Some(group)).then_some(*group)
+            })
+            .collect::<Vec<_>>();
         for group in groups {
-            let incoming = source.selected.get(&group).cloned().unwrap_or_else(SelectedNativeSupport::missing);
+            let incoming = source
+                .selected
+                .get(&group)
+                .cloned()
+                .unwrap_or_else(SelectedNativeSupport::missing);
             if let Some(held) = self.selected.get(&group) {
                 let mut merged = held.clone();
                 if merged.merge(&incoming) {
@@ -525,20 +553,31 @@ impl IssuedInputNativeDecisions {
         for (owner, fact) in &incoming.facts {
             if let Some(previous) = self.facts.get(owner) {
                 if previous.role != fact.role {
-                    return Err(failure("selected native decision role differs from its issuer"));
+                    return Err(failure(
+                        "selected native decision role differs from its issuer",
+                    ));
                 }
                 let mut groups = previous.groups.clone();
                 for (ordinal, group) in &fact.groups {
-                    if groups.insert(*ordinal, *group).is_some_and(|old| old != *group) {
-                        return Err(admission_failure(ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: group.binding.artifact(),
-                        }));
+                    if groups
+                        .insert(*ordinal, *group)
+                        .is_some_and(|old| old != *group)
+                    {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity {
+                                artifact: group.binding.artifact(),
+                            },
+                        ));
                     }
                 }
                 if previous.groups.diff(&groups).next().is_some() {
-                    self.facts.insert(owner.clone(), RecordedInputNativeDecision {
-                        role: previous.role.clone(), groups,
-                    });
+                    self.facts.insert(
+                        owner.clone(),
+                        RecordedInputNativeDecision {
+                            role: previous.role.clone(),
+                            groups,
+                        },
+                    );
                 }
             } else {
                 self.facts.insert(owner.clone(), fact.clone());
@@ -1508,7 +1547,9 @@ impl CompilerSourceSupport {
             artifacts,
             native_offers: offers.into_values().collect::<Vec<_>>().into(),
             native_availability: availability.clone(),
-            input_decisions: self.input_decisions.with_recorded_facts(facts.input_decisions.clone()),
+            input_decisions: self
+                .input_decisions
+                .with_recorded_facts(facts.input_decisions.clone()),
             native_offer_facts: facts.offers.clone(),
             native_fact_owner: Some(facts),
             // The home census belongs to the demanded rows, not to cold
@@ -1660,7 +1701,7 @@ impl CompilerSourceSupport {
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         let decisions = self.input_decisions.for_exact_roles(&projection);
-        let mut support = Self::new_with_native_facts(
+        let support = Self::new_with_native_facts(
             projection,
             artifacts,
             offers,
@@ -1678,7 +1719,7 @@ impl CompilerSourceSupport {
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         let decisions = self.input_decisions.restricted(&projection, &artifacts);
-        let mut support = Self::new_with_native_facts(
+        let support = Self::new_with_native_facts(
             projection,
             artifacts,
             offers,
@@ -1694,7 +1735,8 @@ impl CompilerSourceSupport {
         incoming: Option<&IssuedInputNativeDecisions>,
     ) -> Result<Self, CompileError> {
         if let Some(incoming) = incoming {
-            self.input_decisions.merge_selected(&incoming.for_exact_roles(&self.projection))?;
+            self.input_decisions
+                .merge_selected(&incoming.for_exact_roles(&self.projection))?;
         }
         self.refreshed_native_facts()
     }
@@ -1743,7 +1785,10 @@ impl CompilerSourceSupport {
                     .clone();
                 let offer = IssuedNativeOffer::issue(original, &artifacts, proof)?;
                 for group in groups.values().copied() {
-                    input_decisions.selected.insert(group, SelectedNativeSupport::Acquired(Arc::from([offer.clone()])));
+                    input_decisions.selected.insert(
+                        group,
+                        SelectedNativeSupport::Acquired(Arc::from([offer.clone()])),
+                    );
                 }
                 input_decisions.facts.insert(
                     owner,
@@ -2394,7 +2439,7 @@ impl CompilerSourceSupport {
                 .into_rows(),
             None => self.native_availability.clone(),
         };
-        let mut support = Self::new_with_native_facts(
+        let support = Self::new_with_native_facts(
             projection,
             artifacts,
             offers,
@@ -2429,7 +2474,7 @@ impl CompilerSourceSupport {
                     },
                     CompilerInputValidation::ReceivedFragment,
                 )?;
-            let mut resolved = Self::new_with_native_facts(
+            let resolved = Self::new_with_native_facts(
                 projection,
                 artifacts,
                 support.native_offers.iter().cloned(),
@@ -2578,8 +2623,8 @@ impl CompilerSourceSupport {
             }
         }
         drop(state);
-        restored.input_decisions = IssuedInputNativeDecisions::default()
-            .with_recorded_facts(decision_facts.clone());
+        restored.input_decisions =
+            IssuedInputNativeDecisions::default().with_recorded_facts(decision_facts.clone());
         restored.refreshed_native_facts()
     }
 
@@ -3173,7 +3218,11 @@ impl CompilerSourceSupport {
         let mut projection = self.projection.clone();
         projection.admit_role(endorsement.owner().clone(), role.clone())?;
         let mut decisions = self.input_decisions.clone();
-        if let Some(fact) = decisions.facts.get_mut(endorsement.owner()).filter(|fact| &fact.role == previous) {
+        if let Some(fact) = decisions
+            .facts
+            .get_mut(endorsement.owner())
+            .filter(|fact| &fact.role == previous)
+        {
             // The checked endorsement transfers the SAME chosen acquisition
             // while changing its role; ordinary role pruning cannot do this.
             fact.role = role.recorded_fact();
@@ -4307,8 +4356,8 @@ mod tests {
             assert!(demanded.metadata().entries[&root].is_native());
             assert!(!demanded.source_support().native_offers().is_empty());
             assert_eq!(
-                demanded.source_support().input_decisions(),
-                support.input_decisions()
+                demanded.source_support().input_decisions().recorded_facts(),
+                support.input_decisions().recorded_facts()
             );
             assert_eq!(
                 demanded.source_support().native_availability(),
@@ -4482,7 +4531,10 @@ mod tests {
                 .unwrap();
             assert_eq!(row.permits(7), ordinals.contains(&7));
             assert_eq!(row.permits(9001), ordinals.contains(&9001));
-            assert_eq!(actual.input_decisions, source.input_decisions);
+            assert_eq!(
+                actual.input_decisions.recorded_facts(),
+                source.input_decisions.recorded_facts()
+            );
             assert!(Arc::ptr_eq(
                 &actual.selected.home_units,
                 &source.selected.home_units
@@ -4880,7 +4932,10 @@ mod tests {
                 source.artifacts.selection_snapshot(),
                 recomputed.artifacts.selection_snapshot()
             );
-            assert_eq!(source.input_decisions, recomputed.input_decisions);
+            assert_eq!(
+                source.input_decisions.recorded_facts(),
+                recomputed.input_decisions.recorded_facts()
+            );
             drop(interfaces);
             drop(support);
             drop(recomputed);
@@ -5094,7 +5149,10 @@ mod tests {
                 .unwrap();
             assert_eq!(narrowed.selected, legacy.selected);
             assert_eq!(narrowed.projection, legacy.projection);
-            assert_eq!(narrowed.input_decisions, legacy.input_decisions);
+            assert_eq!(
+                narrowed.input_decisions.recorded_facts(),
+                legacy.input_decisions.recorded_facts()
+            );
             assert_eq!(
                 narrowed.artifacts.selection_snapshot(),
                 legacy.artifacts.selection_snapshot()
@@ -5223,7 +5281,10 @@ mod tests {
         assert_eq!(source.artifacts, reversed.artifacts);
         assert_eq!(source.native_availability, reversed.native_availability);
         assert_eq!(source.selected, reversed.selected);
-        assert_eq!(source.input_decisions, reversed.input_decisions);
+        assert_eq!(
+            source.input_decisions.recorded_facts(),
+            reversed.input_decisions.recorded_facts()
+        );
         assert_eq!(source.native_fact_owner, reversed.native_fact_owner);
         crate::exact_context::take_native_fact_work();
         assert_eq!(source, reversed);
@@ -5265,7 +5326,10 @@ mod tests {
             let before = Arc::clone(source.native_fact_owner());
             for _ in 0..4 {
                 let request = source.close_request(None, &Default::default()).unwrap();
-                assert_eq!(request.input_decisions, source.input_decisions);
+                assert_eq!(
+                    request.input_decisions.recorded_facts(),
+                    source.input_decisions.recorded_facts()
+                );
                 let captured = PublicationNativeAuthority::capture(&request).unwrap();
                 let unchanged_work = take_native_fact_work();
                 assert_eq!(
@@ -5349,7 +5413,10 @@ mod tests {
                 changed.native_fact_owner().commitment(),
                 before.commitment()
             );
-            assert_eq!(changed.input_decisions, source.input_decisions);
+            assert_eq!(
+                changed.input_decisions.recorded_facts(),
+                source.input_decisions.recorded_facts()
+            );
             eprintln!(
                 "native-fact-successor unrelated={unrelated} cold={cold:?} changed={delta:?}"
             );
@@ -5640,7 +5707,10 @@ mod tests {
             assert!(Arc::ptr_eq(&source.native_offers, &changed.native_offers));
             assert_eq!(source.native_offer_facts, changed.native_offer_facts);
             assert_eq!(source.native_availability, changed.native_availability);
-            assert_eq!(source.input_decisions, changed.input_decisions);
+            assert_eq!(
+                source.input_decisions.recorded_facts(),
+                changed.input_decisions.recorded_facts()
+            );
             assert!(Arc::ptr_eq(
                 &metadata.retained.selected_native_groups,
                 &updated_metadata.retained.selected_native_groups
@@ -5940,7 +6010,10 @@ mod tests {
             let joined = support.merge(&support).unwrap();
             no_metadata(&support.artifacts);
             no_metadata(&joined.artifacts);
-            assert_eq!(joined.input_decisions, support.input_decisions);
+            assert_eq!(
+                joined.input_decisions.recorded_facts(),
+                support.input_decisions.recorded_facts()
+            );
             assert_eq!(joined.native_availability, support.native_availability);
             // Explicit complete observation remains available, and agrees
             // with the original independently issued graph and payload set.
@@ -5996,6 +6069,121 @@ mod tests {
                 assert_eq!(entry.descriptor, expected);
                 assert_eq!(entry.requirements.len(), 1);
             }
+        }
+    }
+
+    #[test]
+    fn selected_native_acquisitions_follow_choices_without_promoting_availability() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries[..2].to_vec())
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap();
+        let a = CompilerSourceSupport::from_selected_issuance(projection.clone(), view.clone())
+            .unwrap();
+        let b = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        assert_eq!(
+            a, b,
+            "compiler graph equality remains independent of live acquisition"
+        );
+        let owner = &entries[1].descriptor.owner;
+        let group = a.input_decisions.facts[owner].groups[&7];
+        let issuer_a = a.input_decisions.selected[&group].acquisitions()[0].clone();
+        let issuer_b = b.input_decisions.selected[&group].acquisitions()[0].clone();
+        assert!(!issuer_a.same_issuance(&issuer_b));
+        assert_eq!(
+            issuer_a, issuer_b,
+            "equal graph facts do not identify a live acquisition"
+        );
+        let assert_sources =
+            |support: &CompilerSourceSupport, expected: &[&IssuedNativeOffer], missing: bool| {
+                let selected = &support.input_decisions.selected[&group];
+                assert_eq!(
+                    matches!(selected, SelectedNativeSupport::Missing(_)),
+                    missing
+                );
+                assert_eq!(selected.acquisitions().len(), expected.len());
+                for expected in expected {
+                    assert!(selected
+                        .acquisitions()
+                        .iter()
+                        .any(|actual| actual.same_issuance(expected)));
+                }
+            };
+        let available_b = a
+            .clone()
+            .retain_normalized_availability(b.native_availability())
+            .unwrap()
+            .retain_offers(b.native_offers.iter().cloned())
+            .unwrap();
+        assert_sources(&available_b, &[&issuer_a], false);
+        assert_eq!(
+            available_b.artifacts.capture_graph_selection(),
+            a.artifacts.capture_graph_selection()
+        );
+        for (left, right) in [(&a, &b), (&b, &a)] {
+            let both = left.merge(right).unwrap();
+            assert_sources(&both, &[&issuer_a, &issuer_b], false);
+            assert_eq!(
+                both.input_decisions.recorded_facts(),
+                a.input_decisions.recorded_facts()
+            );
+            assert_eq!(
+                both.artifacts.capture_graph_selection(),
+                a.artifacts.capture_graph_selection()
+            );
+            let narrowed = both
+                .source_support(&BTreeSet::from([owner.clone()]))
+                .unwrap();
+            assert_sources(&narrowed, &[&issuer_a, &issuer_b], false);
+            let expected_roots = narrowed
+                .input_decisions
+                .facts
+                .values()
+                .flat_map(|fact| fact.groups.values().copied())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                narrowed
+                    .input_decisions
+                    .selected
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                expected_roots
+            );
+        }
+        let facts = a.native_fact_owner();
+        let recovered = a
+            .restore_native_maps(
+                &a.projection.recorded_roles,
+                &facts.offers,
+                &facts.native_availability,
+                &facts.input_decisions,
+            )
+            .unwrap();
+        assert_sources(&recovered, &[], true);
+        assert_eq!(
+            recovered.input_decisions.recorded_facts(),
+            a.input_decisions.recorded_facts()
+        );
+        for (left, right) in [(&a, &recovered), (&recovered, &a)] {
+            assert_sources(&left.merge(right).unwrap(), &[&issuer_a], true);
+        }
+        // This is the former sparse-overwrite state: selected facts exist,
+        // but no live acquisition was observed. It cannot be upgraded by A.
+        let sparse = IssuedInputNativeDecisions {
+            facts: a.input_decisions.facts.clone(),
+            selected: Default::default(),
+        };
+        for (left, right) in [(&sparse, &a.input_decisions), (&a.input_decisions, &sparse)] {
+            let mut merged = left.clone();
+            merged.merge_selected(right).unwrap();
+            let SelectedNativeSupport::Missing(acquired) = &merged.selected[&group] else {
+                panic!("selected missing evidence must remain missing");
+            };
+            assert_eq!(acquired.len(), 1);
+            assert!(acquired[0].same_issuance(&issuer_a));
         }
     }
 
@@ -6151,7 +6339,10 @@ mod tests {
                 prior_support.artifacts.capture_graph_selection(),
             );
             assert_eq!(joined.projection, prior_support.projection);
-            assert_eq!(joined.input_decisions, prior_support.input_decisions);
+            assert_eq!(
+                joined.input_decisions.recorded_facts(),
+                prior_support.input_decisions.recorded_facts()
+            );
             assert_eq!(
                 joined.native_availability,
                 prior_support.native_availability
@@ -6518,7 +6709,10 @@ mod tests {
                 for retained in [custody, offers] {
                     assert_eq!(retained.artifacts.namespace(), original_namespace);
                     assert_eq!(retained.artifacts.selected_native_groups(), original_groups);
-                    assert_eq!(retained.input_decisions, original_decisions);
+                    assert_eq!(
+                        retained.input_decisions.recorded_facts(),
+                        original_decisions.recorded_facts()
+                    );
                     assert_eq!(retained.native_availability.rows().count(), rows.len());
                     for (row, prior) in retained.native_availability.rows().zip(&rows) {
                         assert!(Arc::ptr_eq(row, prior));
@@ -6670,7 +6864,10 @@ mod tests {
                     .namespace()
                     .contains_key(&entry.descriptor.id)
             }));
-            assert_eq!(narrowed.input_decisions, expected.input_decisions);
+            assert_eq!(
+                narrowed.input_decisions.recorded_facts(),
+                expected.input_decisions.recorded_facts()
+            );
         }
     }
 
