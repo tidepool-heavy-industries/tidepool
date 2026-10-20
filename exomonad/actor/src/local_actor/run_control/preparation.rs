@@ -2,8 +2,9 @@
 use super::*;
 
 use crate::resident_workbench::{
-    ActorGenerationCommit, ActorGenerationPublicationDriver, ActorGenerationPublicationSettlement,
-    ActorPublicationAttemptObserver, ReservedActorGeneration,
+    ActorGenerationBodyOutcome, ActorGenerationPublicationBody,
+    ActorGenerationPublicationBodyCompletion, ActorGenerationPublicationBodyResult,
+    ActorGenerationPublicationDriver, ActorPublicationAttemptObserver,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -42,18 +43,17 @@ impl PublicationNonStart {
 
 pub(super) enum PublicationDelivery {
     NotStarted {
-        reserved: ReservedActorGeneration,
+        body: ActorGenerationPublicationBody,
         reason: PublicationNonStart,
     },
-    Settled {
-        settlement: ActorGenerationPublicationSettlement,
-        notification: PublicationNotificationObservation,
+    Observed {
+        body: ActorGenerationPublicationBodyResult,
     },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum PublicationOutcomeObservation {
-    Published,
+    Visible,
     Refused,
     Unconfirmed,
     Failed,
@@ -72,7 +72,6 @@ pub(super) enum PublicationTerminalObservation {
     NotStarted(PublicationNonStartKind),
     Completed {
         outcome: PublicationOutcomeObservation,
-        notification: PublicationNotificationObservation,
     },
     ProducerLostAfterExecute,
 }
@@ -101,29 +100,27 @@ impl PublicationWriter {
             PublicationDelivery::NotStarted { reason, .. } => {
                 PublicationTerminalObservation::NotStarted(reason.kind())
             }
-            PublicationDelivery::Settled {
-                settlement,
-                notification,
-            } => {
-                let outcome = match settlement {
-                    ActorGenerationPublicationSettlement::Unpublished(refusal) => refusal.outcome(),
-                    ActorGenerationPublicationSettlement::Settled(outcome) => outcome,
+            PublicationDelivery::Observed { body } => {
+                let outcome = match body.completion() {
+                    ActorGenerationPublicationBodyCompletion::Observed { outcome, .. } => {
+                        match outcome {
+                            Ok(ActorGenerationBodyOutcome::Visible { .. }) => {
+                                PublicationOutcomeObservation::Visible
+                            }
+                            Ok(ActorGenerationBodyOutcome::Refused(_)) => {
+                                PublicationOutcomeObservation::Refused
+                            }
+                            Ok(ActorGenerationBodyOutcome::Unconfirmed(_)) => {
+                                PublicationOutcomeObservation::Unconfirmed
+                            }
+                            Err(_) => PublicationOutcomeObservation::Failed,
+                        }
+                    }
+                    ActorGenerationPublicationBodyCompletion::Unobserved { .. } => {
+                        PublicationOutcomeObservation::Unconfirmed
+                    }
                 };
-                PublicationTerminalObservation::Completed {
-                    outcome: match outcome.as_ref() {
-                        Ok(ActorGenerationCommit::Published { .. }) => {
-                            PublicationOutcomeObservation::Published
-                        }
-                        Ok(ActorGenerationCommit::Refused(_)) => {
-                            PublicationOutcomeObservation::Refused
-                        }
-                        Ok(ActorGenerationCommit::Unconfirmed(_)) => {
-                            PublicationOutcomeObservation::Unconfirmed
-                        }
-                        Err(_) => PublicationOutcomeObservation::Failed,
-                    },
-                    notification: *notification,
-                }
+                PublicationTerminalObservation::Completed { outcome }
             }
         };
         // Publish compact completion before either the oneshot receiver or
@@ -169,10 +166,12 @@ impl Drop for PublicationWriter {
 }
 
 /// The transfer retains the actual unexecuted payload across every queue/spawn
-/// boundary. Its Drop first returns Reserved, then releases the publisher.
+/// boundary. Its Drop first returns the unrun body, then releases the publisher.
 pub(super) struct PublicationTransfer {
-    payload: Option<(ReservedActorGeneration, ActorGenerationPublicationDriver)>,
-    publication_owner: Option<generation::GenerationRetirementPublicationOwner>,
+    payload: Option<(
+        ActorGenerationPublicationBody,
+        ActorGenerationPublicationDriver,
+    )>,
     writer: PublicationWriter,
     nonstart: PublicationNonStart,
 }
@@ -204,14 +203,12 @@ impl PublicationTransfer {
     }
 
     pub(super) fn new(
-        reserved: ReservedActorGeneration,
+        body: ActorGenerationPublicationBody,
         publisher: ActorGenerationPublicationDriver,
-        publication_owner: Option<generation::GenerationRetirementPublicationOwner>,
         writer: PublicationWriter,
     ) -> Self {
         Self {
-            payload: Some((reserved, publisher)),
-            publication_owner,
+            payload: Some((body, publisher)),
             writer,
             nonstart: PublicationNonStart::TransferOwnerLostBeforeExecute,
         }
@@ -222,29 +219,14 @@ impl PublicationTransfer {
     }
 
     async fn run(mut self) {
-        let Some((reserved, publisher)) = self.payload.take() else {
+        let Some((body, publisher)) = self.payload.take() else {
             return;
         };
-        match publisher.run(reserved).await {
-            Ok(settlement) => {
-                let notification = if let Some(owner) = self.publication_owner.as_mut() {
-                    owner.observe(&settlement)
-                } else if matches!(&settlement,
-                    ActorGenerationPublicationSettlement::Settled(outcome)
-                        if matches!(outcome.as_ref(), Ok(ActorGenerationCommit::Published { .. })))
-                {
-                    PublicationNotificationObservation::Unobserved
-                } else {
-                    PublicationNotificationObservation::NotRequired
-                };
-                self.writer.deliver(PublicationDelivery::Settled {
-                    settlement,
-                    notification,
-                });
-            }
-            Err((reserved, publisher)) => {
+        match publisher.run(body).await {
+            Ok(body) => self.writer.deliver(PublicationDelivery::Observed { body }),
+            Err((body, publisher)) => {
                 self.writer.deliver(PublicationDelivery::NotStarted {
-                    reserved,
+                    body,
                     reason: PublicationNonStart::CandidateChanged,
                 });
                 drop(publisher);
@@ -255,13 +237,13 @@ impl PublicationTransfer {
 
 impl Drop for PublicationTransfer {
     fn drop(&mut self) {
-        if let Some((reserved, publisher)) = self.payload.take() {
+        if let Some((body, publisher)) = self.payload.take() {
             let reason = std::mem::replace(
                 &mut self.nonstart,
                 PublicationNonStart::TransferOwnerLostBeforeExecute,
             );
             self.writer
-                .deliver(PublicationDelivery::NotStarted { reserved, reason });
+                .deliver(PublicationDelivery::NotStarted { body, reason });
             // Receiver custody precedes disposal, including a panicking test
             // publisher destructor. No terminal/RunState lock is held here.
             drop(publisher);
