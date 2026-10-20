@@ -620,12 +620,13 @@ impl CompilerWorldLexicalSurface {
                         crate::checked_cell::hash(join.interface_bytes()),
                         join.exports(),
                     ),
-                    WorldDeclarationSelection::Recovered(tip) => (
-                        tip.root().clone(),
-                        None,
-                        tip.interface_sha256().to_owned(),
-                        tip.exports(),
-                    ),
+                    WorldDeclarationSelection::Recovered(tip) => {
+                        let roles = tip.context().compiler_source_support().projection().snapshot_roles();
+                        let interface = roles.get(tip.root()).ok_or_else(|| {
+                            source_failure("recovered declaration facade lacks its issuing primary role")
+                        })?.interface();
+                        (tip.root().clone(), Some(interface), tip.interface_sha256().to_owned(), tip.exports())
+                    },
                 };
                 let roles = primary
                     .compiler_source_support()
@@ -4252,6 +4253,108 @@ mod identity_tests {
         assert!(WorldSourceSelection::new([0; 32], "captured-source").is_err());
         assert!(WorldSourceSelection::new([7; 32], "").is_err());
         assert!(WorldSourceSelection::new([7; 32], "x".repeat(65537)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn recovered_authored_facade_keeps_its_issuing_primary_product() {
+        use crate::declaration_join::{
+            ExactLexicalNode, ExactModuleIdentity, RecoveryDeclarationOrigin,
+            RecoveryDeclarationSelection,
+        };
+        use tidepool_repr::{Generation, SessionModule};
+        let module = SessionModule::lib(Generation(61));
+        let mut branches = Vec::new();
+        for body in ["-- source revision A", "-- source revision B"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = format!(
+                "module {} (answer) where\nanswer :: Int\nanswer = 41\n{body}\n",
+                module.module_name()
+            );
+            let path = root.path().join(module.relative_hs_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &source).unwrap();
+            let certificate = Arc::new(
+                crate::artifacts::test_support::certify_authored_declaration(
+                    module,
+                    &path,
+                    &source,
+                    &[root.path().to_path_buf()],
+                    root.path(),
+                )
+                .unwrap(),
+            );
+            let owner = ExactModuleIdentity {
+                unit: certificate.product().owner().unit.clone(),
+                module: module.module_name(),
+            };
+            let context = Arc::new(
+                ExactDeclarationContext::new(
+                    &[certificate.clone()],
+                    &[],
+                    vec![ExactLexicalNode {
+                        owner: owner.clone(),
+                        imports: Vec::new(),
+                    }],
+                )
+                .unwrap(),
+            );
+            let artifact = context
+                .compiler_input_projection()
+                .snapshot_roles()
+                .get(&owner)
+                .unwrap()
+                .interface();
+            branches.push((root, certificate, owner, context, artifact));
+        }
+        let (_, first, owner, primary, artifact) = &branches[0];
+        let (_, second, _, foreign, foreign_artifact) = &branches[1];
+        assert_eq!(
+            first.lexical_exports(),
+            second.lexical_exports(),
+            "both actual products publish the same exported names and types"
+        );
+        assert_ne!(first.source_sha256(), second.source_sha256());
+        assert_ne!(
+            artifact, foreign_artifact,
+            "different original source certificates exercise distinct canonical products"
+        );
+        let recovered = crate::artifacts::test_support::with_settlement(|settlement| {
+            crate::declaration_join::certify_recovered_declaration_tip_in_context(
+                primary.clone(),
+                RecoveryDeclarationSelection {
+                    origin: RecoveryDeclarationOrigin::Authored {
+                        generation: module.gen().0,
+                        introduced_exports: first.introduced_exports().to_vec(),
+                    },
+                    root: owner.clone(),
+                    lexical: primary.lexical_graph().to_vec(),
+                    exports: first.lexical_exports().to_vec(),
+                    instances: first.instances().clone(),
+                    family_closure: first.family_closure().to_vec(),
+                },
+                &[],
+                settlement,
+            )
+        })
+        .unwrap();
+        let lexical = crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
+            Vec::new(),
+            Some(crate::compiler_world::WorldDeclarationSelection::Recovered(
+                Arc::new(recovered),
+            )),
+        )
+        .unwrap();
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        lexical.materialize(primary, &mut materializer).unwrap();
+        assert!(
+            matches!(
+                lexical.materialize(foreign, &mut materializer),
+                Err(CompileError::ExtractFailed(_))
+            ),
+            "a distinct actual product must fail the writer's source validation"
+        );
     }
 
     #[test]
