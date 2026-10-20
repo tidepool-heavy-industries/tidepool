@@ -18970,6 +18970,12 @@ pub(crate) mod request_tests {
                 Some(input.mounted_input()),
             )
             .unwrap();
+        let expected_close = match &boundary {
+            WorldInputPlanBoundary::Actual => tidepool_runtime::CompilerTransactionClose::Clean,
+            WorldInputPlanBoundary::ForeignWorld(_) | WorldInputPlanBoundary::ForeignOriginal(_) => {
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            }
+        };
         let mut world = execution.admission.compiler_world().unwrap().clone();
         let mut dependency = context.source_dependency().clone();
         match boundary {
@@ -19026,10 +19032,8 @@ pub(crate) mod request_tests {
             .await;
         assert_eq!(
             closes.compiler_close_observations().as_slice(),
-            &[crate::termination::CompilerWorkClose::Settled(
-                tidepool_runtime::CompilerTransactionClose::Clean
-            )],
-            "a retained plan is returned only after its actual parser transaction END"
+            &[crate::termination::CompilerWorkClose::Settled(expected_close)],
+            "successful parser work confirms END; owner preflight refusal submits no request"
         );
         (result, input)
     }
