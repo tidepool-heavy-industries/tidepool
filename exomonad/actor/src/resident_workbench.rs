@@ -20105,21 +20105,54 @@ pub(crate) mod request_tests {
             let original = context.source_dependency().source_lease().unwrap();
             let target = history_context.source_dependency().source_lease().unwrap();
             assert!(!Arc::ptr_eq(&original, &target));
-            for (original_gate, lease) in [(true, &original), (false, &target)] {
+            for lease in [&original, &target] {
                 let fence = lease.source_admission().fence().unwrap();
                 let refusal = HostWorkObservation::new();
-                let rejected = workbench.query_public_module_world(transferred.clone(), tidepool_runtime::session::NameQuery {
-                    scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
-                    namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
-                }, StructuredInspectionKind::Info, Some(refusal.clone())).await;
-                if original_gate {
-                    assert!(matches!(rejected, Err(ResidentActorWorkbenchError::SourceAdmission(
-                        generation_admission::GenerationAdmissionError::Closed { .. }))));
-                } else {
-                    assert!(matches!(rejected, Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(
-                        tidepool_runtime::RuntimeError::SourceAdmission(tidepool_runtime::session::SourceAdmissionError::Closed { .. }))))));
-                }
-                assert_world_hot_work(&refusal.snapshot(), WorldEnsureExpectation::RefusedBeforeEnsure);
+                let rejected = workbench
+                    .query_public_module_world(
+                        transferred.clone(),
+                        tidepool_runtime::session::NameQuery {
+                            scope: tidepool_runtime::session::NameScope::PublicModule(
+                                "WorldQuestion".into(),
+                            ),
+                            namespace: tidepool_runtime::session::NameNamespace::Value,
+                            name: "known".into(),
+                        },
+                        StructuredInspectionKind::Info,
+                        Some(refusal.clone()),
+                    )
+                    .await;
+                use tidepool_runtime::session::{SourceAdmissionError, SourceAdmissionPhase};
+                // Either capture or later compiler admission may observe the
+                // fence first. The refused source owner and phase must survive
+                // that boundary; the error's wrapper does not choose the owner.
+                let (scope, phase) = match &rejected {
+                    Err(ResidentActorWorkbenchError::SourceAdmission(SourceAdmissionError::Closed {
+                        scope,
+                        phase,
+                    }))
+                    | Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                        tidepool_runtime::session::SessionError::SourceAdmission(
+                            SourceAdmissionError::Closed { scope, phase },
+                        ),
+                    )))
+                    | Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(
+                        tidepool_runtime::RuntimeError::SourceAdmission(SourceAdmissionError::Closed {
+                            scope,
+                            phase,
+                        }),
+                    ))) => (scope, phase),
+                    _ => panic!("query lost the exact closed-source refusal: {rejected:?}"),
+                };
+                assert_eq!(*scope, lease.scope(), "{rejected:?}");
+                assert!(
+                    matches!(phase, SourceAdmissionPhase::Fenced { .. }),
+                    "{rejected:?}"
+                );
+                assert_world_hot_work(
+                    &refusal.snapshot(),
+                    WorldEnsureExpectation::RefusedBeforeEnsure,
+                );
                 fence
                     .reopen_with(lease.original_source(), |reopen| {
                         reopen.commit();
@@ -20127,6 +20160,25 @@ pub(crate) mod request_tests {
                     })
                     .unwrap()
                     .unwrap();
+                let reopened = HostWorkObservation::new();
+                let answer = installed_world_query(
+                    &workbench,
+                    transferred.clone(),
+                    captured.clone(),
+                    "WorldQuestion",
+                    StructuredInspectionKind::Type,
+                    reopened.clone(),
+                )
+                .await;
+                assert_eq!(
+                    answer.provenance().fingerprint,
+                    transferred_answer.provenance().fingerprint
+                );
+                assert!(
+                    matches!(answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. }
+                if info.expression.canonical == "Int")
+                );
+                assert_world_hot_work(&reopened.snapshot(), WorldEnsureExpectation::ResidentHit);
             }
             let checked = HostWorkObservation::new();
             let check_observation = checked.clone();
