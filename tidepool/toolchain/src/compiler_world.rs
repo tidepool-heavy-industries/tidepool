@@ -3260,6 +3260,7 @@ pub fn plan_cell(
 /// program issuer in this module can turn these observations into authority.
 struct WorldCellOutputAdmission {
     request_correlation: String,
+    plan_receipt_sha256: [u8; 32],
     pub(crate) origin: tidepool_extract_cmd::CompilerTransactionOrigin,
     pub(crate) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(crate) directory: Arc<tempfile::TempDir>,
@@ -3707,7 +3708,7 @@ impl CheckedWorldCellProgram {
     }
 
     pub fn plan_digest(&self) -> [u8; 32] {
-        world_digest(self.output.reservation.plan().receipt())
+        self.output.plan_receipt_sha256
     }
 
     pub fn certificate_sha256(&self) -> &[u8; 32] {
@@ -3912,7 +3913,7 @@ fn world_cell_output_certificate(
     };
     frame(b"TidepoolCheckedWorldCellProgram4");
     frame(reservation.admission_digest());
-    frame(&world_digest(reservation.plan().receipt()));
+    frame(&output.plan_receipt_sha256);
     frame(logical.logical_id());
     frame(logical.producer_sha256());
     frame(logical.profile_sha256());
@@ -4617,6 +4618,7 @@ fn admit_world_preparation_response(
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     Ok(Ok(WorldCellOutputAdmission {
         request_correlation,
+        plan_receipt_sha256: plan_digest,
         origin,
         reservation,
         directory,
