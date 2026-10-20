@@ -16278,7 +16278,7 @@ mod tests {
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, ResidentError,
-        TurnClassification, TurnKind, TypeMatch, TypeMatchQuality, WorkbenchCellItemKind,
+        TurnClassification, TurnKind, WorkbenchCellItemKind,
         WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt,
         WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
         WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,

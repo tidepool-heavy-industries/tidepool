@@ -1568,7 +1568,7 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         .fence()
         .unwrap()
         .retire(tidepool_runtime::session::NotebookGenerationId::INITIAL)
-        .unwrap();
+        .unwrap_or_else(|(_, cause)| panic!("retire callback source: {cause}"));
     let refused_b = slots.capture_source(source_b.source_admission());
     assert!(matches!(
         slots.admit_delivery(independent.clone()),
