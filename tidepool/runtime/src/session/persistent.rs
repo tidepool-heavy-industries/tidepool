@@ -19,7 +19,7 @@ use tidepool_codegen::binding_table::{
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
+    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
     ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
@@ -1047,11 +1047,11 @@ impl PersistentSession {
         metadata: &DataConTable,
         target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
         retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
     ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
         let plan = target.source_plan();
+        let demanded = target.demanded();
         self.admit_source_work_in(scope)?;
 
         if !self.scopes.is_live(scope) {
@@ -1127,7 +1127,6 @@ impl PersistentSession {
         let mut staged = engine.install_certified_turn(
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             &inherited,
             &exact_external,
@@ -6559,16 +6558,15 @@ mod checkpoint_scope_tests {
             .resolve_certification_in(scope, &prepared, &TurnCertification::default())
             .unwrap();
         assert!(resolved.groups.is_empty());
-        let (target, demanded) =
+        let target =
             ScopedTargetImage::compile_scoped(prepared, &resolved, &ImageRegistry::new()).unwrap();
-        assert!(demanded.is_empty());
+        assert!(target.demanded().is_empty());
         let (program, keys, _) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
                 target,
                 &BTreeMap::new(),
-                demanded,
                 &[],
                 &|_| None,
             )
@@ -7070,7 +7068,7 @@ mod checkpoint_scope_tests {
             session.retire_scope(d);
             session.retire_scope(e);
             let later = session.mint_detached_scope(public).unwrap();
-            let (target, evidence, demanded, inherited) = prepare_selected_groups_fixture(
+            let (target, evidence, inherited) = prepare_selected_groups_fixture(
                 &session,
                 later,
                 &groups,
@@ -7079,7 +7077,7 @@ mod checkpoint_scope_tests {
             let root_domain = target.source_plan().target[&source("D", "d2")].domain;
             let e_domain = target.source_plan().target[&source("E", "e2")].domain;
             assert_ne!(root_domain, e_domain);
-            let d2: Vec<_> = demanded
+            let d2: Vec<_> = target.demanded()
                 .iter()
                 .filter(|image| image.group().owner().module == "D")
                 .collect();
@@ -7112,8 +7110,7 @@ mod checkpoint_scope_tests {
                     &target.fixture_constructor_metadata(),
                     target,
                     &evidence,
-                    demanded,
-                    &inherited,
+                        &inherited,
                     &|_| None,
                 )
                 .unwrap()
@@ -7160,7 +7157,7 @@ mod checkpoint_scope_tests {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("D", "d1"),
         };
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
         let admitted = session.public_visibility_snapshot_in(scope).unwrap();
         let cache = session
@@ -7193,7 +7190,6 @@ mod checkpoint_scope_tests {
                 &target.fixture_constructor_metadata(),
                 target,
                 &evidence,
-                demanded,
                 &inherited,
                 &|_| None,
             )
@@ -7217,7 +7213,7 @@ mod checkpoint_scope_tests {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("D", "d1"),
         };
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
         let mut metadata = target.fixture_constructor_metadata();
         let staged_only = super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
@@ -7234,7 +7230,6 @@ mod checkpoint_scope_tests {
                 &metadata,
                 target,
                 &evidence,
-                demanded,
                 &inherited,
                 &|_| None,
             ),
@@ -7334,7 +7329,7 @@ mod checkpoint_scope_tests {
         assert!(session.prepared_mut().unwrap().unpin(old_target));
         assert!(session.retire_failed_turn_source_instances(a, &old_delta));
         assert!(!session.prepared_mut().unwrap().release(stale.handle()));
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(&session, b, &groups, &[source("b")]);
         assert_eq!(inherited.len(), 1);
         assert!(
@@ -7350,7 +7345,6 @@ mod checkpoint_scope_tests {
                 &target.fixture_constructor_metadata(),
                 target,
                 &evidence,
-                demanded,
                 &inherited,
                 &|_| None,
             )
@@ -7453,7 +7447,7 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert_eq!(resolved.target_owners, vec![expected]);
         let registry = ImageRegistry::new();
-        let (target, demanded) =
+        let target =
             ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
         let (program, keys, _) = session
             .install_certified_turn_in(
@@ -7461,7 +7455,6 @@ mod checkpoint_scope_tests {
                 &target.fixture_constructor_metadata(),
                 target,
                 &resolved.source_evidence,
-                demanded,
                 &resolved.inherited_needed,
                 &|_| None,
             )
@@ -8541,7 +8534,6 @@ mod checkpoint_scope_tests {
             &DataConTable,
             ScopedTargetImage,
             &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-            Vec<DemandedImage>,
             &[InheritedSourceDemand],
             &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
         ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> =
@@ -8579,19 +8571,18 @@ mod checkpoint_scope_tests {
             inherited_needed: Vec::new(),
             source_plan: plan,
         };
-        let (target, demanded) = ScopedTargetImage::compile_scoped(
+        let target = ScopedTargetImage::compile_scoped(
             testing::prepare(testing::wire_program()).unwrap(),
             &resolved,
             &registry,
         )
         .unwrap();
-        assert!(demanded.is_empty());
+        assert!(target.demanded().is_empty());
         let refused = session.install_certified_turn_in(
             scope,
             &target.fixture_constructor_metadata(),
             target,
             &BTreeMap::new(),
-            demanded,
             &[],
             &|_| None,
         );

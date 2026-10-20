@@ -1989,7 +1989,6 @@ impl CheckedTurnCompletion {
             tidepool_codegen::prepared_program::SourceBinder,
             (tidepool_repr::execution_schema::CachedHomeOwner, u32),
         >,
-        demanded: Vec<tidepool_codegen::prepared_program::DemandedImage>,
         inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
         retained_sources: &dyn Fn(super::persistent::ValidatedRetainedSourceRef<'_>) -> Option<super::resident::NativeSourceCustody>,
     ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
@@ -2037,7 +2036,6 @@ impl CheckedTurnCompletion {
             metadata,
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             retained_sources,
         )?;

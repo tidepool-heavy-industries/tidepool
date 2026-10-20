@@ -167,9 +167,11 @@ fn immutable_package_only_original_image_keeps_fresh_machine_cafs_independent() 
     let install = |engine: &mut PreparedEngine, demanded, bindings: &mut BindingTable, scope| {
         let mut staged = engine
             .install_certified_turn(
-                package_original_target(&group, &registry),
+                ScopedTargetImage {
+                    demanded: vec![demanded],
+                    ..package_original_target(&group, &registry)
+                },
                 &certified_source_evidence(std::slice::from_ref(&group)),
-                vec![demanded],
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -278,10 +280,14 @@ fn immutable_package_only_original_refuses_missing_or_changed_proof_atomically()
     let programs = engine.programs.len();
     let install = |engine: &mut PreparedEngine, requested, entry| {
         let group = package_original_group(package_original_owner(&package, requested), rep, entry);
+        let target = package_original_target(&group, &registry);
+        let evidence = certified_source_evidence(std::slice::from_ref(&group));
         engine.install_certified_turn(
-            package_original_target(&group, &registry),
-            &certified_source_evidence(std::slice::from_ref(&group)),
-            vec![DemandedImage::compile(group, &registry).unwrap()],
+            ScopedTargetImage {
+                demanded: vec![DemandedImage::compile(group, &registry).unwrap()],
+                ..target
+            },
+            &evidence,
             &[],
             &BTreeMap::new(),
             &HashMap::new(),

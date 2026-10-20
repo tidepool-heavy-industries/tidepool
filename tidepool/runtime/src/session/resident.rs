@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, DemandedImage, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
+    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
     PreparedOuter, PreparedResult, ProgramId, SourceBinder,
 };
 use tidepool_repr::execution_schema::{
@@ -4619,7 +4619,6 @@ where
         metadata: &DataConTable,
         target: super::prepared::ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
     ) -> Result<super::persistent::InstalledCertifiedTurn, PreparedRuntimeError> {
         let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
@@ -4632,7 +4631,6 @@ where
             metadata,
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             &retained_sources,
         )
@@ -6966,14 +6964,13 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) =
+            let target =
                 super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
             let installed = self.install_certified_turn_in(
                 scope,
                 &table,
                 target,
                 &resolved.source_evidence,
-                demanded,
                 &resolved.inherited_needed,
             )?;
             let (program, source_keys, _native_sources) = installed.into_parts();
@@ -7970,7 +7967,7 @@ where
             .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
         let (program, source_keys, native_sources) = if let Some(resolved) = resolved {
-            let (target, demanded) = match images {
+            let target = match images {
                 TurnImageAcquisition::Ready { bundle } => {
                     super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
                 }
@@ -7991,7 +7988,6 @@ where
                     &metadata,
                     target,
                     &resolved.source_evidence,
-                    demanded,
                     &resolved.inherited_needed,
                     &retained_sources,
                 )?,
@@ -8000,7 +7996,6 @@ where
                     &metadata,
                     target,
                     &resolved.source_evidence,
-                    demanded,
                     &resolved.inherited_needed,
                 )?,
             }.into_parts()

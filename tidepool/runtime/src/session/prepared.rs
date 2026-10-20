@@ -760,6 +760,7 @@ pub(crate) struct ScopedTargetImage {
     base: ImageTarget,
     plan: super::persistent::ResolvedSourceDomainPlan,
     owners: Arc<[ImportOwner]>,
+    demanded: Vec<DemandedImage>,
 }
 
 impl std::ops::Deref for ScopedTargetImage {
@@ -774,6 +775,10 @@ impl std::ops::Deref for ScopedTargetImage {
 }
 
 impl ScopedTargetImage {
+    pub(crate) fn demanded(&self) -> &[DemandedImage] {
+        &self.demanded
+    }
+
     pub(crate) fn owners(&self) -> &[ImportOwner] {
         &self.owners
     }
@@ -1138,11 +1143,12 @@ impl PreparedSourceEntry {
             &compiled.prepared(),
             certification,
         )?;
-        let (target, demanded) = ScopedTargetImage::compile_scoped(
+        let target = ScopedTargetImage::compile_scoped(
             compiled.prepared().as_ref().clone(),
             &resolved,
             &registry,
         )?;
+        let demanded = target.demanded();
         let mut images = Vec::with_capacity(demanded.len() + 1);
         images.push(Arc::clone(&target.image));
         images.extend(demanded.iter().map(|image| Arc::clone(image.image())));
@@ -1307,7 +1313,7 @@ impl ImageTarget {
         prepared: PreparedProgram,
         resolved: &super::persistent::ResolvedCertifiedTurn,
         images: NativeImageAcquisition<'_>,
-    ) -> Result<(ScopedTargetImage, Vec<DemandedImage>), PreparedRuntimeError> {
+    ) -> Result<ScopedTargetImage, PreparedRuntimeError> {
         let groups = resolved
             .groups
             .iter()
@@ -1327,11 +1333,9 @@ impl ImageTarget {
                 ScopedDemandedImage::admit(image, group).map(ScopedDemandedImage::into_image)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            target.with_source_plan(
-                resolved.source_plan.clone(),
-                Arc::from(resolved.target_owners.clone()),
-            ),
+        Ok(target.with_source_plan(
+            resolved.source_plan.clone(),
+            Arc::from(resolved.target_owners.clone()),
             demanded,
         ))
     }
@@ -1462,11 +1466,13 @@ impl ImageTarget {
         self,
         plan: super::persistent::ResolvedSourceDomainPlan,
         owners: Arc<[ImportOwner]>,
+        demanded: Vec<DemandedImage>,
     ) -> ScopedTargetImage {
         ScopedTargetImage {
             base: self,
             plan,
             owners,
+            demanded,
         }
     }
 
@@ -1484,7 +1490,7 @@ impl ScopedTargetImage {
         prepared: PreparedProgram,
         resolved: &super::persistent::ResolvedCertifiedTurn,
         registry: &ImageRegistry,
-    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         ImageTarget::acquire_scoped(
             prepared,
             resolved,
@@ -1496,7 +1502,7 @@ impl ScopedTargetImage {
         prepared: PreparedProgram,
         resolved: &super::persistent::ResolvedCertifiedTurn,
         bundle: &NativeImageBundle,
-    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         ImageTarget::acquire_scoped(
             prepared,
             resolved,
@@ -4404,13 +4410,13 @@ impl PreparedEngine {
         &mut self,
         target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
         inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
         retained_sources: &HashMap<ImportOwner, NativeSourceCustody>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        let demanded = target.demanded();
         let target_owners = target.owners();
         let mut target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
             .into_iter()
@@ -4531,7 +4537,6 @@ impl PreparedEngine {
         self.install_certified_turn_admitted(
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             inherited,
             exact_external,
@@ -4547,9 +4552,8 @@ impl PreparedEngine {
     // checks their full identity, representation and callable signature.
     fn install_certified_turn_admitted(
         &mut self,
-        target: ScopedTargetImage,
+        mut target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
         inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
@@ -4558,6 +4562,7 @@ impl PreparedEngine {
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
         certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        let demanded = std::mem::take(&mut target.demanded);
         let target_owners = target.owners();
         struct DiagnosticDigest<'a>(&'a [u8]);
         impl std::fmt::Display for DiagnosticDigest<'_> {
@@ -6806,9 +6811,7 @@ pub(super) mod tests {
         let mut scopes = tidepool_codegen::scope::ScopeTree::new();
         let scope = scopes.mint_isolated();
         let bindings = BindingTable::new();
-        let selection = bindings
-            .source_domain_selection_in(&scopes, scope)
-            .unwrap();
+        let selection = bindings.source_domain_selection_in(&scopes, scope).unwrap();
         let snapshot = bindings.scope_snapshot(&scopes, scope).unwrap();
         let plan = owners
             .iter()
@@ -6832,6 +6835,7 @@ pub(super) mod tests {
         base.with_source_plan(
             super::super::persistent::ResolvedSourceDomainPlan::fixture(plan, selection, snapshot),
             Arc::from(owners),
+            Vec::new(),
         )
     }
 
@@ -7130,12 +7134,12 @@ pub(super) mod tests {
             Err(PreparedRuntimeError::MissingPreparedNativeImage)
         ));
         assert_eq!(CompiledProgram::successful_image_compilations(), before);
-        let (target, demanded) =
+        let target =
             ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
         let complete = NativeImageBundle {
             registry: registry.clone(),
             images: std::iter::once(target.image.clone())
-                .chain(demanded.iter().map(|image| image.image().clone()))
+                .chain(target.demanded().iter().map(|image| image.image().clone()))
                 .map(|image| (Arc::as_ptr(&image) as usize, image))
                 .collect(),
             target: Arc::as_ptr(&target.image) as usize,
@@ -7149,15 +7153,17 @@ pub(super) mod tests {
             ));
             assert_eq!(CompiledProgram::successful_image_compilations(), before);
         }
-        let (looked_up, groups) =
+        let looked_up =
             ScopedTargetImage::lookup_scoped(prepared.clone(), &resolved, &complete).unwrap();
         assert!(Arc::ptr_eq(&looked_up.image, &target.image));
-        assert!(groups
+        assert_eq!(looked_up.demanded().len(), target.demanded().len());
+        assert!(looked_up
+            .demanded()
             .iter()
-            .zip(&demanded)
+            .zip(target.demanded())
             .all(|(a, b)| Arc::ptr_eq(a.image(), b.image())));
         assert_eq!(CompiledProgram::successful_image_compilations(), before);
-        drop((target, demanded, looked_up, groups, complete));
+        drop((target, looked_up, complete));
         assert!(
             matches!(
                 ScopedTargetImage::lookup_scoped(prepared, &resolved, &absent),
@@ -7255,9 +7261,11 @@ pub(super) mod tests {
             }
             assert!(matches!(
                 engine.install_certified_turn(
-                    target(),
+                    ScopedTargetImage {
+                        demanded: demanded(),
+                        ..target()
+                    },
                     &wrong,
-                    demanded(),
                     &[],
                     &BTreeMap::new(),
                     &HashMap::new(),
@@ -7270,9 +7278,11 @@ pub(super) mod tests {
         }
         let mut installed = engine
             .install_certified_turn(
-                target(),
+                ScopedTargetImage {
+                    demanded: demanded(),
+                    ..target()
+                },
                 &evidence,
-                demanded(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -7362,16 +7372,15 @@ pub(super) mod tests {
                 roots, selection, snapshot,
             ),
         };
-        let compile = || {
-            ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap()
-        };
-        let (target, demanded) = compile();
+        let compile =
+            || ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
+        let target = compile();
         assert_eq!(
             target.image.authenticated_source_literal(GlobalId(0)),
             Some(&literal)
         );
-        assert_eq!(demanded.len(), 1);
-        assert_eq!(demanded[0].group(), &groups[0]);
+        assert_eq!(target.demanded().len(), 1);
+        assert_eq!(target.demanded()[0].group(), &groups[0]);
         let (mut engine, _) =
             PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
         let before = engine.residency();
@@ -7391,12 +7400,11 @@ pub(super) mod tests {
                 5 => wrong.get_mut(&literal).unwrap().0.module = "Other".into(),
                 _ => unreachable!(),
             }
-            let (target, demanded) = compile();
+            let target = compile();
             assert!(matches!(
                 engine.install_certified_turn(
                     target,
                     &wrong,
-                    demanded,
                     &[],
                     &BTreeMap::new(),
                     &HashMap::new(),
@@ -7411,7 +7419,6 @@ pub(super) mod tests {
             .install_certified_turn(
                 target,
                 &evidence,
-                demanded,
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -7797,20 +7804,23 @@ pub(super) mod tests {
             binder: testing::identity("Fixture", "z"),
         };
         assert!(matches!(
-            engine.install_certified_turn(
-                target(), &source_evidence, vec![compile(), compile()],
-                &[], &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
-
-                &HashMap::new(),
-            ),
-            Err(PreparedRuntimeError::Demand(DemandError::DuplicateBinder(key))) if key == duplicate
-        ));
+                    engine.install_certified_turn(ScopedTargetImage { demanded: vec![compile(), compile()], ..target() },
+        &source_evidence,
+        &[],
+        &BTreeMap::new(),
+        &HashMap::new(),
+        &BindingTable::new(),
+        &HashMap::new(),),
+                    Err(PreparedRuntimeError::Demand(DemandError::DuplicateBinder(key))) if key == duplicate
+                ));
         assert_eq!(engine.residency(), before);
         let mut installed = engine
             .install_certified_turn(
-                target(),
+                ScopedTargetImage {
+                    demanded: vec![compile()],
+                    ..target()
+                },
                 &source_evidence,
-                vec![compile()],
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -7895,9 +7905,11 @@ pub(super) mod tests {
         let install = |engine: &mut PreparedEngine| {
             engine
                 .install_certified_turn(
-                    target(),
+                    ScopedTargetImage {
+                        demanded: demand.compile(&registry).unwrap(),
+                        ..target()
+                    },
                     &evidence,
-                    demand.compile(&registry).unwrap(),
                     &[],
                     &BTreeMap::new(),
                     &HashMap::new(),
@@ -7967,13 +7979,13 @@ pub(super) mod tests {
             version: root.version.clone(),
             binder: root.binder.clone(),
         };
-        let target = || {
-            scoped_single_domain_target(target_prepared.clone(), &registry, vec![owner.clone()])
-        };
+        let target =
+            || scoped_single_domain_target(target_prepared.clone(), &registry, vec![owner.clone()]);
         let unmatched_owners = || ScopedTargetImage {
             base: ImageTarget::compile(target_prepared.clone(), &registry).unwrap(),
             plan: target().plan.clone(),
             owners: Arc::from(Vec::new()),
+            demanded: Vec::new(),
         };
         let (mut engine, bootstrap) =
             PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
@@ -7986,9 +7998,11 @@ pub(super) mod tests {
             .product_sha256 = [99; 32];
         assert!(matches!(
             engine.install_certified_turn(
-                target(),
+                ScopedTargetImage {
+                    demanded: demand.compile(&registry).unwrap(),
+                    ..target()
+                },
                 &wrong_source_evidence,
-                demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -8000,9 +8014,11 @@ pub(super) mod tests {
         assert_eq!(engine.residency(), before);
         assert!(matches!(
             engine.install_certified_turn(
-                unmatched_owners(),
+                ScopedTargetImage {
+                    demanded: demand.compile(&registry).unwrap(),
+                    ..unmatched_owners()
+                },
                 &source_evidence,
-                demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -8024,9 +8040,11 @@ pub(super) mod tests {
             .unwrap();
         assert!(matches!(
             engine.install_certified_turn(
-                target(),
+                ScopedTargetImage {
+                    demanded: with_unused.compile(&registry).unwrap(),
+                    ..target()
+                },
                 &source_evidence,
-                with_unused.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -8038,9 +8056,11 @@ pub(super) mod tests {
         assert_eq!(engine.residency(), before);
         let mut installed = engine
             .install_certified_turn(
-                target(),
+                ScopedTargetImage {
+                    demanded: demand.compile(&registry).unwrap(),
+                    ..target()
+                },
                 &source_evidence,
-                demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -8096,7 +8116,6 @@ pub(super) mod tests {
             .install_certified_turn(
                 target(),
                 &source_evidence,
-                vec![],
                 &[],
                 &inherited,
                 &HashMap::new(),
@@ -8159,9 +8178,11 @@ pub(super) mod tests {
         );
         let mut aborted = engine
             .install_certified_turn(
-                target(),
+                ScopedTargetImage {
+                    demanded: demand.compile(&registry).unwrap(),
+                    ..target()
+                },
                 &source_evidence,
-                demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -8239,7 +8260,7 @@ pub(super) mod tests {
         ProgramId,
         tidepool_codegen::binding_table::SourceScopeAdmission,
     ) {
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(session, scope, groups, &[root]);
         let (program, keys, _) = session
             .install_certified_turn_in(
@@ -8247,7 +8268,6 @@ pub(super) mod tests {
                 &target.fixture_constructor_metadata(),
                 target,
                 &evidence,
-                demanded,
                 &inherited,
                 &|_| None,
             )
@@ -8264,7 +8284,6 @@ pub(super) mod tests {
     ) -> (
         ScopedTargetImage,
         BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        Vec<DemandedImage>,
         Vec<InheritedSourceDemand>,
     ) {
         use tidepool_codegen::prepared_program::GroupInventory;
@@ -8318,18 +8337,13 @@ pub(super) mod tests {
                 snapshot,
             ),
         };
-        let (target, demanded) = ScopedTargetImage::compile_scoped(
+        let target = ScopedTargetImage::compile_scoped(
             testing::prepare(wire).unwrap(),
             &resolved,
             &registry,
         )
         .unwrap();
-        (
-            target,
-            certified_source_evidence(groups),
-            demanded,
-            inherited,
-        )
+        (target, certified_source_evidence(groups), inherited)
     }
 
     #[test]
@@ -8366,20 +8380,19 @@ pub(super) mod tests {
             inherited_needed: Vec::new(),
             source_plan: dead_plan,
         };
-        let (dead_target, dead_demanded) = ScopedTargetImage::compile_scoped(
+        let dead_target = ScopedTargetImage::compile_scoped(
             testing::prepare(testing::wire_program()).unwrap(),
             &resolved,
             &registry,
         )
         .unwrap();
-        assert!(dead_demanded.is_empty());
+        assert!(dead_target.demanded().is_empty());
         assert!(matches!(
             session.install_certified_turn_in(
                 tidepool_codegen::scope::ScopeId(u64::MAX),
                 &DataConTable::new(),
                 dead_target,
                 &BTreeMap::new(),
-                Vec::new(),
                 &[],
                 &|_| None,
             ),
@@ -8638,22 +8651,21 @@ pub(super) mod tests {
                     snapshot,
                 ),
             };
-            let (target, demanded) = ScopedTargetImage::compile_scoped(
+            let target = ScopedTargetImage::compile_scoped(
                 testing::prepare(wire).unwrap(),
                 &resolved,
                 &registry,
             )
             .unwrap();
-            (target, demanded, inherited, selected)
+            (target, inherited, selected)
         };
         let evidence = certified_source_evidence(&groups);
         let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
-        let (target, demanded, inherited, selected) = prepare(&bindings, a, binder("a"));
+        let (target, inherited, selected) = prepare(&bindings, a, binder("a"));
         let mut refused = engine
             .install_certified_turn(
                 target,
                 &evidence,
-                demanded,
                 &inherited,
                 selected.inherited(),
                 &HashMap::new(),
@@ -8673,12 +8685,11 @@ pub(super) mod tests {
         refused.leases.clear();
         engine.abort_certified_turn(refused, vec![]).unwrap();
         let install = |engine: &mut PreparedEngine, bindings: &mut BindingTable, scope, root| {
-            let (target, demanded, inherited, selected) = prepare(bindings, scope, root);
+            let (target, inherited, selected) = prepare(bindings, scope, root);
             let mut staged = engine
                 .install_certified_turn(
                     target,
                     &evidence,
-                    demanded,
                     &inherited,
                     selected.inherited(),
                     &HashMap::new(),
@@ -8697,7 +8708,7 @@ pub(super) mod tests {
         let (ta, _) = install(&mut engine, &mut bindings, a, binder("a"));
         bindings.seed_detached_scope(&scopes, a, c);
         let (tb, delta_b) = install(&mut engine, &mut bindings, a, binder("b"));
-        let (_, _, late, _) = prepare(&bindings, c, binder("b"));
+        let (_, late, _) = prepare(&bindings, c, binder("b"));
         let held = bindings
             .retained_source_sibling_attachment(&late[0])
             .unwrap();
@@ -8799,9 +8810,11 @@ pub(super) mod tests {
         let first_demand = inventory.seal([binder("a")]).unwrap();
         let mut first = engine
             .install_certified_turn(
-                target("a", &registry),
+                ScopedTargetImage {
+                    demanded: first_demand.compile(&registry).unwrap(),
+                    ..target("a", &registry)
+                },
                 &source_evidence,
-                first_demand.compile(&registry).unwrap(),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -8870,7 +8883,6 @@ pub(super) mod tests {
         let bad_result = engine.install_certified_turn(
             bad_target,
             &source_evidence,
-            vec![],
             pending_sibling.inherited_demands(),
             &existing
                 .iter()
@@ -8906,7 +8918,6 @@ pub(super) mod tests {
             .install_certified_turn(
                 target("b", &registry),
                 &source_evidence,
-                vec![],
                 pending_sibling.inherited_demands(),
                 &existing
                     .iter()
@@ -8991,7 +9002,6 @@ pub(super) mod tests {
             engine.install_certified_turn(
                 scoped_fixture(target, vec![owner]),
                 &BTreeMap::new(),
-                vec![],
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -9307,16 +9317,18 @@ pub(super) mod tests {
                 .compile(&registry)
                 .unwrap();
             engine.install_certified_turn(
-                scoped_single_domain_target(
-                    testing::prepare(wire).unwrap(),
-                    &registry,
-                    vec![ImportOwner::Source {
-                        version: owner.module_version.clone(),
-                        binder: binder.clone(),
-                    }],
-                ),
+                ScopedTargetImage {
+                    demanded: demand,
+                    ..scoped_single_domain_target(
+                        testing::prepare(wire).unwrap(),
+                        &registry,
+                        vec![ImportOwner::Source {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        }],
+                    )
+                },
                 &evidence,
-                demand,
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -9566,12 +9578,14 @@ pub(super) mod tests {
         // An unsigned target cannot authorize a package body merely because
         // it has the same identity. Producer-sealed admission is tested by the
         // real compiler lane; these fixtures exercise its native transaction.
-        assert!(matches!(engine.install_certified_turn(
-            target(true), &evidence, selected(&good), &[],
-            &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
-
-                &HashMap::new(),
-        ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+        assert!(
+            matches!(engine.install_certified_turn(ScopedTargetImage { demanded: selected(&good), ..target(true) },
+&evidence,
+&[],
+&BTreeMap::new(),
+&HashMap::new(),
+&BindingTable::new(),
+&HashMap::new(),), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
             owner,
             evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
                 present: true,
@@ -9592,14 +9606,17 @@ pub(super) mod tests {
             && diagnostic.demanded_groups[0].imports[0].position == 0
             && diagnostic.demanded_groups[0].imports[0].owner == package_owner([9; 32])
             && diagnostic.demanded_groups[0].imports[1].position == 1
-            && diagnostic.demanded_groups[0].imports[1].owner == source_owner));
+            && diagnostic.demanded_groups[0].imports[1].owner == source_owner)
+        );
         assert_eq!(engine.residency(), before);
-        assert!(matches!(engine.install_certified_turn(
-            target(false), &evidence, selected(&good), &[],
-            &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
-
-                &HashMap::new(),
-        ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+        assert!(
+            matches!(engine.install_certified_turn(ScopedTargetImage { demanded: selected(&good), ..target(false) },
+&evidence,
+&[],
+&BTreeMap::new(),
+&HashMap::new(),
+&BindingTable::new(),
+&HashMap::new(),), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
             owner,
             evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
                 present: false,
@@ -9610,7 +9627,8 @@ pub(super) mod tests {
         }) if owner == package_owner([9; 32])
             && diagnostic.target_top.kind == PackageTargetTopKind::Absent
             && diagnostic.target_top.exportability == PackageTargetTopExportability::Absent
-            && diagnostic.retained_export == PackageRetainedExportFact::Missing));
+            && diagnostic.retained_export == PackageRetainedExportFact::Missing)
+        );
         assert_eq!(engine.residency(), before);
         let capped_target = target(false);
         let capped_target_exports = exportable_code_tops(&capped_target.prepared)
@@ -9663,9 +9681,11 @@ pub(super) mod tests {
         let admitted = || BTreeMap::from([(package.clone(), (ValueId(1), [9; 32]))]);
         let install = |engine: &mut PreparedEngine, group: &CertifiedGroup| {
             engine.install_certified_turn_admitted(
-                target(true),
+                ScopedTargetImage {
+                    demanded: selected(group),
+                    ..target(true)
+                },
                 &evidence,
-                selected(group),
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
@@ -9845,15 +9865,18 @@ pub(super) mod tests {
             }],
         );
         assert!(matches!(
-            engine.install_certified_turn(
-                target, &certified_source_evidence(&groups), demand.compile(&registry).unwrap(),
-                &[], &BTreeMap::new(), &HashMap::new(), &BindingTable::new(), &HashMap::new(),
-            ),
-            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                owner: missing,
-                evidence: CertifiedPackageOwnerEvidence::TargetDefinition { present: false, .. },
-            }) if missing == owner
-        ));
+                    engine.install_certified_turn(ScopedTargetImage { demanded: demand.compile(&registry).unwrap(), ..target },
+        &certified_source_evidence(&groups),
+        &[],
+        &BTreeMap::new(),
+        &HashMap::new(),
+        &BindingTable::new(),
+        &HashMap::new(),),
+                    Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                        owner: missing,
+                        evidence: CertifiedPackageOwnerEvidence::TargetDefinition { present: false, .. },
+                    }) if missing == owner
+                ));
         assert_eq!(engine.residency(), before);
     }
 
@@ -9946,9 +9969,11 @@ pub(super) mod tests {
                        groups: &[CertifiedGroup],
                        exact: &HashMap<ImportOwner, PreparedHandle>| {
             engine.install_certified_turn(
-                target(&groups[0]),
+                ScopedTargetImage {
+                    demanded: selected(groups),
+                    ..target(&groups[0])
+                },
                 &certified_source_evidence(groups),
-                selected(groups),
                 &[],
                 &BTreeMap::new(),
                 exact,
@@ -10118,7 +10143,6 @@ pub(super) mod tests {
             .install_certified_turn_admitted(
                 scoped_fixture(target, Vec::new()),
                 &BTreeMap::new(),
-                vec![],
                 &[],
                 &BTreeMap::new(),
                 &HashMap::new(),
