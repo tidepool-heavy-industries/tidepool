@@ -2048,6 +2048,17 @@ impl RuntimeCellAdmission {
         })
     }
 
+    pub(super) fn world_source_reference(
+        &self,
+    ) -> Result<&Arc<super::GenerationArtifactReference>, SessionError> {
+        match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World { source, .. } => Ok(source),
+            RuntimeCellCompilerBasis::Finite(_) => {
+                Err(SessionError::WorldCellRequiresServicePreparation)
+            }
+        }
+    }
+
     pub(super) fn original_source_lease(
         &self,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
@@ -3974,12 +3985,12 @@ impl PersistentSession {
     ) -> Result<(), SessionError> {
         let RuntimeCellCompilerBasis::World {
             original_source,
-            source,
             ..
         } = &admission.compiler_basis
         else {
             return Err(SessionError::StaleStagedDeclaration);
         };
+        let source = admission.world_source_reference()?.clone();
         let original_source = original_source.clone();
         let target = admission._retained_scope.clone();
         RuntimeLexicalScopeLease::with_source_leases(
