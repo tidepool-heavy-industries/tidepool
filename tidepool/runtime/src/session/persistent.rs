@@ -35,6 +35,7 @@ use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
+use super::resident::NativeSourceCustody;
 use super::turn::TurnCertification;
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, PublicManifestBase,
@@ -64,6 +65,43 @@ pub(crate) struct ResolvedCertifiedTurn {
     pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
     pub inherited_needed: Vec<InheritedSourceDemand>,
     pub source_plan: ResolvedSourceDomainPlan,
+}
+
+/// One successful native installation and its exact source contribution.
+pub(crate) struct InstalledCertifiedTurn {
+    program: ProgramId,
+    source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
+    native_sources: NativeSourceCustody,
+}
+
+impl InstalledCertifiedTurn {
+    pub(crate) fn source_keys(&self) -> &tidepool_codegen::binding_table::SourceScopeAdmission {
+        &self.source_keys
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ProgramId,
+        tidepool_codegen::binding_table::SourceScopeAdmission,
+        NativeSourceCustody,
+    ) {
+        (self.program, self.source_keys, self.native_sources)
+    }
+}
+
+/// Borrowed only after the actual scoped binding identity and generation match.
+pub(crate) struct ValidatedRetainedSourceRef<'a> {
+    entry: &'a BindingEntry,
+}
+
+impl ValidatedRetainedSourceRef<'_> {
+    pub(crate) fn id(&self) -> SessionVarId {
+        self.entry.id
+    }
+    pub(crate) fn handle(&self) -> tidepool_codegen::prepared_program::PreparedHandle {
+        self.entry.value.handle
+    }
 }
 
 #[derive(Clone)]
@@ -1004,13 +1042,8 @@ impl PersistentSession {
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-    ) -> Result<
-        (
-            ProgramId,
-            tidepool_codegen::binding_table::SourceScopeAdmission,
-        ),
-        PreparedRuntimeError,
-    > {
+        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
         let plan = target.source_plan();
         self.admit_source_work_in(scope)?;
 
@@ -1036,6 +1069,7 @@ impl PersistentSession {
             plan.selection.inherited().clone()
         };
         let mut exact_external = HashMap::new();
+        let mut exact_sources = HashMap::new();
         let retained = std::cell::OnceCell::new();
         for (globals, owners) in std::iter::once((target.globals(), target.owners())).chain(
             demanded.iter().map(|selected| {
@@ -1060,7 +1094,13 @@ impl PersistentSession {
                     ))
                     .filter(|entry| entry.id == *id)
                     .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
-                exact_external.insert(owner.clone(), entry.value.handle);
+                if !exact_external.contains_key(owner) {
+                    let witness = ValidatedRetainedSourceRef { entry };
+                    let sources = retained_sources(witness)
+                        .ok_or(PreparedRuntimeError::MissingRetainedSource { id: *id })?;
+                    exact_sources.insert(owner.clone(), sources);
+                    exact_external.insert(owner.clone(), entry.value.handle);
+                }
             }
         }
         drop(retained);
@@ -1085,6 +1125,7 @@ impl PersistentSession {
             &inherited,
             &exact_external,
             &self.bindings,
+            &exact_sources,
         )?;
         let tokens = std::mem::take(&mut staged.leases);
         let admitted = engine
@@ -1101,13 +1142,18 @@ impl PersistentSession {
                     .as_mut()
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
+                let native_sources = staged.native_sources.clone();
                 let target = engine.commit_certified_turn(staged);
                 self.session_table = admitted_metadata;
                 if let Some(engine) = bootstrap {
                     self.machine = Some(engine);
                     self.ensure_machine_incarnation();
                 }
-                Ok((target, keys))
+                Ok(InstalledCertifiedTurn {
+                    program: target,
+                    source_keys: keys,
+                    native_sources,
+                })
             }
             Err(tokens) => {
                 let engine = bootstrap
@@ -6347,7 +6393,7 @@ mod checkpoint_scope_tests {
         let (target, demanded) =
             ScopedTargetImage::compile_scoped(prepared, &resolved, &ImageRegistry::new()).unwrap();
         assert!(demanded.is_empty());
-        let (program, keys) = session
+        let (program, keys, _) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
@@ -6355,8 +6401,10 @@ mod checkpoint_scope_tests {
                 &BTreeMap::new(),
                 demanded,
                 &[],
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         assert!(keys.is_empty());
         assert!(session.prepared_mut().unwrap().unpin(program));
     }
@@ -6895,7 +6943,7 @@ mod checkpoint_scope_tests {
                     }
                 );
             }
-            let (mixed, _) = session
+            let (mixed, _, _) = session
                 .install_certified_turn_in(
                     later,
                     &target.fixture_constructor_metadata(),
@@ -6903,8 +6951,10 @@ mod checkpoint_scope_tests {
                     &evidence,
                     demanded,
                     &inherited,
+                    &|_| None,
                 )
-                .unwrap();
+                .unwrap()
+                .into_parts();
             let d2_leases: Vec<_> = selected_sources(&session, later)
                 .into_iter()
                 .filter(|lease| lease.owner().module == "D" && lease.original_ordinal() == 2)
@@ -6974,7 +7024,7 @@ mod checkpoint_scope_tests {
             session.public_visibility_snapshot_in(scope).unwrap(),
             admitted
         );
-        let (program, _) = session
+        let (program, _, _) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
@@ -6982,8 +7032,10 @@ mod checkpoint_scope_tests {
                 &evidence,
                 demanded,
                 &inherited,
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         assert!(session.prepared_mut().unwrap().unpin(program));
     }
 
@@ -7015,7 +7067,13 @@ mod checkpoint_scope_tests {
         assert_ne!(before.source_selection, after.source_selection);
         assert!(matches!(
             session.install_certified_turn_in(
-                scope, &metadata, target, &evidence, demanded, &inherited
+                scope,
+                &metadata,
+                target,
+                &evidence,
+                demanded,
+                &inherited,
+                &|_| None,
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
@@ -7123,7 +7181,7 @@ mod checkpoint_scope_tests {
                 .is_none(),
             "live anchor cannot issue a stale sibling descriptor"
         );
-        let (fresh, _) = session
+        let (fresh, _, _) = session
             .install_certified_turn_in(
                 b,
                 &target.fixture_constructor_metadata(),
@@ -7131,8 +7189,10 @@ mod checkpoint_scope_tests {
                 &evidence,
                 demanded,
                 &inherited,
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         let live = selected_sources(&session, b)
             .into_iter()
             .find(|lease| lease.binder().binder.occurrence == "b")
@@ -7232,7 +7292,7 @@ mod checkpoint_scope_tests {
         let registry = ImageRegistry::new();
         let (target, demanded) =
             ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
-        let (program, keys) = session
+        let (program, keys, _) = session
             .install_certified_turn_in(
                 ScopeId::ROOT,
                 &target.fixture_constructor_metadata(),
@@ -7240,8 +7300,10 @@ mod checkpoint_scope_tests {
                 &resolved.source_evidence,
                 demanded,
                 &resolved.inherited_needed,
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         assert!(keys.is_empty());
         assert!(session.machine.as_mut().unwrap().unpin(program));
         session.machine = None;
@@ -8318,13 +8380,9 @@ mod checkpoint_scope_tests {
             &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
             Vec<DemandedImage>,
             &[InheritedSourceDemand],
-        ) -> Result<
-            (
-                ProgramId,
-                tidepool_codegen::binding_table::SourceScopeAdmission,
-            ),
-            PreparedRuntimeError,
-        > = PersistentSession::install_certified_turn_in;
+            &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+        ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> =
+            PersistentSession::install_certified_turn_in;
         let image = super::super::prepared::ImageTarget::compile(
             testing::prepare(testing::wire_program()).unwrap(),
             &ImageRegistry::new(),
@@ -8372,6 +8430,7 @@ mod checkpoint_scope_tests {
             &BTreeMap::new(),
             demanded,
             &[],
+            &|_| None,
         );
         assert!(matches!(
             refused,

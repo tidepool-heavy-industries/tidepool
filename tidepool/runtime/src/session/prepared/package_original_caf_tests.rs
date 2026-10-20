@@ -65,6 +65,7 @@ fn package_original_machine(registry: &ImageRegistry) -> (PreparedEngine, Progra
             &BTreeMap::new(),
             &HashMap::new(),
             &BindingTable::new(),
+            &HashMap::new(),
             BTreeMap::new(),
             BTreeMap::from([(producer_identity(), [9; 32])]),
         )
