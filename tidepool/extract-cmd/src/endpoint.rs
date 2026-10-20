@@ -1004,7 +1004,33 @@ pub struct HostAdmissionCancellation {
 }
 
 thread_local! {
-    static HOST_ADMISSION_CHECKPOINTS: RefCell<Vec<HostAdmissionCancellation>> = const { RefCell::new(Vec::new()) };
+    static HOST_ADMISSION_CHECKPOINTS: RefCell<Vec<HostCheckpointObserver>> = const { RefCell::new(Vec::new()) };
+}
+
+enum HostCheckpointObserver {
+    Cancellation(HostAdmissionCancellation),
+    NativeDemand(crate::NativeDemandControl),
+}
+impl HostCheckpointObserver {
+    fn checkpoint(&self) -> io::Result<()> {
+        match self {
+            Self::Cancellation(observer) => observer.checkpoint(),
+            Self::NativeDemand(control) => control.checkpoint(),
+        }
+    }
+}
+
+pub(crate) fn with_native_demand_control<T>(
+    control: crate::NativeDemandControl,
+    action: impl FnOnce() -> T,
+) -> T {
+    HOST_ADMISSION_CHECKPOINTS.with(|scopes| {
+        scopes
+            .borrow_mut()
+            .push(HostCheckpointObserver::NativeDemand(control))
+    });
+    let _scope = HostCheckpointScope;
+    action()
 }
 
 struct HostCheckpointScope;
@@ -1044,7 +1070,9 @@ impl HostAdmissionCancellation {
     /// synchronous extent does not propagate across await or thread boundaries.
     pub fn run_sync<T>(&self, action: impl FnOnce() -> T) -> T {
         HOST_ADMISSION_CHECKPOINTS.with(|scopes| {
-            scopes.borrow_mut().push(self.clone());
+            scopes
+                .borrow_mut()
+                .push(HostCheckpointObserver::Cancellation(self.clone()));
         });
         let _scope = HostCheckpointScope;
         action()
@@ -1384,6 +1412,7 @@ impl CompilerEndpoint {
         fields(inclusive = true)
     )]
     pub(crate) fn bind(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()) {
             let identity = bind_scoped_endpoint(cmd, |cancellation| {
                 Self::bind_unscoped_with_cancellation(cmd, cancellation)
@@ -1459,6 +1488,7 @@ impl CompilerEndpoint {
         cancellation: Option<&CompilerTransactionCancellation>,
         timeout: Duration,
     ) -> Result<Self, SpawnError> {
+        refuse_native_demand_reentry(&spec.program)?;
         let mut command = process::command(&spec.program);
         command
             .args(&spec.prefix)
@@ -1802,8 +1832,50 @@ impl CompilerEndpoint {
         })
     }
 
+    /// Execute World preparation with the exact held input owner's narrow
+    /// dependency resolver. The outer scope retains input/END custody.
+    pub fn execute_with_native_demand(
+        self,
+        cmd: &ExtractCmd,
+        owner: crate::NativeDemandOwner,
+        resolver: &mut dyn crate::NativeDemandResolver,
+    ) -> Result<ExtractRun, SpawnError> {
+        if !matches!(self.transport, Transport::Scoped) {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "native demand requires an explicit compiler transaction scope",
+                ),
+            ));
+        }
+        refuse_native_demand_reentry(&cmd.program)?;
+        ensure_scoped_transaction(cmd, &self.identity)?;
+        TRANSACTION_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            let Some(ScopedCompiler::Active { transaction, .. }) =
+                scope.as_mut().map(|state| &mut state.compiler)
+            else {
+                return Err(SpawnError::indeterminate(
+                    "compiler transaction",
+                    io::Error::other("compiler scope ended before native demand execution"),
+                ));
+            };
+            transaction.execute_with_native_demand(cmd, owner, resolver)
+        })
+    }
+
     /// Execute `cmd` through the producer captured by this endpoint.
     pub fn execute(mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        if cmd.request.requires_native_demand() {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "World preparation requires native demand exchange capability",
+                ),
+            ));
+        }
         if cmd.request.is_exact_inputs() && !matches!(self.transport, Transport::Scoped) {
             return Err(SpawnError::not_submitted(
                 &cmd.program,
@@ -1891,6 +1963,7 @@ impl CompilerEndpoint {
                 }
             }
             Transport::Scoped => {
+                refuse_native_demand_reentry(&cmd.program)?;
                 ensure_scoped_transaction(cmd, &self.identity)?;
                 TRANSACTION_SCOPE.with(|scope| {
                     let mut scope = scope.borrow_mut();
@@ -2046,30 +2119,34 @@ pub fn compiler_host_checkpoint() -> io::Result<()> {
         scopes
             .borrow()
             .iter()
-            .try_for_each(HostAdmissionCancellation::checkpoint)
-    })?;
-    let cancelled = TRANSACTION_SCOPE.with(|scope| {
-        scope.borrow().as_ref().is_some_and(|state| {
-            state
-                .cancellation
-                .as_ref()
-                .is_some_and(CompilerTransactionCancellation::is_cancelled)
-        })
+            .try_for_each(HostCheckpointObserver::checkpoint)
+    })
+}
+
+fn refuse_native_demand_reentry(program: &OsStr) -> Result<(), SpawnError> {
+    let resolving = HOST_ADMISSION_CHECKPOINTS.with(|scopes| {
+        scopes
+            .borrow()
+            .iter()
+            .any(|observer| matches!(observer, HostCheckpointObserver::NativeDemand(_)))
     });
-    if cancelled {
-        Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "compiler host work was cancelled",
-        ))
-    } else {
-        Ok(())
+    if resolving {
+        return Err(SpawnError::not_submitted(
+            program,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native demand resolution cannot start nested compiler work",
+            ),
+        ));
     }
+    Ok(())
 }
 
 fn bind_scoped_endpoint(
     cmd: &ExtractCmd,
     bind: impl FnOnce(Option<&CompilerTransactionCancellation>) -> Result<CompilerEndpoint, SpawnError>,
 ) -> Result<CompilerIdentity, SpawnError> {
+    refuse_native_demand_reentry(&cmd.program)?;
     let existing = TRANSACTION_SCOPE.with(|scope| {
         let scope = scope.borrow();
         let state = scope.as_ref()?;
@@ -2428,7 +2505,10 @@ fn with_compiler_transaction_inner<T>(
     let guard = TransactionScopeGuard {
         close_sink: Some(close_sink),
     };
-    let action = action();
+    let action = match &host_admission {
+        Some(observer) => observer.run_sync(action),
+        None => action(),
+    };
     let close = guard.finish();
     CompilerTransactionSettled {
         origin,
@@ -2466,7 +2546,48 @@ impl CompilerTransaction {
         result
     }
 
+    pub fn execute_with_native_demand(
+        &mut self,
+        cmd: &ExtractCmd,
+        owner: crate::NativeDemandOwner,
+        resolver: &mut dyn crate::NativeDemandResolver,
+    ) -> Result<ExtractRun, SpawnError> {
+        if self.failed {
+            return Err(SpawnError::indeterminate(
+                "compiler transaction",
+                io::Error::other("compiler transaction cannot continue after a failed request"),
+            ));
+        }
+        let mut exchange = crate::native_demand::Exchange::new(owner)
+            .map_err(|source| SpawnError::indeterminate(&cmd.program, source))?;
+        let result = self.execute_inner_with_native(cmd, Some((&mut exchange, resolver)));
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
     fn execute_inner(&mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        if cmd.request.requires_native_demand() {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "World preparation requires native demand exchange capability",
+                ),
+            ));
+        }
+        self.execute_inner_with_native(cmd, None)
+    }
+
+    fn execute_inner_with_native(
+        &mut self,
+        cmd: &ExtractCmd,
+        mut native: Option<(
+            &mut crate::native_demand::Exchange,
+            &mut dyn crate::NativeDemandResolver,
+        )>,
+    ) -> Result<ExtractRun, SpawnError> {
         let mut cmd = cmd.clone();
         cmd.request.set_workload(self.workload);
         let cwd = std::env::current_dir()
@@ -2509,14 +2630,46 @@ impl CompilerTransaction {
                         io::Error::new(io::ErrorKind::BrokenPipe, "compiler transaction is closed"),
                     )
                 })?;
-                stdin
-                    .write_all(&[daemon::TRANSACTION_REQUEST])
-                    .and_then(|()| stdin.write_all(&request))
-                    .and_then(|()| stdin.flush())
-                    .map_err(|source| {
-                        SpawnError::indeterminate(endpoint.program.clone(), source)
+                let send = |writer: &mut dyn Write| -> io::Result<()> {
+                    writer.write_all(&[if native.is_some() {
+                        crate::native_demand::REQUEST
+                    } else {
+                        daemon::TRANSACTION_REQUEST
+                    }])?;
+                    if let Some((exchange, _)) = native.as_ref() {
+                        exchange.write(writer)?;
+                    }
+                    writer.write_all(&request)?;
+                    writer.flush()
+                };
+                let sent = match native.as_ref() {
+                    Some((exchange, _)) => {
+                        let control = exchange.control(self.cancellation.clone());
+                        control
+                            .writer(stdin)
+                            .and_then(|mut writer| send(&mut writer))
+                    }
+                    None => send(stdin),
+                };
+                sent.map_err(|source| SpawnError::indeterminate(endpoint.program.clone(), source))?;
+                let output = if let Some((exchange, resolver)) = native.as_mut() {
+                    let stdout = endpoint.stdout.as_mut().ok_or_else(|| {
+                        SpawnError::indeterminate(
+                            endpoint.program.clone(),
+                            io::Error::other("direct compiler stdout is closed"),
+                        )
                     })?;
-                daemon::decode_output(endpoint.stdout_mut()?).map_err(|error| {
+                    daemon::read_direct_native_output(
+                        stdout,
+                        stdin,
+                        exchange,
+                        *resolver,
+                        self.cancellation.clone(),
+                    )
+                } else {
+                    daemon::decode_output(endpoint.stdout_mut()?)
+                };
+                output.map_err(|error| {
                     SpawnError::indeterminate(endpoint.program.clone(), io::Error::other(error))
                 })?
             }
@@ -2524,8 +2677,17 @@ impl CompilerTransaction {
                 transaction,
                 socket,
             } => {
-                let output = daemon::execute_transaction_request(transaction, &cwd, &cmd.request)
-                    .map_err(|error| {
+                let output = match native.as_mut() {
+                    Some((exchange, resolver)) => daemon::execute_native_transaction_request(
+                        transaction,
+                        &cwd,
+                        &cmd.request,
+                        exchange,
+                        *resolver,
+                    ),
+                    None => daemon::execute_transaction_request(transaction, &cwd, &cmd.request),
+                }
+                .map_err(|error| {
                     SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error))
                 })?;
                 worker_location = transaction.worker_location().cloned();
@@ -3240,6 +3402,66 @@ mod tests {
     #[test]
     fn direct_begin_handshake_deadline_terminates_and_reaps_the_child() {
         timeout_stalled_direct_handshake(4);
+    }
+
+    #[test]
+    fn direct_native_reply_write_obeys_original_deadline_and_reaps_nonreading_peer() {
+        struct LargeReply;
+        impl crate::NativeDemandResolver for LargeReply {
+            fn resolve_native_demand(
+                &mut self,
+                demand: &crate::NativeDemand,
+                control: &crate::NativeDemandControl,
+            ) -> io::Result<crate::NativeReply> {
+                control.checkpoint()?;
+                assert_eq!((demand.stage, demand.sequence), (0, 1));
+                Ok(crate::NativeReply::Resolved(vec![42; 1024 * 1024]))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 26);
+        let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
+        let mut transaction = endpoint.transaction().unwrap();
+        let child = match transaction.transport.as_ref().unwrap() {
+            TransactionTransport::Direct(endpoint) => endpoint.child.clone(),
+            _ => panic!("direct fixture"),
+        };
+        let command = ExtractCmd {
+            program: "fixture".into(),
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+            worker_affinity_hint: None,
+        };
+        let mut exchange = crate::native_demand::Exchange::new(crate::NativeDemandOwner {
+            admission: [1; 32],
+            world: [2; 32],
+            inputs: [3; 32],
+        })
+        .unwrap();
+        exchange.limit_deadline(Duration::from_millis(200)).unwrap();
+        let started = Instant::now();
+        let error = transaction
+            .execute_inner_with_native(&command, Some((&mut exchange, &mut LargeReply)))
+            .unwrap_err();
+        assert!(!error.permits_rebind());
+        assert!(
+            matches!(error.source.get_ref().and_then(|cause| cause.downcast_ref::<daemon::DaemonError>()), Some(daemon::DaemonError::Io(cause)) if cause.kind() == io::ErrorKind::TimedOut)
+        );
+        assert!(
+            directory.path().join("stalled").exists(),
+            "peer never reached its nonreading barrier"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        transaction.failed = true;
+        let close = transaction.finish();
+        assert!(
+            matches!(close, CompilerTransactionClose::Unconfirmed(_)),
+            "a killed frontend without worker END evidence cannot confirm cleanup: {close:?}"
+        );
+        assert!(
+            child.lock().unwrap().try_wait().unwrap().is_some(),
+            "direct owner must reap its exact child"
+        );
     }
 
     #[test]

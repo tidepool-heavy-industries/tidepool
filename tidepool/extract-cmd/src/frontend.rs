@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -899,7 +899,15 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let consumed_worker = prepared.consumed_worker_identity();
     crate::endpoint::write_identity(io::stdout().lock(), &identity, &consumed_worker)
         .map_err(FrontendError::Io)?;
-    let mut stdin = io::stdin().lock();
+    // Readiness checks observe the kernel descriptor. A StdinLock may retain
+    // bytes in its BufReader after that descriptor stops reporting readiness.
+    // This machine channel has one unbuffered reader from its first byte.
+    let mut stdin = File::from(
+        io::stdin()
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(FrontendError::Io)?,
+    );
     let mut prefix = [0u8; 8];
     stdin.read_exact(&mut prefix).map_err(FrontendError::Io)?;
     if &prefix == daemon::DIRECT_TRANSACTION {
@@ -914,13 +922,40 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
                 stdin.read_exact(&mut command).map_err(FrontendError::Io)?;
                 match command[0] {
                     daemon::TRANSACTION_END => break,
-                    daemon::TRANSACTION_REQUEST => {
+                    command @ (daemon::TRANSACTION_REQUEST | crate::native_demand::REQUEST) => {
+                        let exchange = if command == crate::native_demand::REQUEST {
+                            Some(
+                                crate::native_demand::Exchange::read(&mut stdin)
+                                    .map_err(FrontendError::Io)?,
+                            )
+                        } else {
+                            None
+                        };
                         let (cwd, argv) = daemon::read_request(&mut stdin)?;
                         let mut prepared_request = daemon::prepare_worker_request(argv)?;
-                        let (code, out, err) =
-                            worker.request(&cwd, &mut prepared_request.request)?;
-                        daemon::write_response(io::stdout().lock(), code, &out, &err)?;
-                        io::stdout().flush().map_err(FrontendError::Io)?;
+                        if let Some(exchange) = exchange {
+                            let (code, out, err) = worker.native_request(
+                                &cwd,
+                                &mut prepared_request.request,
+                                &exchange,
+                                &mut stdin,
+                                &mut io::stdout().lock(),
+                            )?;
+                            let control = exchange.control(None);
+                            let mut stdout = io::stdout().lock();
+                            let mut writer =
+                                control.writer(&mut stdout).map_err(FrontendError::Io)?;
+                            writer
+                                .write_all(&[daemon::TRANSACTION_OUTPUT])
+                                .map_err(FrontendError::Io)?;
+                            daemon::write_response(&mut writer, code, &out, &err)?;
+                            writer.flush().map_err(FrontendError::Io)?;
+                        } else {
+                            let (code, out, err) =
+                                worker.request(&cwd, &mut prepared_request.request)?;
+                            daemon::write_response(io::stdout().lock(), code, &out, &err)?;
+                            io::stdout().flush().map_err(FrontendError::Io)?;
+                        }
                     }
                     other => {
                         return Err(FrontendError::Daemon(format!(

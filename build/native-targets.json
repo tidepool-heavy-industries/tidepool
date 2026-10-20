@@ -301,6 +301,10 @@
           "test": "//tidepool/extract-cmd:daemon_integration",
           "test_build": "//tidepool/extract-cmd:daemon_integration_binary"
         },
+        "native_demand_transport": {
+          "test": "//tidepool/extract-cmd:native_demand_transport",
+          "test_build": "//tidepool/extract-cmd:native_demand_transport_binary"
+        },
         "no_open_coded_extract_spawns": {
           "test": "//tidepool/extract-cmd:no_open_coded_extract_spawns",
           "test_build": "//tidepool/extract-cmd:no_open_coded_extract_spawns_binary"
