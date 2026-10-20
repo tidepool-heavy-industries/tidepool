@@ -1,27 +1,30 @@
 # Compiler work and authority map
 
-The current review baseline is `aa811a4483`, with the demand-product changes
-still on receiving branches on 2026-10-20. A candidate is not part of that
-root merely because its source review or a component check passed.
+The current integrated source baseline is `d91f6a67a6` (2026-10-20).
+It contains the compiler-primary projection, bounded World residency, idle-worker
+affinity, completed compiler-product handoff and the earlier affine retirement
+tranche. Integration is not release qualification: the actual joined runtime
+still exposes the failures listed below.
 The later P1–P10 material describes the earlier finite path at
 `8245fa800a`/`c10837d44d`; it is a historical deletion inventory, not the live
 service dataflow. Stage timings are inclusive and are not additive. Use
 [compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
 
-## Current service costs and receiving changes
+## Integrated service dataflow and remaining costs
 
 The [demand-products contract](../plans/shared-warm-compiler/completion/demand-products.md)
-owns the accepted next implementation. These changes are not yet integrated or
-qualified at the baseline above.
+owns the accepted implementation. The
+[review checkpoint](../plans/shared-warm-compiler/completion/review-checkpoint-20261020.md)
+separates joined evidence, receiving repairs and open design decisions.
 
-| Current producer and consumer | Work still present | Receiving change and invariant |
+| Producer and consumer | Integrated boundary | Remaining work or qualification |
 | --- | --- | --- |
-| Rust `CompilerWorld` restoration → Haskell `ExactScope` | `compiler_world.rs` exports a full `MaterializedContext` plus a separate primary-association map. The compiler receives runtime graph facts beyond its selected compiler inputs. | N replaces these with one private, owner-issued compiler-primary projection. Full runtime correlation remains distinct from compiler-input identity and exact native demand. Equal interfaces do not authorize exchanging historical implementations. |
-| Held World → staged native certification | Completed source products and native certification have separate handoffs. Certified GHC Name mappings are not carried as a complete reusable product. | E pairs the existing completion and certification owners, carries the certified Name mapping within its actual compiler universe, and uses the same native worklist with optional prior products. SOURCE-cycle rehydration remains required. |
-| `ExactInputOwner` → optional World residency | One 128 MiB default encoded-input allowance is shared by original inputs and World backing. A separate 4096-entry limit currently also counts World nodes and subtracts them from original-image slots. | D removes World participation in this mixed count, preserving shared byte accounting, cleanup quarantine and RSS admission. A residency observation is not a permanent retention promise. |
-| Endpoint binding → daemon scheduler | A World reference does not yet supply an idle-worker affinity hint to transaction admission. A warm process alone does not establish reuse of the desired World. | C prefers a matching idle worker without changing admission authority, queue policy or accepted-request ownership. Actual worker identity is observed after transaction start, including queued worker replacement. |
-| Public Reload → retirement owner | The larger affine lifecycle tranche at `1a497cdf8e` remains outside this baseline. Its source review does not establish current root behavior. | Integrate the tranche coherently, including public callers, source slots, ownership transfer and protocol mirrors. Delivery-loss execution and production nonstart discharge remain unresolved gates. |
+| Rust `CompilerWorld` restoration → Haskell `ExactScope` | One private compiler-primary projection carries owner-checked compiler inputs. The full runtime Context commitment remains opaque to Haskell and distinct from compiler-input identity and native demand. | Rust still materializes and commits the runtime Context. This change removes over-delivery to the compiler, not all graph work. |
+| Held World → staged native certification | The private issuer pairs its guarded completion with its actual pending predecessor and certified GHC Name associations. The existing worklist can acquire prior finalized source bodies without frontend replay. | SOURCE-cycle rehydration remains. Per-owner historical variant lookup and retained GHC heap remain real costs. Joined SOURCE history and Core controls pass; full actor acceptance is open. |
+| `ExactInputOwner` → optional World residency | A shared 128 MiB default encoded-input allowance covers originals and World backing. World nodes no longer consume the separate 4096 original-image slots. Existing FIFO, backing ownership and cleanup quarantine remain. | The allowance is not a decoded-heap or filesystem-allocation bound. Per-World payload charging remains conservative. The 4097-file history passed on the receiving revision; actual joined startup is separate. |
+| Endpoint binding → daemon scheduler | Best-effort affinity prefers a matching idle worker; busy/missing hints use the ordinary immediate fallback. Actual worker identity is observed after BEGIN. | Typed realization references and zero-reference direct Complete acquisition remain a separate receiving follow-up, with front-door controls still pending. No accepted query is replayed. |
+| Public Reload → retirement owner | The earlier affine lifecycle tranche is integrated, including source slots and public callers. Later diagnostic/nonstart changes remain on the receiving lifecycle branch. | Real tests expose source-birth and fixture-boundary problems. Preparation permission under A must not be confused with an independent replacement B; genuine captured-A dependencies must remain. |
 
 The triggering packet census measured 5,204 distinct reachable blocks: 4,698
 HAMT nodes, two scope proofs and 504 smaller facts. The two proofs represented
@@ -37,10 +40,19 @@ The first acquisition is not yet fully decomposed. The compiler projection
 change also leaves Rust's runtime-context materialization and commitment
 calculation as a measured residual, rather than claiming all graph work vanishes.
 
-Root `aa811a4483` adds owner, expected/actual interface seals and certificate/input
-paths to canonical-interface mismatch diagnostics. Its compilation and execution
-are pending. The public startup mismatch must still be reproduced with that
-diagnostic; inventory contents alone cannot identify its cause.
+Canonical-interface diagnostics now identify the owner, expected/current seals and
+selected certificate/input paths. The joined declared runtime cohort reproduces
+`Tidepool.Aeson.FromJSON` mismatch before activation assertions. A pinned GHC
+read/write of the retained expected interface is byte-identical; that excludes
+only simple reserialization as a reproducer, not other compiler-state differences.
+The actual differing current bytes were not retained by the earlier failure.
+
+Joined compilation passed for the production worker, Haskell source-boot test
+binary, toolchain tests and actor tests. Two joined Haskell selections passed
+(SOURCE history with eleven actual admissions; finalized Core). The actual
+compiled-C test exposed a temporary validation namespace escaping as authored
+Original selection; its private-result repair is receiving. Do not weaken the
+role oracle or rebuild exact issued dependency edges from a broader inventory.
 
 ## Earlier service checkpoint and receiving boundaries
 
