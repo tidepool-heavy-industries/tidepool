@@ -1508,6 +1508,70 @@ mod tests {
     }
 
     #[test]
+    fn retirement_claimed_body_error_never_issues_a_refusal_continuation() {
+        for published in [false, true] {
+            for refused in [false, true] {
+                let fixture = PublicationFixture::replacement(true);
+                let decision = tidepool_runtime::session::PublicationDecision::new();
+                let mut guard = fixture.reserve(decision.clone());
+                let _original = capture_original(&mut guard);
+                let claim = decision.claim_commit().unwrap();
+                let pending_claim = if published {
+                    claim.published();
+                    None
+                } else {
+                    Some(claim)
+                };
+                let primary = if refused {
+                    Ok(super::super::ActorGenerationCommit::Refused(
+                        "body observed a refusal after claim".into(),
+                    ))
+                } else {
+                    Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+                };
+                let completion = super::super::PublicationBodyCompletion::Observed {
+                    guard,
+                    outcome: primary,
+                }
+                .for_retirement();
+                let super::super::ActorGenerationPublicationSettlement::Settled(outcome) =
+                    completion
+                else {
+                    panic!("a commit claim excludes known-unpublished restoration");
+                };
+                let Err(error) = outcome.as_ref() else {
+                    panic!("the contradictory observed outcome retains uncertainty")
+                };
+                assert!(error.requires_recovery());
+                assert_eq!(
+                    error.execution_failure_kind(),
+                    if refused {
+                        None
+                    } else {
+                        Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+                    }
+                );
+                let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error
+                else {
+                    panic!("both causes remain typed")
+                };
+                assert!(matches!(
+                    failure.settlement,
+                    super::super::PublicationSettlementError::PublicationUnconfirmed
+                ));
+                assert!(
+                    matches!(
+                        failure.outcome.as_ref(),
+                        Ok(super::super::ActorGenerationCommit::Refused(_))
+                    ) == refused
+                );
+                fixture.assert_candidate_unavailable();
+                drop(pending_claim);
+            }
+        }
+    }
+
+    #[test]
     fn publisher_failed_settlement_retains_external_prerequisite_and_primary_outcome() {
         for bootstrap in [true, false] {
             for visible in [true, false] {
