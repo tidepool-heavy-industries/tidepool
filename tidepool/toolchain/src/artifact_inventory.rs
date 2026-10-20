@@ -8436,7 +8436,7 @@ impl ArtifactView {
                 _ => Vec::new(),
             };
             let selected_choices = selected_sources
-                .into_iter()
+                .iter()
                 .filter_map(|decisions| {
                     decisions
                         .facts
@@ -8507,6 +8507,9 @@ impl ArtifactView {
                     groups: chosen,
                 },
             );
+            for source in selected_sources {
+                input_decisions.carry_selected_from(source, owner);
+            }
         }
         timing.advance("validate_issued_merge");
         self.validate_issued_merge(other)?;
