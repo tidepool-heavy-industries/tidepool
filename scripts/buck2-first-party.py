@@ -1202,6 +1202,9 @@ def runtime_test_cases(binary):
         "initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes",
         "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
         "native_admission_commits_the_live_machine_export_owner",
+        "selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values",
+        "settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
+        "world_private_admission_requires_the_actual_transaction_original",
     )]
     compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
     compiler_arguments = runtime_arguments(
@@ -1212,8 +1215,8 @@ def runtime_test_cases(binary):
         '    name = "runtime_admission_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
-        "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
-        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
+        f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
     semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
         "signed_template_helpers_execute_recursion_and_polymorphism_once",
