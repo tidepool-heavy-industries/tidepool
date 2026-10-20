@@ -2161,7 +2161,14 @@ pub(crate) enum DemandNativeInputsError {
 /// demand data only: the complete product certifier still authenticates every
 /// current body, source proof and interface before issuing native authority.
 struct ReceiptNativeInputDemand<'a> {
-    globals: Vec<&'a crate::certified_products::AcceptedGlobal>,
+    sources: Vec<ExternalSourceGlobal<'a>>,
+}
+
+struct ExternalSourceGlobal<'a> {
+    unit: &'a str,
+    module: &'a str,
+    module_version: Option<&'a tidepool_repr::execution_schema::ModuleVersion>,
+    original_ordinal: u32,
 }
 
 impl<'a> ReceiptNativeInputDemand<'a> {
@@ -2190,7 +2197,7 @@ impl<'a> ReceiptNativeInputDemand<'a> {
         if !current.is_subset(&observed) {
             return Err(failure("current native output lacks its receipt owner"));
         }
-        let mut globals = Vec::new();
+        let mut sources = Vec::new();
         for global in receipt
             .modules
             .iter()
@@ -2203,6 +2210,7 @@ impl<'a> ReceiptNativeInputDemand<'a> {
                 unit,
                 module,
                 module_version,
+                original_ordinal,
                 ..
             } = &global.owner
             else {
@@ -2213,10 +2221,15 @@ impl<'a> ReceiptNativeInputDemand<'a> {
             if module_version.is_none() && current.contains(&(unit.as_str(), module.as_str())) {
                 continue;
             }
-            budget.reserve::<&crate::certified_products::AcceptedGlobal>(1)?;
-            globals.push(global);
+            budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
+            sources.push(ExternalSourceGlobal {
+                unit,
+                module,
+                module_version: module_version.as_ref(),
+                original_ordinal: *original_ordinal,
+            });
         }
-        Ok(Self { globals })
+        Ok(Self { sources })
     }
 }
 
@@ -2263,23 +2276,18 @@ impl DemandNativeInputs {
         inputs: &ReceiptNativeInputDemand<'_>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<DemandCertifiedGroups, CompileError> {
-        use crate::certified_products::ReceiptImportOwner;
         let operation = validation.inventory.clone();
         let budget = NativeDemandBudget(Some(&operation));
         let mut roots = BTreeMap::new();
         let mut proofs = BTreeMap::new();
-        for global in &inputs.globals {
+        for global in &inputs.sources {
             budget.checkpoint()?;
-            let ReceiptImportOwner::Source {
+            let ExternalSourceGlobal {
                 unit,
                 module,
                 module_version,
                 original_ordinal,
-                ..
-            } = &global.owner
-            else {
-                unreachable!("receipt input projection retains only source globals")
-            };
+            } = global;
             // The shared choice owner also constructs one temporary owner key.
             budget.strings(unit.len().saturating_add(module.len()).saturating_mul(2))?;
             let owner = identity(unit, module);
@@ -2302,7 +2310,7 @@ impl DemandNativeInputs {
             let native_owner = row.original_owner();
             if native_owner.unit != *unit
                 || native_owner.module != *module
-                || module_version.as_ref() != Some(&native_owner.module_version)
+                || *module_version != Some(&native_owner.module_version)
             {
                 return Err(failure(
                     "receipt native group differs from its issued owner or permission",
@@ -9544,13 +9552,12 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             }
             insert(&mut roots, &claim.owner)?;
         }
-        for global in &inputs.globals {
-            let crate::certified_products::ReceiptImportOwner::Source { unit, module, .. } =
-                &global.owner
-            else {
-                unreachable!("receipt input projection retains only source globals")
-            };
-            let owner = identity(unit, module);
+        for global in &inputs.sources {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(1))?;
+            charge(operation.charge(global.unit.len()))?;
+            charge(operation.charge(global.module.len()))?;
+            let owner = identity(global.unit, global.module);
             insert(&mut roots, &owner)?;
             insert(&mut native_roots, &owner)?;
         }
@@ -20177,7 +20184,7 @@ mod tests {
             };
             let inputs = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
             assert!(
-                inputs.globals.is_empty(),
+                inputs.sources.is_empty(),
                 "actual current output is independent of origin label"
             );
             let operation = InventoryOperation::new(Default::default());
@@ -20187,7 +20194,15 @@ mod tests {
             let selected = cold
                 .demanded_native_inputs(demand, &BTreeSet::new(), &operation)
                 .unwrap();
-            assert!(selected.native_availability().0.is_empty());
+            assert!(!selected
+                .advertised_native_originals()
+                .0
+                .contains_key(&owner));
+            assert!(selected
+                .native_availability()
+                .0
+                .values()
+                .all(|row| row.original_owner().module != owner.module));
             assert!(
                 selected
                     .certify_receipt_groups(&inputs, &mut PackageInterfaceValidation::default())
@@ -20198,7 +20213,7 @@ mod tests {
             );
             let external = receipt_input_demand_fixture(&receipt);
             assert_eq!(
-                external.globals.len(),
+                external.sources.len(),
                 1,
                 "a receipt row without current physical output remains external"
             );
@@ -20210,6 +20225,16 @@ mod tests {
                 Err(DemandNativeInputsError::UnadvertisedOwner { .. })
             ));
 
+            let mut duplicate_receipt = receipt.clone();
+            duplicate_receipt
+                .modules
+                .push(duplicate_receipt.modules[0].clone());
+            assert!(ReceiptNativeInputDemand::from_products(&duplicate_receipt, &current).is_err());
+            let mut mismatched_receipt = receipt.clone();
+            mismatched_receipt.modules[0].module = "MissingCurrentOwner".into();
+            assert!(
+                ReceiptNativeInputDemand::from_products(&mismatched_receipt, &current).is_err()
+            );
             let mut historical = global.clone();
             let ReceiptImportOwner::Source { module_version, .. } = &mut historical.owner else {
                 unreachable!()
@@ -20218,17 +20243,11 @@ mod tests {
             receipt.targets.get_mut("target").unwrap().push(historical);
             let mixed = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
             assert_eq!(
-                mixed.globals.len(),
+                mixed.sources.len(),
                 1,
                 "same-module historical choice survives a current output"
             );
-            assert!(matches!(
-                &mixed.globals[0].owner,
-                ReceiptImportOwner::Source {
-                    module_version: Some(_),
-                    ..
-                }
-            ));
+            assert!(mixed.sources[0].module_version.is_some());
             assert!(selected
                 .certify_receipt_groups(&mixed, &mut PackageInterfaceValidation::default())
                 .is_err());
