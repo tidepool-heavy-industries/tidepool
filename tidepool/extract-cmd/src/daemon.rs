@@ -9085,7 +9085,16 @@ fn main() {{
                 foreground_jobs: Some(1),
                 preparation_jobs: Some(1),
             };
-            let server = std::thread::spawn(move || serve(&config, prepared));
+            let trace = CapturedWriter::default();
+            let subscriber = tracing_subscriber(
+                CapturedWriter::default(),
+                CapturedWriter::default(),
+                trace.clone(),
+                tracing_subscriber::EnvFilter::new("info"),
+            );
+            let server = std::thread::spawn(move || {
+                tracing::subscriber::with_default(subscriber, || serve(&config, prepared))
+            });
             let _server = OwnedServer {
                 socket: socket.clone(),
                 thread: Some(server),
@@ -9101,6 +9110,33 @@ fn main() {{
                     reason = "bounded test-owned daemon readiness polling"
                 )]
                 std::thread::sleep(Duration::from_millis(5));
+            };
+            let await_release = |admission: AdmissionId| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let observed = trace.text();
+                    if observed
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .any(|row| {
+                            row["fields"]["phase"] == "compiler_capacity_release"
+                                && row["fields"]["admission_id"].as_u64() == Some(admission.0)
+                                && row["fields"]["daemon_epoch"] == hex(&binding.epoch)
+                        })
+                    {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "capacity release for admission {} absent: {observed}",
+                        admission.0
+                    );
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "bounded wait for exact owned resource release event"
+                    )]
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             };
             let mut first = begin_transaction(&socket, &binding.epoch).unwrap();
             assert!(
@@ -9135,6 +9171,7 @@ fn main() {{
                 let accepted = queued.admission_id;
                 assert!(queued.worker_location().is_none());
                 end_transaction(&mut spill).unwrap();
+                await_release(spill.admission_id);
                 // Slot 1 becomes idle while this already accepted transaction
                 // retains the original slot-0 queue and its fixed CPU grant.
                 queued.stream.set_nonblocking(true).unwrap();
@@ -9144,6 +9181,7 @@ fn main() {{
                 );
                 queued.stream.set_nonblocking(false).unwrap();
                 end_transaction(&mut first).unwrap();
+                await_release(first.admission_id);
                 assert!(
                     execute_test_transaction_request(&mut queued, dir.path(), &argv)
                         .unwrap()
@@ -9163,6 +9201,7 @@ fn main() {{
                     "queued execution observes the replacement instance after rotation"
                 );
                 end_transaction(&mut queued).unwrap();
+                await_release(queued.admission_id);
                 let mut stale = begin_transaction_for_workload_with_hint(
                     &socket,
                     &binding.epoch,
@@ -9185,7 +9224,9 @@ fn main() {{
                 end_transaction(&mut stale).unwrap();
             } else {
                 end_transaction(&mut spill).unwrap();
+                await_release(spill.admission_id);
                 end_transaction(&mut first).unwrap();
+                await_release(first.admission_id);
                 let mut preferred = begin_transaction_for_workload_with_hint(
                     &socket,
                     &binding.epoch,
