@@ -414,9 +414,13 @@ impl Rows {
         issued: &ArtifactView,
         available: &BTreeSet<ArtifactId>,
         demanded: &BTreeSet<RawGroup>,
+        supplied_roots: &BTreeSet<ArtifactId>,
+        identity_roots: &BTreeSet<NativeGroupBinding>,
     ) -> View {
+        // An inherited physical body is not a newly requested root. Existing
+        // immutable rows stay in parent.physical independently of this plan.
         let mut planned_groups = demanded.clone();
-        planned_groups.extend(groups(&parent.facts()));
+        planned_groups.extend(&parent.demand);
         let graph = issued.capture_graph_selection();
         // These are identity observations at the issuance boundary, never the
         // source of expected edges or expected reachable membership.
@@ -461,11 +465,26 @@ impl Rows {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let issued_groups = graph
-            .native_groups
+        // Observe identities only for explicitly requested/prior roots. The
+        // complete returned custody census is checked later, never used to
+        // decide which additional groups the reference should expect.
+        let mut issued_groups = parent
+            .physical
             .iter()
-            .map(|group| self.register(catalog, ArtifactBindingNode::Group(*group)))
+            .filter(|row| matches!(row.fact, Fact::Group(_)))
+            .copied()
             .collect::<BTreeSet<_>>();
+        for group in identity_roots {
+            let row = self.register(catalog, ArtifactBindingNode::Group(*group));
+            let Fact::Group(raw) = row.fact else {
+                unreachable!()
+            };
+            assert!(
+                planned_groups.contains(&raw),
+                "unrequested issued group root: {group:?}"
+            );
+            issued_groups.insert(row);
+        }
         for row in namespace.values() {
             if !self.edges.contains_key(row) {
                 let mut edges = BTreeSet::new();
@@ -553,7 +572,14 @@ impl Rows {
             namespace: namespace.clone(),
             roots: BTreeSet::new(),
             demand: BTreeSet::new(),
+            root_bindings: BTreeSet::new(),
         };
+        let mut root_bindings = parent.root_bindings.clone();
+        root_bindings.extend(
+            namespace
+                .iter()
+                .filter_map(|(id, row)| supplied_roots.contains(id).then_some(*row)),
+        );
         for raw in &planned_groups {
             let carrier = namespace[&catalog.originals[raw.0].descriptor.id];
             let fresh = issued_groups
@@ -572,6 +598,7 @@ impl Rows {
                     "newly planned group uses chosen carrier"
                 );
                 selected.insert(*chosen);
+                root_bindings.insert(*chosen);
             } else {
                 // An issuer can return an already-held exact row when two
                 // branches issued equal group rows under the same carrier.
@@ -595,6 +622,7 @@ impl Rows {
                     matching.is_subset(&parent.physical),
                     "unobserved fresh issuing identity"
                 );
+                root_bindings.extend(&matching);
                 selected.extend(matching);
             }
         }
@@ -607,6 +635,7 @@ impl Rows {
             namespace,
             roots: parent.roots.clone(),
             demand: catalog.group_closure(&parent.demand.union(demanded).copied().collect()),
+            root_bindings,
         }
     }
 }
@@ -620,12 +649,122 @@ struct View {
     // from the complete physical byte custody.
     roots: BTreeSet<ArtifactId>,
     demand: BTreeSet<RawGroup>,
+    // Exact root bindings are distinct from both the selected logical closure
+    // and the complete retained physical graph.
+    root_bindings: BTreeSet<Physical>,
 }
 
 impl View {
     fn facts(&self) -> BTreeSet<Fact> {
         self.physical.iter().map(|row| row.fact).collect()
     }
+}
+
+/// Full observable rows are compared before any payload-only summary. This
+/// checker also supports mutation controls without creating runtime authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GraphObservation {
+    physical: BTreeSet<ArtifactBindingNode>,
+    roots: BTreeSet<ArtifactBindingNode>,
+    namespace: BTreeSet<ArtifactBinding>,
+    edges: BTreeSet<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
+    demand: BTreeSet<NativeGroupKey>,
+}
+
+impl GraphObservation {
+    fn expected(catalog: &Catalog, rows: &Rows, view: &View) -> Self {
+        Self {
+            physical: view.physical.iter().map(|row| rows.handles[row]).collect(),
+            roots: view
+                .root_bindings
+                .iter()
+                .map(|row| rows.handles[row])
+                .collect(),
+            namespace: view
+                .namespace
+                .values()
+                .map(|row| match rows.handles[row] {
+                    ArtifactBindingNode::Artifact(binding) => binding,
+                    _ => unreachable!(),
+                })
+                .collect(),
+            edges: view
+                .physical
+                .iter()
+                .flat_map(|source| {
+                    rows.edges[source].iter().map(|(target, edge)| {
+                        (rows.handles[source], rows.handles[target], edge.clone())
+                    })
+                })
+                .collect(),
+            demand: catalog.selection(&view.demand),
+        }
+    }
+
+    fn actual(view: &ArtifactView) -> Self {
+        let graph = view.capture_graph_selection();
+        Self {
+            physical: graph
+                .bindings
+                .into_iter()
+                .map(ArtifactBindingNode::Artifact)
+                .chain(
+                    graph
+                        .native_groups
+                        .into_iter()
+                        .map(ArtifactBindingNode::Group),
+                )
+                .collect(),
+            roots: graph.roots.into_iter().collect(),
+            namespace: graph.namespace.into_iter().collect(),
+            edges: view.binding_dependencies().into_iter().collect(),
+            demand: view.selected_native_groups(),
+        }
+    }
+}
+
+fn check_graph_observation(
+    expected: &GraphObservation,
+    actual: &GraphObservation,
+    step: usize,
+    slot: usize,
+) -> Result<(), TestCaseError> {
+    prop_assert_eq!(
+        &actual.physical,
+        &expected.physical,
+        "physical closure at step {}, slot {}",
+        step,
+        slot
+    );
+    prop_assert_eq!(
+        &actual.roots,
+        &expected.roots,
+        "exact roots at step {}, slot {}",
+        step,
+        slot
+    );
+    prop_assert_eq!(
+        &actual.namespace,
+        &expected.namespace,
+        "chosen namespace at step {}, slot {}",
+        step,
+        slot
+    );
+    prop_assert_eq!(
+        &actual.edges,
+        &expected.edges,
+        "independent raw rows at step {}, slot {}",
+        step,
+        slot
+    );
+    prop_assert_eq!(
+        &actual.demand,
+        &expected.demand,
+        "selected demand at step {}, slot {}",
+        step,
+        slot
+    );
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -651,7 +790,7 @@ enum Op {
         nodes: Vec<usize>,
         to: usize,
     },
-    Merge {
+    RetainCustody {
         left: usize,
         right: usize,
         to: usize,
@@ -693,7 +832,7 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
             2 => slot.clone().prop_map(Op::Drop),
             3 => (slot.clone(), proptest::collection::vec(0..MODULES, 0..5), slot.clone())
                 .prop_map(|(from, nodes, to)| Op::Project { from, nodes, to }),
-            3 => (slot.clone(), slot.clone(), slot.clone()).prop_map(|(left, right, to)| Op::Merge { left, right, to }),
+            3 => (slot.clone(), slot.clone(), slot.clone()).prop_map(|(left, right, to)| Op::RetainCustody { left, right, to }),
             2 => (slot.clone(), 0usize..2, slot.clone()).prop_map(|(from, inventory, to)| Op::Recover { from, inventory, to }),
             4 => (slot, 0..MODULES, prop::sample::select(vec![3u32, 11, 29, 0, 4]), any::<bool>())
                 .prop_map(|(from, node, ordinal, all)| Op::Read { from, node, ordinal, all }),
@@ -716,7 +855,7 @@ struct Coverage {
     reclaimed: usize,
     absent_slots: usize,
     recoveries: usize,
-    namespace_masks: usize,
+    custody_namespace_conflicts: usize,
     carrier_qualified_refusals: usize,
     duplicate_scope_views: usize,
     cross_scope_group_carriers: usize,
@@ -825,7 +964,7 @@ fn prefix() -> Vec<Op> {
             reverse: true,
             to: 7,
         },
-        Op::Merge {
+        Op::RetainCustody {
             left: 2,
             right: 7,
             to: 4,
@@ -852,7 +991,7 @@ fn prefix() -> Vec<Op> {
             nodes: vec![0],
             to: 5,
         },
-        Op::Merge {
+        Op::RetainCustody {
             left: 2,
             right: 6,
             to: 5,
@@ -896,7 +1035,7 @@ fn prefix() -> Vec<Op> {
             reverse: false,
             to: 5,
         },
-        Op::Merge {
+        Op::RetainCustody {
             left: 2,
             right: 5,
             to: 7,
@@ -911,7 +1050,7 @@ fn prefix() -> Vec<Op> {
             nodes: vec![0],
             to: 5,
         },
-        Op::Merge {
+        Op::RetainCustody {
             left: 3,
             right: 5,
             to: 7,
@@ -921,6 +1060,8 @@ fn prefix() -> Vec<Op> {
 
 // The oracle intentionally retains the old linear iterator and reads graph
 // edges directly, independently of the index's construction and lookup.
+// A separate differential cache/index check. Its production slow resolver is
+// not the independent Catalog/Rows semantic oracle above.
 fn check_native_selection_index(
     view: &ArtifactView,
     coverage: &mut Coverage,
@@ -1027,6 +1168,7 @@ fn run_history_observed(
                     namespace: BTreeMap::new(),
                     roots: BTreeSet::new(),
                     demand: BTreeSet::new(),
+                    root_bindings: BTreeSet::new(),
                 });
             }
             Op::Admit {
@@ -1058,8 +1200,24 @@ fn run_history_observed(
                         result
                     );
                     if let Ok(result) = result {
-                        let mut admitted =
-                            rows.admit(catalog, &view, &result, &available, &demanded);
+                        let identity_roots = result
+                            .capture_graph_selection()
+                            .roots
+                            .into_iter()
+                            .filter_map(|node| match node {
+                                ArtifactBindingNode::Group(group) => Some(group),
+                                ArtifactBindingNode::Artifact(_) => None,
+                            })
+                            .collect();
+                        let mut admitted = rows.admit(
+                            catalog,
+                            &view,
+                            &result,
+                            &available,
+                            &demanded,
+                            &supplied,
+                            &identity_roots,
+                        );
                         admitted.roots = view.roots.clone();
                         admitted.roots.extend(supplied);
                         admitted
@@ -1127,6 +1285,7 @@ fn run_history_observed(
                                 }
                             }
                         }
+                        let root_bindings = selected.clone();
                         let selected_closure = rows.close(selected);
                         let demand = groups(&selected_closure.iter().map(|row| row.fact).collect());
                         let mut physical = selected_closure.clone();
@@ -1160,12 +1319,19 @@ fn run_history_observed(
                                         for ((source, _), targets) in &catalog.edges {
                                             if *source == node {
                                                 for (target, _) in targets {
-                                                    if let Some(carrier) = rows.resolve(
-                                                        &view,
-                                                        catalog.originals[*target].descriptor.id,
-                                                    ) {
-                                                        physical.insert(carrier);
-                                                    }
+                                                    let required =
+                                                        catalog.originals[*target].descriptor.id;
+                                                    // Byte custody preserves every already-issued
+                                                    // physical parent. The compiler namespace chooses
+                                                    // one input; it cannot replace these identities.
+                                                    physical.extend(
+                                                        view.physical
+                                                            .iter()
+                                                            .filter(|row| {
+                                                                row.fact == Fact::Carrier(required)
+                                                            })
+                                                            .copied(),
+                                                    );
                                                 }
                                             }
                                         }
@@ -1203,6 +1369,7 @@ fn run_history_observed(
                             namespace,
                             roots: ids,
                             demand,
+                            root_bindings,
                         });
                         coverage.projections += 1;
                     } else {
@@ -1212,25 +1379,19 @@ fn run_history_observed(
                     coverage.absent_slots += 1;
                 }
             }
-            Op::Merge { left, right, to } => {
+            Op::RetainCustody { left, right, to } => {
                 if let (Some(left_view), Some(right_view)) =
                     (model[*left].clone(), model[*right].clone())
                 {
                     let result = actual[*left]
                         .as_ref()
                         .unwrap()
-                        .merge_fixture_selections(actual[*right].as_ref().unwrap());
+                        .retain_custody(actual[*right].as_ref().unwrap());
                     prop_assert!(result.is_ok(), "step {}: {:?}: {:?}", step, op, result);
-                    let inventory = if right_view.physical.is_empty() {
-                        left_view.inventory
-                    } else if left_view.physical.is_empty() {
-                        right_view.inventory
-                    } else {
-                        left_view.inventory
-                    };
+                    let inventory = left_view.inventory;
                     let mut physical = left_view.physical.clone();
                     physical.extend(&right_view.physical);
-                    coverage.namespace_masks += right_view
+                    coverage.custody_namespace_conflicts += right_view
                         .namespace
                         .iter()
                         .filter(|(id, carrier)| {
@@ -1240,12 +1401,12 @@ fn run_history_observed(
                                 .is_some_and(|old| old != *carrier)
                         })
                         .count();
-                    let mut namespace = left_view.namespace;
-                    namespace.extend(right_view.namespace);
-                    let mut roots = left_view.roots;
-                    roots.extend(right_view.roots);
-                    let mut demand = left_view.demand;
-                    demand.extend(right_view.demand);
+                    // Retention carries every exact peer binding but preserves
+                    // the receiver's choices. It grants no peer execution root.
+                    let namespace = left_view.namespace;
+                    let roots = left_view.roots;
+                    let demand = left_view.demand;
+                    let root_bindings = left_view.root_bindings;
                     actual[*to] = Some(result.unwrap());
                     model[*to] = Some(View {
                         inventory,
@@ -1253,6 +1414,7 @@ fn run_history_observed(
                         namespace,
                         roots,
                         demand,
+                        root_bindings,
                     });
                     coverage.merges += 1;
                     if left_view.inventory != right_view.inventory {
@@ -1380,71 +1542,11 @@ fn run_history_observed(
                 coverage.custody_only_views +=
                     usize::from(!groups(&view.facts()).is_subset(&view.demand));
                 check_native_selection_index(observed, coverage)?;
-                let graph = observed.capture_graph_selection();
-                let expected_handles = view
-                    .physical
-                    .iter()
-                    .map(|row| rows.handles[row])
-                    .collect::<BTreeSet<_>>();
-                let actual_handles = graph
-                    .bindings
-                    .into_iter()
-                    .map(ArtifactBindingNode::Artifact)
-                    .chain(
-                        graph
-                            .native_groups
-                            .into_iter()
-                            .map(ArtifactBindingNode::Group),
-                    )
-                    .collect::<BTreeSet<_>>();
-                prop_assert_eq!(
-                    actual_handles,
-                    expected_handles,
-                    "physical closure at step {}, slot {}",
-                    step,
-                    slot
-                );
-                let expected_namespace = view
-                    .namespace
-                    .values()
-                    .map(|row| match rows.handles[row] {
-                        ArtifactBindingNode::Artifact(binding) => binding,
-                        _ => unreachable!(),
-                    })
-                    .collect::<BTreeSet<_>>();
-                prop_assert_eq!(
-                    graph.namespace.into_iter().collect::<BTreeSet<_>>(),
-                    expected_namespace,
-                    "chosen namespace at step {}, slot {}",
-                    step,
-                    slot
-                );
-                let expected_edges = view
-                    .physical
-                    .iter()
-                    .flat_map(|source| {
-                        rows.edges[source].iter().map(|(target, edge)| {
-                            (rows.handles[source], rows.handles[target], edge.clone())
-                        })
-                    })
-                    .collect::<BTreeSet<_>>();
-                prop_assert_eq!(
-                    observed
-                        .binding_dependencies()
-                        .into_iter()
-                        .collect::<BTreeSet<_>>(),
-                    expected_edges,
-                    "independent raw rows at step {}, slot {}",
-                    step,
-                    slot
-                );
-                prop_assert_eq!(
-                    observed.selected_native_groups(),
-                    catalog.selection(&view.demand),
-                    "step {}, slot {}",
-                    step,
-                    slot
-                );
+                // Expected full sets come solely from request facts and the
+                // immutable model. Reading the result cannot enlarge them.
+                let expected = GraphObservation::expected(catalog, &rows, view);
+                let observed_graph = GraphObservation::actual(observed);
+                check_graph_observation(&expected, &observed_graph, step, slot)?;
                 prop_assert_eq!(
                     observed
                         .root_entries()
@@ -1549,6 +1651,275 @@ fn retained_body_history() -> Vec<Op> {
             all: false,
         },
     ]
+}
+
+#[test]
+fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() {
+    let mut supports = Vec::new();
+    let mut original_facts = Vec::new();
+    for version in [1, 2] {
+        // All declared outputs and BOTH value dependencies are present. This
+        // completion is deliberately separate from partial recovery histories.
+        let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], version);
+        let inventory = ArtifactInventory::default();
+        let entries = catalog.entries(true, false);
+        let supplied = catalog.supplied_ids(true);
+        let complete = root_groups(3);
+        let base = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &base.metadata_snapshot(),
+                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+            )
+            .unwrap();
+        let output =
+            crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &base)
+                .unwrap();
+        let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let mut rows = Rows::default();
+        let empty = View {
+            inventory: 0,
+            physical: BTreeSet::new(),
+            namespace: BTreeMap::new(),
+            roots: BTreeSet::new(),
+            demand: BTreeSet::new(),
+            root_bindings: BTreeSet::new(),
+        };
+        let base_model = rows.admit(
+            &catalog,
+            &empty,
+            &base,
+            &supplied,
+            &BTreeSet::new(),
+            &supplied,
+            &BTreeSet::new(),
+        );
+        // Only ask the actual completed owner for the opaque identities of
+        // independently specified required roots. Never copy its graph census.
+        let mut identities = BTreeSet::new();
+        for raw in &complete {
+            let key = catalog.key(*raw);
+            let offer = support
+                .native_offers()
+                .iter()
+                .find(|offer| offer.original() == key.artifact)
+                .unwrap();
+            assert!(offer.is_full());
+            let issued = offer.group_bindings(key).collect::<Vec<_>>();
+            assert_eq!(issued.len(), 1, "one actual output issuer for {raw:?}");
+            identities.insert(issued[0]);
+        }
+        let mut model = rows.admit(
+            &catalog,
+            &base_model,
+            support.artifacts(),
+            &supplied,
+            &complete,
+            &BTreeSet::new(),
+            &identities,
+        );
+        // Full availability is hidden custody, not an executable decision.
+        model.demand.clear();
+        model.root_bindings = base_model.root_bindings;
+        let expected = GraphObservation::expected(&catalog, &rows, &model);
+        check_graph_observation(
+            &expected,
+            &GraphObservation::actual(support.artifacts()),
+            0,
+            0,
+        )
+        .unwrap();
+        let peer = support.for_source_owners(&BTreeSet::new()).unwrap();
+        let merged = support.merge(&peer).unwrap();
+        check_graph_observation(
+            &expected,
+            &GraphObservation::actual(merged.artifacts()),
+            1,
+            0,
+        )
+        .unwrap();
+        assert!(merged.artifacts().selected_native_groups().is_empty());
+        // Consume the same completed selection through production target
+        // admission. This is graph admission, not runtime physical-site proof.
+        let mut fixed = inventory
+            .bind_segment(merged.artifacts(), catalog.originals.clone(), &selection)
+            .unwrap();
+        let owner = match &catalog.originals[0].payload {
+            ArtifactPayload::Original(product) => product.owner().clone(),
+            _ => unreachable!(),
+        };
+        let imports = vec![PendingImportOwner::Source {
+            owner,
+            original_ordinal: 3,
+            binder: SymbolIdentity {
+                unit: "fixture".into(),
+                module: "History0".into(),
+                namespace: "value".into(),
+                occurrence: "entry_3".into(),
+                record_parent: None,
+            },
+        }];
+        let target = inventory
+            .admit_bound_target(
+                &mut fixed,
+                merged.artifacts(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                Vec::new(),
+                &selection,
+            )
+            .unwrap();
+        let target = target.bind_target(None, imports);
+        let resolved = target.resolve().unwrap();
+        let required = catalog.group_closure(&root_groups(0));
+        let expected_groups = identities
+            .iter()
+            .filter(|binding| {
+                required.iter().any(|raw| {
+                    catalog.key(*raw).artifact == binding.binding.artifact()
+                        && raw.1 == binding.original_ordinal
+                })
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(resolved.groups(), &expected_groups);
+        check_graph_observation(
+            &expected,
+            &GraphObservation::actual(support.artifacts()),
+            2,
+            0,
+        )
+        .unwrap();
+        original_facts.push(
+            catalog
+                .originals
+                .iter()
+                .map(|entry| (entry.descriptor.owner.clone(), entry.descriptor.id))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        supports.push(support);
+    }
+    // Both are genuine completed outputs, but choosing different Originals for
+    // one compiler owner must still refuse instead of merging their authority.
+    for (left, right) in [(0, 1), (1, 0)] {
+        let refused = supports[left].merge(&supports[right]);
+        assert!(
+            matches!(refused, Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                owner, existing, incoming,
+            } if original_facts[left].get(&owner) == Some(&existing)
+                && original_facts[right].get(&owner) == Some(&incoming) && existing != incoming))
+        );
+    }
+    let inventories = supports
+        .iter()
+        .map(|support| support.artifacts().inventory().clone())
+        .collect::<Vec<_>>();
+    drop(supports);
+    for inventory in inventories {
+        assert_eq!(
+            inventory.node_count(),
+            0,
+            "final completed owners release their physical rows"
+        );
+    }
+}
+
+#[test]
+fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
+    let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    let inventory = ArtifactInventory::default();
+    let parent = View {
+        inventory: 0,
+        physical: BTreeSet::new(),
+        namespace: BTreeMap::new(),
+        roots: BTreeSet::new(),
+        demand: BTreeSet::new(),
+        root_bindings: BTreeSet::new(),
+    };
+    let demanded = catalog.group_closure(&root_groups(0));
+    let supplied = catalog.supplied_ids(false);
+    let issued = inventory
+        .admit_recovery_selection(
+            &inventory.empty_view(),
+            catalog.entries(false, false),
+            &catalog.selection(&demanded),
+        )
+        .unwrap();
+    let identities = issued
+        .capture_graph_selection()
+        .roots
+        .into_iter()
+        .filter_map(|node| match node {
+            ArtifactBindingNode::Group(group) => Some(group),
+            _ => None,
+        })
+        .collect();
+    let mut rows = Rows::default();
+    let model = rows.admit(
+        &catalog,
+        &parent,
+        &issued,
+        &supplied,
+        &demanded,
+        &supplied,
+        &identities,
+    );
+    let expected = GraphObservation::expected(&catalog, &rows, &model);
+    let actual = GraphObservation::actual(&issued);
+    check_graph_observation(&expected, &actual, 0, 0).unwrap();
+    let unrelated = inventory
+        .admit_recovery_selection(
+            &inventory.empty_view(),
+            catalog.entries(true, true),
+            &catalog.selection(&root_groups(2)),
+        )
+        .unwrap();
+    let unrelated_graph = unrelated.capture_graph_selection();
+    let extra = unrelated_graph
+        .native_groups
+        .into_iter()
+        .find(|group| {
+            group.binding.artifact() == catalog.key((0, 29)).artifact
+                && group.original_ordinal == 29
+        })
+        .unwrap();
+    let extra = ArtifactBindingNode::Group(extra);
+    assert!(!expected.physical.contains(&extra));
+    let mut extra_binding = actual.clone();
+    extra_binding.physical.insert(extra);
+    assert!(check_graph_observation(&expected, &extra_binding, 0, 0).is_err());
+    let mut extra_root = actual.clone();
+    extra_root.roots.insert(extra);
+    assert!(check_graph_observation(&expected, &extra_root, 0, 0).is_err());
+    let mut extra_demand = actual.clone();
+    extra_demand.demand.insert(catalog.key((0, 29)));
+    assert!(check_graph_observation(&expected, &extra_demand, 0, 0).is_err());
+    let mut extra_edge = actual.clone();
+    let from = *actual
+        .roots
+        .iter()
+        .find(|node| matches!(node, ArtifactBindingNode::Group(_)))
+        .unwrap();
+    extra_edge.edges.insert((
+        from,
+        extra,
+        ArtifactDependency::NativeGroup {
+            dependent_ordinal: 3,
+            required_ordinal: 29,
+        },
+    ));
+    assert!(check_graph_observation(&expected, &extra_edge, 0, 0).is_err());
+    let mut missing_edge = actual.clone();
+    assert!(missing_edge.edges.pop_first().is_some());
+    assert!(check_graph_observation(&expected, &missing_edge, 0, 0).is_err());
 }
 
 #[test]
@@ -2038,7 +2409,7 @@ fn staged_future_interface_does_not_widen_prior_views() {
     assert!(coverage.repeated >= 1 && coverage.cross_merges >= 1 && coverage.reclaimed > 0);
     assert!(
         coverage.recoveries > 0
-            && coverage.namespace_masks > 0
+            && coverage.custody_namespace_conflicts > 0
             && coverage.duplicate_scope_views > 0
     );
     assert!(coverage.carrier_qualified_refusals > 0 && coverage.cross_scope_group_carriers > 0);
@@ -2071,7 +2442,7 @@ fn scoped_carrier_namespace_controls_projection_and_recovery() {
             reverse: false,
             to: 3,
         },
-        Op::Merge {
+        Op::RetainCustody {
             left: 2,
             right: 3,
             to: 4,
@@ -2116,7 +2487,7 @@ fn scoped_carrier_namespace_controls_projection_and_recovery() {
     assert_eq!(coverage.read_refusals, 2);
     assert_eq!(coverage.reads, 2);
     assert_eq!(coverage.recoveries, 1);
-    assert!(coverage.namespace_masks > 0 && coverage.duplicate_scope_views > 0);
+    assert!(coverage.custody_namespace_conflicts > 0 && coverage.duplicate_scope_views > 0);
     eprintln!("scoped carrier regression coverage: {coverage:?}");
 }
 
@@ -2154,7 +2525,7 @@ fn same_carrier_branch_groups_remain_ambiguous_after_readmission() {
             reverse: false,
             to: 3,
         },
-        Op::Merge {
+        Op::RetainCustody {
             left: 3,
             right: 2,
             to: 4,
@@ -2240,6 +2611,37 @@ proptest! {
     }
 
     #[test]
+    fn native_causal_histories_shrink_without_a_fixed_work_prefix(
+        masks in proptest::collection::vec(0u8..16, MODULES),
+        generations in proptest::collection::vec(0u64..8, 2 * MODULES),
+        steps in proptest::collection::vec((0u8..7, 0usize..SLOTS, 0usize..SLOTS,
+            0usize..SLOTS, 0u8..6, any::<bool>()), 1..33),
+    ) {
+        let catalog = Catalog::new(&masks, &generations, 1);
+        // Only empty owners are fixed. Every operation that can cause a graph
+        // mismatch, including the first actual issuance, is generated/shrunk.
+        let mut history = vec![Op::Empty { inventory: 0, to: 0 }, Op::Empty { inventory: 1, to: 1 }];
+        for (index, (kind, from, peer, to, root, reverse)) in steps.into_iter().enumerate() {
+            history.push(if index == 0 {
+                Op::Admit { parent: 0, root: root % 3, future: true, reverse, to: 2 }
+            } else { match kind {
+                0 => Op::Admit { parent: from, root, future: reverse, reverse, to },
+                1 => Op::Project { from, nodes: vec![usize::from(root) % MODULES], to },
+                2 => Op::RetainCustody { left: from, right: peer, to },
+                3 => Op::Read { from, node: usize::from(root) % MODULES,
+                    ordinal: ORDINALS[peer % ORDINALS.len()], all: reverse },
+                4 => Op::Recover { from, inventory: peer % 2, to },
+                5 => Op::Clone { from, to },
+                _ => Op::Drop(from),
+            }});
+        }
+        let coverage = run_history(&catalog, &history)?;
+        // A successful real issuance is guaranteed, independently of whether
+        // later generated references have been dropped or overwritten.
+        prop_assert!(coverage.admissions > 0);
+    }
+
+    #[test]
     fn staged_native_histories_match_raw_fact_model(
         masks in proptest::collection::vec(0u8..16, MODULES),
         generations in proptest::collection::vec(0u64..8, 2 * MODULES),
@@ -2252,7 +2654,7 @@ proptest! {
         prop_assert!(coverage.admissions >= 6 && coverage.refusals >= 2);
         prop_assert!(coverage.clones > 0 && coverage.projections > 0 && coverage.merges >= 2);
         prop_assert!(coverage.cross_merges > 0 && coverage.reclaimed > 0 && coverage.read_refusals >= 3);
-        prop_assert!(coverage.recoveries > 0 && coverage.namespace_masks > 0 && coverage.duplicate_scope_views > 0);
+        prop_assert!(coverage.recoveries > 0 && coverage.custody_namespace_conflicts > 0 && coverage.duplicate_scope_views > 0);
         prop_assert!(coverage.carrier_qualified_refusals > 0 && coverage.cross_scope_group_carriers > 0);
         prop_assert!(coverage.indexed_unique > 0 && coverage.indexed_unavailable > 0);
         prop_assert!(coverage.custody_only_views > 0 && coverage.custody_only_reads >= 2 && coverage.selected_retained_body > 0);
