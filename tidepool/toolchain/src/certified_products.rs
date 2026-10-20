@@ -4871,6 +4871,33 @@ pub(crate) fn resolve_selected_original_binding(
     binder: &SymbolIdentity,
     operation: &InventoryOperation,
 ) -> CertResult<(CachedHomeOwner, u32)> {
+    let (native, ordinal) = authenticate_original_binding_membership(
+        source, owner, interface, original, binder, operation,
+    )?;
+    let permitted = source
+        .native_availability()
+        .issued_row(original.artifact)
+        .is_some_and(|row| row.original_owner() == &native && row.permits(ordinal));
+    if !permitted {
+        return Err(CertificationError::OriginalAvailability(Box::new(
+            OriginalAvailabilityRefusal {
+                owner: native.clone(),
+                original_ordinal: ordinal,
+            },
+        )));
+    }
+    Ok((native, ordinal))
+}
+// Metadata authentication proves code membership only. It cannot issue an
+// executable choice, retained-value custody, or completed package readiness.
+fn authenticate_original_binding_membership(
+    source: &crate::artifact_inventory::CompilerSourceSupport,
+    owner: &crate::declaration_join::ExactModuleIdentity,
+    interface: crate::artifact_inventory::ArtifactBinding,
+    original: crate::artifact_inventory::ArtifactBinding,
+    binder: &SymbolIdentity,
+    operation: &InventoryOperation,
+) -> CertResult<(CachedHomeOwner, u32)> {
     let refuse = |reason| CertificationError::InputDecision {
         owner: owner.clone(),
         reason,
@@ -4920,18 +4947,6 @@ pub(crate) fn resolve_selected_original_binding(
             symbol: binder.clone(),
         }))
     })?;
-    let permitted = source
-        .native_availability()
-        .issued_row(original.artifact)
-        .is_some_and(|row| row.original_owner() == product.owner() && row.permits(ordinal));
-    if !permitted {
-        return Err(CertificationError::OriginalAvailability(Box::new(
-            OriginalAvailabilityRefusal {
-                owner: product.owner().clone(),
-                original_ordinal: ordinal,
-            },
-        )));
-    }
     Ok((product.owner().clone(), ordinal))
 }
 
@@ -13709,6 +13724,12 @@ pub(crate) mod tests {
                 original,
                 binder: binder.clone(),
             };
+            assert_eq!(
+                authenticate_original_binding_membership(
+                    source, &owner, interface, original, &binder, &operation,
+                ).unwrap(),
+                (product.owner().clone(), ordinal),
+            );
             let resolved = ResolvedOriginalBindings::issue(
                 request.compiler_inputs().shared_compiler_source_support(),
                 Arc::clone(&operation),
