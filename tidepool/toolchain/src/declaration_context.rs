@@ -2275,12 +2275,24 @@ impl IssuedNativePermissionDelta {
     }
 }
 
+/// An ordinary package code obligation of one exact selected native group.
+/// It is not a live package export and does not itself prove executable code.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct NativePackageObligation {
+    pub(crate) demander: crate::artifact_inventory::NativeGroupBinding,
+    pub(crate) identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub(crate) interface_digest: [u8; 32],
+}
+
 /// Executable payload rows remain paired with the exact scoped choices that
 /// admitted them. Pending group payloads alone do not carry those choices.
 pub(crate) struct DemandCertifiedGroups {
     basis: Arc<RequestCompilerInputs>,
     groups: Vec<PendingCertifiedGroup>,
     bindings: BTreeMap<NativeGroupKey, crate::artifact_inventory::NativeGroupBinding>,
+    resolved_originals: Option<Arc<crate::certified_products::ResolvedOriginalBindings>>,
+    retained_bindings: Vec<crate::artifact_inventory::NativeBindingRequirement>,
+    package_obligations: Vec<NativePackageObligation>,
 }
 
 impl DemandCertifiedGroups {
@@ -2293,6 +2305,16 @@ impl DemandCertifiedGroups {
 
     pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
         &self.groups
+    }
+
+    pub(crate) fn retained_bindings(
+        &self,
+    ) -> &[crate::artifact_inventory::NativeBindingRequirement] {
+        &self.retained_bindings
+    }
+
+    pub(crate) fn package_obligations(&self) -> &[NativePackageObligation] {
+        &self.package_obligations
     }
 
     fn bound_rows(
@@ -2330,6 +2352,7 @@ pub(crate) enum DemandNativeInputsError {
 /// current body, source proof and interface before issuing native authority.
 struct ReceiptNativeInputDemand<'a> {
     sources: Vec<ExternalSourceGlobal<'a>>,
+    resolved_originals: Option<Arc<crate::certified_products::ResolvedOriginalBindings>>,
 }
 
 struct ExternalSourceGlobal<'a> {
@@ -2343,7 +2366,7 @@ impl<'a> ReceiptNativeInputDemand<'a> {
     fn from_products(
         receipt: &'a crate::certified_products::CertifiedReceipt,
         products: &crate::certified_products::ParsedModuleProducts,
-        source: Option<&crate::artifact_inventory::CompilerSourceSupport>,
+        source: Option<&Arc<crate::artifact_inventory::CompilerSourceSupport>>,
     ) -> Result<Self, CompileError> {
         use crate::certified_products::ReceiptImportOwner;
         let budget = NativeDemandBudget(Some(products.operation()));
@@ -2366,6 +2389,22 @@ impl<'a> ReceiptNativeInputDemand<'a> {
         if !current.is_subset(&observed) {
             return Err(failure("current native output lacks its receipt owner"));
         }
+        let resolved_originals = source
+            .map(|source| {
+                crate::certified_products::ResolvedOriginalBindings::issue(
+                    Arc::clone(source),
+                    Arc::clone(products.operation()),
+                    receipt
+                        .modules
+                        .iter()
+                        .flat_map(|module| &module.groups)
+                        .flat_map(|group| &group.globals)
+                        .chain(receipt.targets.values().flatten())
+                        .map(|global| &global.owner),
+                )
+                .map_err(compiler_evidence_failure)
+            })
+            .transpose()?;
         let mut sources = Vec::new();
         for global in receipt
             .modules
@@ -2375,35 +2414,21 @@ impl<'a> ReceiptNativeInputDemand<'a> {
             .chain(receipt.targets.values().flatten())
         {
             budget.checkpoint()?;
-            if let ReceiptImportOwner::OriginalBinding {
-                unit,
-                module,
-                interface,
-                original,
-                binder,
-            } = &global.owner
-            {
+            if let ReceiptImportOwner::OriginalBinding { unit, module, .. } = &global.owner {
                 let owner = identity(unit, module);
-                let source = source.ok_or_else(|| compiler_evidence_failure(
-                    crate::certified_products::CertificationError::InputDecision {
-                        owner: owner.clone(), reason: crate::certified_products::InputDecisionRefusal::MissingContinuationOwner,
-                    }))?;
-                let (resolved, ordinal) =
-                    crate::certified_products::resolve_selected_original_binding(
-                        source,
-                        &owner,
-                        *interface,
-                        *original,
-                        binder,
-                        products.operation(),
-                    )
-                    .map_err(compiler_evidence_failure)?;
+                let (resolved, ordinal) = resolved_originals.as_ref()
+                    .and_then(|resolved| resolved.get(&global.owner))
+                    .ok_or_else(|| compiler_evidence_failure(
+                        crate::certified_products::CertificationError::InputDecision {
+                            owner,
+                            reason: crate::certified_products::InputDecisionRefusal::MissingContinuationOwner,
+                        }))?;
                 budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
                 sources.push(ExternalSourceGlobal {
-                    unit: Cow::Owned(resolved.unit),
-                    module: Cow::Owned(resolved.module),
-                    module_version: Some(Cow::Owned(resolved.module_version)),
-                    original_ordinal: ordinal,
+                    unit: Cow::Owned(resolved.unit.clone()),
+                    module: Cow::Owned(resolved.module.clone()),
+                    module_version: Some(Cow::Owned(resolved.module_version.clone())),
+                    original_ordinal: *ordinal,
                 });
                 continue;
             }
@@ -2430,7 +2455,10 @@ impl<'a> ReceiptNativeInputDemand<'a> {
                 original_ordinal: *original_ordinal,
             });
         }
-        Ok(Self { sources })
+        Ok(Self {
+            sources,
+            resolved_originals,
+        })
     }
 }
 
@@ -2479,6 +2507,15 @@ impl DemandNativeInputs {
     ) -> Result<DemandCertifiedGroups, CompileError> {
         let operation = validation.inventory.clone();
         let budget = NativeDemandBudget(Some(&operation));
+        if inputs
+            .resolved_originals
+            .as_ref()
+            .is_some_and(|resolved| !resolved.belongs_to(&self.cold.source_support, &operation))
+        {
+            return Err(failure(
+                "resolved native inputs belong to another request operation",
+            ));
+        }
         let mut roots = BTreeMap::new();
         let mut proofs = BTreeMap::new();
         for global in &inputs.sources {
@@ -2586,11 +2623,14 @@ impl DemandNativeInputs {
         let mut bindings = BTreeMap::new();
         let mut available = BTreeMap::new();
         let mut selected_contributions = Vec::new();
+        let mut retained_bindings = BTreeSet::new();
         for (key, binding) in roots {
             budget.checkpoint()?;
             budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;
             let root = BTreeSet::from([binding]);
-            let (closure, _) = proofs[&key].for_groups_with_operation(&root, &operation)?;
+            let (closure, retained) =
+                proofs[&key].for_groups_with_runtime_requirements(&root, &operation)?;
+            retained_bindings.extend(retained);
             for id in closure.originals() {
                 budget.checkpoint()?;
                 let row = self
@@ -2687,6 +2727,7 @@ impl DemandNativeInputs {
             }
         }
         let mut groups = Vec::new();
+        let mut package_obligations = BTreeSet::new();
         budget.reserve::<PendingCertifiedGroup>(bindings.len())?;
         for (key, binding) in &bindings {
             let group = certified
@@ -2699,6 +2740,28 @@ impl DemandNativeInputs {
                     "certified receipt groups and executable bindings disagree",
                 ));
             }
+            for import in group.imports() {
+                if let crate::certified_products::PendingImportOwner::Package {
+                    binder,
+                    interface_digest,
+                    ..
+                } = import
+                {
+                    budget.reserve::<NativePackageObligation>(1)?;
+                    budget.strings(
+                        binder.unit.len()
+                            + binder.module.len()
+                            + binder.namespace.len()
+                            + binder.occurrence.len()
+                            + binder.record_parent.as_ref().map_or(0, String::len),
+                    )?;
+                    package_obligations.insert(NativePackageObligation {
+                        demander: *binding,
+                        identity: binder.clone(),
+                        interface_digest: *interface_digest,
+                    });
+                }
+            }
             groups.push(group);
         }
         if !certified.is_empty() {
@@ -2710,6 +2773,9 @@ impl DemandNativeInputs {
             basis: Arc::clone(&self.cold),
             groups,
             bindings,
+            resolved_originals: inputs.resolved_originals.clone(),
+            retained_bindings: retained_bindings.into_iter().collect(),
+            package_obligations: package_obligations.into_iter().collect(),
         })
     }
 }
@@ -7339,6 +7405,7 @@ pub(crate) struct ProductCompilerInputs<'a> {
     pub(crate) metadata: &'a CompilerArtifactMetadata,
     native_selection: &'a NativeInputSelection,
     original_sources: &'a crate::certified_products::RetainedOriginalSources,
+    resolved_originals: Option<Arc<crate::certified_products::ResolvedOriginalBindings>>,
 }
 
 impl<'a> ProductCompilerInputs<'a> {
@@ -7348,6 +7415,7 @@ impl<'a> ProductCompilerInputs<'a> {
             metadata: &inputs.metadata,
             native_selection: &inputs.native_selection,
             original_sources: &inputs.original_sources,
+            resolved_originals: None,
         }
     }
 
@@ -7359,13 +7427,21 @@ impl<'a> ProductCompilerInputs<'a> {
         inputs: &'a DemandNativeInputs,
         support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         original_sources: &'a crate::certified_products::RetainedOriginalSources,
+        groups: &DemandCertifiedGroups,
     ) -> Self {
         Self {
             source_support: support,
             metadata: inputs.demand.metadata(),
             native_selection: &inputs.native_selection,
             original_sources,
+            resolved_originals: groups.resolved_originals.clone(),
         }
+    }
+
+    pub(crate) fn resolved_originals(
+        &self,
+    ) -> Option<&Arc<crate::certified_products::ResolvedOriginalBindings>> {
+        self.resolved_originals.as_ref()
     }
 
     pub(crate) fn compiler_source_support(
@@ -7466,6 +7542,7 @@ impl<'a> ProductInputFacts<'a> {
                 demand,
                 support,
                 &demand.cold().original_sources,
+                groups,
             ),
             groups: groups.groups(),
             // A world cell has no program-level source continuation. Its
@@ -7547,6 +7624,7 @@ impl DemandedWorldCompilerInputs {
             &self.demand,
             Arc::clone(&self.support),
             &self.demand.cold().original_sources,
+            &self.groups,
         )
     }
 
@@ -10052,7 +10130,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         let native_inputs = ReceiptNativeInputDemand::from_products(
             &receipt,
             &raw,
-            Some(continuation.inputs.compiler_source_support()),
+            Some(&continuation.inputs.source_support),
         )?;
         let demand = self.demand_inputs(&continuation.inputs, &native_inputs)?;
         let groups = demand.certify_receipt_groups(&native_inputs, validation)?;

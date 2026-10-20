@@ -1516,7 +1516,7 @@ impl NativeOfferContribution {
         self: &Arc<Self>,
         roots: &BTreeSet<NativeGroupBinding>,
     ) -> Result<Arc<Self>, CompileError> {
-        Ok(self.restrict_groups(roots, None)?.0)
+        Ok(self.restrict_groups(roots, None, None)?.0)
     }
 
     pub(crate) fn for_groups_with_operation(
@@ -1524,13 +1524,30 @@ impl NativeOfferContribution {
         roots: &BTreeSet<NativeGroupBinding>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<(Arc<Self>, NativeClosureWork), CompileError> {
-        self.restrict_groups(roots, Some(operation))
+        self.restrict_groups(roots, Some(operation), None)
+    }
+
+    /// Resolve retained values while walking this same exact dependency closure.
+    /// Their identities are read from authenticated binding edges, not a worker
+    /// capture list or the surrounding inventory.
+    pub(crate) fn for_groups_with_runtime_requirements(
+        self: &Arc<Self>,
+        roots: &BTreeSet<NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(Arc<Self>, Vec<NativeBindingRequirement>), CompileError> {
+        let mut retained = BTreeSet::new();
+        let (closure, _) = self.restrict_groups(roots, Some(operation), Some(&mut retained))?;
+        operation
+            .reserve::<NativeBindingRequirement>(retained.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        Ok((closure, retained.into_iter().collect()))
     }
 
     fn restrict_groups(
         self: &Arc<Self>,
         roots: &BTreeSet<NativeGroupBinding>,
         operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+        mut retained: Option<&mut BTreeSet<NativeBindingRequirement>>,
     ) -> Result<(Arc<Self>, NativeClosureWork), CompileError> {
         let state = self
             .offer
@@ -1541,7 +1558,7 @@ impl NativeOfferContribution {
             .0
             .lock()
             .expect("inventory lock");
-        let (reachable, work) = admitted_closure_with_operation(
+        let (reachable, work) = admitted_closure_observing(
             &state,
             roots
                 .iter()
@@ -1549,6 +1566,49 @@ impl NativeOfferContribution {
                 .filter(|group| self.reachable.contains(&ArtifactBindingNode::Group(*group)))
                 .map(ArtifactBindingNode::Group),
             operation,
+            |_, target, edge| {
+                let Some(retained) = retained.as_deref_mut() else {
+                    return Ok(());
+                };
+                let ArtifactDependency::NativeBinding {
+                    generation,
+                    namespace,
+                    occurrence,
+                    record_parent,
+                    ..
+                } = edge
+                else {
+                    return Ok(());
+                };
+                let descriptor =
+                    &self.offer.0.custody.lease.payloads[&target.artifact()].descriptor;
+                if let Some(operation) = operation {
+                    operation
+                        .reserve::<NativeBindingRequirement>(1)
+                        .and_then(|_| {
+                            operation.charge(
+                                descriptor.owner.unit.len()
+                                    + descriptor.owner.module.len()
+                                    + namespace.len()
+                                    + occurrence.len()
+                                    + record_parent.as_ref().map_or(0, String::len),
+                            )
+                        })
+                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                }
+                retained.insert(NativeBindingRequirement {
+                    artifact_id: descriptor.id,
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: descriptor.owner.unit.clone(),
+                        module: descriptor.owner.module.clone(),
+                        namespace: namespace.clone(),
+                        occurrence: occurrence.clone(),
+                        record_parent: record_parent.clone(),
+                    },
+                    generation: *generation,
+                });
+                Ok(())
+            },
         )?;
         for node in &reachable {
             if operation.is_some() {
@@ -3897,7 +3957,10 @@ mod normalized_dependency_tests {
         let imports = [PendingImportOwner::Source {
             owner: products[0].owner().clone(),
             original_ordinal: 7,
-            binder: tidepool_repr::execution_schema::testing::identity("NormalizedHidden", "entry_7"),
+            binder: tidepool_repr::execution_schema::testing::identity(
+                "NormalizedHidden",
+                "entry_7",
+            ),
         }];
         let before_bound = fixed.observed_binding_state();
         let error = inventory
