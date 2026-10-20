@@ -108,7 +108,7 @@ pub struct ProgramProvenance {
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
     authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
-    original_sources: BTreeMap<u64, RuntimeSourceOrigin>,
+    original_sources: NativeSourceCustody,
 }
 
 /// Actual runtime source custody is independent of semantic compiler equality.
@@ -163,6 +163,105 @@ impl RuntimeSourceOrigin {
     }
 }
 
+/// Source authority captured by the actual compiler operation before END.
+/// Sealed native membership subsequently selects the sites it can describe.
+#[derive(Clone, Debug)]
+pub(super) struct CapturedSourceOrigin(Arc<super::RuntimeOriginalSource>);
+
+impl CapturedSourceOrigin {
+    pub(super) fn capture(
+        source: &super::RuntimeSourceCompilerTransaction,
+    ) -> Result<Self, super::SourceAdmissionError> {
+        source.admitted_original_source().map(Self)
+    }
+
+    pub(super) fn for_current_group(
+        &self,
+        group: tidepool_toolchain::artifacts::PhysicalCurrentNativeGroup<'_>,
+    ) -> NativeSourceCustody {
+        NativeSourceCustody {
+            sites: Arc::new(
+                group
+                    .sites()
+                    .map(|site| (site, RuntimeSourceOrigin::Known(self.0.clone())))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Immutable per-site original-source custody shared with actual native owners.
+/// It retains no lexical roots, compiled turn, renderer or mutable session state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct NativeSourceCustody {
+    sites: Arc<BTreeMap<u64, RuntimeSourceOrigin>>,
+}
+
+impl NativeSourceCustody {
+    pub(super) fn unknown(sites: impl IntoIterator<Item = u64>) -> Self {
+        Self::complete(sites, BTreeMap::new())
+    }
+
+    fn complete(
+        sites: impl IntoIterator<Item = u64>,
+        mut pending: BTreeMap<u64, RuntimeSourceOrigin>,
+    ) -> Self {
+        Self {
+            sites: Arc::new(
+                sites
+                    .into_iter()
+                    .map(|site| {
+                        (
+                            site,
+                            pending
+                                .remove(&site)
+                                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new())),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(super) fn select(&self, sites: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            sites: Arc::new(
+                sites
+                    .into_iter()
+                    .map(|site| (site, self.source(site)))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(super) fn merge(&mut self, other: &Self) {
+        if Arc::ptr_eq(&self.sites, &other.sites) {
+            return;
+        }
+        let sites = Arc::make_mut(&mut self.sites);
+        for (site, source) in other.sites.iter() {
+            sites
+                .entry(*site)
+                .and_modify(|held| held.merge(source))
+                .or_insert_with(|| source.clone());
+        }
+    }
+
+    fn source(&self, site: u64) -> RuntimeSourceOrigin {
+        self.sites
+            .get(&site)
+            .cloned()
+            .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()))
+    }
+
+    pub(super) fn require_unique(
+        &self,
+        site: u64,
+    ) -> Result<Arc<super::RuntimeOriginalSource>, ResidentError> {
+        self.source(site).require_unique(site)
+    }
+}
+
 enum RuntimeSourceContribution<'a> {
     Retained {
         id: u64,
@@ -209,11 +308,7 @@ fn contribute_import_sources<'a>(
     }
     for original in retained.values() {
         for site in original.sites.keys() {
-            let source = original
-                .original_sources
-                .get(site)
-                .cloned()
-                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            let source = original.original_sources.source(*site);
             sources
                 .entry(*site)
                 .and_modify(|held| held.merge(&source))
@@ -364,11 +459,7 @@ impl CompiledProvenancePlan {
             fresh_completion_sites: self.fresh_completion_sites.clone(),
             source_originals: self.source_originals.clone(),
             native_sites: self.native_sites.clone(),
-            original_sources: self
-                .sites
-                .keys()
-                .map(|site| (*site, RuntimeSourceOrigin::Unknown(Vec::new())))
-                .collect(),
+            original_sources: NativeSourceCustody::unknown(self.sites.keys().copied()),
             authenticated_inputs: self
                 .authenticated_inputs
                 .iter()
@@ -663,9 +754,10 @@ impl ProgramProvenance {
             } else {
                 self.sites.insert(site.site, site.clone());
             }
-            self.original_sources
-                .entry(site.site)
-                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            if !self.original_sources.sites.contains_key(&site.site) {
+                Arc::make_mut(&mut self.original_sources.sites)
+                    .insert(site.site, RuntimeSourceOrigin::Unknown(Vec::new()));
+            }
         }
         Ok(())
     }
@@ -711,18 +803,15 @@ impl ProgramProvenance {
         for site in other.sites.values() {
             let existing = self.sites.contains_key(&site.site);
             self.extend(std::slice::from_ref(site))?;
-            let incoming = other
-                .original_sources
-                .get(&site.site)
-                .cloned()
-                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            let incoming = other.original_sources.source(site.site);
+            let sources = Arc::make_mut(&mut self.original_sources.sites);
             if existing {
-                self.original_sources
+                sources
                     .entry(site.site)
                     .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()))
                     .merge(&incoming);
             } else {
-                self.original_sources.insert(site.site, incoming);
+                sources.insert(site.site, incoming);
             }
         }
         for (site, interfaces) in &other.authenticated_inputs {
@@ -5132,15 +5221,7 @@ where
             .prepared_mut()
             .and_then(|engine| engine.parked_site(entry.id))
             .ok_or_else(invalid)?;
-        entry
-            .provenance
-            .original_sources
-            .get(&site)
-            .ok_or(ResidentError::MissingOriginalSource {
-                site,
-                known_origins: 0,
-            })?
-            .require_unique(site)
+        entry.provenance.original_sources.require_unique(site)
     }
 
     /// Whether the session has no parked frames (ready and quiescent).
@@ -7509,11 +7590,8 @@ where
             for original in retained {
                 provenance.merge(original)?;
             }
-            for (site, source) in &mut provenance.original_sources {
-                *source = sources
-                    .remove(site)
-                    .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
-            }
+            provenance.original_sources =
+                NativeSourceCustody::complete(provenance.sites.keys().copied(), sources);
         }
         Ok(provenance)
     }
@@ -12914,8 +12992,7 @@ mod source_origin_tests {
         source: &Arc<super::super::RuntimeOriginalSource>,
     ) -> ProgramProvenance {
         let mut provenance = ProgramProvenance::from_sites(&[site(site_id)]).unwrap();
-        provenance
-            .original_sources
+        Arc::make_mut(&mut provenance.original_sources.sites)
             .insert(site_id, RuntimeSourceOrigin::Known(source.clone()));
         provenance
     }
@@ -12944,12 +13021,14 @@ mod source_origin_tests {
         source_a.validate_source_issuer().unwrap();
         source_b.validate_source_issuer().unwrap();
         assert!(Arc::ptr_eq(
-            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &provenance.original_sources.sites[&17]
+                .require_unique(17)
+                .unwrap(),
             &source_a
         ));
         provenance.merge(&issued(17, &source_b)).unwrap();
         assert!(matches!(
-            provenance.original_sources[&17].require_unique(17),
+            provenance.original_sources.sites[&17].require_unique(17),
             Err(ResidentError::AmbiguousOriginalSource {
                 site: 17,
                 origins: 2
@@ -12965,17 +13044,39 @@ mod source_origin_tests {
         source.validate_source_issuer().unwrap();
         assert_ne!(source.scope(), ScopeId::ROOT);
         let known = issued(17, &source);
+        let shared = known.original_sources.clone();
+        assert!(Arc::ptr_eq(&shared.sites, &known.original_sources.sites));
+        let mut selected = shared.select([17, 19]);
+        selected.merge(&NativeSourceCustody::unknown([17]));
+        assert!(matches!(
+            selected.require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            selected.require_unique(19),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        assert!(Arc::ptr_eq(&shared.require_unique(17).unwrap(), &source));
         let unknown = ProgramProvenance::from_sites(&[site(17)]).unwrap();
         for (mut left, right) in [(known.clone(), unknown.clone()), (unknown, known)] {
             left.merge(&right).unwrap();
             assert!(matches!(
-                left.original_sources[&17].require_unique(17),
+                left.original_sources.sites[&17].require_unique(17),
                 Err(ResidentError::MissingOriginalSource {
                     site: 17,
                     known_origins: 1
                 })
             ));
-            assert!(Arc::ptr_eq(&left.original_sources[&17].known()[0], &source));
+            assert!(Arc::ptr_eq(
+                &left.original_sources.sites[&17].known()[0],
+                &source
+            ));
         }
     }
 
@@ -12994,11 +13095,15 @@ mod source_origin_tests {
         let mut provenance = issued(23, &source_b);
         provenance.merge(&issued(17, &source_a)).unwrap();
         assert!(Arc::ptr_eq(
-            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &provenance.original_sources.sites[&17]
+                .require_unique(17)
+                .unwrap(),
             &source_a
         ));
         assert!(Arc::ptr_eq(
-            &provenance.original_sources[&23].require_unique(23).unwrap(),
+            &provenance.original_sources.sites[&23]
+                .require_unique(23)
+                .unwrap(),
             &source_b
         ));
     }
@@ -13099,11 +13204,11 @@ mod source_origin_tests {
         source.validate_source_issuer().unwrap();
         let known = issued(17, &source);
         let mut missing = known.clone();
-        missing.original_sources.clear();
+        Arc::make_mut(&mut missing.original_sources.sites).clear();
         for (mut left, right) in [(missing.clone(), known.clone()), (known, missing.clone())] {
             left.merge(&right).unwrap();
             assert!(matches!(
-                left.original_sources[&17].require_unique(17),
+                left.original_sources.sites[&17].require_unique(17),
                 Err(ResidentError::MissingOriginalSource {
                     site: 17,
                     known_origins: 1
@@ -13114,7 +13219,7 @@ mod source_origin_tests {
         metadata_only.sites.insert(17, site(17));
         metadata_only.extend(&[site(17)]).unwrap();
         assert!(matches!(
-            metadata_only.original_sources[&17].require_unique(17),
+            metadata_only.original_sources.sites[&17].require_unique(17),
             Err(ResidentError::MissingOriginalSource {
                 known_origins: 0,
                 ..
@@ -13158,14 +13263,14 @@ mod source_origin_tests {
             for (site_id, source, missing) in history {
                 let mut contribution = issued(site_id, &sources[source]);
                 if missing {
-                    contribution.original_sources.insert(site_id, RuntimeSourceOrigin::Unknown(vec![sources[source].clone()]));
+                    Arc::make_mut(&mut contribution.original_sources.sites).insert(site_id, RuntimeSourceOrigin::Unknown(vec![sources[source].clone()]));
                 }
                 actual.merge(&contribution).unwrap();
                 let expected = model.entry(site_id).or_default();
                 expected.0.insert(source);
                 expected.1 |= missing;
                 for (site_id, (owners, unresolved)) in &model {
-                    let observed = &actual.original_sources[site_id];
+                    let observed = &actual.original_sources.sites[site_id];
                     let actual_owners = observed.known().iter().map(|lease| {
                         sources.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
                     }).collect::<BTreeSet<_>>();
