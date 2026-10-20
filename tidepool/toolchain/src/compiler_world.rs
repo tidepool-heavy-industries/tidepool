@@ -4231,11 +4231,16 @@ pub struct CheckedWorldCellProgram {
     target: WorldSourceSelection,
     logical: WorldCellLogicalIdentity,
     items: Vec<CheckedWorldCellItem>,
+    checked_source: Arc<str>,
     certificate_sha256: [u8; 32],
     producer_identity: [u8; 32],
 }
 
 impl CheckedWorldCellProgram {
+    pub(crate) fn checked_source(&self) -> &Arc<str> {
+        &self.checked_source
+    }
+
     pub(crate) fn observations(&self) -> &Arc<[u8]> {
         &self.output.observations
     }
@@ -4433,7 +4438,7 @@ impl CheckedWorldCellProgram {
                 "world cell preparation does not cover every reserved slot",
             ));
         }
-        let checked_items = crate::checked_cell::admit_world_checked_items(
+        let (checked_source, checked_items) = crate::checked_cell::admit_world_checked_items(
             &output.observations,
             reservation,
             &output.segments,
@@ -4492,6 +4497,7 @@ impl CheckedWorldCellProgram {
             target,
             logical,
             items,
+            checked_source,
             certificate_sha256,
             producer_identity,
         })
@@ -5443,9 +5449,8 @@ fn admit_world_preparation_response(
                     .reserve::<(String, Arc<CheckedValueArtifact>)>(stage.demanded_rows().len())
             })
             .map_err(|e| CompileError::CompilerEvidence(Box::new(e.into())))?;
-        demanded_session_bindings.extend(
-            stage.demanded_session_bindings().iter().map(|id| id.raw()),
-        );
+        demanded_session_bindings
+            .extend(stage.demanded_session_bindings().iter().map(|id| id.raw()));
         for row in stage.demanded_rows() {
             validation
                 .inventory

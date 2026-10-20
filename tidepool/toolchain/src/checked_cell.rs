@@ -730,7 +730,7 @@ pub struct ExactCheckedCell {
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     receipt_digest: [u8; 32],
-    checked_source: String,
+    checked_source: Arc<str>,
     evidence: Vec<(String, Arc<crate::cache::CompletedSourceEvidence>)>,
     observations: Arc<[u8]>,
     items: CheckedCellItems,
@@ -4879,16 +4879,15 @@ impl CheckedItem {
     }
 }
 
-/// Consume the already captured World observations with their correlated item
-/// proofs. The result is the same item representation held by ExactCheckedCell;
-/// the World reservation remains distinct from a finite CheckedCellRequest.
+/// Consume the captured checking source and correlated items from one decoded
+/// World observation. Authored item source remains in the separate reservation.
 pub(crate) fn admit_world_checked_items(
     observations: &[u8],
     reservation: &crate::cell_plan::CompilerWorldCellReservation,
     segments: &[Arc<CheckedTypedSegmentPlan>],
     proofs: &[Arc<crate::compiler_world::WorldItemProof>],
     operation: &tidepool_repr::execution_schema::InventoryOperation,
-) -> Result<Vec<CheckedItem>, CompileError> {
+) -> Result<(Arc<str>, Vec<CheckedItem>), CompileError> {
     let value = operation
         .decode_value(observations, 32 << 20)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
@@ -4949,7 +4948,7 @@ pub(crate) fn admit_world_checked_items(
             ));
         }
     }
-    Ok(items)
+    Ok((Arc::from(string(&output[2])?), items))
 }
 
 /// Adapt the already checked World items into the common checked-cell owner.
@@ -5041,14 +5040,7 @@ pub(crate) fn admit_world_cell(
         declaration_context: program.primary_context().clone(),
         retained_projections: Vec::new(),
         receipt_digest: *program.certificate_sha256(),
-        checked_source: program
-            .reservation()
-            .plan()
-            .items()
-            .iter()
-            .map(|item| item.source())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        checked_source: program.checked_source().clone(),
         evidence: sources
             .iter()
             .map(|(source, text)| ((*text).to_owned(), source.evidence().clone()))
@@ -5221,7 +5213,7 @@ pub(crate) fn admit_checked_cell<'a>(
         retained_projections,
         receipt_digest: Sha256::digest(&receipt).into(),
         evidence,
-        checked_source,
+        checked_source: checked_source.into(),
         observations: observations.into(),
         items: items.into(),
         include: include.to_vec(),
@@ -6112,7 +6104,7 @@ mod tests {
             declaration_context: original,
             retained_projections: vec![],
             receipt_digest: [4; 32],
-            checked_source: String::new(),
+            checked_source: "".into(),
             evidence: vec![],
             observations: vec![].into(),
             items: vec![].into(),
@@ -6182,7 +6174,7 @@ mod tests {
             declaration_context: Arc::clone(original),
             retained_projections: vec![],
             receipt_digest: [4; 32],
-            checked_source: String::new(),
+            checked_source: "".into(),
             evidence: vec![],
             observations: vec![].into(),
             items: vec![].into(),
@@ -6626,7 +6618,7 @@ mod tests {
             declaration_context: original.clone(),
             retained_projections: vec![],
             receipt_digest: [4; 32],
-            checked_source: String::new(),
+            checked_source: "".into(),
             evidence: vec![],
             observations: vec![].into(),
             items: vec![].into(),
@@ -8029,7 +8021,7 @@ mod tests {
                         declaration_context: original.clone(),
                         retained_projections: vec![],
                         receipt_digest: [4; 32],
-                        checked_source: String::new(),
+                        checked_source: "".into(),
                         evidence: vec![],
                         observations: vec![].into(),
                         items: vec![].into(),

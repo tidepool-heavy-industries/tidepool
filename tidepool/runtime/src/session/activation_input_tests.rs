@@ -1205,6 +1205,17 @@ fn try_check_fixture_cell(
         )
         .unwrap();
     let (checked, program) = turn::finish_cell_program_admitted(prepared)?;
+    if !checked.items.is_empty() {
+        checked
+            .checked_item(0)
+            .expect("the actual World checking source matches its issued owner");
+        let mut edited = checked.clone();
+        edited.checked_source.push('\n');
+        assert!(
+            edited.checked_item(0).is_err(),
+            "changed checking-source observations cannot retain item authority"
+        );
+    }
     let prefix = resident
         .begin_cell_program(program)
         .unwrap()
