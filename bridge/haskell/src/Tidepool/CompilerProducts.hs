@@ -30,7 +30,7 @@ import Tidepool.RequestCompletion (finishCompletion)
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Applicative ((<|>))
-import Control.Exception (Exception, throwIO, evaluate)
+import Control.Exception (Exception, throwIO, evaluate, catch)
 import Control.Concurrent.MVar (MVar)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, when)
@@ -54,15 +54,17 @@ import GHC.Core.TyCon (tyConClass_maybe, isNewTyCon)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Core.PatSyn (patSynMatcher, patSynBuilder)
 import GHC.Types.Var (Id)
-import GHC.Unit.Module.ModSummary (ms_location)
-import GHC.Driver.Env (HscEnv, hsc_NC, hsc_all_home_unit_ids, hsc_HPT, lookupType)
+import GHC.Unit.Module.ModSummary (ms_location, ms_mod, ms_hs_hash, ms_hspp_file)
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
+import GHC.Driver.Env (HscEnv, hsc_NC, hsc_all_home_unit_ids, hsc_HPT, hsc_mod_graph, lookupType)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Iface.Syntax (IfaceClsInst(..))
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_exports, mi_insts)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_exports, mi_insts, mi_usages)
+import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
 import Numeric (readHex)
-import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
+import System.Directory (canonicalizePath, doesPathExist, makeAbsolute, createDirectoryIfMissing)
 import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
@@ -84,7 +86,7 @@ import Tidepool.ExactScope
   , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
-  , CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureCanonicalMetadata, canonicalOrigin, isSourceOriginal
+  , CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureCanonicalMetadata, canonicalOrigin, isSourceOriginal, canonicalInterfaceInput, canonicalRequirements
   , captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
@@ -112,7 +114,7 @@ import Tidepool.ExecutionSource
   , ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceFailure(..), executionIdentityKey, issueExecutionSourceRecipe
   , executionSourceInheritedOwners, ExecutionSourceRef(..), executionSourceProspectiveReferences )
-import Tidepool.ExtractUtil (shaHex)
+import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, finalizedTypeInterfaces
   , materializeFinalizedModuleArtifactsWithOutputs, LocalFinalizedAdmission
@@ -141,7 +143,7 @@ import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, seria
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule, admitCompiledCanonicalOriginal, CandidateCoreFailure(..)
   , admittedOriginalProof, admittedOriginalInterface, originalVersionLookup, originalVersionSeal )
-import Tidepool.FinalizedModule (finalizedHomeModInfo)
+import Tidepool.FinalizedModule (finalizedHomeModInfo, captureFinalizedInterface)
 import Tidepool.Timing
   ( readTimingEnabled, timePhase, timeDetailPhase, timeTaskDetailPhase, TaskOwner(..), TaskComponent(..), emitCount
   , ReuseContext, ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
@@ -442,6 +444,41 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
                   (Map.lookup name (pprPackageImports prepared))
                 metadata <- captureCanonicalMetadata (compilationScope <$> preparedExactCompilation prepared) proof
                 admitted <- admitCompiledCanonicalOriginal environment metadata original roots
+                  `catch` \failure -> case failure of
+                    CandidateOriginalInterfaceMismatch {} -> do
+                      let directory = outDir </> "canonical-interface-mismatch"
+                          stem = shaHex (TE.encodeUtf8 (T.pack (show key)))
+                          prefix = directory </> stem
+                      -- Every secondary observation belongs to one protected
+                      -- diagnostic action. Ordinary evidence failures preserve
+                      -- the typed primary; asynchronous cancellation propagates.
+                      _ <- trySynchronous $ do
+                        actual <- captureFinalizedInterface original
+                        expected <- canonicalProofInterfaceBody proof
+                          (let (artifact,_,_) = canonicalInterfaceInput proof in artifact)
+                        createDirectoryIfMissing True directory
+                        let bounded = BS.length (artifactBytes actual) <= 32 * 1024 * 1024
+                              && BS.length (artifactBytes expected) <= 32 * 1024 * 1024
+                        when bounded $ do
+                          BS.writeFile (prefix ++ ".actual.hi") (artifactBytes actual)
+                          BS.writeFile (prefix ++ ".expected.hi") (artifactBytes expected)
+                        writeFile (prefix ++ ".metadata") (show failure ++ "\n"
+                          ++ "interface-bytes-retained=" ++ show bounded ++ "\n"
+                          ++ "selected-source=" ++ canonicalSourceSha256 proof ++ "\n"
+                          ++ "finalization-ingress=unobserved; correlate TIDEPOOL_FINALIZED_OWNER_TRACE\n"
+                          ++ "selected-requirements=" ++ take 65536 (show (canonicalRequirements proof)) ++ "\n"
+                          ++ "current-usages=" ++ take 65536 (renderWithContext defaultSDocContext
+                            (ppr (mi_usages (hm_iface (finalizedHomeModInfo original))))) ++ "\n"
+                          ++ "current-interface-hash=" ++ show (mi_iface_hash (mi_final_exts
+                            (hm_iface (finalizedHomeModInfo original)))) ++ "\n"
+                          ++ "current-source-summaries=" ++ take 65536 (show
+                            [(ms_hspp_file summary,show (ms_hs_hash summary))
+                            | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph environment)
+                            , ms_mod summary == owner]) ++ "\n"
+                          ++ "current-package-witness=" ++ take 65536 (show roots) ++ "\n")
+                        hPutStrLn stderr ("canonical-interface-mismatch-evidence " ++ prefix)
+                      throwIO failure
+                    _ -> throwIO failure
                 pure [(owner,admitted)]
           _ -> pure []
       let selectedContext = productContext {preparedRetainedOriginals =
