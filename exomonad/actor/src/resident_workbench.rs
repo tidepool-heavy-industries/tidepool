@@ -26086,6 +26086,112 @@ pub(crate) mod request_tests {
         );
     }
 
+    /// Every compiler-query verb must cross the real decode → dispatch →
+    /// resume path: the fixture suspends once per verb through the generated
+    /// request schema, and each suspension is captured as a boundary and
+    /// answered by `resume_compiler_query`, never by a helper called directly.
+    #[tokio::test]
+    async fn compiler_query_verbs_decode_dispatch_and_resume() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (session, context, source, _root) = host_mount_fixture_with_effects(
+                |_| {},
+                &[tidepool_mcp::introspection_decl()],
+                "'[Introspection]",
+            );
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            let (workbench, context) = workbench
+                .admit_private_cell_for_test(context)
+                .await
+                .expect("admit the compiler-query cell");
+            let code = include_str!("fixtures/compiler-query-verbs.hs");
+            let (checked, prepared) = workbench
+                .prepare_cell(context.clone(), code.into())
+                .await
+                .expect("compile the compiler-query cell");
+            assert_eq!(checked.items.len(), 1);
+            let PreparedCell {
+                mut items,
+                dependencies: _dependencies,
+            } = prepared;
+            let mut step = workbench
+                .begin_prepared_cell_item(
+                    context.clone(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: code.into(),
+                    },
+                    items.remove(0),
+                )
+                .await
+                .expect("start the compiler-query cell");
+            let mut operations = Vec::new();
+            loop {
+                match step {
+                    ResidentWorkbenchStep::Running { fragment, outcome } => {
+                        let boundary = workbench_runner_for_test(&workbench)
+                            .capture_boundary(
+                                context.clone(),
+                                (*outcome).into(),
+                                context.placement.resource_scope,
+                            )
+                            .await
+                            .expect("capture the query boundary");
+                        let (continuation, query) = match boundary {
+                            ResidentActorBoundary::CompilerQuery {
+                                continuation,
+                                query,
+                            } => (continuation, query),
+                            other => panic!(
+                                "fixture suspended on a non-compiler boundary: {}",
+                                other.operation()
+                            ),
+                        };
+                        operations.push(query.operation());
+                        let resumed = workbench
+                            .resume_compiler_query(context.clone(), continuation, query)
+                            .await
+                            .expect("resume the compiler query");
+                        step = workbench
+                            .settle_item(context.clone(), *fragment, resumed)
+                            .await
+                            .expect("settle the resumed query");
+                    }
+                    ResidentWorkbenchStep::Committed { .. } => break,
+                    other => panic!("unexpected workbench step: {}", step_label(&other)),
+                }
+            }
+            assert_eq!(
+                operations,
+                [
+                    "currentScopeView",
+                    "scopeBindings",
+                    "moduleExports",
+                    "rowFit",
+                    "typeOfExpression",
+                    "typeSearch",
+                ]
+            );
+
+            fn step_label(step: &ResidentWorkbenchStep) -> &'static str {
+                match step {
+                    ResidentWorkbenchStep::Committed { .. } => "committed",
+                    ResidentWorkbenchStep::Rejected(_) => "rejected",
+                    ResidentWorkbenchStep::Running { .. } => "running",
+                    ResidentWorkbenchStep::Replied { .. } => "replied",
+                    ResidentWorkbenchStep::CancellationAcknowledged { .. } => "cancellation ack",
+                }
+            }
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn scope_live_closure_survives_body_realm_retirement() {
         with_test_compiler_owner(

@@ -732,6 +732,7 @@ rust_filegroup(
         "//:facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md": ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md",
         "//:actor_skill_exomonad_cleanup": ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md",
         "//:actor_skill_exomonad_command": ".exomonad/workspace/skills/exomonad-command/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_command_references_hosted_tools_md": ".exomonad/workspace/skills/exomonad-command/references/hosted-tools.md",
         "//:actor_skill_exomonad_define_actors": ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md",
         "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md": ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
         "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md": ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
