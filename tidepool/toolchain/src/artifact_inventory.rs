@@ -620,6 +620,9 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         &self,
         binding: NativeGroupBinding,
     ) -> Result<&'a crate::certified_products::PendingCertifiedGroup, CompileError> {
+        if !self.target.groups().contains(&binding) {
+            return Err(failure("native source row is outside its resolved target"));
+        }
         self.groups.get(binding).ok_or_else(|| {
             failure("selected native binding lacks its exact certified product")
         })
@@ -652,24 +655,12 @@ impl ResolvedNativeTarget<'_> {
     pub(crate) fn imports(&self) -> &[crate::certified_products::PendingImportOwner] {
         self.owner.imports()
     }
-    pub(crate) fn original_owner(
-        &self,
-        group: NativeGroupBinding,
-    ) -> Result<&tidepool_repr::execution_schema::CachedHomeOwner, CompileError> {
-        if !self.groups.contains(&group) {
-            return Err(failure("native source row is outside its resolved target"));
-        }
-        match &self.owner.artifacts().lease.payloads[&group.binding.artifact()].payload {
-            ArtifactPayload::Original(product) => Ok(product.owner()),
-            _ => Err(failure("resolved native source lacks its Original payload")),
-        }
-    }
-
     pub(crate) fn native_sites(
         &self,
     ) -> Result<crate::checked_cell::SelectedNativeSites, CompileError> {
         self.owner.artifacts().native_sites_for_groups(&self.groups)
     }
+
     /// Original execution is a separate issued context. Check its custody of
     /// these already-resolved bindings; never derive another target from it.
     pub(crate) fn ensure_original_execution_custody(
