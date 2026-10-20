@@ -10811,76 +10811,79 @@ pub(super) mod tests {
         let settled = state.with_source_compiler_transaction(
             source.original_source().clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
             |state, _| {
-        let producer = state
-            .install_prepared(testing::prepare(wire).unwrap(), None)
-            .unwrap();
-        let engine = state.prepared_mut().unwrap();
-        let expected = engine.installed_program_sources(producer).clone();
-        assert_ne!(
-            expected,
-            NativeSourceCustody::default(),
-            "actual producer contributes an unknown site"
-        );
-        let handle = engine.machine.retain_top(producer, ValueId(0)).unwrap();
-        assert!(engine.adopt(handle));
-        let binding = |id, generation, handle| BindingEntry {
-            name: BindingName("producer".into()),
-            id: SessionVarId::from_extract(id),
-            module: SessionModule::val(Generation(generation)),
-            value: BoundValue {
-                handle,
-                identity: producer_identity(),
+                let producer = state
+                    .install_prepared(testing::prepare(wire).unwrap(), None)
+                    .unwrap();
+                let engine = state.prepared_mut().unwrap();
+                let expected = engine.installed_program_sources(producer).clone();
+                assert_ne!(
+                    expected,
+                    NativeSourceCustody::default(),
+                    "actual producer contributes an unknown site"
+                );
+                let handle = engine.machine.retain_top(producer, ValueId(0)).unwrap();
+                assert!(engine.adopt(handle));
+                let binding = |id, generation, handle| BindingEntry {
+                    name: BindingName("producer".into()),
+                    id: SessionVarId::from_extract(id),
+                    module: SessionModule::val(Generation(generation)),
+                    value: BoundValue {
+                        handle,
+                        identity: producer_identity(),
+                    },
+                    type_display: None,
+                    defining_expr: None,
+                    scope: tidepool_codegen::scope::ScopeId::ROOT,
+                };
+                state.bind(binding(1, 1, handle)).unwrap();
+                let before = state.prepared().unwrap().residency();
+                assert!(matches!(
+                    state.install_prepared(plain_import_consumer_program(false, Some(1)), None),
+                    Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(1)
+                ));
+                assert_eq!(state.prepared().unwrap().residency(), before);
+                let actual_source = |input: super::super::persistent::ValidatedRetainedSourceRef<'_>| {
+                    if input.id() != SessionVarId::from_extract(1) {
+                        return None;
+                    }
+                    assert_eq!(input.handle(), handle);
+                    Some(expected.clone())
+                };
+                let target = plain_import_consumer_program(false, Some(1));
+                assert!(target.sites().is_empty());
+                let (wrapper, sources) = state
+                    .install_prepared_with_sources(target, None, &actual_source)
+                    .unwrap();
+                assert_eq!(
+                    sources, expected,
+                    "site-free wrapper retains its actual input's Unknown contribution"
+                );
+                assert_eq!(
+                    state.prepared().unwrap().installed_program_sources(wrapper),
+                    &expected
+                );
+                let engine = state.prepared_mut().unwrap();
+                let alias = engine.retain_handle_value(handle, RealmId::ROOT).unwrap();
+                assert!(engine.adopt(alias));
+                state.bind(binding(2, 2, alias)).unwrap();
+                let before = state.prepared().unwrap().residency();
+                assert!(
+                    matches!(
+                        state.install_prepared_with_sources(
+                            plain_import_consumer_program(false, Some(2)), None, &actual_source,
+                        ),
+                        Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(2)
+                    ),
+                    "new binding cannot borrow another binding's retained source pair"
+                );
+                assert_eq!(state.prepared().unwrap().residency(), before);
             },
-            type_display: None,
-            defining_expr: None,
-            scope: tidepool_codegen::scope::ScopeId::ROOT,
-        };
-        state.bind(binding(1, 1, handle)).unwrap();
-        let before = state.prepared().unwrap().residency();
-        assert!(matches!(
-            state.install_prepared(plain_import_consumer_program(false, Some(1)), None),
-            Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(1)
-        ));
-        assert_eq!(state.prepared().unwrap().residency(), before);
-        let actual_source = |input: super::super::persistent::ValidatedRetainedSourceRef<'_>| {
-            if input.id() != SessionVarId::from_extract(1) {
-                return None;
-            }
-            assert_eq!(input.handle(), handle);
-            Some(expected.clone())
-        };
-        let target = plain_import_consumer_program(false, Some(1));
-        assert!(target.sites().is_empty());
-        let (wrapper, sources) = state
-            .install_prepared_with_sources(target, None, &actual_source)
-            .unwrap();
-        assert_eq!(
-            sources, expected,
-            "site-free wrapper retains its actual input's Unknown contribution"
-        );
-        assert_eq!(
-            state.prepared().unwrap().installed_program_sources(wrapper),
-            &expected
-        );
-        let engine = state.prepared_mut().unwrap();
-        let alias = engine.retain_handle_value(handle, RealmId::ROOT).unwrap();
-        assert!(engine.adopt(alias));
-        state.bind(binding(2, 2, alias)).unwrap();
-        let before = state.prepared().unwrap().residency();
-        assert!(
-            matches!(
-                state.install_prepared_with_sources(
-                    plain_import_consumer_program(false, Some(2)), None, &actual_source,
-                ),
-                Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(2)
-            ),
-            "new binding cannot borrow another binding's retained source pair"
-        );
-        assert_eq!(state.prepared().unwrap().residency(), before);
-            },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(
             settled.close(),
             crate::CompilerTransactionClose::NotStarted
