@@ -1814,10 +1814,26 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
         )
         .unwrap();
         assert!(merged.artifacts().selected_native_groups().is_empty());
-        // Consume the same completed selection through production target
-        // admission. This is graph admission, not runtime physical-site proof.
-        let mut fixed = inventory
-            .bind_segment(merged.artifacts(), catalog.originals.clone(), &selection)
+        // Capture the completed support as actual request input, preserving
+        // its issued rows and decisions. Reusing the earlier NewProduct
+        // selection would describe another output rather than this continuation.
+        let context =
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                .unwrap()
+                .extend_issued_compiler_support(&merged)
+                .unwrap();
+        let inputs = context
+            .capture_world_primary_compiler_inputs([2; 32])
+            .unwrap();
+        let continuation =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                &inputs,
+                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+            )
+            .unwrap();
+        let receiving_inventory = inputs.artifacts().inventory();
+        let mut fixed = receiving_inventory
+            .bind_segment(inputs.artifacts(), Vec::new(), &continuation)
             .unwrap();
         let owner = match &catalog.originals[0].payload {
             ArtifactPayload::Original(product) => product.owner().clone(),
@@ -1834,13 +1850,13 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 record_parent: None,
             },
         }];
-        let target = inventory
+        let target = receiving_inventory
             .admit_bound_target(
                 &mut fixed,
-                merged.artifacts(),
+                inputs.artifacts(),
                 NativeArtifactDemand::CertifiedTargetImports(&imports),
                 Vec::new(),
-                &selection,
+                &continuation,
             )
             .unwrap();
         let target = target.bind_target(None, imports);
