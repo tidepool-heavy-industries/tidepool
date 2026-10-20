@@ -93,6 +93,30 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn admit_source_invocation(
+        journal: &Arc<Mutex<Self>>,
+        actor: ActorRef,
+        reservation: RequestReservationOwner,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+        request: &WorkbenchRequest,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<
+        Arc<InvocationWork>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
+        source.clone().with_open_admission(|| {
+            let work = InvocationWork::new_source(actor, reservation, source);
+            let mut journal = journal.lock();
+            if let Some(execution) = request.execution_id() {
+                journal.begin(execution, request.clone(), invocation);
+                journal.bind_provider_finalization(execution, invocation, control);
+            }
+            journal.retain_invocation_work(work.clone(), request.execution_id(), invocation);
+            work
+        })
+    }
+
     /// Publish the active record and its selection-pending cleanup owner under
     /// the same journal lock. Retirement must never observe active work without
     /// either its issued source or an explicit unclassified root.

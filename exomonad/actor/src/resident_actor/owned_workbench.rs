@@ -973,16 +973,8 @@ where
         } else {
             None
         };
-        let admit_work = || {
-            let work = if inspection.is_some() {
-                InvocationWork::new_neutral(context.actor, reservation_owner.clone())
-            } else {
-                InvocationWork::new_source(
-                    context.actor,
-                    reservation_owner.clone(),
-                    context.source_dependency().clone(),
-                )
-            };
+        let admit_inspection = || {
+            let work = InvocationWork::new_neutral(context.actor, reservation_owner.clone());
             let mut journal = self.workbench_executions.lock();
             if let Some(execution) = request.execution_id() {
                 journal.begin(execution, request.clone(), invocation.as_ref());
@@ -1000,9 +992,17 @@ where
             work
         };
         let invocation_work = if inspection.is_some() {
-            admit_work()
+            admit_inspection()
         } else {
-            match context.source_dependency().with_open_admission(admit_work) {
+            match WorkbenchExecutions::admit_source_invocation(
+                &self.workbench_executions,
+                context.actor,
+                reservation_owner.clone(),
+                context.source_dependency().clone(),
+                &request,
+                invocation.as_ref(),
+                control.as_ref(),
+            ) {
                 Ok(work) => work,
                 Err(error) => {
                     return terminal_task(Err(Self::tool_invocation_failure(

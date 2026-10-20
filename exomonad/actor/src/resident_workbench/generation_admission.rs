@@ -864,6 +864,13 @@ mod tests {
         dependency
     }
 
+    #[tokio::test]
+    async fn resident_inventory_preserves_exact_coordinator_compiler_and_sibling_activity() {
+        let mut history = History::new();
+        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        crate::resident_actor::assert_owner_observation_contract(dependency).await;
+    }
+
     /// Owner-cluster controls use real canonical runtime leases and the actual
     /// publication/visibility entry. They allocate no compiler code or durable head.
     struct PublicationFixture {
