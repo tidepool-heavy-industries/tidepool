@@ -1449,11 +1449,11 @@ mod tests {
             let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             let mut original = capture_original(&mut guard);
             let error = crate::ResidentActorWorkbenchError::Resident(ResidentError::Session(
-                SessionError::RecoveryStore(StoreError {
+                SessionError::RecoveryStore(Box::new(StoreError {
                     path: "actual-owner-boundary-control.db".into(),
                     kind,
                     detail: "retained storage evidence".into(),
-                }),
+                })),
             ));
             let completion = super::super::PublicationBodyCompletion::Observed {
                 guard,
@@ -1487,12 +1487,10 @@ mod tests {
                 .admit_source()
                 .is_ok());
             assert!(fixture.generation.scope.admit_source().is_ok());
-            assert!(primary
-                .as_ref()
-                .as_ref()
-                .unwrap_err()
-                .to_string()
-                .contains("retained storage evidence"));
+            let Err(primary_error) = primary.as_ref() else {
+                panic!("source restoration must preserve the actual primary failure");
+            };
+            assert!(primary_error.to_string().contains("retained storage evidence"));
         }
     }
 
@@ -1517,11 +1515,11 @@ mod tests {
             StoreErrorKind::RecoveryRequired,
         ] {
             let error = crate::ResidentActorWorkbenchError::Delivered(ResidentError::Run(
-                tidepool_runtime::RuntimeError::Session(SessionError::RecoveryStore(StoreError {
+                tidepool_runtime::RuntimeError::Session(SessionError::RecoveryStore(Box::new(StoreError {
                     path: "nested-owner-boundary-control.db".into(),
                     kind,
                     detail: "nested storage evidence".into(),
-                })),
+                }))),
             ));
             assert_eq!(
                 error.publication_failure_cause(),
