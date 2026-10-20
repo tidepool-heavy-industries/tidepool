@@ -3750,6 +3750,27 @@ impl BindingTable {
         None
     }
 
+    /// Test one exact binding's source visibility without enumerating names.
+    /// Every name-map issuer uses the immutable entry's canonical name;
+    /// a differently named alias is a new binding identity.
+    pub fn is_binding_visible_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        id: SessionVarId,
+    ) -> Result<bool, BindingPromotionError> {
+        if !tree.is_live(scope) {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let entry = self
+            .live
+            .get(&id)
+            .ok_or(BindingPromotionError::MissingOrForeignBinding)?;
+        Ok(self
+            .resolve_in(tree, scope, &entry.name.0)
+            .is_some_and(|visible| visible.id == id))
+    }
+
     /// Look up a specific (possibly shadowed) binding by its id.
     #[must_use]
     pub fn get(&self, id: SessionVarId) -> Option<&BindingEntry> {

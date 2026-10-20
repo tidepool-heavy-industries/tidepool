@@ -1102,6 +1102,7 @@ def compile_fail_cases(package, library):
 
 def codegen_publication_test_cases(binary):
     tests = (
+        "exact_visibility_query_tracks_frozen_and_promoted_identities",
         "prepared_projection_preserves_ancestor_after_local_removal",
         "promotion_shadowing_keeps_hidden_dependency_custody_without_install_allocations",
         "prepared_promotion_witness_matches_committed_history",
