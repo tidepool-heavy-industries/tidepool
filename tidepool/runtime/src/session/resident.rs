@@ -4586,6 +4586,20 @@ where
     /// against a single scope snapshot under this session's machine checkout.
     /// The persistent registrar owns every new source root before the target
     /// can be run; failed registration rolls the native batch back.
+    fn install_prepared_with_sources(
+        &mut self,
+        prepared: tidepool_repr::execution_schema::PreparedProgram,
+        metadata: &DataConTable,
+    ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
+        let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+            self.binding_provenance
+                .get(&input.id().raw())
+                .map(|provenance| provenance.source_custody())
+        };
+        self.state
+            .install_prepared_with_sources(prepared, Some(metadata), &retained_sources)
+    }
+
     fn install_certified_turn_in(
         &mut self,
         scope: ScopeId,
@@ -7007,7 +7021,7 @@ where
             (program, source_keys)
         } else {
             (
-                self.state.install_prepared(prepared, Some(&table))?,
+                self.install_prepared_with_sources(prepared, &table)?.0,
                 Default::default(),
             )
         };
@@ -8016,13 +8030,9 @@ where
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
             }
-            let native_sources =
-                NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site));
-            (
-                self.state.install_prepared(prepared, Some(&metadata))?,
-                Default::default(),
-                native_sources,
-            )
+            let (program, native_sources) =
+                self.install_prepared_with_sources(prepared, &metadata)?;
+            (program, Default::default(), native_sources)
         };
         // Every fallible metadata check preceded installation. Runtime sources
         // come only from this exact installed outcome; missing evidence is Unknown.

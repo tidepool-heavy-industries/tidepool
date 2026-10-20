@@ -34,7 +34,7 @@ use tidepool_repr::execution_schema::{
 use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
+use super::prepared::{PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
 use super::resident::NativeSourceCustody;
 use super::turn::TurnCertification;
 use super::{
@@ -1545,6 +1545,16 @@ impl PersistentSession {
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
+        self.install_prepared_with_sources(prepared, metadata, &|_| None)
+            .map(|(program, _)| program)
+    }
+
+    pub(crate) fn install_prepared_with_sources(
+        &mut self,
+        prepared: PreparedProgram,
+        metadata: Option<&DataConTable>,
+        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+    ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
         self.admit_source_work_in(ScopeId::ROOT)?;
 
         let admitted_metadata = self.stage_install_metadata(
@@ -1564,10 +1574,20 @@ impl PersistentSession {
                 self.ensure_machine_incarnation();
                 program
             }
-            Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index)?,
+            Some(engine) => {
+                engine.install(prepared, &self.bindings, &self.binding_index, &|entry| {
+                    retained_sources(ValidatedRetainedSourceRef { entry })
+                })?
+            }
         };
         self.session_table = admitted_metadata;
-        Ok(program)
+        let sources = self
+            .machine
+            .as_ref()
+            .expect("successful install owns its engine")
+            .installed_program_sources(program)
+            .clone();
+        Ok((program, sources))
     }
 
     fn stage_install_metadata<'a>(
@@ -1589,57 +1609,6 @@ impl PersistentSession {
     pub(crate) fn ensure_machine_incarnation(&mut self) {
         self.machine_incarnation
             .get_or_insert_with(super::registry::fresh_session_id);
-    }
-
-    /// Step (a) of the off-checkout split install (see
-    /// `PreparedEngine::snapshot_install`): `None` when this is the
-    /// session's first turn (the machine does not exist yet to snapshot,
-    /// so bootstrapping -- and its one inline compile -- is the caller's
-    /// only option; `install_prepared` remains correct for that case).
-    pub(crate) fn snapshot_install_prepared(
-        &mut self,
-        prepared: PreparedProgram,
-    ) -> Result<Option<InstallSnapshot>, PreparedRuntimeError> {
-        match self.machine.as_mut() {
-            None => Ok(None),
-            Some(engine) => engine
-                .snapshot_install(prepared, &self.bindings, &self.binding_index)
-                .map(Some),
-        }
-    }
-
-    /// Step (c) of the off-checkout split install: revalidate `snapshot`'s
-    /// imports and, if still current, install `compiled` (see
-    /// `PreparedEngine::revalidate_and_install`). `None` both when the
-    /// machine went away since the snapshot was taken (caller falls back to
-    /// [`Self::install_prepared`]) and when revalidation finds a stale
-    /// import (caller recompiles from a fresh snapshot, or falls back).
-    pub(crate) fn revalidate_and_install_prepared(
-        &mut self,
-        scope: ScopeId,
-        snapshot: InstallSnapshot,
-        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
-        metadata: Option<&DataConTable>,
-    ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
-        self.admit_source_work_in(scope)?;
-        let admitted_metadata = self.stage_install_metadata(
-            metadata,
-            compiled.constructor_declarations(),
-            std::iter::empty(),
-        )?;
-        let installed = match self.machine.as_mut() {
-            None => None,
-            Some(engine) => engine.revalidate_and_install(
-                snapshot,
-                compiled,
-                &self.bindings,
-                &self.binding_index,
-            )?,
-        };
-        if installed.is_some() {
-            self.session_table = admitted_metadata;
-        }
-        Ok(installed)
     }
 
     /// The live prepared bindings a later turn compiles against: each one's
