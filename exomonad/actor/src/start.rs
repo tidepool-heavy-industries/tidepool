@@ -1191,7 +1191,7 @@ mod tests {
         })
         .unwrap();
         let prefix = grandchild
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let item = grandchild

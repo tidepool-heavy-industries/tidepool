@@ -2694,7 +2694,7 @@ mod tests {
     fn terminal_preserves_native_carrier_refusal_scope() {
         use tidepool_toolchain::artifact_inventory::{
             ArtifactBinding, ArtifactId, ArtifactInventoryFailure, ArtifactSelectionId,
-            NativeAdmissionRefusal, NativeAdmissionSource,
+            NativeAdmissionRefusal,
         };
         use tidepool_toolchain::failclass::{
             CompileFailureCause, FailureClass, FailureEnvelope, Phase,
@@ -2709,11 +2709,9 @@ mod tests {
                 original_ordinal: 296,
             },
             native_refusal: Some(NativeAdmissionRefusal::InputNoCompatibleCandidate {
-                source: NativeAdmissionSource::CertifiedSelection,
                 selected_original: Some(selected),
                 canonical: ArtifactId([5; 32]),
                 selected_canonical: None,
-                candidate_count: 2,
             }),
         };
         let terminal = ActorTerminal::failed(

@@ -292,7 +292,7 @@ proptest! {
         expected.extend_from_slice(&8u32.to_le_bytes());
         expected.extend_from_slice(b"/fixture");
         expected.extend_from_slice(&2u32.to_le_bytes());
-        for bytes in [b"--worker-request-v24".as_slice(), b"5450524551303234000100000001000000010000000107000000457870722e6873".as_slice()] {
+        for bytes in [b"--worker-request-v25".as_slice(), b"5450524551303235000100000001000000010000000107000000457870722e6873".as_slice()] {
             expected.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             expected.extend_from_slice(bytes);
         }

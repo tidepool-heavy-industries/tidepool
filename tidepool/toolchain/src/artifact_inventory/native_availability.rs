@@ -825,7 +825,7 @@ pub(super) fn bind_certified_input_demand(
             return Err(failure("native demand lacks original payload"));
         };
         let owner = product.owner();
-        let supports = {
+        let (chosen, support) = {
             if !selection.permits_native_group(key.artifact, owner, key.original_ordinal) {
                 tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         stage = "input_demand_permission", ?key, ?owner,
@@ -843,7 +843,7 @@ pub(super) fn bind_certified_input_demand(
             let carried = selection
                 .continuation_input(&module_identity(owner))
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-            let (chosen, support) = if carried.is_some() {
+            if carried.is_some() {
                 let chosen = verified_root_choice(selection, *key, owner, &entry)?;
                 let support = selection
                     .native_group_support(*key, owner, chosen)
@@ -892,66 +892,43 @@ pub(super) fn bind_certified_input_demand(
                     )
                 })?;
                 (chosen, support)
-            };
-            vec![(chosen, support)]
+            }
         };
         let canonical = ArtifactEntry::canonical_artifact_id(
             product
                 .module_interface()
                 .ok_or_else(|| failure("native canonical carrier missing"))?,
         );
-        let candidate_count = supports.len();
-        let mut compatible = Vec::new();
-        for (group, support) in supports {
-            let support = NativeSupportRef::checked(state, parent, group, support)?;
-            let issued = support.describe(group)?;
-            let carrier = issued.carrier;
-            let canonical_binding = issued.canonical;
-            let retained_offer = support.offer;
-            if namespace
-                .get(&key.artifact)
-                .is_some_and(|selected| *selected != carrier)
-            {
-                continue;
-            }
-            // An interface-only receiving role may retain the issued body's
-            // unchanged historical canonical binding without selecting Original.
-            let historical_interface = retained_offer.is_some()
-                && !namespace.contains_key(&key.artifact)
-                && selection.interface_only_artifact(&entry.descriptor.owner) == Some(canonical);
-            if namespace
-                .get(&canonical)
-                .is_none_or(|selected| *selected == canonical_binding || historical_interface)
-            {
-                compatible.push((issued, support));
-            }
-        }
-
-        if compatible.len() > 1 {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::BindingAmbiguity {
-                    artifact: key.artifact,
-                },
-            ));
-        }
-        let Some((issued, support)) = compatible.pop() else {
+        let support = NativeSupportRef::checked(state, parent, chosen, support)?;
+        let issued = support.describe(chosen)?;
+        let carrier = issued.carrier;
+        let canonical_binding = issued.canonical;
+        // An interface-only receiving role may retain the issued body's
+        // unchanged historical canonical binding without selecting Original.
+        let historical_interface = support.offer.is_some()
+            && !namespace.contains_key(&key.artifact)
+            && selection.interface_only_artifact(&entry.descriptor.owner) == Some(canonical);
+        let carrier_matches = namespace
+            .get(&key.artifact)
+            .is_none_or(|selected| *selected == carrier);
+        let canonical_matches = namespace
+            .get(&canonical)
+            .is_none_or(|selected| *selected == canonical_binding || historical_interface);
+        if !carrier_matches || !canonical_matches {
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                 stage = "input_demand_carrier", ?key, owner = ?product.owner(),
                 selected_carrier = ?namespace.get(&key.artifact),
-                ?canonical, selected_canonical = ?namespace.get(&canonical), candidate_count,
-                source = "certified_selection",
-                "native input candidates do not match selected carrier or canonical binding");
+                ?canonical, selected_canonical = ?namespace.get(&canonical),
+                "issued native input binding does not match selected carrier or canonical binding");
             return Err(native_admission_failure(
                 *key,
                 NativeAdmissionRefusal::InputNoCompatibleCandidate {
-                    source: NativeAdmissionSource::CertifiedSelection,
                     selected_original: namespace.get(&key.artifact).copied(),
                     canonical,
                     selected_canonical: namespace.get(&canonical).copied(),
-                    candidate_count,
                 },
             ));
-        };
+        }
         support.acquire(state, entries, &mut incoming, &issued)?;
         if let Some(offer) = support.offer {
             retained_offers.push(offer.clone());
@@ -3166,6 +3143,45 @@ mod normalized_dependency_tests {
             .is_none(),
             "new Full qualification cannot borrow another canonical scope"
         );
+        let unrelated = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                producer.sha256(),
+                "fixture",
+                "CarrierNamespaceOverlay",
+                BTreeMap::new(),
+            ),
+        ));
+        let incompatible = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.values().cloned().chain([unrelated]).collect(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap()
+            .retain_custody(parent)
+            .unwrap();
+        let incompatible_namespace = incompatible.namespace();
+        assert_ne!(incompatible_namespace[&root_id], root_pair.0);
+        let before_incompatible = incompatible.capture_graph_selection();
+        let mut state = inventory.0.lock().expect("inventory lock");
+        let error = bind_certified_input_demand(
+            &mut state,
+            &incompatible,
+            &entries,
+            BTreeMap::new(),
+            &BTreeSet::from([root_key]),
+            &selection,
+        )
+        .err()
+        .expect("an issued choice cannot substitute the receiver's selected Original");
+        assert!(matches!(error, CompileError::ArtifactInventory(ref error)
+        if error.native_refusal == Some(NativeAdmissionRefusal::InputNoCompatibleCandidate {
+            selected_original: incompatible_namespace.get(&root_id).copied(),
+            canonical: root_pair.1.artifact,
+            selected_canonical: incompatible_namespace.get(&root_pair.1.artifact).copied(),
+        })));
+        drop(state);
+        assert_eq!(incompatible.capture_graph_selection(), before_incompatible);
         let cold_inventory = ArtifactInventory::default();
         let cold = cold_inventory
             .recover_selection(

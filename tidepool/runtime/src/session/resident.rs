@@ -829,7 +829,7 @@ impl HostCarrier {
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
             HostCarrierOrigin::Checked { admission, .. } => {
-                Ok(admission.snapshot().view().session_root())
+                Ok(admission.snapshot().session_root())
             }
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
@@ -3875,6 +3875,18 @@ where
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
+    pub fn admit_world_planned_host_carrier_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        binding: String,
+        expected: HostBindingType,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+    }
+
+    /// Admit one compiler-issued binder reserved for a native host payload.
     pub fn admit_host_carrier_cell_in(
         &mut self,
         scope: ScopeId,
@@ -3913,10 +3925,9 @@ where
 
     pub fn begin_cell_program(
         &self,
-        admission: Arc<super::RuntimeCellAdmission>,
-        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
-        self.state.begin_cell_program(admission, program)
+        self.state.begin_cell_program(settled)
     }
 
     pub fn admit_native_setup_cell_in(
@@ -5931,7 +5942,7 @@ where
         let interface = execution
             .value_interface_certificate()
             .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let session_root = admission.snapshot().view().session_root().to_path_buf();
+        let session_root = admission.snapshot().session_root().to_path_buf();
         let staged = self.state.stage_checked_value_interface(interface)?;
         self.state.validate_staged_value_interface(&staged)?;
         if self.state.mount_cancelled(self.run_context.resource_scope) {
@@ -9343,7 +9354,7 @@ mod authored_publication_tests {
         .unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
@@ -11624,7 +11635,7 @@ mod authored_publication_tests {
         .unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();

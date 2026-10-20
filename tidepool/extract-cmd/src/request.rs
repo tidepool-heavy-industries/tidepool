@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v24";
-const MAGIC: &[u8; 8] = b"TPREQ024";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v25";
+const MAGIC: &[u8; 8] = b"TPREQ025";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -25,6 +25,7 @@ pub enum ExactInputsAcquisition {
     Resident(String),
     /// Strict cold-world descriptor; input descriptors retain their existing owner.
     Complete(PathBuf),
+    Successor { predecessor: String, realization: String, descriptor: PathBuf },
 }
 
 impl ExactInputsRequest {
@@ -34,6 +35,7 @@ impl ExactInputsRequest {
             && match &self.acquisition {
                 ExactInputsAcquisition::Resident(reference) => valid(reference),
                 ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
+                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => valid_world_identity(predecessor) && valid(realization) && descriptor.to_str().is_some_and(valid),
             }
     }
 }
@@ -161,13 +163,6 @@ impl WorldCellRecipe {
             && self.turn_templates.iter().all(|(kind, source)| {
                 valid_reference(kind) && kind.len() <= 65536 && source.len() <= 2 << 20
             })
-            && self
-                .turn_templates
-                .iter()
-                .map(|(kind, _)| kind)
-                .collect::<BTreeSet<_>>()
-                .len()
-                == self.turn_templates.len()
     }
 }
 
@@ -1010,6 +1005,7 @@ impl ExtractRequest {
                     let acquisition = match decoder.byte()? {
                         0 => ExactInputsAcquisition::Resident(decoder.string()?),
                         1 => ExactInputsAcquisition::Complete(PathBuf::from(decoder.os_string()?)),
+                        2 => ExactInputsAcquisition::Successor { predecessor: decoder.string()?, realization: decoder.string()?, descriptor: PathBuf::from(decoder.os_string()?) },
                         _ => return Err(ProtocolError::InvalidExactInputs),
                     };
                     Field::EnsureExactInputs(ExactInputsRequest { root, acquisition })
@@ -2054,6 +2050,12 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                     out.push(1);
                     push_frame(out, path.as_os_str());
                 }
+                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => {
+                    out.push(2);
+                    push_frame(out, OsStr::new(predecessor));
+                    push_frame(out, OsStr::new(realization));
+                    push_frame(out, descriptor.as_os_str());
+                }
             }
         }
     }
@@ -2956,28 +2958,6 @@ mod tests {
         assert_eq!(error.to_string(), "an input file is required");
     }
 
-    /// Parses `name = "value"` out of a Haskell source file by scanning for a
-    /// line whose trimmed text starts with `name` followed by `=` and a
-    /// quoted literal — never a substring search, so a renamed or
-    /// re-shaped binding fails this test instead of silently passing.
-    fn haskell_string_const(source: &str, name: &str) -> Option<String> {
-        for line in source.lines() {
-            let Some(rest) = line.trim_start().strip_prefix(name) else {
-                continue;
-            };
-            let Some(rest) = rest.trim_start().strip_prefix('=') else {
-                continue;
-            };
-            let Some(rest) = rest.trim_start().strip_prefix('"') else {
-                continue;
-            };
-            if let Some(end) = rest.find('"') {
-                return Some(rest[..end].to_string());
-            }
-        }
-        None
-    }
-
     #[test]
     fn world_public_module_wire_is_exclusive_and_matches_haskell() {
         let query = WorldPublicModuleRequest {
@@ -2995,7 +2975,7 @@ mod tests {
         };
         let mut request = ExtractRequest::default();
         request.world_public_module(query.clone());
-        let bytes = unhex("5450524551303234000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
+        let bytes = unhex("5450524551303235000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
         assert_eq!(request.encode(), bytes);
         for mode in [WorldQueryMode::Info, WorldQueryMode::Type] {
             let mut request = ExtractRequest::default();
@@ -3108,8 +3088,8 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
         assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
-        let plan_bytes = unhex("5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72").unwrap();
-        let prepare_bytes = unhex("5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
+        let plan_bytes = unhex("5450524551303235000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72").unwrap();
+        let prepare_bytes = unhex("5450524551303235000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
         let mut plan_request = ExtractRequest::default();
         plan_request.world_cell_plan(plan.clone()).unwrap();
         let mut prepare_request = ExtractRequest::default();
@@ -3153,10 +3133,7 @@ mod tests {
         Arc::make_mut(&mut value.recipe).source = "λ".repeat((1 << 20) + 1);
         bad_recipes.push(value);
         let mut value = plan.clone();
-        let duplicate = value.recipe.turn_templates[0].clone();
-        Arc::make_mut(&mut value.recipe)
-            .turn_templates
-            .push(duplicate);
+        Arc::make_mut(&mut value.recipe).turn_templates[0].0.clear();
         bad_recipes.push(value);
         let mut value = plan.clone();
         value.output = "x".repeat(65537).into();
@@ -3219,6 +3196,16 @@ mod tests {
         let mut request = ExtractRequest::default();
         request.world_cell_prepare(empty).unwrap();
         assert!(ExtractRequest::decode(&request.encode()).is_ok()); // Semantic empty-plan proof is owned by the compiler.
+
+        let mut ordered = plan;
+        Arc::make_mut(&mut ordered.recipe).turn_templates = vec![
+            ("expr".into(), "effectful expression template".into()),
+            ("expr".into(), "pure expression template".into()),
+        ];
+        let mut request = ExtractRequest::default();
+        request.world_cell_plan(ordered.clone()).unwrap();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.fields, vec![Field::WorldCellPlan(ordered)]);
     }
 
     #[test]
@@ -3335,7 +3322,7 @@ mod tests {
         };
         let request = make(resident.clone());
         // Independent fixed bytes also checked by the maintained Haskell codec case.
-        let bytes = unhex("54505245513032340001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
+        let bytes = unhex("54505245513032350001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
         assert_eq!(request.encode(), bytes);
         assert_eq!(
             ExtractRequest::decode(&bytes).unwrap().mode(),
@@ -3416,7 +3403,7 @@ mod tests {
             assert!(ExtractRequest::decode(&bytes[..end]).is_err());
         }
         let mut unknown = bytes.clone();
-        unknown[90] = 2;
+        unknown[90] = 3;
         assert_eq!(
             ExtractRequest::decode(&unknown).unwrap_err(),
             ProtocolError::InvalidExactInputs
@@ -3527,8 +3514,8 @@ mod tests {
     #[test]
     fn worker_request_flag_matches_the_haskell_encoder() {
         let haskell = include_str!("../../../bridge/haskell/src/Tidepool/ExtractRequest.hs");
-        let found = haskell_string_const(haskell, "workerRequestFlag")
-            .expect("workerRequestFlag = \"...\" not found in ExtractRequest.hs");
-        assert_eq!(found, WORKER_REQUEST_FLAG);
+        let version: u32 = haskell.lines().find_map(|line| line.strip_prefix("workerRequestVersion = ")).expect("owning worker grammar version").parse().unwrap();
+        assert_eq!(format!("--worker-request-v{version}"), WORKER_REQUEST_FLAG);
+        assert_eq!(format!("TPREQ{version:03}").as_bytes(), MAGIC);
     }
 }

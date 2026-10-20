@@ -9,7 +9,8 @@ module Tidepool.GhcPipeline
   , WorldModulePolicyFailure(..), WorldModulePolicy(..)
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprReuseContext
   , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
-  , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
+  , PreparedDependencies, PreparedSourceRoute(..), preparedSourceRoute
+  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
@@ -211,7 +212,7 @@ import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.Binders (analyzeOrderedCellWithFlags, templateParserFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, homeInterfaceUsageOwners)
@@ -471,17 +472,36 @@ revalidatePreparedCandidateInputs prepared =
 data PreparedDependencies
   = SourceOnly DependencyEvidence
   | ExactScoped DependencyEvidence ExactCompilation CompletedSourceImports
+  | WorldScoped DependencyEvidence BS.ByteString BS.ByteString
+
+-- A read-only projection of the actual compiler route. Absence of a finite
+-- scope cannot classify a held World completion as ordinary source.
+data PreparedSourceRoute
+  = PreparedOrdinarySource
+  | PreparedExactSource ExactCompilation
+  | PreparedWorldSource BS.ByteString BS.ByteString
+
+preparedSourceRoute :: PreparedPipelineResult -> PreparedSourceRoute
+preparedSourceRoute prepared = case ownedPprDependencies prepared of
+  SourceOnly _ -> PreparedOrdinarySource
+  ExactScoped _ exact _ -> PreparedExactSource exact
+  WorldScoped _ base domain -> PreparedWorldSource base domain
 
 -- Only the completed compiler pass captures which original authored requests
 -- actually resolved to fresh home roots. Generated imports cannot issue one.
 newtype CompletedSourceImports = CompletedSourceImports [(ImportIntent,(String,String))]
 
 preparedDependencies
-  :: HscEnv -> [ImportIntent] -> DependencyEvidence -> Maybe ExactCompilation
+  :: HscEnv -> PipelineVariant -> DependencyEvidence -> Maybe ExactCompilation
   -> IO PreparedDependencies
+preparedDependencies _ variant fresh exact
+  | Just (WorldSourceInputBasis facts _ _) <- pvWorldSources variant = case exact of
+      Nothing -> pure (WorldScoped fresh (worldInputsIdentityBytes facts)
+        (worldSourceDomainSha256 (worldInputsSources facts)))
+      Just _ -> throwIO CheckedPurposeMismatch
 preparedDependencies _ _ fresh Nothing = pure (SourceOnly fresh)
-preparedDependencies env intents fresh (Just exact) = do
-  roots <- fmap catMaybes $ forM intents $ \intent -> case intent of
+preparedDependencies env variant fresh (Just exact) = do
+  roots <- fmap catMaybes $ forM (pvSourceImportIntents variant) $ \intent -> case intent of
     RetainedGeneratedImport -> pure Nothing
     AuthoredSourceImport owner rawQualifier -> do
       let qualifier = renameRawPkgQual (hsc_unit_env env) owner rawQualifier
@@ -505,12 +525,13 @@ preparedFreshDependencies :: PreparedPipelineResult -> DependencyEvidence
 preparedFreshDependencies prepared = case ownedPprDependencies prepared of
   SourceOnly fresh -> fresh
   ExactScoped fresh _ _ -> fresh
+  WorldScoped fresh _ _ -> fresh
 
 -- | Exact-scope evidence only; fresh source imports remain in their own view.
 preparedExactCompilation :: PreparedPipelineResult -> Maybe ExactCompilation
-preparedExactCompilation prepared = case ownedPprDependencies prepared of
-  SourceOnly _ -> Nothing
-  ExactScoped _ exact _ -> Just exact
+preparedExactCompilation prepared = case preparedSourceRoute prepared of
+  PreparedExactSource exact -> Just exact
+  _ -> Nothing
 
 -- Private, request-local reuse of completed authored import decisions. The
 -- retained original rows grant neither current-source selection nor purity.
@@ -571,6 +592,7 @@ retainProgramSourceImports previous prepared captured retained = do
   forM_ previous (either fail pure . validateProgramSourceImports retained)
   case ownedPprDependencies prepared of
     SourceOnly _ -> pure previous
+    WorldScoped _ _ _ -> throwIO CheckedPurposeMismatch
     ExactScoped _ _ (CompletedSourceImports []) -> pure previous
     ExactScoped fresh compilation (CompletedSourceImports roots) -> do
       let admitted = compilationScope compilation
@@ -2040,12 +2062,14 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   recipe <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (pvGeneratedScaffold variant)
   source <- liftIO (captureGeneratedScaffoldTarget recipe path >>= either fail pure)
   let sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
-  effective <- liftIO (templateParserFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
+  effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldModuleFlags path effective)
   plan <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (typedPurposePlan purpose)
   current <- getSession
   demand <- liftIO (typedSegmentInputOccurrences (hscUpdateFlags (const effective) current) plan sourceText)
-  occurrences <- either (const (liftIO (throwIO WorldCellUnsupported))) pure demand
+  occurrences <- either (\failure -> liftIO $ do
+    emitWorldAcquisitionRejection "world cell demand" path (show failure)
+    throwIO WorldCellUnsupported) pure demand
   let selected = [binding | name <- occurrences,Just binding <- [Map.lookup name (worldInputsBindings facts)]]
   -- The initial checked-value slice admits package-only native types. A home
   -- dependency requires its exact selected type closure, not passive custody.
@@ -5059,7 +5083,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           PreparedStg -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
-              (pvSourceImportIntents variant) dependencies exactCompilation)
+              variant dependencies exactCompilation)
             pure PreparedPipelineResult
               { ownedPprPipelineResult = result
               , ownedPprModules = modules
@@ -5078,7 +5102,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               "accepted module candidate changed before artifact publication"
             originalBindings <- liftIO (availableOriginalBindings (ownedPrHscEnv result))
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
-              (pvSourceImportIntents variant) dependencies exactCompilation)
+              variant dependencies exactCompilation)
             pure PreparedPipelineResult
               { ownedPprPipelineResult = result
               , ownedPprModules = modules
@@ -6110,6 +6134,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     Nothing -> pure (ExactInputsRejected UnsupportedOperation)
                     Just _ | conflicting -> pure (ExactInputsRejected InvalidRealization)
                     Just association -> case acquisition of
+                      SuccessorExactInputs _ _ _ -> pure (ExactInputsRejected UnsupportedOperation)
                       ResidentExactInputs reference ->
                         case held of
                           Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentHeldHit world

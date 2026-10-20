@@ -8,6 +8,8 @@ module Tidepool.SessionArtifacts
   , prepareTypedSegmentSessionBindings
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals
   , typedSegmentSessionInterfaces, typedSegmentSessionBinders
+  , ResolvedTypedItemBindings, resolveTypedSegmentBindings
+  , resolvedTypedItemOrdinal, resolvedTypedItemBinders, resolvedTypedItemInterface
   , typedSegmentSessionRetainedGlobals, typedSegmentSessionInterfacesThrough
   , typedSegmentSessionBindingRepresentations
   , withTypedSegmentSessionPublication
@@ -20,6 +22,8 @@ import Control.Exception (bracket, mask, onException, throwIO)
 import Control.Monad (forM, foldM)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (nub, isPrefixOf)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import Data.Data (Data, Typeable, cast, gmapQ)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -136,7 +140,25 @@ data PreparedTypedSegmentBindings = PreparedTypedSegmentBindings HscEnv
 
 data PreparedTypedItemBindings
   = UncapturedTypedItem Int
-  | CapturedTypedItem Int SessionModule [CapturedBoundBinder] [(Id, Id)] CapturedSessionInterface
+  | CapturedTypedItem Int SessionModule (NonEmpty CapturedBoundBinder) [(Id, Id)] CapturedSessionInterface
+
+-- The successful target resolver closes the persisted capture types. The
+-- interface stays paired with the exact item which emitted and hydrated it.
+data ResolvedTypedItemBindings
+  = UncapturedItemBindings Int
+  | CapturedItemBindings Int (NonEmpty BoundBinder) CapturedSessionInterface
+
+resolvedTypedItemOrdinal :: ResolvedTypedItemBindings -> Int
+resolvedTypedItemOrdinal (UncapturedItemBindings ordinal) = ordinal
+resolvedTypedItemOrdinal (CapturedItemBindings ordinal _ _) = ordinal
+
+resolvedTypedItemBinders :: ResolvedTypedItemBindings -> [BoundBinder]
+resolvedTypedItemBinders (UncapturedItemBindings _) = []
+resolvedTypedItemBinders (CapturedItemBindings _ binders _) = NE.toList binders
+
+resolvedTypedItemInterface :: ResolvedTypedItemBindings -> Maybe CapturedSessionInterface
+resolvedTypedItemInterface (UncapturedItemBindings _) = Nothing
+resolvedTypedItemInterface (CapturedItemBindings _ _ interface) = Just interface
 
 -- Keep the persisted compiler type until the final target module's immutable
 -- identity resolver is available. A staged session interface can precede the
@@ -172,13 +194,20 @@ typedSegmentSessionInterfaces (PreparedTypedSegmentBindings _ items _) =
 typedSegmentSessionBinders
   :: IdentityResolver -> PreparedTypedSegmentBindings
   -> Either TypeIdentityFailure [(Int, [BoundBinder])]
-typedSegmentSessionBinders resolver (PreparedTypedSegmentBindings _ items _) =
-  traverse itemBinders items
+typedSegmentSessionBinders resolver batch =
+  map (\item -> (resolvedTypedItemOrdinal item,resolvedTypedItemBinders item))
+    <$> resolveTypedSegmentBindings resolver batch
+
+resolveTypedSegmentBindings
+  :: IdentityResolver -> PreparedTypedSegmentBindings
+  -> Either TypeIdentityFailure [ResolvedTypedItemBindings]
+resolveTypedSegmentBindings resolver (PreparedTypedSegmentBindings _ items _) =
+  traverse resolve items
   where
-    itemBinders (UncapturedTypedItem ordinal) = Right (ordinal, [])
-    itemBinders (CapturedTypedItem ordinal _ binders _ _) = do
-      resolved <- traverse (resolveCapturedBoundBinder resolver) binders
-      pure (ordinal, resolved)
+    resolve (UncapturedTypedItem ordinal) = Right (UncapturedItemBindings ordinal)
+    resolve (CapturedTypedItem ordinal _ binders _ interface) =
+      (\resolved -> CapturedItemBindings ordinal resolved interface)
+        <$> traverse (resolveCapturedBoundBinder resolver) binders
 
 resolveCapturedBoundBinder
   :: IdentityResolver -> CapturedBoundBinder -> Either TypeIdentityFailure BoundBinder
@@ -243,7 +272,8 @@ prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
             && eqType (idType global) (idType original))
             (fail "typed capture differs from its hydrated session type")
           pure (original, global)
-        let binders = zipWith (captureBinder owner representation) selected (map snd pairs)
+        binders <- maybe (fail "captured typed item has no hydrated binders") pure
+          (NE.nonEmpty (zipWith (captureBinder owner representation) selected (map snd pairs)))
         pure (hydrated, CapturedTypedItem ordinal owner binders pairs captured : completed)
 
     captureBinder owner representation capture global = CapturedBoundBinder
