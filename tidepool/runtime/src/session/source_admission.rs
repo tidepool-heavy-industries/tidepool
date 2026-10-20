@@ -596,6 +596,18 @@ pub struct OwnSourceFenceReopened {
     attempt: u64,
 }
 
+/// Issued only by the actual publication confirmation transition.
+#[derive(Debug)]
+pub struct ConfirmedSourcePublication {
+    reopened: OwnSourceFenceReopened,
+}
+
+impl ConfirmedSourcePublication {
+    pub(super) fn matches(&self, owner: &RuntimeSourceAdmission, attempt: u64) -> bool {
+        self.reopened.matches(owner, attempt)
+    }
+}
+
 impl OwnSourceFenceReopened {
     pub(super) fn matches(&self, owner: &RuntimeSourceAdmission, attempt: u64) -> bool {
         self.owner.same_owner(owner) && self.attempt == attempt
@@ -718,11 +730,12 @@ impl RuntimeSourceFence {
         lease: &Arc<super::RuntimeLexicalScopeLease>,
         prerequisite: Option<&RuntimeSourcePublicationPrerequisite>,
         settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
-    ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
+    ) -> Result<Result<ConfirmedSourcePublication, E>, SourceAdmissionError> {
         self.publication_view(prerequisite)
             .with_current_state(lease, |state| {
                 ScopedReopen::settle(state, &self.owner, self.attempt, settle)
             })
+            .map(|result| result.map(|reopened| ConfirmedSourcePublication { reopened }))
     }
 
     pub fn unconfirmed_claims(&self) -> usize {
@@ -906,10 +919,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            first.discard_unpublished(&reopened),
+            first.close_reopened_source(&reopened),
             Err(SourceAdmissionError::StaleFence)
         );
-        second.discard_unpublished(&reopened).unwrap();
+        second.close_reopened_source(&reopened).unwrap();
         assert!(matches!(
             second_lease.admit_source(),
             Err(SourceAdmissionError::Closed {

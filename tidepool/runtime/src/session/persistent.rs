@@ -519,6 +519,15 @@ impl Drop for PersistentSession {
     }
 }
 
+enum NativeInstallationSource<'a> {
+    Unwitnessed,
+    Checked(super::turn::CurrentNativeSources<'a>),
+    ClosedEntry {
+        entry: &'a super::PreparedSourceEntry,
+        source: &'a super::resident::CapturedSourceOrigin,
+    },
+}
+
 impl PersistentSession {
     /// Own source preparation for callers that hold the session substrate.
     pub fn with_source_compiler_transaction<T>(
@@ -868,19 +877,29 @@ impl PersistentSession {
             scope,
             prepared,
             certification,
-            current.as_ref(),
-            None,
+            current.map_or(
+                NativeInstallationSource::Unwitnessed,
+                NativeInstallationSource::Checked,
+            ),
         )
     }
 
     pub(super) fn resolve_closed_source_entry_in(
         &self,
         scope: ScopeId,
-        prepared: &PreparedProgram,
-        certification: &TurnCertification,
+        entry: &super::PreparedSourceEntry,
         source: &super::resident::CapturedSourceOrigin,
     ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
-        self.resolve_certification_with_sources(scope, prepared, certification, None, Some(source))
+        let code = entry.compiled().code();
+        let certification = code
+            .certification()
+            .expect("PreparedSourceEntry retains sealed original certification");
+        self.resolve_certification_with_sources(
+            scope,
+            code.prepared(),
+            certification,
+            NativeInstallationSource::ClosedEntry { entry, source },
+        )
     }
 
     pub(crate) fn resolve_runtime_target_in(
@@ -901,8 +920,10 @@ impl PersistentSession {
             scope,
             target.prepared.prepared(),
             &certification,
-            current.as_ref(),
-            None,
+            current.map_or(
+                NativeInstallationSource::Unwitnessed,
+                NativeInstallationSource::Checked,
+            ),
         )
     }
 
@@ -911,8 +932,7 @@ impl PersistentSession {
         scope: ScopeId,
         prepared: &PreparedProgram,
         certification: &TurnCertification,
-        current: Option<&super::turn::CurrentNativeSources<'_>>,
-        closed: Option<&super::resident::CapturedSourceOrigin>,
+        origin: NativeInstallationSource<'_>,
     ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
@@ -1095,23 +1115,21 @@ impl PersistentSession {
             let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
             groups.push(ResolvedSourceGroup {
-                sources: current
-                    .map(|current| current.group(pending))
-                    .or_else(|| {
-                        closed.map(|source| {
-                            source.for_closed_entry_sites(pending.group().definitions().sites())
-                        })
-                    })
-                    .unwrap_or_else(|| {
-                        NativeSourceCustody::unknown(
-                            pending
-                                .group()
-                                .definitions()
-                                .sites()
-                                .iter()
-                                .map(|site| site.site),
-                        )
-                    }),
+                sources: match &origin {
+                    NativeInstallationSource::Checked(current) => current.group(pending),
+                    NativeInstallationSource::ClosedEntry { entry, source } => {
+                        debug_assert!(std::ptr::eq(prepared, entry.compiled().prepared().as_ref()));
+                        source.for_closed_entry_sites(pending.group().definitions().sites())
+                    }
+                    NativeInstallationSource::Unwitnessed => NativeSourceCustody::unknown(
+                        pending
+                            .group()
+                            .definitions()
+                            .sites()
+                            .iter()
+                            .map(|site| site.site),
+                    ),
+                },
                 group: tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
                     CertifiedGroup::admit(
                         pending.owner().clone(),
@@ -1124,12 +1142,15 @@ impl PersistentSession {
         }
         Ok(ResolvedCertifiedTurn {
             groups,
-            target_sources: current
-                .map(super::turn::CurrentNativeSources::target)
-                .or_else(|| closed.map(|source| source.for_closed_entry_sites(prepared.sites())))
-                .unwrap_or_else(|| {
+            target_sources: match &origin {
+                NativeInstallationSource::Checked(current) => current.target(),
+                NativeInstallationSource::ClosedEntry { source, .. } => {
+                    source.for_closed_entry_sites(prepared.sites())
+                }
+                NativeInstallationSource::Unwitnessed => {
                     NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
-                }),
+                }
+            },
             target_owners,
             package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
@@ -6890,7 +6911,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_b,
-                &[owner]),
+                &[owner]
+            ),
             Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(session.residency().unwrap(), before);
@@ -7197,7 +7219,8 @@ mod checkpoint_scope_tests {
             let root_domain = target.source_plan().target[&source("D", "d2")].domain;
             let e_domain = target.source_plan().target[&source("E", "e2")].domain;
             assert_ne!(root_domain, e_domain);
-            let d2: Vec<_> = target.demanded()
+            let d2: Vec<_> = target
+                .demanded()
                 .iter()
                 .filter(|image| image.group().owner().module == "D")
                 .collect();

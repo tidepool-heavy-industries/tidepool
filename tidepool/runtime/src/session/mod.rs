@@ -19,6 +19,7 @@
 mod admission;
 mod source_admission;
 pub use source_admission::{
+    ConfirmedSourcePublication,
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
     RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim,
     RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView, RuntimeSourceReopen,

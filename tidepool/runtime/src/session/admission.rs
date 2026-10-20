@@ -1452,14 +1452,22 @@ impl ReservedNotebookScope {
 
     pub fn settle_published(
         &mut self,
-        witness: &super::OwnSourceFenceReopened,
+        witness: &super::ConfirmedSourcePublication,
     ) -> Result<(), super::SourceAdmissionError> {
-        self.validate(witness)?;
+        let Some(lease) = &self.lease else {
+            return Err(super::SourceAdmissionError::StaleFence);
+        };
+        if !witness.matches(lease.source_admission(), self.attempt) {
+            return Err(super::SourceAdmissionError::StaleFence);
+        }
         drop(self.lease.take());
         Ok(())
     }
 
-    pub fn discard_unpublished(
+    /// Cut off this own reopened source. Only the publication guard's known
+    /// nonpublication branch may invoke this; the witness proves exact reopen,
+    /// not the absence of publication or physical cleanup.
+    pub fn close_reopened_source(
         &mut self,
         witness: &super::OwnSourceFenceReopened,
     ) -> Result<(), super::SourceAdmissionError> {
@@ -2750,7 +2758,12 @@ impl RuntimeCellAdmission {
     /// Issue cumulative lexical projections while the machine and prefix
     /// mutex are stowed. Only this admission's immutable checked items enter
     /// the prepared sequence consumed by declaration adoption.
-    #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.declaration_projections", skip_all, fields(inclusive = true))]
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "cell_program.declaration_projections",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(super) fn prepare_declaration_projections(
         &self,
         cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
