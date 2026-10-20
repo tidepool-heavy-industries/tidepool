@@ -1,6 +1,237 @@
 //! Supervised preparation and acknowledged result delivery.
 use super::*;
 
+use crate::resident_workbench::{
+    ActorGenerationCommit, ActorGenerationPublicationOperation,
+    ActorGenerationPublicationSettlement, ActorPublicationAttemptObserver, ReservedActorGeneration,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PublicationNonStartKind {
+    SupervisorSendFailed,
+    SpawnFailed,
+    WorkerSendFailed,
+    TransferOwnerLostBeforeExecute,
+}
+
+pub(super) enum PublicationNonStart {
+    SupervisorSendFailed,
+    SpawnFailed(ractor::SpawnErr),
+    WorkerSendFailed,
+    TransferOwnerLostBeforeExecute,
+}
+
+impl PublicationNonStart {
+    pub(super) fn kind(&self) -> PublicationNonStartKind {
+        match self {
+            Self::SupervisorSendFailed => PublicationNonStartKind::SupervisorSendFailed,
+            Self::SpawnFailed(_) => PublicationNonStartKind::SpawnFailed,
+            Self::WorkerSendFailed => PublicationNonStartKind::WorkerSendFailed,
+            Self::TransferOwnerLostBeforeExecute => {
+                PublicationNonStartKind::TransferOwnerLostBeforeExecute
+            }
+        }
+    }
+}
+
+pub(super) enum PublicationDelivery {
+    NotStarted {
+        reserved: ReservedActorGeneration,
+        reason: PublicationNonStart,
+    },
+    Settled(ActorGenerationPublicationSettlement),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PublicationOutcomeObservation {
+    Published,
+    Refused,
+    Unconfirmed,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PublicationTerminalObservation {
+    NotStarted(PublicationNonStartKind),
+    Completed(PublicationOutcomeObservation),
+    ProducerLostAfterExecute,
+}
+
+/// Only compact tags survive in terminal metadata. Even an error's full primary
+/// Arc can recursively retain a published generation; it belongs to custody.
+pub(super) struct PublicationWriter {
+    sender: Option<oneshot::Sender<PublicationDelivery>>,
+    terminal: Arc<std::sync::OnceLock<PublicationTerminalObservation>>,
+    actor: ActorRef,
+    observer: ActorPublicationAttemptObserver,
+    control: RactorRef<RunControlMessage>,
+}
+
+impl PublicationWriter {
+    fn deliver(&mut self, delivery: PublicationDelivery) {
+        let observed = match &delivery {
+            PublicationDelivery::NotStarted { reason, .. } => {
+                PublicationTerminalObservation::NotStarted(reason.kind())
+            }
+            PublicationDelivery::Settled(settlement) => {
+                let outcome = match settlement {
+                    ActorGenerationPublicationSettlement::Unpublished(refusal) => refusal.outcome(),
+                    ActorGenerationPublicationSettlement::Settled(outcome) => outcome,
+                };
+                PublicationTerminalObservation::Completed(match outcome.as_ref() {
+                    Ok(ActorGenerationCommit::Published { .. }) => {
+                        PublicationOutcomeObservation::Published
+                    }
+                    Ok(ActorGenerationCommit::Refused(_)) => PublicationOutcomeObservation::Refused,
+                    Ok(ActorGenerationCommit::Unconfirmed(_)) => {
+                        PublicationOutcomeObservation::Unconfirmed
+                    }
+                    Err(_) => PublicationOutcomeObservation::Failed,
+                })
+            }
+        };
+        let rejected = self
+            .sender
+            .take()
+            .and_then(|sender| sender.send(delivery).err());
+        let _ = self.terminal.set(observed);
+        self.notify();
+        drop(rejected);
+    }
+
+    fn notify(&self) {
+        let _ = self
+            .control
+            .send_message(RunControlMessage::GenerationPublicationReady {
+                actor: self.actor,
+                observer: self.observer.clone(),
+            });
+    }
+}
+
+impl Drop for PublicationWriter {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = self
+                .terminal
+                .set(PublicationTerminalObservation::ProducerLostAfterExecute);
+            drop(sender);
+            self.notify();
+        }
+    }
+}
+
+/// The transfer retains the actual unexecuted payload across every queue/spawn
+/// boundary. Its Drop first returns Reserved, then releases the publisher.
+pub(super) struct PublicationTransfer {
+    operation: Option<ActorGenerationPublicationOperation>,
+    writer: PublicationWriter,
+    nonstart: PublicationNonStart,
+}
+
+impl PublicationTransfer {
+    pub(super) fn channel(
+        actor: ActorRef,
+        observer: ActorPublicationAttemptObserver,
+        control: RactorRef<RunControlMessage>,
+    ) -> (
+        PublicationWriter,
+        oneshot::Receiver<PublicationDelivery>,
+        Arc<std::sync::OnceLock<PublicationTerminalObservation>>,
+    ) {
+        // Allocate the channel while the actual operation/fence are still in
+        // RunState. Creating its affine transfer below then only moves values.
+        let (sender, receiver) = oneshot::channel();
+        let terminal = Arc::new(std::sync::OnceLock::new());
+        let writer = PublicationWriter {
+            sender: Some(sender),
+            terminal: terminal.clone(),
+            actor,
+            observer,
+            control,
+        };
+        (writer, receiver, terminal)
+    }
+
+    pub(super) fn new(
+        operation: ActorGenerationPublicationOperation,
+        writer: PublicationWriter,
+    ) -> Self {
+        Self {
+            operation: Some(operation),
+            writer,
+            nonstart: PublicationNonStart::TransferOwnerLostBeforeExecute,
+        }
+    }
+
+    pub(super) fn return_unstarted(mut self, reason: PublicationNonStart) {
+        self.nonstart = reason;
+    }
+
+    async fn run(mut self) {
+        let Some(operation) = self.operation.take() else {
+            return;
+        };
+        let settlement = operation.run().await;
+        self.writer
+            .deliver(PublicationDelivery::Settled(settlement));
+    }
+}
+
+impl Drop for PublicationTransfer {
+    fn drop(&mut self) {
+        if let Some(operation) = self.operation.take() {
+            let (reserved, discard) = operation.into_retained_parts();
+            let reason = std::mem::replace(
+                &mut self.nonstart,
+                PublicationNonStart::TransferOwnerLostBeforeExecute,
+            );
+            self.writer
+                .deliver(PublicationDelivery::NotStarted { reserved, reason });
+            // Receiver custody precedes disposal, including a panicking test
+            // publisher destructor. No terminal/RunState lock is held here.
+            drop(discard);
+        }
+    }
+}
+
+struct PublicationWorker;
+struct PublicationWorkerIdentity {
+    actor: ActorRef,
+    observer: ActorPublicationAttemptObserver,
+}
+
+impl Actor for PublicationWorker {
+    type Msg = PublicationTransfer;
+    type State = PublicationWorkerIdentity;
+    type Arguments = PublicationWorkerIdentity;
+
+    async fn pre_start(
+        &self,
+        _myself: RactorRef<Self::Msg>,
+        identity: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(identity)
+    }
+
+    async fn handle(
+        &self,
+        myself: RactorRef<Self::Msg>,
+        transfer: Self::Msg,
+        identity: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if transfer.writer.actor != identity.actor
+            || !transfer.writer.observer.same_attempt(&identity.observer)
+        {
+            transfer.return_unstarted(PublicationNonStart::WorkerSendFailed);
+        } else {
+            transfer.run().await;
+        }
+        myself.stop(None);
+        Ok(())
+    }
+}
+
 pub(crate) enum RootAdmissionOutcome {
     StartupPermit(super::RootStartupAdmission),
     Actor(LocalActorRef, ractor::concurrency::JoinHandle<()>),
@@ -343,6 +574,7 @@ impl RootDelivery {
 }
 
 pub(super) enum PreparationMessage {
+    PublishGeneration(PublicationTransfer),
     #[cfg(test)]
     KillRoot {
         id: u64,
@@ -405,6 +637,11 @@ pub(super) struct PreparationState {
     workers: HashMap<ractor::ActorId, TrackedWorker>,
 }
 enum WorkerKind {
+    Publication {
+        actor: ActorRef,
+        observer: ActorPublicationAttemptObserver,
+        terminal: Arc<std::sync::OnceLock<PublicationTerminalObservation>>,
+    },
     Root {
         id: u64,
         compiler: RetainedActorExit,
@@ -467,6 +704,25 @@ impl Actor for PreparationSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            PreparationMessage::PublishGeneration(transfer) => {
+                let actor = transfer.writer.actor;
+                let observer = transfer.writer.observer.clone();
+                let terminal = transfer.writer.terminal.clone();
+                let identity = PublicationWorkerIdentity { actor, observer: observer.clone() };
+                match Actor::spawn_linked(None, PublicationWorker, identity, myself.get_cell()).await {
+                    Ok((worker, task)) => {
+                        state.workers.insert(worker.get_id(), TrackedWorker {
+                            cell: worker.get_cell(), kind: WorkerKind::Publication { actor, observer, terminal },
+                            terminal: false, reported: false,
+                        });
+                        drop(task);
+                        if let Err(ractor::MessagingErr::SendErr(transfer)) = worker.send_message(transfer) {
+                            transfer.return_unstarted(PublicationNonStart::WorkerSendFailed);
+                        }
+                    }
+                    Err(error) => transfer.return_unstarted(PublicationNonStart::SpawnFailed(error)),
+                }
+            }
             #[cfg(test)]
             PreparationMessage::KillRoot { id, reply } => {
                 for worker in state.workers.values() { if matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id) { worker.cell.kill(); } }
@@ -577,6 +833,15 @@ impl Actor for PreparationSupervisor {
                     return Ok(());
                 }
                 match &mut record.kind {
+                    WorkerKind::Publication { actor, observer, terminal } => {
+                        // The actual sender/transfer publishes before any identity
+                        // notification. Absence stays uncertain; never replay.
+                        let _ = terminal.get();
+                        let _ = state.control.send_message(RunControlMessage::GenerationPublicationReady {
+                            actor: *actor, observer: observer.clone(),
+                        });
+                        record.reported = true;
+                    }
                     WorkerKind::Root { id, compiler, produced, native } => {
                         compiler.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "root preparation worker lost"));
                         let id = *id;
