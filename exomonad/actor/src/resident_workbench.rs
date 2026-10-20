@@ -23197,11 +23197,24 @@ pub(crate) mod request_tests {
             state.clone(),
             ActorPublicationOwner::Preparation(terminal.client()),
         );
-        let publication = publisher.publish(
+        let preparation = publisher.into_retirement_preparation(
             prepared,
             tidepool_runtime::session::PublicationDecision::new(),
             ActorGenerationPublication::Terminal,
         );
+        let (prepared, reserve) = preparation.into_parts();
+        let outcome = match reserve.reserve(prepared) {
+            Ok(outcome) => outcome,
+            Err(_) => panic!("the actual publisher retains its candidate"),
+        };
+        let ActorGenerationRetirementPreparationOutcome::Reserved {
+            reserved,
+            publisher,
+        } = outcome
+        else {
+            panic!("the actual publisher reserves before checkout")
+        };
+        let publication = publisher.run(reserved);
         tokio::pin!(publication);
         assert!(futures_util::poll!(publication.as_mut()).is_pending());
         assert!(
@@ -23213,7 +23226,14 @@ pub(crate) mod request_tests {
             receipt,
             "publication checkout control retired the actual owner",
         );
-        let error = match publication.await {
+        let settlement = match publication.await {
+            Ok(settlement) => settlement,
+            Err(_) => panic!("the actual reservation matches its publisher"),
+        };
+        let ActorGenerationPublicationSettlement::Settled(outcome) = &settlement else {
+            panic!("unobserved checkout cannot grant source restoration")
+        };
+        let error = match outcome.as_ref() {
             Err(error) => error,
             Ok(_) => panic!("retired checkout cannot publish"),
         };
@@ -23223,11 +23243,22 @@ pub(crate) mod request_tests {
             if matches!(failure.outcome.as_ref(), Err(ResidentActorWorkbenchError::Checkout(_)))
                 && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
         );
-        let diagnostic = error.to_string();
-        let observed = crate::resident_actor::reload_publication_result(Err(error)).unwrap();
+        let (_, observed) = settlement.diagnostic_outcome().unwrap();
+        assert!(matches!(
+            observed,
+            ActorGenerationPublicationRefusalObservation::Failed {
+                cause: ActorPublicationFailureCause::Checkout,
+                requires_recovery: true,
+                ..
+            }
+        ));
         assert!(
-            matches!(observed, ActorGenerationCommit::Unconfirmed(ref detail) if detail.to_string() == diagnostic && detail.to_string().contains("publication checkout control retired the actual owner"))
+            crate::resident_actor::RetirementDiagnosticEvidence::from_settlement(&settlement)
+                .is_some()
         );
+        assert!(error
+            .to_string()
+            .contains("publication checkout control retired the actual owner"));
         assert!(
             matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target))
         );

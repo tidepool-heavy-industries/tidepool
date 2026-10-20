@@ -1,7 +1,7 @@
 //! Staged configuration publication for the admitted Reload effect.
 use super::*;
 use crate::generated::source::SourceError;
-use crate::resident_workbench::{ActorGeneration, ActorGenerationCommit};
+use crate::resident_workbench::ActorGeneration;
 use tidepool_bridge_effects::{RlPolicy, SrReloadOutcome};
 
 pub(crate) struct CoherentReloadOperation<H, O> {
@@ -10,23 +10,9 @@ pub(crate) struct CoherentReloadOperation<H, O> {
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     checked: Vec<String>,
     policy: RlPolicy,
-    lifecycle: Option<crate::LifecycleHandle>,
+    kernel: KernelContext,
+    inventory: ResidentGenerationInventory,
     diagnostic: WorkbenchOperationDiagnosticOwner,
-}
-
-fn unreadable(error: impl std::fmt::Display) -> SourceError {
-    SourceError::SourceUnreadable(error.to_string())
-}
-
-pub(crate) fn reload_publication_result(
-    result: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
-) -> Result<ActorGenerationCommit, SourceError> {
-    match result {
-        Err(error) if error.requires_recovery() => {
-            Ok(ActorGenerationCommit::Unconfirmed(error.to_string().into()))
-        }
-        result => result.map_err(unreadable),
-    }
 }
 
 impl<H, O> CoherentReloadOperation<H, O>
@@ -52,58 +38,33 @@ where
             ReloadPreparationOutcome::Settled(outcome) => return Ok(outcome),
             ReloadPreparationOutcome::Ready(prepared) => prepared,
         };
-        let report = prepared
-            .reload_report()
-            .expect("reload preparation carries its report")
-            .clone();
         let publication = self.control.as_ref().map_or_else(
             tidepool_runtime::session::PublicationDecision::new,
             |control| control.publication_decision(),
         );
-        let result = self
-            .publisher
-            .publish(
-                prepared,
-                publication,
-                if self.control.is_some() {
-                    crate::resident_workbench::ActorGenerationPublication::Continuing
-                } else {
-                    crate::resident_workbench::ActorGenerationPublication::Terminal
-                },
+        let preparation = self.publisher.into_retirement_preparation(
+            prepared,
+            publication,
+            if self.control.is_some() {
+                crate::resident_workbench::ActorGenerationPublication::Continuing
+            } else {
+                crate::resident_workbench::ActorGenerationPublication::Terminal
+            },
+        );
+        let receipt = self
+            .kernel
+            .retire_actor_generation(
+                preparation,
+                self.inventory,
+                self.diagnostic,
+                false,
+                self.control,
             )
-            .await;
-        let result = reload_publication_result(result)?;
-        match result {
-            ActorGenerationCommit::Published {
-                generation,
-                cancellation_pending,
-            } => {
-                if let Some(control) = self.control.as_ref() {
-                    control.complete_continuing_publication(cancellation_pending);
-                }
-                if let Some(lifecycle) = self.lifecycle {
-                    lifecycle.generation_published(generation);
-                }
-                Ok(SrReloadOutcome::ReloadPublished(
-                    report.previous,
-                    report.candidate,
-                    report.changed_modules,
-                    report.surface,
-                ))
-            }
-            ActorGenerationCommit::Refused(_detail)
-                if self
-                    .control
-                    .as_ref()
-                    .is_some_and(|control| control.cancellation_requested()) =>
-            {
-                Ok(SrReloadOutcome::ReloadCancelled(report.previous))
-            }
-            ActorGenerationCommit::Refused(detail) => Err(SourceError::SourceUnavailable(detail.to_string())),
-            ActorGenerationCommit::Unconfirmed(detail) => Ok(
-                SrReloadOutcome::ReloadPublicationUnconfirmed(report.candidate, detail.to_string()),
-            ),
-        }
+            .await
+            .map_err(|error| SourceError::SourceUnavailable(error.to_string()))?;
+        Ok(SrReloadOutcome::ReloadRetirement(Arc::unwrap_or_clone(
+            receipt,
+        )))
     }
 }
 
@@ -114,6 +75,8 @@ where
 {
     pub(crate) fn coherent_reload_operation(
         &self,
+        kernel: KernelContext,
+        coordinator: Arc<InvocationWork>,
         generation: Arc<ActorGeneration>,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
         checked: Vec<String>,
@@ -160,7 +123,8 @@ where
             control,
             checked,
             policy,
-            lifecycle: self.lifecycle.clone(),
+            kernel,
+            inventory: self.environment.generation_inventory(Some(coordinator)),
             diagnostic,
         })
     }

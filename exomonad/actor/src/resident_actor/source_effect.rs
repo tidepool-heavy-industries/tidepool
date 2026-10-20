@@ -252,6 +252,8 @@ where
     }
     pub(super) fn prepare_reload_effect(
         &self,
+        kernel: KernelContext,
+        coordinator: Option<Arc<InvocationWork>>,
         context: ActorSessionContext,
         issued: Option<ActorRequestSnapshot>,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
@@ -279,6 +281,11 @@ where
                     )
                 })
                 .and_then(|diagnostic| {
+                    let coordinator = coordinator.ok_or_else(|| {
+                        SourceError::SourceUnavailable(
+                            "reload has no actual admitted invocation owner".into(),
+                        )
+                    })?;
                     issued
                         .as_ref()
                         .and_then(ActorRequestSnapshot::generation)
@@ -290,6 +297,8 @@ where
                         })
                         .and_then(|generation| {
                             self.coherent_reload_operation(
+                                kernel,
+                                coordinator,
                                 generation,
                                 control,
                                 options.also_check,

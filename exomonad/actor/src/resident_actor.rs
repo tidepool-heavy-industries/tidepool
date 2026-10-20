@@ -52,8 +52,6 @@ pub(crate) mod invocation_work;
 mod jev_form_runtime_tests;
 mod owned_workbench;
 #[cfg(test)]
-pub(crate) use owned_workbench::reload_publication_result;
-#[cfg(test)]
 mod root_preparation_tests;
 #[cfg(test)]
 mod test_forest;
@@ -6232,6 +6230,8 @@ where
             } => {
                 let authorized = effect_owner.admits_reload(context.actor);
                 let operation = self.prepare_reload_effect(
+                    kernel,
+                    effect_owner.invocation_work(),
                     context,
                     effect_owner.issued_snapshot().cloned(),
                     control,
