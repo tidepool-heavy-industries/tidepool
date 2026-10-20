@@ -179,6 +179,7 @@ pub struct PrivateExecutionAdmission {
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
     pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+    pub(super) host_retirements: parking_lot::Mutex<Vec<super::resident::PrivateHostRetirement>>,
 }
 
 enum PrivateExecutionCompilerBasis {
@@ -194,7 +195,6 @@ enum PrivateExecutionCompilerBasis {
         admitted: PublicVisibilitySnapshot,
         admitted_context:
             Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-        admitted_public_view: [u8; 32],
     },
 }
 
@@ -208,7 +208,6 @@ pub(super) struct WorldExecutionAdmissionFacts {
     pub(super) admitted: PublicVisibilitySnapshot,
     pub(super) admitted_context:
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-    pub(super) admitted_public_view: [u8; 32],
 }
 
 pub(super) struct CertifiedPrivateValueWrite {
@@ -616,7 +615,6 @@ impl PrivateExecutionAdmission {
                 original_source,
                 admitted,
                 admitted_context,
-                admitted_public_view,
                 ..
             } => Some(WorldExecutionAdmissionFacts {
                 published: published.clone(),
@@ -624,7 +622,6 @@ impl PrivateExecutionAdmission {
                 original_source: original_source.clone(),
                 admitted: admitted.clone(),
                 admitted_context: admitted_context.clone(),
-                admitted_public_view: *admitted_public_view,
             }),
             PrivateExecutionCompilerBasis::Finite { .. } => None,
         }
@@ -3330,9 +3327,6 @@ impl PersistentSession {
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
         let admitted_context = self.lib().current_exact_context_in(public_scope);
-        let admitted_public_view = self
-            .compile_view_digest_in(public_scope)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
         let source = published.base.source.clone();
         self.begin_private_execution_with_world(
             public_scope,
@@ -3342,7 +3336,6 @@ impl PersistentSession {
                 original_source: original_source.clone(),
                 admitted,
                 admitted_context,
-                admitted_public_view,
             },
         )
     }
@@ -3386,7 +3379,6 @@ impl PersistentSession {
             original_source: world.original_source,
             admitted: world.admitted,
             admitted_context: world.admitted_context,
-            admitted_public_view: world.admitted_public_view,
         };
         let binding_tip = self
             .binding_tip_id(private_scope)
@@ -3404,6 +3396,7 @@ impl PersistentSession {
             binding_tip,
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             final_intent: OnceLock::new(),
+            host_retirements: parking_lot::Mutex::new(Vec::new()),
         };
         let admission = store
             .as_ref()
