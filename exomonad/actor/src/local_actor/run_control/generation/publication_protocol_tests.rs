@@ -103,15 +103,18 @@ impl RunControlClient {
             assert!(endpoint
                 .send_message(PreparationMessage::PublishGeneration(transfer))
                 .is_ok());
+            let mut custody = GenerationPublicationCustody::Waiting { receiver, terminal };
             tokio::time::timeout(Duration::from_secs(10), async {
-                while terminal.get().is_none() {
+                loop {
+                    custody.observe(&mut owner);
+                    if !matches!(custody, GenerationPublicationCustody::Waiting { .. }) {
+                        break;
+                    }
                     tokio::task::yield_now().await;
                 }
             })
             .await
             .unwrap();
-            let mut custody = GenerationPublicationCustody::Waiting { receiver, terminal };
-            custody.observe(&mut owner);
             assert!(matches!(custody, GenerationPublicationCustody::Received));
             assert!(matches!(
                 owner.failure_outcome().unwrap().as_ref(),
