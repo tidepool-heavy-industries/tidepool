@@ -3364,13 +3364,12 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &projection,
-                &artifacts.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &artifacts.metadata_snapshot(),
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
         let inputs = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
         let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
         let root_owner = ExactModuleIdentity {
@@ -3456,8 +3455,7 @@ mod normalized_dependency_tests {
                         );
                         assert!(empty.dependency_support(key, product.owner()).is_none());
                         assert!(
-                            exhaustive_group_supports(empty.rows(), key, product.owner())
-                                .is_empty()
+                            exhaustive_group_supports(empty.rows(), key, product.owner()).is_empty()
                         );
                     }
                 }
@@ -3608,11 +3606,18 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         selection
-            .finish_new_product_availability(
-                &parent.metadata_snapshot(),
-                complete.native_availability(),
-            )
+            .with_new_product_dependencies(&parent.metadata_snapshot(), std::slice::from_ref(&proof))
             .unwrap();
+        let completed_root = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            parent,
+            vec![entries[&root_id].clone()],
+        )
+        .unwrap();
+        assert!(completed_root
+            .native_availability()
+            .issued_row(root_id)
+            .is_some());
         let canonical = Arc::new(ArtifactEntry::canonical(
             products[0].module_interface().unwrap().clone(),
         ));
@@ -3633,13 +3638,9 @@ mod normalized_dependency_tests {
             .unwrap();
         assert_ne!(receiving.namespace()[&canonical_id], hidden_pair.1);
         assert!(
-            NativeOriginalRequirement::from_issued_group_custody(
-                hidden_id,
-                canonical_id,
-                &receiving
-            )
-            .unwrap()
-            .is_none(),
+            NativeOriginalRequirement::from_issued_group_custody(hidden_id, canonical_id, &receiving)
+                .unwrap()
+                .is_none(),
             "new Full qualification cannot borrow another canonical scope"
         );
         let unrelated = Arc::new(ArtifactEntry::canonical(
@@ -3814,10 +3815,7 @@ mod normalized_dependency_tests {
         let imports = [PendingImportOwner::Source {
             owner: products[0].owner().clone(),
             original_ordinal: 7,
-            binder: tidepool_repr::execution_schema::testing::identity(
-                "NormalizedHidden",
-                "entry_7",
-            ),
+            binder: tidepool_repr::execution_schema::testing::identity("NormalizedHidden", "entry_7"),
         }];
         let before_bound = fixed.observed_binding_state();
         let error = inventory
@@ -3884,17 +3882,16 @@ mod normalized_dependency_tests {
         // Finish the product through the real completion issuer so the
         // selection carries issued availability rather than an unresolved
         // pending requirement.
-        let support = crate::declaration_context::issue_fixture_compiler_support(
-            projection,
-            artifacts.clone(),
+        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &artifacts,
+            vec![entry.clone()],
         )
         .unwrap();
-        selection
-            .finish_new_product_availability(
-                &artifacts.metadata_snapshot(),
-                support.native_availability(),
-            )
-            .unwrap();
+        assert!(completed
+            .native_availability()
+            .issued_row(entry.descriptor.id)
+            .is_some());
         (entry, selection)
     }
 

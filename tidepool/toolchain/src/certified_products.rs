@@ -12801,9 +12801,7 @@ pub(crate) mod tests {
 
     #[test]
     fn receipt_original_identity_selects_exact_issued_artifact_among_equal_owners() {
-        use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
-        };
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
         let product = full_native_fixture("ExactReceiptIdentity", vec![(7, vec![])], 1);
         let producer = product.module_interface().unwrap().producer_sha256();
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
@@ -12811,8 +12809,7 @@ pub(crate) mod tests {
             ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
                 .unwrap(),
         );
-        let crate::artifact_inventory::ArtifactPayload::Original(other_product) = &other.payload
-        else {
+        let crate::artifact_inventory::ArtifactPayload::Original(other_product) = &other.payload else {
             unreachable!();
         };
         assert_eq!(product.owner(), other_product.owner());
@@ -12825,11 +12822,6 @@ pub(crate) mod tests {
             .admit_shared(&inventory.empty_view(), vec![other.clone()])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        let support = crate::declaration_context::issue_fixture_compiler_support(
-            projection.clone(),
-            left.clone(),
-        )
-        .unwrap();
         let both = left.retain_custody(&right).unwrap();
         let metadata = both.metadata_snapshot();
         assert!(metadata.artifacts.contains_key(&entry.descriptor.id));
@@ -12838,10 +12830,14 @@ pub(crate) mod tests {
         let mut selected =
             CertifiedSourceSelection::from_compiler_projection(&projection, &metadata, &operation)
                 .unwrap();
-        let issued = support.native_availability();
-        selected
-            .finish_new_product_availability(&metadata, &issued)
+        let output =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selected,
+                &both,
+                vec![entry.clone()],
+            )
             .unwrap();
+        let issued = output.native_availability();
         assert_eq!(
             selected
                 .compiler_projection_from_metadata(&metadata, &BTreeSet::new())
@@ -12860,6 +12856,31 @@ pub(crate) mod tests {
                 .target_original(product.owner())
                 .unwrap()
         ));
+        let current = selected
+            .current_product(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: 7,
+                },
+                &entry,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(current.entry(), &entry));
+        let groups = current.own_group_candidates().unwrap();
+        assert_eq!(groups.bindings().len(), 1);
+        let CertifiedNativeGroupSupport::Issued(own) = current
+            .own_group_support(*groups.bindings().first().unwrap())
+            .unwrap()
+        else {
+            panic!("completed current product owns its issued proof");
+        };
+        let offered = output
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
+            .unwrap();
+        assert!(own.same_issuance(offered));
         let mut missing = metadata.as_ref().clone();
         missing.artifacts.remove(&entry.descriptor.id);
         assert!(
@@ -12872,24 +12893,16 @@ pub(crate) mod tests {
 
     #[test]
     fn receipt_new_product_identity_binds_only_actual_producing_cohort() {
-        use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
-        };
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
         let product = full_native_fixture("ProducedReceiptIdentity", vec![(7, vec![])], 1);
         let canonical = product.module_interface().unwrap();
-        let entry = Arc::new(
-            ArtifactEntry::original(canonical.producer_sha256(), product.clone()).unwrap(),
-        );
+        let entry =
+            Arc::new(ArtifactEntry::original(canonical.producer_sha256(), product.clone()).unwrap());
         let inventory = ArtifactInventory::default();
         let view = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        let support = crate::declaration_context::issue_fixture_compiler_support(
-            projection.clone(),
-            view.clone(),
-        )
-        .unwrap();
         let operation = InventoryOperation::new(Default::default());
         let mut selected = CertifiedSourceSelection::new_product_ingress();
         selected
@@ -12921,14 +12934,47 @@ pub(crate) mod tests {
             &completed[0],
             &view.metadata_snapshot().artifacts[&entry.descriptor.id]
         ));
-        let issued = support.native_availability();
-        selected
-            .finish_new_product_availability(&view.metadata_snapshot(), &issued)
+        let output =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selected,
+                &view,
+                vec![entry.clone()],
+            )
             .unwrap();
+        let issued = output.native_availability();
         assert!(Arc::ptr_eq(
-            selected.issued_native_availability().next().unwrap(),
-            issued.issued_row(entry.descriptor.id).unwrap()
+            issued
+                .issued_row(entry.descriptor.id)
+                .unwrap()
+                .target_original(product.owner())
+                .unwrap(),
+            &entry,
         ));
+        let current = selected
+            .current_product(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: 7,
+                },
+                &entry,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(current.entry(), &entry));
+        let groups = current.own_group_candidates().unwrap();
+        assert_eq!(groups.bindings().len(), 1);
+        let CertifiedNativeGroupSupport::Issued(own) = current
+            .own_group_support(*groups.bindings().first().unwrap())
+            .unwrap()
+        else {
+            panic!("completed current product owns its issued proof");
+        };
+        let offered = output
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
+            .unwrap();
+        assert!(own.same_issuance(offered));
         assert!(
             selected.complete_native_entries(&view).unwrap().is_empty(),
             "already-issued body is not a new product to reissue"
