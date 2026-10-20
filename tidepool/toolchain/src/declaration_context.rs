@@ -1707,6 +1707,7 @@ impl RequestNativeAvailability {
         )
     }
 
+    #[track_caller]
     fn for_compiler_roots(
         &self,
         roles: &CompilerInputProjection,
@@ -1805,6 +1806,12 @@ impl RequestNativeAvailability {
                 admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
             })?;
             if !has_payload(&id) {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    artifact = ?id,
+                    owner = ?row.original.descriptor.owner,
+                    direct = direct.contains(&id),
+                    caller = %std::panic::Location::caller(),
+                    "native availability payload check refused");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
                 ));
@@ -2593,17 +2600,21 @@ impl RequestCompilerInputs {
             self.artifacts(),
             &direct,
             |id| {
-                self.metadata
-                    .retained
-                    .artifacts
-                    .get(id)
-                    .is_some_and(|payload| {
-                        self.native_selection
-                            .availability
-                            .0
-                            .get(id)
-                            .is_some_and(|row| Arc::ptr_eq(payload, &row.original))
-                    })
+                let payload = self.metadata.retained.artifacts.get(id);
+                let row = self.native_selection.availability.0.get(id);
+                let same_payload = payload.zip(row).is_some_and(|(payload, row)| {
+                    Arc::ptr_eq(payload, &row.original)
+                });
+                if !same_payload {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        artifact = ?id,
+                        metadata_payload_present = payload.is_some(),
+                        availability_payload_present = row.is_some(),
+                        same_descriptor = payload.zip(row).is_some_and(|(payload, row)|
+                            payload.descriptor == row.original.descriptor),
+                        "demanded native payload identity refused");
+                }
+                same_payload
             },
             budget,
             &mut work,
