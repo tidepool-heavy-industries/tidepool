@@ -353,6 +353,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       timing <- readTimingEnabled
       let environment = prHscEnv (pprPipelineResult prepared)
           selectedCanonical = prCanonicalInterfaceAdmissions (pprPipelineResult prepared)
+          freshOwners = freshSourceOwners (preparedFreshDependencies prepared)
       canonical <- fmap Map.fromList $ fmap concat $ forM (preparedProductModules productContext) $ \preparedModule -> do
         let owner = pmModule preparedModule
             name = moduleName owner
@@ -360,7 +361,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
         case Map.lookup key selectedCanonical of
           Just (ModuleInterfaceAdmission proof)
             | isSourceOriginal (canonicalOrigin proof)
-            , not (hasFreshSourceEvidence (preparedFreshDependencies prepared) key) ->
+            , key `Set.notMember` freshOwners ->
             case Map.lookup owner (preparedRetainedOriginals productContext) of
               Just retained -> do
                 unless (admittedOriginalProof retained == proof)
@@ -377,7 +378,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       let selectedContext = productContext {preparedRetainedOriginals =
             Map.union (preparedRetainedOriginals productContext) canonical}
       finalized <- timeDetailPhase timing "module_products" "capture_finalization" $
-        capturePreparedFinalization originalInterfaces outDir prepared
+        capturePreparedFinalization originalInterfaces outDir prepared freshOwners
       let withheld = Set.fromList
             [owner | prepared' <- preparedProductModules selectedContext
               , let owner = pmModule prepared'
@@ -415,15 +416,15 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
 -- Every native encoding is independently required to have that local proof or
 -- an admitted canonical original; an unaccounted native owner still refuses.
 capturePreparedFinalization :: OriginalInterfaceArtifacts -> FilePath
-  -> PreparedPipelineResult -> IO FinalizedModuleArtifacts
-capturePreparedFinalization originals directory prepared = do
+  -> PreparedPipelineResult -> Set.Set (String,String) -> IO FinalizedModuleArtifacts
+capturePreparedFinalization originals directory prepared freshOwners = do
   let environment = prHscEnv (pprPipelineResult prepared)
       allFinalized = pprFinalizedModules prepared
       evidence = preparedFreshDependencies prepared
       fresh = Map.filter (\original ->
         let owner = mi_module (hm_iface (finalizedHomeModInfo original))
             (unit,name) = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
-        in hasFreshSourceEvidence evidence (unit,name)) allFinalized
+        in (unit,name) `Set.member` freshOwners) allFinalized
   captured <- captureFinalizedModuleArtifacts originals environment fresh
     (pprPackageImports prepared) evidence directory
   captureFinalizedModuleTypeInterfaces originals environment (Map.difference allFinalized fresh) captured
@@ -431,13 +432,15 @@ capturePreparedFinalization originals directory prepared = do
 -- Source qualification precedes native product availability. In particular,
 -- an actual fresh module begins as ProductInterfaceOnly until this publisher
 -- admits its original groups; ProductReady cannot be a source-role premise.
-hasFreshSourceEvidence :: DependencyEvidence -> (String,String) -> Bool
-hasFreshSourceEvidence evidence key = or
-  [ not (null path) && any ((== path) . dependencySourcePath) (dependencySources evidence)
+freshSourceOwners :: DependencyEvidence -> Set.Set (String,String)
+freshSourceOwners evidence = Set.fromList
+  [ (dependencyModuleUnit node,dependencyModuleName node)
   | node <- dependencyModules evidence
-  , (dependencyModuleUnit node,dependencyModuleName node) == key
   , not (dependencyModuleBoot node)
-  , let path = dependencyModuleSource node ]
+  , let path = dependencyModuleSource node
+  , not (null path), path `Set.member` paths ]
+  where
+    paths = Set.fromList (map dependencySourcePath (dependencySources evidence))
 
 
 -- Final emitted home imports need a native original group. A retained
@@ -926,6 +929,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
       Just inventory -> pure (currentOriginalFinalized inventory)
       Nothing -> timeDetailPhase timing "module_products" "capture_finalization" $
         capturePreparedFinalization originalInterfaces outDir prepared
+          (freshSourceOwners dependencies)
     (finalized,finalizedOutputs) <- materializeFinalizedModuleArtifactsWithOutputs outDir capturedFinalization
     let retained = maybe Map.empty preparedRetainedOriginals issued
         retainedProofs = Map.fromList

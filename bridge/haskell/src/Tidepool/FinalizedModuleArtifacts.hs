@@ -272,8 +272,9 @@ captureFinalizedModuleTypeInterfaces originals env selected artifacts@(Finalized
   let allTypes = previous ++ rows
   forM_ (duplicates [(exactUnit artifact,exactModule artifact) | CapturedTypeInterface artifact _ _ <- allTypes]) $ \(unit,name) ->
     throwIO (DuplicateFinalizedOwner unit name)
-  when (length allTypes + length (capturedRows artifacts) > 128)
-    (throwIO FinalizedInventoryTooLarge)
+  -- TYPE custody is not an encoded original row inventory. Its retention is
+  -- bounded by the interface and aggregate byte budgets, independently of
+  -- the fresh original producer's row allowance.
   let total = sum [artifactLength body | CapturedTypeInterface _ body _ <- allTypes]
         + sum [artifactLength interface + artifactLength package + maybe 0 artifactLength core
           | CapturedModule _ _ _ interface package core _ _ <- capturedRows artifacts]

@@ -74,9 +74,9 @@ import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
-  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
+  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, canonicalProofOriginalBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, emptyFinalizedModuleArtifacts, finalizedTypeInterfaces, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts, FinalizedArtifactFailure(..))
-import Tidepool.HomeProducts (AdmittedFinalizedOriginal, admitCompiledCanonicalOriginal, admittedOriginalProof, CandidateCoreFailure(..))
+import Tidepool.HomeProducts (AdmittedFinalizedOriginal, admitCompiledCanonicalOriginal, admittedOriginalModule, admittedOriginalProof, CandidateCoreFailure(..))
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), ProductAvailability(..))
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts, retainTypeInterfaceCaptures, retainedTypeInterfaceBody)
 import Tidepool.GhcPipeline
@@ -413,7 +413,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     (Map.lookup key (scopeModuleInterfaceProofs makeScope))
   assert (canonicalCertificateSha256 makeProof == canonicalCertificateSha256 proof)
     "independent delivery changed the original canonical identity"
-  promotionScopeChecks env work scope proof
+  promotionScopeChecks env work scope proof finalized roots
   capturedConsumerChecks libdir work scope artifact bytes summary proof
   -- Relocated receipt views may disappear without revoking the compiler-issued
   -- byte owner. A new materialization writes held bodies; its fresh destination
@@ -969,10 +969,11 @@ snapshotExecutableHook = withTiming $ withScratch $ \producer -> withScratch $ \
 
 -- Metadata proof validation, executable promotion and scope extension form one
 -- custody history. Exact byte budgets cover every captured interface, certificate, sidecar and Core.
-promotionScopeChecks :: HscEnv -> FilePath -> ExactScope -> CanonicalInterfaceProof -> IO ()
-promotionScopeChecks env work scope proof = do
+promotionScopeChecks :: HscEnv -> FilePath -> ExactScope -> CanonicalInterfaceProof
+  -> FinalizedModule -> PackageImportEvidence -> IO ()
+promotionScopeChecks env work scope proof finalized roots = do
   let key = ("main","FinalizedCoreFixture")
-  row@(iface,packages,_) <- case scopeInterfaces scope of
+  row@(iface,packages,packagesSha) <- case scopeInterfaces scope of
     [row] -> pure row
     _ -> fail "promotion fixture requires one original interface"
   core@(corePath,_) <- maybe (fail "promotion fixture lacks defining Core") pure
@@ -987,6 +988,30 @@ promotionScopeChecks env work scope proof = do
       descriptor <- metadataProof
       metadata <- captureCanonicalProofs Nothing [(descriptor,MetadataInterfaceUse)]
       assert (length metadata == 1) "metadata-only promotion required absent Core"
+      captured <- case metadata of
+        [selected] -> pure selected
+        _ -> fail "metadata capture lost its selected canonical proof"
+      absentCore <- try (admittedInterfaceCoreBytes (ModuleInterfaceAdmission captured))
+        :: IO (Either IOException BS.ByteString)
+      assert (either (const True) (const False) absentCore)
+        "metadata proof unexpectedly held the absent original Core payload"
+      current <- admitCompiledCanonicalOriginal env captured finalized roots
+      assert (admittedOriginalProof current == captured)
+        "current finalization replaced its metadata-only canonical proof"
+      currentCore <- requireRight =<< captureFinalizedCore (admittedOriginalModule current)
+      assert (artifactBytes currentCore == bytes)
+        "canonical admission did not retain its actual current finalized Core"
+      packageBody <- BS.readFile packages
+      bracket (removeFile packages) (\_ -> BS.writeFile packages packageBody) $ \_ -> do
+        retainedPackages <- canonicalProofOriginalBytes (admittedOriginalProof current) packages packagesSha
+        assert (retainedPackages == packageBody)
+          "current canonical original lost its captured downstream package witness"
+      changed <- newFinalizedModule env (finalizedHomeModInfo finalized)
+        (finalizedTidyGuts finalized) {cg_binds=[]}
+      refused <- try (admitCompiledCanonicalOriginal env captured changed roots)
+        :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+      assert (case refused of Left CandidateOriginalCoreMismatch -> True; _ -> False)
+        "metadata-only canonical proof accepted different current Core"
       unowned <- try (admittedInterfaceCoreBytes (ModuleInterfaceAdmission descriptor))
         :: IO (Either IOException BS.ByteString)
       assert (either (const True) (const False) unowned)

@@ -20,7 +20,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.ExtractUtil (shaHex)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
@@ -135,9 +135,12 @@ admitCompiledCanonicalOriginal env proof original packages = do
   expectedInterface <- canonicalProofInterfaceBody proof artifact
   unless (interface == expectedInterface) (throwIO CandidateOriginalInterfaceMismatch)
   either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface (finalizedHomeModInfo original)))
+  -- The compiler owns this current Core body. Its admitted canonical seal
+  -- verifies identity without acquiring an old Core payload from metadata.
   core <- captureFinalizedCore original >>= either (throwIO . CandidateCoreDecodeFailure) pure
-  expectedCore <- admittedInterfaceCoreBody (ModuleInterfaceAdmission proof)
-  unless (core == expectedCore) (throwIO CandidateOriginalCoreMismatch)
+  expectedCore <- maybe (throwIO CandidateCoreMissing) pure (canonicalCoreArtifact proof)
+  unless (artifactSha256 core == canonicalCoreSha256 expectedCore)
+    (throwIO CandidateOriginalCoreMismatch)
   expectedPackages <- canonicalProofOriginalBody proof packagePath packageSha
   unless (encodePackageImports artifact packages == artifactBytes expectedPackages)
     (throwIO CandidateOriginalPackagesMismatch)
