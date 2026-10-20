@@ -35,6 +35,23 @@ Retained facts may outlive that allowance; they do not authorize later effects.
 Package cells keep their existing GHC owner, and changed projection inputs still
 use the original worklist's validation and fallback.
 
+World native preparation uses the same worklist with an optional completed-product
+handoff. The private issuer certifies its guarded completion and pairs the result
+with the actual pending dependency owner; a later stage must have borrowed that
+exact predecessor. Source captures retain the original local finalization and
+canonical proof without declaring native readiness. Newly reached source bodies
+are prepared from that completed owner without frontend replay. Each operation
+keeps its own source-resolution evidence.
+
+Staged certification retains exact GHC Name-to-symbol associations together with
+its native certification context. Same-Name conflicts refuse; native projection
+and recovery consume the same map. Do not reconstruct native availability from
+HPT contents or occurrence spelling. The NameCache association does not freeze
+Id/details knots: GHC still rehydrates affected SOURCE cycles when needed.
+Canonical metadata consumers require the opaque captured-metadata value from
+the existing input capture owner; descriptor presence does not establish custody
+or native body permission.
+
 ## Concrete actor specifications
 
 A module that defines a polymorphic spec has not necessarily instantiated its

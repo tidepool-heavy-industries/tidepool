@@ -23,7 +23,7 @@ module Tidepool.GhcPipeline
   , prTargetRdrEnv, prTargetTcGblEnv
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
-  , WorldSourceOriginal, acquireWorldSourceOriginal, worldSourceOriginalFinalization, captureWorldSourceOriginals
+  , WorldSourceOriginal, acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
   , FinalizedExecutionFailure(..)
   , RetainedCompilerArtifact, retainedCompilerInterface, retainedCompilerArtifactClosure
     -- * Bound-value type analysis
@@ -229,7 +229,7 @@ import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedH
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, LocalFinalizedAdmission, finalizedLocalAdmissions, localFinalizedInterface
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
-  , matchesCapturedFinalization, finalizedInterfaceSeals )
+  , matchesCapturedFinalization, localFinalizedPackageEvidence, finalizedInterfaceSeals )
 import Tidepool.HomeProducts
   ( hydrateCandidateHomeProductsWithOriginalsUsing, validateCandidateCompilerViewProfile, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
@@ -515,10 +515,13 @@ data PreparedSourceRoute
 -- One earlier completed source paired with the capture that authenticated
 -- its exact compiler object and package facts. It is compiler availability;
 -- the consuming worklist still prepares and certifies any native groups.
-data WorldSourceOriginal = WorldSourceOriginal FinalizedModule LocalFinalizedAdmission
+data WorldSourceOriginal = WorldSourceOriginal !FinalizedModule !LocalFinalizedAdmission
 
 worldSourceOriginalFinalization :: WorldSourceOriginal -> FinalizedModule
 worldSourceOriginalFinalization (WorldSourceOriginal original _) = original
+
+worldSourceOriginalPackages :: WorldSourceOriginal -> PackageImportEvidence
+worldSourceOriginalPackages (WorldSourceOriginal _ proof) = localFinalizedPackageEvidence proof
 
 acquireWorldSourceOriginal :: PreparedPipelineResult -> Module -> LocalFinalizedAdmission
   -> IO (Maybe WorldSourceOriginal)
@@ -530,7 +533,7 @@ acquireWorldSourceOriginal prepared owner proof = case ownedPprDependencies prep
     unless (selectedDomain == domain && (exactUnit artifact,exactModule artifact) ==
         (unitString (moduleUnit owner),moduleNameString (moduleName owner))) (throwIO WorldCellCorrupt)
     case Map.lookup owner versions of
-      Nothing -> pure Nothing
+      Nothing -> throwIO WorldCellCorrupt
       Just byIngress -> do
         selected <- foldM (\known node -> do
           let payload = gmePayload (completedModuleEntry node)

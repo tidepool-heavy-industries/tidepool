@@ -36,7 +36,6 @@ import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
-import Data.List (sort, nub)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe, isNothing)
@@ -79,7 +78,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader, exactInterfaceSummary )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
-  , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
+  , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication
@@ -98,7 +97,7 @@ import Tidepool.ExecutionProjection
   , rawOriginalProductOwner
   , OriginalProjectionCache, newOriginalProjectionCache, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
-  , rawOriginalProductBinders, rawOriginalProductDemands
+  , rawOriginalProductDemands
   , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity )
@@ -117,15 +116,15 @@ import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, finalizedTypeInterfaces
   , materializeFinalizedModuleArtifactsWithOutputs, LocalFinalizedAdmission
-  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedInterfaceBody, localFinalizedSourceSha256
+  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
   , localFinalizedPackageBody, localFinalizedPackageEvidence
   )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
-  , pprReuseContext, pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
+  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
   , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
   , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
-  , acquireWorldSourceOriginal, worldSourceOriginalFinalization, captureWorldSourceOriginals
+  , acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
   , preparedFreshDependencies, preparedExactCompilation
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
@@ -143,7 +142,6 @@ import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule, admitCompiledCanonicalOriginal, CandidateCoreFailure(..)
   , admittedOriginalProof, admittedOriginalInterface, originalVersionLookup, originalVersionSeal )
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
-import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing
   ( readTimingEnabled, timePhase, timeDetailPhase, timeTaskDetailPhase, TaskOwner(..), TaskComponent(..), emitCount
   , ReuseContext, ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
@@ -254,7 +252,7 @@ nameCacheIdentity environment = let names = hsc_NC environment in (nsUniqChar na
 
 mergeOriginalBindings :: Map.Map Name SymbolIdentity -> Map.Map Name SymbolIdentity
   -> IO (Map.Map Name SymbolIdentity)
-mergeOriginalBindings previous additions = foldM insertBinding previous (Map.toAscList additions)
+mergeOriginalBindings initial additions = foldM insertBinding initial (Map.toAscList additions)
   where
     insertBinding known (name,identity) = case Map.lookup name known of
       Just previous | previous /= identity -> throwIO (CertifiedNameConflict previous identity)
@@ -666,11 +664,11 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
               (certifiedSourceCaptures certified) of
             Nothing -> pure Nothing
             Just (SourceOriginalCapture proof capture) -> do
-              completed <- acquireWorldSourceOriginal prepared owner capture
+              acquired <- acquireWorldSourceOriginal prepared owner capture
               traverse (\original -> do
                 captured <- captureCanonicalMetadata Nothing proof
                 admitCompiledCanonicalOriginal env captured
-                  (worldSourceOriginalFinalization original) (localFinalizedPackageEvidence capture)) completed
+                  (worldSourceOriginalFinalization original) (worldSourceOriginalPackages original)) acquired
         case local of
           Nothing -> acquireCanonical siblings owner producer missing
           Just original -> do
