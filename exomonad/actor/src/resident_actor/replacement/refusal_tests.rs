@@ -1224,6 +1224,38 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
     let initial_a = receive(&mut events).await;
     let initial_b = receive(&mut events).await;
     assert_eq!((initial_a.slot, initial_b.slot), (0, 1));
+    // Another real recipient owns a registration of the same B executable.
+    // Capturing its slot cannot keep it executable after its namespace drops.
+    let (drop_send, mut drop_events) = tokio::sync::mpsc::unbounded_channel();
+    let (drop_recipient, drop_address, drop_task) = recipient_fixture.spawn(drop_send, None).await;
+    let drop_slots = SourceSlots::default();
+    drop_slots.bind_owner(drop_recipient.identity());
+    drop_slots.install_connections(
+        behavior
+            .environment
+            .requests
+            .attach_sources(drop_recipient.identity(), drop_recipient.clone(), &[])
+            .unwrap(),
+    );
+    let attach_claim = context_b.source_dependency().claim().unwrap();
+    drop_slots
+        .attach(slots.binding(1).unwrap(), |connections, slot| {
+            connections.attach_lifecycle(slot, &recipient);
+            Ok(())
+        })
+        .unwrap();
+    drop(attach_claim);
+    let drop_initial = receive(&mut drop_events).await;
+    assert!(matches!(
+        drop_slots.admit_delivery(drop_initial),
+        SourceDeliveryAdmission::Admitted(_)
+    ));
+    let dropped_capture = drop_slots.capture_source(source_b.source_admission());
+    drop(drop_slots);
+    assert!(matches!(
+        dropped_capture[0].observation().state,
+        SourceRegistrationState::Closed { rejected: 0 }
+    ));
     let first = match slots.admit_delivery(initial_a.clone()) {
         SourceDeliveryAdmission::Admitted(delivery) => delivery,
         _ => panic!("A admits before fence"),
@@ -1458,10 +1490,15 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         refused_b[0].observation().state,
         SourceRegistrationState::Open { deferred: 2, .. }
     ));
+    slots.clear();
     assert!(matches!(
-        refused_b[0].close().state,
+        refused_b[0].observation().state,
         SourceRegistrationState::Closed { rejected: 2 }
     ));
+    assert!(
+        weak_b.upgrade().is_none(),
+        "terminal clear releases B even while its capture is retained"
+    );
     assert!(recipient.terminal().requested_shutdown().is_none());
     fence
         .reopen_with(source_a.original_source(), |reopen| {
@@ -1474,6 +1511,8 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
     drop(captured_a);
     drop(behavior);
     address.stop(None);
+    drop_address.stop(None);
     task.await.unwrap();
+    drop_task.await.unwrap();
     owner.finish().await;
 }

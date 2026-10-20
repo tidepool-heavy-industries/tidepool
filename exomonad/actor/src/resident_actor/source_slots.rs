@@ -164,25 +164,7 @@ impl CapturedSourceRegistration {
         if source_relation(&source, &self.cutoff) != SourceRegistrationDependency::Dependent {
             return self.observation();
         }
-        let discarded = {
-            let mut state = self.slot.state.lock();
-            match &*state {
-                SourceSlotState::Open(open)
-                    if open.binding.execution.source_dependency() == &source =>
-                {
-                    let closed = SourceSlotState::Closed {
-                        target: open.binding.target,
-                        rejected: open.deferred.len(),
-                        settled_delivery: open.next_delivery - 1,
-                    };
-                    Some(std::mem::replace(&mut *state, closed))
-                }
-                SourceSlotState::Closed { .. } | SourceSlotState::Open(_) => None,
-            }
-        };
-        // Subscription guards can enter RequestRegistry; never drop them under
-        // a slot borrow or a retirement/source gate.
-        drop(discarded);
+        close_slot(&self.slot, Some(&source));
         self.observation()
     }
 }
@@ -194,6 +176,15 @@ struct SourceSlotsState {
     owner: Option<ActorRef>,
     slots: Vec<Arc<SourceSlot>>,
     connections: Option<ActorSourceConnections>,
+}
+impl Drop for SourceSlotsState {
+    fn drop(&mut self) {
+        // Captured observations retain slots, not their canonical namespace.
+        // The last namespace owner must still release executable custody.
+        for slot in &self.slots {
+            close_slot(slot, None);
+        }
+    }
 }
 
 /// Held by source() across both map_source and run_receiver. Source retirement
@@ -608,8 +599,34 @@ impl SourceSlots {
             let mut state = self.0.lock();
             (std::mem::take(&mut state.slots), state.connections.take())
         };
+        for slot in &slots {
+            close_slot(slot, None);
+        }
         drop((slots, connections));
     }
+}
+
+fn close_slot(slot: &Arc<SourceSlot>, expected: Option<&SourceDependency>) {
+    let discarded = {
+        let mut state = slot.state.lock();
+        match &*state {
+            SourceSlotState::Open(open)
+                if expected
+                    .is_none_or(|source| open.binding.execution.source_dependency() == source) =>
+            {
+                let closed = SourceSlotState::Closed {
+                    target: open.binding.target,
+                    rejected: open.deferred.len(),
+                    settled_delivery: open.next_delivery - 1,
+                };
+                Some(std::mem::replace(&mut *state, closed))
+            }
+            _ => None,
+        }
+    };
+    // Native subscription guards and executable custody may enter other owners.
+    // Destruct them only after the slot borrow is released.
+    drop(discarded);
 }
 
 fn resume_slot(slot: &Arc<SourceSlot>) {
