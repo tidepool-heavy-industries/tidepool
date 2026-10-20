@@ -1286,6 +1286,10 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("selected original {artifact:?} is outside retained custody")]
+    MissingRetainedCustody {
+        artifact: crate::artifact_inventory::ArtifactId,
+    },
     #[error("compiler product certificate duplicate source binder: {0:?}")]
     DuplicateSourceBinder(Box<SourceBinderConflict>),
     #[error("compiler product original group conflict: {0:?}")]
@@ -2749,9 +2753,7 @@ impl ReceiptNativeSelection {
         let retained = metadata
             .artifacts
             .get(&id)
-            .ok_or(CertificationError::Mismatch(
-                "selected original is outside retained custody",
-            ))?;
+            .ok_or(CertificationError::MissingRetainedCustody { artifact: id })?;
         let ArtifactPayload::Original(product) = &retained.payload else {
             return Err(CertificationError::Mismatch("selected original payload"));
         };
@@ -13108,6 +13110,10 @@ pub(crate) mod tests {
             (original.clone(), &interface_only),
             (product(current + 32), &view),
         ] {
+            let expected_missing = ArtifactEntry::original(producer.sha256(), missing.clone())
+                .unwrap()
+                .descriptor
+                .id;
             let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(
                 ArtifactEntry::canonical(canonical.clone()),
             )])
@@ -13145,7 +13151,8 @@ pub(crate) mod tests {
             );
             assert!(matches!(result,
                 Err(crate::CompileError::CompilerEvidence(error))
-                if matches!(*error, CertificationError::Mismatch("complete native selection payload"))));
+                if matches!(*error, CertificationError::MissingRetainedCustody { artifact }
+                    if artifact == expected_missing)));
         }
     }
 

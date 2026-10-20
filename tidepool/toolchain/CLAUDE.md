@@ -361,6 +361,13 @@ definitions. Ordinals and naming patterns do not issue binder identity.
 
 ## Execution failure diagnostics
 
+Missing selected-original custody retains its exact `ArtifactId` through
+certification, recovery and `CompilerEvidenceFailure::MissingRetainedCustody`.
+It remains `VersionSkew`, distinct from missing canonical custody, wrong-owner
+evidence or unavailable filesystem observation. The alpha diagnostic format
+adds the closed `missing_retained_custody` variant; older readers refuse unknown
+variants and require the matching binary. No fallback reconstructs custody.
+
 The isolated libtest runner's `--output-dir` owns one fresh diagnostic root per
 case and explicitly sets `TIDEPOOL_TEST_DIAGNOSTIC_SCOPE=1`. Only that mode keeps
 original compiler scratch under the case root after successful compilation,

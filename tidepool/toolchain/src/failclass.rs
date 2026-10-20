@@ -162,6 +162,9 @@ pub enum CompilerTransactionPublicationFailure {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompilerEvidenceFailure {
     Interrupted,
+    MissingRetainedCustody {
+        artifact: crate::artifact_inventory::ArtifactId,
+    },
     SourceEvidence {
         input: std::path::PathBuf,
         failure: crate::cache::DependencyEvidenceFailure,
@@ -215,6 +218,12 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
         use tidepool_repr::execution_schema::ParseError;
         match error {
             CertificationError::Interrupted(_) => Self::Interrupted,
+            CertificationError::MissingRetainedCustody { artifact }
+            | CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::MissingRetainedCustody { artifact },
+            ) => Self::MissingRetainedCustody {
+                artifact: *artifact,
+            },
             CertificationError::CapturedModulePayload(
                 RecoveryArtifactError::CompletedSourceEvidence { input, failure },
             ) => Self::SourceEvidence {
@@ -418,7 +427,8 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
                     failure: EvidenceReadCause::NonAbsolutePath,
                     ..
                 }
-                | CompilerEvidenceFailure::Contract => FailureClass::VersionSkew,
+                | CompilerEvidenceFailure::Contract
+                | CompilerEvidenceFailure::MissingRetainedCustody { .. } => FailureClass::VersionSkew,
                 _ => FailureClass::Infra,
             };
             FailureEnvelope::new(class, Phase::Compile, err.to_string())
