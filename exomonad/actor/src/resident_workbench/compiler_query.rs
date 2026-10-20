@@ -394,12 +394,16 @@ pub(super) struct NameList {
 
 impl NameList {
     fn from_entries(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> Self {
-        // The worker is asked for at most `QUERY_RESULT_LIMIT` entries, so the
-        // decoder's list is already bounded. Count what arrived before the
-        // defensive trim; never recompute the count from the retained prefix.
-        // `observed == limit` means "at least limit": the worker stopped at the
-        // cap, so the true scope size is not observable.
-        let observed = entries.len();
+        // The worker deduplicates candidate names and then bounds the encoded
+        // list at `QUERY_RESULT_LIMIT`, so a conforming decode carries at most
+        // that many distinct entries. `observed` is the retained count, not a
+        // scope total: `observed == limit` means "at least limit" and the true
+        // scope size is never counted.
+        //
+        // A longer decode means the worker ignored its budget. Report the cap
+        // rather than the decoded length so the wire never carries a count the
+        // actor cannot justify; the retained entries are still trimmed below.
+        let observed = entries.len().min(QUERY_RESULT_LIMIT);
         let entries = entries
             .into_iter()
             .take(QUERY_RESULT_LIMIT)
@@ -464,10 +468,12 @@ pub(super) struct TypeMatches {
 
 impl TypeMatches {
     fn from_matches(matches: Vec<RuntimeTypeMatch>, provenance: ScopeProvenance) -> Self {
-        // The worker bounds the encoded match list at the requested budget, so
-        // the decoder's list is already capped. Count what arrived before the
-        // defensive trim; `observed == limit` means "at least limit".
-        let observed = matches.len();
+        // The worker deduplicates candidates and then bounds the encoded
+        // match list at the requested budget, so a conforming decode carries
+        // at most `QUERY_RESULT_LIMIT` distinct matches. `observed == limit`
+        // means "at least limit"; an over-long decode is capped at the budget
+        // so no unsupported total crosses the wire.
+        let observed = matches.len().min(QUERY_RESULT_LIMIT);
         let matches = matches
             .into_iter()
             .take(QUERY_RESULT_LIMIT)
@@ -1335,6 +1341,10 @@ mod tests {
         fn inspection_queries(&self) -> Vec<InspectionQuery> {
             match planned(self) {
                 CompilerPlan::Queries(queries) => queries,
+                // `currentScopeView` is answered from the held view and
+                // submits nothing, exactly as it did before planning became
+                // explicit.
+                CompilerPlan::Answered(CompilerQueryAnswer::ScopeView(_)) => Vec::new(),
                 CompilerPlan::Answered(_) => {
                     panic!("expected compiler queries from {}", self.operation())
                 }
@@ -1656,6 +1666,40 @@ mod tests {
     }
 
     #[test]
+    fn row_fit_targets_classify_every_reference_shape() {
+        let view = live();
+        // Empty defining module: a local binder in the executing scope.
+        assert!(matches!(
+            row_fit_target(&identifier("", "local"), &view),
+            RowFitTarget::CurrentScope
+        ));
+        // The live declaration generation and a retained value generation.
+        assert!(matches!(
+            row_fit_target(&identifier("Tidepool.Session.Lib.G4", "local"), &view),
+            RowFitTarget::CurrentScope
+        ));
+        assert!(matches!(
+            row_fit_target(&identifier("Tidepool.Session.Val.G3", "local"), &view),
+            RowFitTarget::CurrentScope
+        ));
+        // A replaced declaration generation and a reserved spelling that names
+        // no module: held-state unknown, never a current-scope read.
+        assert!(matches!(
+            row_fit_target(&identifier("Tidepool.Session.Lib.G3", "local"), &view),
+            RowFitTarget::StaleSessionModule
+        ));
+        assert!(matches!(
+            row_fit_target(&identifier("Tidepool.Session.Lib.G", "local"), &view),
+            RowFitTarget::StaleSessionModule
+        ));
+        // A public module keeps its keyed owner read.
+        assert!(
+            matches!(row_fit_target(&identifier("Data.Thing", "thing"), &view),
+                RowFitTarget::Module(module) if module == "Data.Thing")
+        );
+    }
+
+    #[test]
     fn row_fit_refusals_name_the_executing_scope_for_local_references() {
         let view = provenance(4, "world");
         for module in ["", "Tidepool.Session.Lib.G3"] {
@@ -1707,7 +1751,9 @@ mod tests {
             CompilerQueryAnswer::Names(names) => {
                 assert_eq!(names.entries.len(), QUERY_RESULT_LIMIT);
                 assert_eq!(names.limit, QUERY_RESULT_LIMIT);
-                assert!(names.observed > names.limit);
+                // An over-long decode reads as "at least limit", never as a
+                // total the actor cannot observe.
+                assert_eq!(names.observed, names.limit);
             }
             other => panic!("expected a name list, got {}", answer_name(&other)),
         }
@@ -1739,7 +1785,7 @@ mod tests {
             CompilerQueryAnswer::Matches(found) => {
                 assert_eq!(found.matches.len(), QUERY_RESULT_LIMIT);
                 assert_eq!(found.limit, QUERY_RESULT_LIMIT);
-                assert!(found.observed > found.limit);
+                assert_eq!(found.observed, found.limit);
             }
             other => panic!("expected type matches, got {}", answer_name(&other)),
         }
@@ -2324,7 +2370,7 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_bounds_rows_and_preserves_the_observed_count() {
+    fn an_over_long_enumeration_reads_as_at_least_the_budget() {
         let entry_view = provenance(1, "world");
         let entries = (0..QUERY_RESULT_LIMIT + 3)
             .map(|index| {
@@ -2346,7 +2392,10 @@ mod tests {
         match answer {
             CompilerQueryAnswer::Names(names) => {
                 assert_eq!(names.entries.len(), QUERY_RESULT_LIMIT);
-                assert_eq!(names.observed, QUERY_RESULT_LIMIT + 3);
+                // A conforming worker stops at the budget, so a longer list
+                // means the worker ignored it. The wire still reports no more
+                // than the budget: "at least limit", never an unjustified total.
+                assert_eq!(names.observed, names.limit);
                 assert_eq!(names.limit, QUERY_RESULT_LIMIT);
                 assert_eq!(names.provenance, entry_view);
             }
