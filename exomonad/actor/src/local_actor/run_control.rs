@@ -168,7 +168,7 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
-    lost_retirements: Vec<generation::RetainedGenerationRetirementRecord>,
+    lost_retirements: Vec<generation::GenerationRetirementCore>,
     retirement_discards: Vec<generation::GenerationRetirementDiscard>,
     recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
@@ -235,7 +235,7 @@ enum RunControlNativeExit {
 }
 
 struct RunControlNativeLoss {
-    attempts: Vec<generation::RetainedGenerationRetirementRecord>,
+    attempts: Vec<generation::GenerationRetirementCore>,
     worker_transfers: HashMap<u64, WorkerTransfer>,
     resource_transfers: HashMap<u64, ResourceTransfer>,
 }
@@ -296,7 +296,7 @@ impl RunControlNativeCleanup {
                         .filter(|record| {
                             matches!(
                                 record,
-                                generation::RetainedGenerationRetirementRecord::Active(_)
+                                generation::GenerationRetirementCore::Active(_)
                             )
                         })
                         .count(),
@@ -306,12 +306,12 @@ impl RunControlNativeCleanup {
                         .filter(|record| {
                             matches!(
                                 record,
-                                generation::RetainedGenerationRetirementRecord::Completed { .. }
+                                generation::GenerationRetirementCore::Completed { .. }
                             )
                         })
                         .count(),
                     sources_settled: custody.attempts.iter().filter(|record|
-                        matches!(record, generation::RetainedGenerationRetirementRecord::SourcesSettled { .. })).count(),
+                        matches!(record, generation::GenerationRetirementCore::SourcesSettled { .. })).count(),
                     worker_transfers: custody.worker_transfers.len(),
                     resource_transfers: custody.resource_transfers.len(),
                 },
@@ -1215,7 +1215,7 @@ fn begin_reservation_after(
             reply: Some(reply),
             dependency,
             preparation: None,
-            retirement: generation::GenerationRetirementRecord::Idle,
+            retirement: generation::GenerationRetirementRecord::idle(),
         },
     );
     if state
@@ -1303,9 +1303,9 @@ impl Actor for RunControl {
                     state
                         .reservations
                         .get(&actor)
-                        .and_then(|record| match &record.retirement {
-                            generation::GenerationRetirementRecord::Completed(completion) => {
-                                Some(completion.outcome.clone())
+                        .and_then(|record| match &record.retirement.core {
+                            generation::GenerationRetirementCore::Completed { completion, .. } => {
+                                Some(completion.clone())
                             }
                             _ => None,
                         });

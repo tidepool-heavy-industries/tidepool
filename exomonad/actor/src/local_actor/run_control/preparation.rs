@@ -2,8 +2,8 @@
 use super::*;
 
 use crate::resident_workbench::{
-    ActorGenerationCommit, ActorGenerationPublicationOperation,
-    ActorGenerationPublicationSettlement, ActorPublicationAttemptObserver, ReservedActorGeneration,
+    ActorGenerationCommit, ActorGenerationPublicationDriver, ActorGenerationPublicationSettlement,
+    ActorPublicationAttemptObserver, ReservedActorGeneration,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -12,6 +12,7 @@ pub(super) enum PublicationNonStartKind {
     SpawnFailed,
     WorkerSendFailed,
     AttemptChanged,
+    CandidateChanged,
     TransferOwnerLostBeforeExecute,
 }
 
@@ -20,6 +21,7 @@ pub(super) enum PublicationNonStart {
     SpawnFailed(ractor::SpawnErr),
     WorkerSendFailed,
     AttemptChanged,
+    CandidateChanged,
     TransferOwnerLostBeforeExecute,
 }
 
@@ -30,6 +32,7 @@ impl PublicationNonStart {
             Self::SpawnFailed(_) => PublicationNonStartKind::SpawnFailed,
             Self::WorkerSendFailed => PublicationNonStartKind::WorkerSendFailed,
             Self::AttemptChanged => PublicationNonStartKind::AttemptChanged,
+            Self::CandidateChanged => PublicationNonStartKind::CandidateChanged,
             Self::TransferOwnerLostBeforeExecute => {
                 PublicationNonStartKind::TransferOwnerLostBeforeExecute
             }
@@ -127,7 +130,7 @@ impl Drop for PublicationWriter {
 /// The transfer retains the actual unexecuted payload across every queue/spawn
 /// boundary. Its Drop first returns Reserved, then releases the publisher.
 pub(super) struct PublicationTransfer {
-    operation: Option<ActorGenerationPublicationOperation>,
+    payload: Option<(ReservedActorGeneration, ActorGenerationPublicationDriver)>,
     writer: PublicationWriter,
     nonstart: PublicationNonStart,
 }
@@ -157,11 +160,12 @@ impl PublicationTransfer {
     }
 
     pub(super) fn new(
-        operation: ActorGenerationPublicationOperation,
+        reserved: ReservedActorGeneration,
+        publisher: ActorGenerationPublicationDriver,
         writer: PublicationWriter,
     ) -> Self {
         Self {
-            operation: Some(operation),
+            payload: Some((reserved, publisher)),
             writer,
             nonstart: PublicationNonStart::TransferOwnerLostBeforeExecute,
         }
@@ -172,19 +176,27 @@ impl PublicationTransfer {
     }
 
     async fn run(mut self) {
-        let Some(operation) = self.operation.take() else {
+        let Some((reserved, publisher)) = self.payload.take() else {
             return;
         };
-        let settlement = operation.run().await;
-        self.writer
-            .deliver(PublicationDelivery::Settled(settlement));
+        match publisher.run(reserved).await {
+            Ok(settlement) => self
+                .writer
+                .deliver(PublicationDelivery::Settled(settlement)),
+            Err((reserved, publisher)) => {
+                self.writer.deliver(PublicationDelivery::NotStarted {
+                    reserved,
+                    reason: PublicationNonStart::CandidateChanged,
+                });
+                drop(publisher);
+            }
+        }
     }
 }
 
 impl Drop for PublicationTransfer {
     fn drop(&mut self) {
-        if let Some(operation) = self.operation.take() {
-            let (reserved, discard) = operation.into_retained_parts();
+        if let Some((reserved, publisher)) = self.payload.take() {
             let reason = std::mem::replace(
                 &mut self.nonstart,
                 PublicationNonStart::TransferOwnerLostBeforeExecute,
@@ -193,7 +205,7 @@ impl Drop for PublicationTransfer {
                 .deliver(PublicationDelivery::NotStarted { reserved, reason });
             // Receiver custody precedes disposal, including a panicking test
             // publisher destructor. No terminal/RunState lock is held here.
-            drop(discard);
+            drop(publisher);
         }
     }
 }
