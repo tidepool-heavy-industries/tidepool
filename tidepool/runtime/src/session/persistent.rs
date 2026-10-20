@@ -6869,6 +6869,7 @@ mod checkpoint_scope_tests {
         ));
         assert_eq!(session.bindings.mutation_revision(), before);
         mint_fixture_origin_with_custody(&mut session, private, owner.clone(), &[old_id]);
+        let publication_revision = session.bindings.mutation_revision();
         let custody = session
             .resolve_native_binding_custody(private, std::slice::from_ref(&requirement))
             .unwrap();
@@ -6884,7 +6885,7 @@ mod checkpoint_scope_tests {
                 &[owner],
             )
             .unwrap();
-        assert_eq!(session.bindings.mutation_revision(), before);
+        assert_eq!(session.bindings.mutation_revision(), publication_revision);
         session.bindings.commit_exact_binding_promotion(prepared);
         assert_eq!(
             session
