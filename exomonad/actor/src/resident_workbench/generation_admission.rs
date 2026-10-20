@@ -1533,6 +1533,20 @@ mod tests {
     }
 
     #[test]
+    fn publication_diagnostic_refusal_preserves_its_typed_cause() {
+        let error = crate::ResidentActorWorkbenchError::OperationDiagnostic(
+            crate::WorkbenchDiagnosticRefusal::InvocationChanged,
+        );
+        assert_eq!(
+            error.publication_failure_cause(),
+            super::super::ActorPublicationFailureCause::OperationDiagnostic(
+                crate::WorkbenchDiagnosticRefusal::InvocationChanged,
+            )
+        );
+        assert!(!error.requires_recovery());
+    }
+
+    #[test]
     fn publication_recovery_requirement_survives_owned_error_wrappers() {
         use super::super::ActorPublicationFailureCause as Cause;
         use tidepool_runtime::session::{
