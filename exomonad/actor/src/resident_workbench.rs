@@ -3583,7 +3583,7 @@ impl ActorGenerationCommit {
         self.into_initial_generation()
     }
 
-    pub(crate) fn into_initial_generation(
+    fn into_initial_generation(
         self,
     ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
         match self {
