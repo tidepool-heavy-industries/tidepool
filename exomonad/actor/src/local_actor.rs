@@ -277,6 +277,18 @@ pub(crate) enum LifetimeTransferError {
 }
 
 impl KernelContext {
+    pub(crate) async fn publish_initial_actor_generation(
+        &self,
+        preparation: crate::resident_workbench::ActorGenerationRetirementPreparation,
+    ) -> Result<
+        Arc<crate::resident_workbench::ActorGeneration>,
+        run_control::InitialGenerationPublicationError,
+    > {
+        self.directory
+            .publish_initial_generation(preparation, self.lifecycle.clone())
+            .await
+    }
+
     pub(crate) async fn creation_descendant(
         &self,
         owner: ActorRef,
