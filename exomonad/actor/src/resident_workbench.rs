@@ -25121,13 +25121,17 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap();
             assert!(warm_view.exact_declaration_context().is_none());
-            let first_bootstrap = workbench
+            let (first_bootstrap, first_bootstrap_snapshot) = workbench
                 .access
                 .with_machine(context.clone(), {
                     let owner = owner.clone();
                     move |session, context, _| {
+                        let snapshot = session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .expect("the bootstrap owner holds its actual public scope");
                         session
                             .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
+                            .map(|bootstrap| (bootstrap, snapshot))
                             .map_err(|error| {
                                 ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                             })
@@ -25227,9 +25231,25 @@ pub(crate) mod request_tests {
             workbench
                 .access
                 .with_machine(context.clone(), move |session, _, _| {
-                    session
-                        .publish_durable_public_bootstrap(first_bootstrap)
-                        .map_err(|error| {
+                    let current = session
+                        .public_visibility_snapshot_in(first_bootstrap_snapshot.scope)
+                        .expect("the first installation retains its actual public scope");
+                    session.publish_durable_public_bootstrap(first_bootstrap).map_err(|error| {
+                            eprintln!(
+                                "first bootstrap ticket refusal: {error:?}; initial machine={:?} scope={:?} epoch={} tip={:?} bindings={} sources={}; current machine={:?} scope={:?} epoch={} tip={:?} bindings={} sources={}",
+                                first_bootstrap_snapshot.machine_incarnation,
+                                first_bootstrap_snapshot.scope,
+                                first_bootstrap_snapshot.epoch,
+                                first_bootstrap_snapshot.declaration_tip,
+                                first_bootstrap_snapshot.bindings.len(),
+                                first_bootstrap_snapshot.source_instances.len(),
+                                current.machine_incarnation,
+                                current.scope,
+                                current.epoch,
+                                current.declaration_tip,
+                                current.bindings.len(),
+                                current.source_instances.len(),
+                            );
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                         })
                 })
