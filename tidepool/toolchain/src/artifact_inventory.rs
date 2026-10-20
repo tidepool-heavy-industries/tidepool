@@ -4990,17 +4990,27 @@ impl ArtifactInventory {
             }
         }
         let owners = SelectedOwners::new(&state, &planning_entries, &parent_ids)?;
-        let requested_target = |group: NativeGroupKey| {
-            resolved_targets
-                .get(&group)
-                .copied()
-                .unwrap_or(PlannedTarget::NewGroup(group))
+        let requested_target = |group: NativeGroupKey| match resolved_targets.get(&group).copied() {
+            Some(target) => Ok(target),
+            None if matches!(
+                root_intent,
+                ArtifactRootIntent::Certified(_) | ArtifactRootIntent::PrivateAvailability { .. }
+            ) =>
+            {
+                Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: group.artifact,
+                        original_ordinal: group.original_ordinal,
+                    },
+                ))
+            }
+            None => Ok(PlannedTarget::NewGroup(group)),
         };
         let mut selected_targets = groups
             .iter()
             .copied()
             .map(requested_target)
-            .collect::<BTreeSet<_>>();
+            .collect::<Result<BTreeSet<_>, _>>()?;
         if namespace_ids.is_none() {
             selected_targets.extend(
                 native_groups(parent_nodes)
@@ -5139,70 +5149,84 @@ impl ArtifactInventory {
             .filter(|(_, matching)| !matching.is_empty())
             .map(|(key, matching)| (key, *matching.first().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        let resolve_target = |target: PlannedTarget, scope| match target {
-            PlannedTarget::ExactGroup(binding) => InventoryNodeKey::Group(binding),
-            PlannedTarget::NewGroup(group) => inherited
-                .get(&LogicalNodeKey::Group(group))
-                .copied()
-                .unwrap_or_else(|| LogicalNodeKey::Group(group).bind(scope)),
-            PlannedTarget::Artifact(id) => namespace_bindings
-                .get(&id)
-                .copied()
-                .map(InventoryNodeKey::Artifact)
-                .or_else(|| inherited.get(&LogicalNodeKey::Artifact(id)).copied())
-                .unwrap_or_else(|| LogicalNodeKey::Artifact(id).bind(scope)),
+        let resolve_target = |target: PlannedTarget, scope: Option<ArtifactSelectionId>| {
+            let existing = match target {
+                PlannedTarget::ExactGroup(binding) => Some(InventoryNodeKey::Group(binding)),
+                PlannedTarget::NewGroup(group) => {
+                    inherited.get(&LogicalNodeKey::Group(group)).copied()
+                }
+                PlannedTarget::Artifact(id) => namespace_bindings
+                    .get(&id)
+                    .copied()
+                    .map(InventoryNodeKey::Artifact)
+                    .or_else(|| inherited.get(&LogicalNodeKey::Artifact(id)).copied()),
+            };
+            if let Some(existing) = existing {
+                return Ok(existing);
+            }
+            let scope = scope.ok_or_else(|| match target {
+                PlannedTarget::NewGroup(group) => {
+                    admission_failure(ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: group.artifact,
+                        original_ordinal: group.original_ordinal,
+                    })
+                }
+                PlannedTarget::Artifact(artifact) => {
+                    admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact })
+                }
+                PlannedTarget::ExactGroup(_) => unreachable!("exact binding already resolved"),
+            })?;
+            Ok(target.logical().bind(scope))
         };
         let provisional_plan = planned
             .iter()
             .map(|(key, edges)| {
-                (
+                Ok((
                     inherited
                         .get(key)
                         .copied()
                         .unwrap_or_else(|| key.bind(provisional)),
                     edges
                         .iter()
-                        .map(|(target, edge)| (resolve_target(*target, provisional), edge.clone()))
-                        .collect::<BTreeSet<_>>(),
-                )
+                        .map(|(target, edge)| {
+                            resolve_target(*target, Some(provisional))
+                                .map(|target| (target, edge.clone()))
+                        })
+                        .collect::<Result<BTreeSet<_>, _>>()?,
+                ))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let witness = ScopeProofV3::issue(&provisional_plan, provisional).map(Arc::new);
         let selection = witness.as_ref().map(|proof| proof.selection);
-        let resolve_row = |key: LogicalNodeKey| {
-            resolve_target(PlannedTarget::from(key), selection.unwrap_or(provisional))
-        };
+        let resolve_row = |key: LogicalNodeKey| resolve_target(PlannedTarget::from(key), selection);
         let bound = planned
             .iter()
             .map(|(key, edges)| {
-                (
-                    resolve_row(*key),
+                Ok((
+                    resolve_row(*key)?,
                     edges
                         .iter()
                         .map(|(target, edge)| {
-                            (
-                                resolve_target(*target, selection.unwrap_or(provisional)),
-                                edge.clone(),
-                            )
+                            resolve_target(*target, selection).map(|target| (target, edge.clone()))
                         })
-                        .collect::<BTreeSet<_>>(),
-                )
+                        .collect::<Result<BTreeSet<_>, _>>()?,
+                ))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let namespace = selected
             .keys()
             .filter(|id| namespace_ids.as_ref().is_none_or(|ids| ids.contains(id)))
             .map(|id| {
                 let InventoryNodeKey::Artifact(binding) =
-                    resolve_row(LogicalNodeKey::Artifact(*id))
+                    resolve_row(LogicalNodeKey::Artifact(*id))?
                 else {
                     unreachable!("artifact plan resolves an artifact node")
                 };
-                (*id, binding)
+                Ok((*id, binding))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         for (key, (binding, cause)) in issued_causes {
-            if resolve_target(requested_target(key), selection.unwrap_or(provisional))
+            if resolve_target(requested_target(key)?, selection)?
                 == InventoryNodeKey::Group(binding)
             {
                 source_receipts.insert(NativeSourceUse::Root(binding), cause);
@@ -5210,7 +5234,7 @@ impl ArtifactInventory {
         }
         for (parent, dependencies) in &current_dependencies {
             let InventoryNodeKey::Group(parent_binding) =
-                resolve_row(LogicalNodeKey::Group(*parent))
+                resolve_row(LogicalNodeKey::Group(*parent))?
             else {
                 unreachable!("source parent is group");
             };
@@ -5219,10 +5243,9 @@ impl ArtifactInventory {
                 NativeSourceCause::Current,
             );
             for dependency in dependencies {
-                let InventoryNodeKey::Group(child) = resolve_target(
-                    PlannedTarget::from(dependency.target().clone()),
-                    selection.unwrap_or(provisional),
-                ) else {
+                let InventoryNodeKey::Group(child) =
+                    resolve_target(PlannedTarget::from(dependency.target().clone()), selection)?
+                else {
                     unreachable!("source child is group");
                 };
                 source_receipts.insert(
@@ -5235,45 +5258,57 @@ impl ArtifactInventory {
             }
         }
         let source_receipt = IssuedNativeSourceReceipt::Solved(Arc::new(source_receipts.clone()));
-        let target_native_selection = target_groups.map(|groups| IssuedTargetNativeSelection {
-            sources: source_receipts,
-            roots: groups
-                .into_iter()
-                .map(|group| {
-                    let InventoryNodeKey::Group(binding) =
-                        resolve_target(requested_target(group), selection.unwrap_or(provisional))
-                    else {
-                        unreachable!("group resolves to group")
-                    };
-                    binding
+        let target_native_selection = target_groups
+            .map(|groups| -> Result<_, CompileError> {
+                Ok(IssuedTargetNativeSelection {
+                    sources: source_receipts,
+                    roots: groups
+                        .into_iter()
+                        .map(|group| {
+                            let InventoryNodeKey::Group(binding) =
+                                resolve_target(requested_target(group)?, selection)?
+                            else {
+                                unreachable!("group resolves to group")
+                            };
+                            Ok(binding)
+                        })
+                        .collect::<Result<Vec<_>, CompileError>>()?
+                        .into(),
                 })
-                .collect::<Vec<_>>()
-                .into(),
-        });
-        let roots = retained_roots.unwrap_or_else(|| {
-            let mut roots = supplied
-                .keys()
-                .filter(|id| planning_entries.contains_key(id))
-                .map(|id| resolve_row(LogicalNodeKey::Artifact(*id)))
-                .collect::<BTreeSet<_>>();
-            roots.extend(groups.iter().copied().map(|group| {
-                resolve_target(requested_target(group), selection.unwrap_or(provisional))
-            }));
-            if namespace_ids.is_none() {
+            })
+            .transpose()?;
+        let roots = match retained_roots {
+            Some(roots) => roots,
+            None => {
+                let mut roots = supplied
+                    .keys()
+                    .filter(|id| planning_entries.contains_key(id))
+                    .map(|id| resolve_row(LogicalNodeKey::Artifact(*id)))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
                 roots.extend(
-                    parent
-                        .roots()
+                    groups
                         .iter()
-                        .filter(|node| planned.contains_key(&node.logical()))
-                        .map(|node| resolve_row(node.logical())),
+                        .copied()
+                        .map(|group| resolve_target(requested_target(group)?, selection))
+                        .collect::<Result<BTreeSet<_>, _>>()?,
                 );
+                if namespace_ids.is_none() {
+                    roots.extend(
+                        parent
+                            .roots()
+                            .iter()
+                            .filter(|node| planned.contains_key(&node.logical()))
+                            .map(|node| resolve_row(node.logical()))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
+                }
+                roots.retain(|node| {
+                    matches!(node, InventoryNodeKey::Group(_))
+                        || parent.roots().binary_search(node).is_err()
+                });
+                roots.into_iter().collect()
             }
-            roots.retain(|node| {
-                matches!(node, InventoryNodeKey::Group(_))
-                    || parent.roots().binary_search(node).is_err()
-            });
-            roots.into_iter().collect()
-        });
+        };
         // The prior selected closure stays immutable and independently owned.
         // Incoming shared carriers use the newly issued namespace binding.
         let issuing_payloads = selected.clone();
