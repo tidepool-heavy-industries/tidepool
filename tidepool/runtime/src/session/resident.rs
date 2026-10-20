@@ -4000,7 +4000,7 @@ where
     pub fn capture_notebook_generation_world(
         &self,
         prepared: &super::PreparedNotebookGeneration,
-        source: &Arc<super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
         self.state.capture_notebook_generation_world(prepared, source, |id| {
             self.hidden_host_bindings.contains_key(&id)

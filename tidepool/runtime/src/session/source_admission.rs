@@ -1198,7 +1198,7 @@ impl RuntimeSourceCompilerTransaction {
         target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<(), SourceAdmissionError> {
         if !Arc::ptr_eq(&self.source, original) {
-            return Err(SourceAdmissionError::ForeignTransaction);
+            return Err(SourceAdmissionError::DifferentOriginalSource);
         }
         self.admit(target)
     }
@@ -1248,17 +1248,6 @@ impl RuntimeSourceCompilerTransaction {
             },
         )
     }
-    pub(super) fn admit_original(
-        &self,
-        original: &Arc<super::RuntimeLexicalScopeLease>,
-        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
-    ) -> Result<(), SourceAdmissionError> {
-        if !Arc::ptr_eq(&self.source, original) {
-            return Err(SourceAdmissionError::DifferentOriginalSource);
-        }
-        self.admit(target)
-    }
-
     pub(crate) fn admitted_original_source(
         &self,
     ) -> Result<Arc<super::RuntimeOriginalSource>, SourceAdmissionError> {
