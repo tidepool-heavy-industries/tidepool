@@ -4383,6 +4383,17 @@ impl RecoveredArtifactAcquisition {
                 return Err(failure("duplicate recovery payload reference").into());
             }
         }
+        // Original certificates retain their own canonical companion even when
+        // that companion is not separately listed by the requesting snapshot.
+        for reference in references {
+            let RecoveryPayloadReference::Original(original) = reference else { continue; };
+            let Some(interface) = &original.module_interface else { continue; };
+            let companion = RecoveryPayloadReference::Canonical(interface.clone());
+            if indexed.get(&companion.id()).is_some_and(|held| held != &companion) {
+                return Err(failure("recovery payload identity has conflicting exact references").into());
+            }
+            indexed.insert(companion.id(), companion);
+        }
         Ok(indexed)
     }
 
@@ -4437,7 +4448,7 @@ impl RecoveredArtifactAcquisition {
         {
             BTreeMap::new()
         } else {
-            recovery_artifacts::with_artifact_work(&mut self.work, |validation| {
+            recovery_artifacts::with_artifact_work(&mut self.work, |validation| -> Result<_, RecoveryInventoryError> {
                 let mut captured = RecoveredArtifactInventory::capture_inputs_with_validation(
                     &self.root,
                     &missing_products,
