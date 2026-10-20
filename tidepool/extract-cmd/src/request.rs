@@ -3719,6 +3719,14 @@ mod tests {
                 },
             ),
             (
+                "545045584f303033004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a65640181000000000000008000000000000000",
+                EnsureExactInputsOutcome::Ready {
+                    world: "a".repeat(64),
+                    realization: "realized".into(),
+                    residency: WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded { required_bytes: 129, limit_bytes: 128 }),
+                },
+            ),
+            (
                 "545045584f303033014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
                 EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64)),
             ),

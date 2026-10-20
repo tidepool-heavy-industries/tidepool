@@ -2640,7 +2640,7 @@ hydrateWorldDeclarationInputs owner env facts = case worldLexicalDeclaration (wo
             then Right (hydrated,Just (VerifiedWorldDeclarationSurface artifact exports (Map.elems entries)))
             else Left "world declaration exports differ from its selected exact interface"
 
--- The Context role and acquired binding jointly selected this row at cold
+-- The Rust-issued primary role and acquired binding selected this row at cold
 -- admission. A passive row with the same module name is never a substitute.
 worldHasSelectedPrimary :: WorldInputFacts -> (String,String) -> Bool
 worldHasSelectedPrimary facts key = Map.member key (worldPrimarySelected (worldInputsPrimary facts))
@@ -2652,7 +2652,7 @@ worldHasSelectedSource facts key = case Map.lookup key (worldPrimarySelected (wo
     _ -> False
   _ -> False
 
--- Resolve only demanded Context owners and their exact declared type closure.
+-- Resolve only demanded selected primary owners and their exact TYPE closure.
 -- This is canonical source/type custody; Original/native execution remains a
 -- distinct consumer. No universe inventory or historical base-row scan occurs.
 readWorldSourceInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [InterfaceOwner]
@@ -2706,7 +2706,7 @@ data CapturedWorldSources = CapturedWorldSources
 
 newtype WorldSourceRoot = WorldSourceRoot { worldSourceFiles :: Map.Map FilePath BS.ByteString }
 
--- Only a Context-selected acquired source row can prevent an absence result.
+-- Only a selected acquired source row can prevent an absence result.
 -- The hint grants no HPT hydration or source replay; captured source/version
 -- resolution remains with the world module resolver.
 -- Equal owner-issued selected-primary roots select the same compiler rows.
