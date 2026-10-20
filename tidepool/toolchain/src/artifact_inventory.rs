@@ -14330,8 +14330,14 @@ mod tests {
             .find(|group| group.binding.artifact() == child.descriptor.id)
             .unwrap();
         let expected_keys = BTreeSet::from([
-            NativeGroupKey { artifact: root.descriptor.id, original_ordinal: 12 },
-            NativeGroupKey { artifact: child.descriptor.id, original_ordinal: 7 },
+            NativeGroupKey {
+                artifact: root.descriptor.id,
+                original_ordinal: 12,
+            },
+            NativeGroupKey {
+                artifact: child.descriptor.id,
+                original_ordinal: 7,
+            },
         ]);
         // The new output owns its root; its dependency keeps the historical child.
         let assert_new_target = |target: &ArtifactView| {
