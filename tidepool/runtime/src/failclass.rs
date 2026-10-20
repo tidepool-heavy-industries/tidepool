@@ -89,7 +89,6 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::WorldCellExpressionReservationUnsupported { .. }
         | SessionError::WorldCellCheckedProgramCapabilityMissing
         | SessionError::WorldCellSuccessorCapabilityMissing { .. }
-        | SessionError::WorldCellFinalPromotionCapabilityMissing
         | SessionError::WorldCellDeclarationPublicationCapabilityMissing
         | SessionError::WorldCellPublicationBaseStale
         | SessionError::WrongPublicManifestTicket

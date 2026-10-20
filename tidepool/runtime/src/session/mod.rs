@@ -188,10 +188,10 @@ pub use turn::{
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
     CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection, CompiledTurn,
     DeclarationReceipt, DeclarationSource, ExpressionLift, HostBindingAuthority, LocatedImport,
-    LocatedPragma, PragmaKind, SettledCellProgram, SourcePrologue, TemplateSelector, TurnClassification, TurnCode,
-    TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE,
-    CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE, PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER,
-    PREPARED_SCAFFOLD_TARGET,
+    LocatedPragma, PragmaKind, SettledCellProgram, SourcePrologue, TemplateSelector,
+    TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate,
+    ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE,
+    PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER, PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.
@@ -437,8 +437,6 @@ pub enum SessionError {
     WorldCellCheckedProgramCapabilityMissing,
     #[error("world cell item {ordinal} requires a SAME-certified per-item successor capability")]
     WorldCellSuccessorCapabilityMissing { ordinal: usize },
-    #[error("world execution final publication requires the SAME post-removal promotion product")]
-    WorldCellFinalPromotionCapabilityMissing,
     #[error("world declaration publication requires its checked lexical promotion product")]
     WorldCellDeclarationPublicationCapabilityMissing,
     #[error("world execution public semantic base changed before atomic installation")]
