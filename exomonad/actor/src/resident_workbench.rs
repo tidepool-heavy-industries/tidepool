@@ -18810,6 +18810,369 @@ pub(crate) mod request_tests {
             .unwrap()
     }
 
+    struct RootedWorldInputTest {
+        workbench: ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        public: crate::ActorSessionContext,
+        captured: crate::CheckpointSourceLayer,
+        source_owner: Arc<WorldQueryTestSource>,
+        fingerprint: String,
+        _root: tempfile::TempDir,
+    }
+
+    impl RootedWorldInputTest {
+        async fn new(client: crate::CompilerPreparationClient, known: i64) -> Self {
+            let (session, mut public, source, root) = host_mount_fixture_with_effects(
+                |_| {},
+                &[tidepool_mcp::introspection_decl()],
+                "'[Introspection]",
+            );
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(public.placement.session, Box::new(session));
+            let body = format!("module WorldQuestion where\nknown :: Int\nknown = {known}\n");
+            let (captured, source_owner) = world_query_test_source_files_with_support(
+                &[vec![("WorldQuestion.hs", body.as_str())]],
+                &source.base_include,
+            );
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench =
+                ResidentActorWorkbench::new(machines, source.bind_preparation(client), None);
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(public.clone())
+                .await
+                .unwrap();
+            let answer = installed_world_query(
+                &workbench,
+                public.clone(),
+                captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Info,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            )
+            .await;
+            assert!(
+                matches!(answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. }
+                if info.identifier.name == "known")
+            );
+            Self {
+                workbench,
+                public,
+                captured,
+                source_owner,
+                fingerprint: answer.provenance().fingerprint.clone(),
+                _root: root,
+            }
+        }
+
+        async fn private(
+            &self,
+        ) -> (
+            ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            crate::ActorSessionContext,
+        ) {
+            let descriptor =
+                crate::ActorDescriptor::new("actual-world-json-input", self.public.placement);
+            let public_owner =
+                crate::resident_actor::WorkbenchPublicOwner::issue(&self.public, &descriptor, None)
+                    .unwrap();
+            let private = Arc::new(
+                workbench_runner_for_test(&self.workbench)
+                    .begin_private_execution(
+                        self.public.clone(),
+                        public_owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert_ne!(private.private_scope, self.public.placement.lexical_scope);
+            let mut private_context = self.public.clone();
+            private_context.placement.lexical_scope = private.private_scope;
+            let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
+            let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                private_context,
+                self.captured.clone(),
+                None,
+                Some(&layers),
+            )
+            .expect("the actual captured source owner admits private B over public A");
+            let frontend = self
+                .workbench
+                .shared_view()
+                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
+                .with_compilation_authority(authority)
+                .with_private_execution(private);
+            (frontend, context)
+        }
+
+        async fn assert_public_unchanged(&self) {
+            self.workbench
+                .access
+                .with_machine(self.public.clone(), |session, context, _| {
+                    assert!(
+                        session
+                            .workbench_bindings_in(context.placement.lexical_scope)
+                            .is_empty(),
+                        "private inputs and results must not enter public bindings"
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let answer = installed_world_query(
+                &self.workbench,
+                self.public.clone(),
+                self.captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Info,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            )
+            .await;
+            assert_eq!(
+                answer.provenance().fingerprint,
+                self.fingerprint,
+                "private input custody must not alter the logical public World"
+            );
+            assert_eq!(
+                self.source_owner
+                    .captures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+        }
+    }
+
+    async fn plan_actual_world_input(
+        frontend: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: &crate::ActorSessionContext,
+        input: HostInputRetirement,
+        source: &str,
+        world_override: Option<Arc<tidepool_toolchain::compiler_world::CompilerWorld>>,
+    ) -> (
+        Result<
+            tidepool_runtime::session::turn::RuntimeWorldCellPlan,
+            tidepool_runtime::session::WorldInspectionError,
+        >,
+        HostInputRetirement,
+    ) {
+        let execution = frontend.private_execution.clone().unwrap();
+        let recipe = frontend
+            .world_cell_recipe(
+                context,
+                source.into(),
+                &CellPreparationPurpose::PrivateExecution(execution.clone()),
+                Some(input.mounted_input()),
+            )
+            .unwrap();
+        let world =
+            world_override.unwrap_or_else(|| execution.admission.compiler_world().unwrap().clone());
+        let (operand, input) = frontend
+            .access
+            .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                let operand = session
+                    .world_cell_operand_for_input(
+                        execution.admission.clone(),
+                        input.write.as_ref().unwrap(),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                Ok((operand, input))
+            })
+            .await
+            .unwrap();
+        let closes = crate::RetainedActorExit::new();
+        let scope = crate::capabilities::WorkbenchServices::new()
+            .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(closes.clone()))
+            .for_preparation();
+        let dependency = context.source_dependency().clone();
+        let result = scope
+            .scope(async move {
+                let work = crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .with_source_dependency(&dependency)
+                    .admit_work()
+                    .unwrap();
+                spawn_blocking_in_span(move || {
+                    let settled = work
+                        .run_source_compiler_phase(
+                            &dependency,
+                            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                            |owner, _| {
+                                tidepool_runtime::session::turn::prepare_world_cell_plan_admitted(
+                                    owner,
+                                    &world,
+                                    recipe,
+                                    Some(operand),
+                                )
+                            },
+                        )
+                        .expect("the actual source compiler transaction settles");
+                    tidepool_runtime::session::turn::finish_world_cell_plan_admitted(settled)
+                })
+                .await
+                .unwrap()
+            })
+            .await;
+        assert_eq!(
+            closes.compiler_close_observations().as_slice(),
+            &[crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            )],
+            "a retained plan is returned only after its actual parser transaction END"
+        );
+        (result, input)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn private_world_cell_json_operand_survives_plan_end_and_preparation() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client, 7).await;
+            for (used, correct) in [(false, true), (true, true), (true, false)] {
+                let (frontend, context) = fixture.private().await;
+                let input = frontend.lease_cell_input(&context).await.unwrap().expect("real JSON input owner");
+                let input_id = tidepool_repr::SessionVarId::from_extract(input.mounted_input().binder.var_id);
+                let input_name = input.mounted_input().binder.name.clone();
+                assert_eq!(input.private.as_ref().unwrap().private_scope(), context.placement.lexical_scope);
+                let expected = if correct { "hi" } else { "wrong" };
+                let cell = if used {
+                    format!("seen <- if input == object [(\"greeting\", String \"{expected}\")] then pure input else error \"wrong actual JSON input\"")
+                } else { "unusedInput <- pure (7 :: Int)".into() };
+                let closes = crate::RetainedActorExit::new();
+                let scope = crate::capabilities::WorkbenchServices::new()
+                    .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(closes.clone())).for_preparation();
+                let (checked, prepared) = scope.scope(frontend.prepare_checked_cell(context.clone(), cell,
+                    frontend.compilation_authority.clone().unwrap(), frontend.private_execution.clone().unwrap(), Some(input)))
+                    .await.expect("Some input passes real parser END and fresh native preparation");
+                assert!(closes.compiler_close_observations().iter().filter(|close| matches!(close,
+                    crate::termination::CompilerWorkClose::Settled(tidepool_runtime::CompilerTransactionClose::Clean))).count() >= 2,
+                    "parser and preparation must both confirm their separate END");
+                assert_eq!(prepared.dependencies._bindings.retained_bindings().contains(&input_id), used,
+                    "compiler availability of the protected input helper is distinct from execution demand");
+                assert_eq!(checked.items.len(), 1);
+                let PreparedCell { mut items, dependencies } = prepared;
+                let result = frontend.begin_prepared_cell_item(context.clone(), ParsedBlock {
+                    ordinal: 1, total: 1, source: checked.items[0].source.clone(),
+                }, items.remove(0)).await;
+                let result = match result {
+                    Ok(ResidentWorkbenchStep::Running { fragment, outcome }) =>
+                        frontend.settle_item(context.clone(), *fragment, (*outcome).into()).await,
+                    other => other,
+                };
+                if correct {
+                    assert!(matches!(result, Ok(ResidentWorkbenchStep::Committed { .. })), "actual input must execute");
+                } else {
+                    let Err(ResidentActorWorkbenchError::Delivered(error)) = result else { panic!("wrong payload oracle must fail in execution") };
+                    assert!(error.is_language_failure(), "{error:?}");
+                }
+                frontend.access.with_machine(context.clone(), move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    assert_eq!(session.current_binding_in(scope, if used { "seen" } else { "unusedInput" }).is_some(), correct);
+                    Ok(())
+                }).await.unwrap();
+                drop(dependencies);
+                frontend.wait_for_host_input_retirement_for_test(context, input_name).await;
+                fixture.assert_public_unchanged().await;
+            }
+        }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn private_world_cell_operand_refuses_crossed_and_retired_owners() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client.clone(), 7).await;
+            let (frontend, context) = fixture.private().await;
+            let (other, other_context) = fixture.private().await;
+            let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let other_input = other.lease_cell_input(&other_context).await.unwrap().unwrap();
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let plan = plan.ok().expect("a real input parser result after confirmed END");
+            let execution = other.private_execution.as_ref().unwrap().admission.clone();
+            let input = frontend.access.with_machine(context.clone(), move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
+                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, input.write.as_ref()),
+                    Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
+                    "a parser plan cannot move to another actual execution");
+                assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
+                Ok(input)
+            }).await.unwrap();
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let plan = plan.ok().unwrap();
+            let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
+            let other_input = frontend.access.with_machine(context.clone(), move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
+                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, other_input.write.as_ref()),
+                    Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
+                    "a legitimate mount from another input cannot replace the exact parser operand");
+                assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
+                Ok(other_input)
+            }).await.unwrap();
+            let other_name = other_input.mounted_input().binder.name.clone();
+            drop(other_input);
+            other.wait_for_host_input_retirement_for_test(other_context, other_name).await;
+
+            // Two genuine affine parser results let one refusal consume a plan
+            // while another still owns physical custody after logical retirement.
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let plan = plan.ok().unwrap();
+            let (retained_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let retained_plan = retained_plan.ok().unwrap();
+            let input_name = input.mounted_input().binder.name.clone();
+            let roots_with_input = frontend.access.with_machine(context.clone(), |session, _, _| Ok(session.persistent_roots_count())).await.unwrap();
+            drop(input);
+            frontend.wait_for_host_input_retirement_for_test(context.clone(), input_name.clone()).await;
+            let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
+            frontend.access.with_machine(context.clone(), move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                assert!(session.current_binding_in(scope, &input_name).is_none());
+                assert_eq!(session.persistent_roots_count(), roots_with_input,
+                    "retained parser plans keep physical custody without reviving the logical mount");
+                let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
+                assert!(matches!(session.admit_world_planned_cell_for_execution(execution, plan),
+                    Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
+                    "a retained Some-input plan cannot execute after its actual guard is gone");
+                assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
+                assert_eq!(session.persistent_roots_count(), roots_with_input);
+                Ok(())
+            }).await.unwrap();
+            drop(retained_plan);
+            frontend.access.with_machine(context, move |session, _, _| {
+                assert!(session.persistent_roots_count() < roots_with_input,
+                    "dropping the last real plan releases the abandoned input's physical root");
+                Ok(())
+            }).await.unwrap();
+            fixture.assert_public_unchanged().await;
+
+            // The foreign World is issued by a second real captured source owner.
+            // This uses the existing runtime operand/source admission boundary;
+            // no caller-built source proof or replacement PendingWrite is involved.
+            let foreign = RootedWorldInputTest::new(client, 8).await;
+            let (foreign_frontend, _) = foreign.private().await;
+            let foreign_world = foreign_frontend.private_execution.as_ref().unwrap().admission.compiler_world().unwrap().clone();
+            let (frontend, context) = fixture.private().await;
+            let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let name = input.mounted_input().binder.name.clone();
+            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", Some(foreign_world)).await;
+            assert!(matches!(refused, Err(tidepool_runtime::session::WorldInspectionError::Runtime(
+                tidepool_runtime::RuntimeError::Session(tidepool_runtime::session::SessionError::SourceAdmission(
+                    tidepool_runtime::session::SourceAdmissionError::ForeignTransaction))))));
+            drop(input);
+            frontend.wait_for_host_input_retirement_for_test(context, name).await;
+            fixture.assert_public_unchanged().await;
+            foreign.assert_public_unchanged().await;
+        }).await;
+    }
+
     #[derive(Clone, Copy)]
     enum WorldEnsureExpectation {
         ResidentHit,
