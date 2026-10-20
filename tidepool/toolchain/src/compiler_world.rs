@@ -1484,17 +1484,29 @@ impl crate::checked_cell::CellProgram {
             .compiler_source_support()
             .world_primary_type_row(&owner)
             .ok_or_else(|| source_failure("authored item lacks its issued primary binding"))?;
+        // The accepted join retains the exact authored input selection. Its
+        // public projection may select only that owner's canonical interface.
+        let input = joined
+            .context()
+            .compiler_source_support()
+            .world_primary_type_row(&owner)
+            .ok_or_else(|| source_failure("declaration join omits the actual authored input"))?;
+        if input.interface_binding != expected.interface_binding
+            || input.original_binding != expected.original_binding
+        {
+            return Err(source_failure(
+                "declaration projection substitutes its authored binding",
+            ));
+        }
         let actual = projection_context
             .compiler_source_support()
             .world_primary_type_row(&owner)
             .ok_or_else(|| {
                 source_failure("declaration projection omits the actual authored owner")
             })?;
-        if actual.interface_binding != expected.interface_binding
-            || actual.original_binding != expected.original_binding
-        {
+        if actual.interface_binding != expected.interface_binding {
             return Err(source_failure(
-                "declaration projection substitutes its authored binding",
+                "declaration projection substitutes its authored interface",
             ));
         }
         let advance = predecessor
