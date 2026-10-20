@@ -7061,13 +7061,13 @@ where
         }
         {
             let provenance = Arc::make_mut(&mut provenance);
+            for original in retained {
+                provenance.merge(original)?;
+            }
             for (site, source) in &mut provenance.original_sources {
                 *source = sources
                     .remove(site)
                     .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
-            }
-            for original in retained {
-                provenance.merge(original)?;
             }
         }
         Ok(provenance)
@@ -12367,6 +12367,143 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
 #[cfg(test)]
 #[path = "activation_input_tests.rs"]
 mod activation_input_tests;
+
+#[cfg(test)]
+mod source_origin_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn site(id: u64) -> YieldSite {
+        YieldSite {
+            site: id,
+            origin: "SameCompilerEvidence".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: vec![],
+            heads: vec![],
+            inputs: vec![],
+            input_type_witnesses: vec![],
+            reply_declaration: None,
+            request_type_signatures: None,
+        }
+    }
+
+    fn issued(
+        site_id: u64,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+    ) -> ProgramProvenance {
+        let mut provenance = ProgramProvenance::from_sites(&[site(site_id)]).unwrap();
+        provenance
+            .original_sources
+            .insert(site_id, RuntimeSourceOrigin::Known(source.clone()));
+        provenance
+    }
+
+    #[test]
+    fn independent_source_owners_survive_identical_compiler_evidence() {
+        let mut a = PersistentSession::new(None, 1024);
+        let mut b = PersistentSession::new(None, 1024);
+        let source_a = a.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let source_b = b.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let mut provenance = issued(17, &source_a);
+        provenance.merge(&issued(17, &source_a)).unwrap();
+        assert!(Arc::ptr_eq(
+            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &source_a
+        ));
+        provenance.merge(&issued(17, &source_b)).unwrap();
+        assert!(matches!(
+            provenance.original_sources[&17].require_unique(17),
+            Err(ResidentError::AmbiguousOriginalSource {
+                site: 17,
+                origins: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn unknown_same_site_stays_missing_in_both_merge_orders() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let known = issued(17, &source);
+        let unknown = ProgramProvenance::from_sites(&[site(17)]).unwrap();
+        for (mut left, right) in [(known.clone(), unknown.clone()), (unknown, known)] {
+            left.merge(&right).unwrap();
+            assert!(matches!(
+                left.original_sources[&17].require_unique(17),
+                Err(ResidentError::MissingOriginalSource {
+                    site: 17,
+                    known_origins: 1
+                })
+            ));
+            assert!(Arc::ptr_eq(&left.original_sources[&17].known()[0], &source));
+        }
+    }
+
+    #[test]
+    fn fresh_target_and_retained_dependency_keep_distinct_site_owners() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source_a = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let source_b = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let mut provenance = issued(23, &source_b);
+        provenance.merge(&issued(17, &source_a)).unwrap();
+        assert!(Arc::ptr_eq(
+            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &source_a
+        ));
+        assert!(Arc::ptr_eq(
+            &provenance.original_sources[&23].require_unique(23).unwrap(),
+            &source_b
+        ));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn accumulated_site_origins_match_independent_owner_set_model(
+            history in prop::collection::vec((0u64..5, 0usize..3, any::<bool>()), 1..80),
+        ) {
+            let mut owner = PersistentSession::new(None, 1024);
+            let leases = (0..3).map(|_| owner.retain_lexical_scope(ScopeId::ROOT).unwrap()).collect::<Vec<_>>();
+            let mut actual = ProgramProvenance::default();
+            let mut model = BTreeMap::<u64, (BTreeSet<usize>, bool)>::new();
+            for (site_id, source, missing) in history {
+                let mut contribution = issued(site_id, &leases[source]);
+                if missing {
+                    contribution.original_sources.insert(site_id, RuntimeSourceOrigin::Unknown(vec![leases[source].clone()]));
+                }
+                actual.merge(&contribution).unwrap();
+                let expected = model.entry(site_id).or_default();
+                expected.0.insert(source);
+                expected.1 |= missing;
+                for (site_id, (owners, unresolved)) in &model {
+                    let observed = &actual.original_sources[site_id];
+                    let actual_owners = observed.known().iter().map(|lease| {
+                        leases.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
+                    }).collect::<BTreeSet<_>>();
+                    prop_assert_eq!(&actual_owners, owners);
+                    prop_assert_eq!(observed.known().len(), owners.len());
+                    match observed.require_unique(*site_id) {
+                        Ok(lease) => {
+                            prop_assert!(!unresolved && owners.len() == 1);
+                            prop_assert!(Arc::ptr_eq(&lease, &leases[*owners.first().unwrap()]));
+                        }
+                        Err(ResidentError::MissingOriginalSource { known_origins, .. }) => {
+                            prop_assert!(*unresolved);
+                            prop_assert_eq!(known_origins, owners.len());
+                        }
+                        Err(ResidentError::AmbiguousOriginalSource { origins, .. }) => {
+                            prop_assert!(!unresolved && owners.len() > 1);
+                            prop_assert_eq!(origins, owners.len());
+                        }
+                        other => prop_assert!(false, "unexpected source observation: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod preview_budget_tests {
