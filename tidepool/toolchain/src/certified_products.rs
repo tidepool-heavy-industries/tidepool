@@ -2569,7 +2569,7 @@ pub(crate) struct CurrentProductRef<'a> {
     ordinal: u32,
 }
 
-impl CurrentProductRef<'_> {
+impl<'a> CurrentProductRef<'a> {
     pub(crate) fn key(&self) -> crate::artifact_inventory::NativeGroupKey {
         crate::artifact_inventory::NativeGroupKey {
             artifact: self.entry.descriptor.id,
@@ -2597,10 +2597,51 @@ impl CurrentProductRef<'_> {
         }
     }
 
-    pub(crate) fn requirements(
+    /// Dependencies borrow the input owner captured by this completed request.
+    /// Callers cannot substitute a second selection or a later namespace.
+    pub(crate) fn request_inputs(
         &self,
-    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
-        self.native.availability.requirements()
+    ) -> Option<&crate::artifact_inventory::CompilerSourceSupport> {
+        match &self.selection.input_origin {
+            CertifiedInputOrigin::Continuation(source) => Some(source),
+            CertifiedInputOrigin::NewProducts => None,
+        }
+    }
+
+    pub(crate) fn entry(&self) -> &Arc<crate::artifact_inventory::ArtifactEntry> {
+        self.entry
+    }
+
+    /// Membership is checked against this same physical output cohort.
+    pub(crate) fn dependency_product<'b>(
+        &'b self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        entry: &'b Arc<crate::artifact_inventory::ArtifactEntry>,
+    ) -> CertResult<Option<CurrentProductRef<'b>>> {
+        self.selection.current_product(key, entry)
+    }
+
+    pub(crate) fn own_group_support(
+        &self,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<CertifiedNativeGroupSupport<'a>> {
+        match &self.native.availability {
+            ReceiptNativeAvailability::Issued(row) => row
+                .dependency_support(self.key(), &self.native.owner)?
+                .offer_for_group(group)
+                .map(CertifiedNativeGroupSupport::Issued),
+            ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
+                .iter()
+                .find(|proof| {
+                    proof.original == self.key().artifact
+                        && proof
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .contains(&group)
+                })
+                .map(CertifiedNativeGroupSupport::NewProductDependency),
+        }
     }
 }
 
@@ -17618,6 +17659,187 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn current_cohort_dependencies_keep_required_owners_in_both_planners() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactDependency, ArtifactEntry, CanonicalProducerIdentity,
+            NativeArtifactDemand,
+        };
+        use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
+        let bytes = b"current-cohort-owner-obligations";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(bytes);
+        let children = ["CohortLeft", "CohortRight"].map(|module| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    vec![(7, vec![])],
+                    76,
+                    &BTreeMap::new(),
+                    module.as_bytes().to_vec(),
+                ),
+                producer.sha256(),
+            )
+        });
+        let imports = children.each_ref().map(|child| PendingImportOwner::Source {
+            owner: child.owner().clone(),
+            original_ordinal: 7,
+            binder: testing::identity(&child.owner().module, "entry"),
+        });
+        let parent = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "CohortParent",
+                vec![(5, imports.to_vec())],
+                77,
+                &BTreeMap::new(),
+                b"cohort parent".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let products =
+            recovered_witness_fixtures(&[children[0].clone(), children[1].clone(), parent]);
+        for reverse in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let context = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .admit_producer(producer.sha256())
+                    .unwrap(),
+            );
+            let request = ExactCompileContext::new(context)
+                .prepare_compilation(root.path(), bytes)
+                .unwrap();
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
+                request.compiler_inputs(),
+                &validation.inventory,
+            )
+            .unwrap();
+            let mut current = products
+                .iter()
+                .map(|product| product.product.clone())
+                .collect::<Vec<_>>();
+            if reverse {
+                current.reverse();
+            }
+            for product in &current {
+                selection
+                    .admit_current(
+                        product.owner(),
+                        ProductOrigin::Cached,
+                        product.module_interface().unwrap(),
+                        &validation.inventory,
+                    )
+                    .unwrap();
+            }
+            selection
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &current).unwrap(),
+                )
+                .unwrap();
+            let output =
+                crate::declaration_context::certified_product_artifact_view_with_validation(
+                    producer.sha256(),
+                    &current,
+                    &[],
+                    &[],
+                    Some(request.compiler_inputs().artifacts()),
+                    NativeArtifactDemand::ScopeInterfaces,
+                    &mut validation,
+                )
+                .unwrap();
+            assert!(output.selected_native_groups().is_empty());
+            assert!(selection.new_product_native_requirements().next().is_none());
+            let entries = current
+                .iter()
+                .map(|product| {
+                    Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let parent = &products[2].product;
+            let parent_entry = entries
+                .iter()
+                .find(|entry| entry.descriptor.owner.module == "CohortParent")
+                .unwrap();
+            let imports = [PendingImportOwner::Source {
+                owner: parent.owner().clone(),
+                original_ordinal: 5,
+                binder: testing::identity("CohortParent", "entry_5"),
+            }];
+            let inventory = output.inventory();
+            let mut bound = inventory.bind_segment(&output, vec![], &selection).unwrap();
+            let selected = inventory
+                .admit_certified_with_demand(
+                    &output,
+                    entries.clone(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    &selection,
+                )
+                .unwrap();
+            let bound = inventory
+                .admit_bound_target(
+                    &mut bound,
+                    &output,
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selection,
+                )
+                .unwrap()
+                .artifacts()
+                .clone();
+            for view in [selected, bound] {
+                let graph = view.capture_graph_selection();
+                assert_eq!(
+                    graph.native_groups.len(),
+                    3,
+                    "one parent and two distinct required owners; reverse={reverse}"
+                );
+                let parent_group = *graph
+                    .native_groups
+                    .iter()
+                    .find(|group| {
+                        group.binding.artifact() == parent_entry.descriptor.id
+                            && group.original_ordinal == 5
+                    })
+                    .unwrap();
+                let edges = graph
+                    .selections
+                    .iter()
+                    .flat_map(|scope| scope.dependencies.iter())
+                    .collect::<BTreeSet<_>>();
+                for child in &products[..2] {
+                    let id = ArtifactEntry::original(producer.sha256(), child.product.clone())
+                        .unwrap()
+                        .descriptor
+                        .id;
+                    let child_group = *graph
+                        .native_groups
+                        .iter()
+                        .find(|group| group.binding.artifact() == id && group.original_ordinal == 7)
+                        .unwrap();
+                    assert_eq!(
+                        child_group.binding.selection(),
+                        parent_group.binding.selection(),
+                        "same cohort needs no earlier child issuance"
+                    );
+                    assert!(edges.contains(&&(
+                        ArtifactBindingNode::Group(parent_group),
+                        ArtifactBindingNode::Group(child_group),
+                        ArtifactDependency::NativeGroup {
+                            dependent_ordinal: 5,
+                            required_ordinal: 7
+                        }
+                    )));
+                    assert!(
+                        !graph
+                            .roots
+                            .contains(&ArtifactBindingNode::Group(child_group)),
+                        "native dependency is not an execution root"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn current_complete_product_borrows_issued_full_dependency_without_execution_demand() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
@@ -17852,15 +18074,104 @@ pub(crate) mod tests {
             assert!(
                 matches!(current_ref.own_group_candidates().unwrap(), NativeGroupCandidates::NewProduct(groups) if groups.is_empty())
             );
+            if full {
+                use crate::artifact_inventory::{ArtifactBindingNode, ArtifactDependency};
+                // Read the expected dependency directly from the original
+                // issuer's recorded rows, before either receiving planner runs.
+                let expected = request
+                    .compiler_inputs()
+                    .native_availability(entry.descriptor.id)
+                    .unwrap()
+                    .offers()
+                    .filter_map(|offer| offer.proof())
+                    .flat_map(|proof| proof.selection.graph_selection().native_groups.iter())
+                    .filter(|group| {
+                        group.binding.artifact() == entry.descriptor.id
+                            && group.original_ordinal == 9001
+                    })
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(expected.len(), 1);
+                let expected = *expected.first().unwrap();
+                let mut binder = testing::identity("CurrentDependent", "entry_5");
+                binder.unit = current.owner().unit.clone();
+                let imports = [PendingImportOwner::Source {
+                    owner: current.owner().clone(),
+                    original_ordinal: 5,
+                    binder,
+                }];
+                let inventory = output.inventory();
+                let mut bound = inventory.bind_segment(&output, vec![], &selection).unwrap();
+                let selected = inventory
+                    .admit_certified_with_demand(
+                        &output,
+                        vec![current_entry.clone()],
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        &selection,
+                    )
+                    .unwrap();
+                let bound = inventory
+                    .admit_bound_target(
+                        &mut bound,
+                        &output,
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &selection,
+                    )
+                    .unwrap()
+                    .artifacts()
+                    .clone();
+                for view in [selected, bound] {
+                    let graph = view.capture_graph_selection();
+                    let parents = graph
+                        .native_groups
+                        .iter()
+                        .filter(|group| {
+                            group.binding.artifact() == current_entry.descriptor.id
+                                && group.original_ordinal == 5
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    assert_eq!(parents.len(), 1);
+                    let parent = parents[0];
+                    assert!(graph
+                        .selections
+                        .iter()
+                        .flat_map(|scope| scope.dependencies.iter())
+                        .any(|edge| *edge
+                            == (
+                                ArtifactBindingNode::Group(parent),
+                                ArtifactBindingNode::Group(expected),
+                                ArtifactDependency::NativeGroup {
+                                    dependent_ordinal: 5,
+                                    required_ordinal: 9001
+                                },
+                            )));
+                    assert_eq!(
+                        graph
+                            .native_groups
+                            .iter()
+                            .filter(|group| group.binding.artifact() == entry.descriptor.id)
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        vec![expected]
+                    );
+                    assert!(
+                        !graph.roots.contains(&ArtifactBindingNode::Group(expected)),
+                        "dependency support adds no execution root"
+                    );
+                }
+            }
             let result = OriginalCompilerInputs::from_selection(&selection, &output);
             if !full {
+                let observed = format!("{result:?}");
                 assert!(
                     matches!(result, Err(crate::CompileError::ArtifactInventory(error))
                     if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact: entry.descriptor.id,
                         original_ordinal: 9001,
                     }),
-                    "missing or bounded-empty availability must refuse the actual dependency"
+                    "missing or bounded-empty availability must refuse the actual dependency: {observed}"
                 );
                 continue;
             }

@@ -1095,6 +1095,16 @@ impl<'a> ContinuationNativeInputs<'a> {
         })
     }
 
+    pub(crate) fn current_product<'b>(
+        &'b self,
+        key: NativeGroupKey,
+        entry: &'b Arc<ArtifactEntry>,
+    ) -> Result<Option<crate::certified_products::CurrentProductRef<'b>>, CompileError> {
+        self.selection
+            .current_product(key, entry)
+            .map_err(compiler_evidence_failure)
+    }
+
     pub(crate) fn projection(&self) -> &CompilerInputProjection {
         &self.projection
     }
