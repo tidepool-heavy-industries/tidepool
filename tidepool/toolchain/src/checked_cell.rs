@@ -2139,7 +2139,9 @@ impl CheckedValueImportAuthority {
         self.values.keys().map(|module| ("main", module.as_str()))
     }
 
-    pub(crate) fn value_owners(&self) -> impl ExactSizeIterator<Item = SessionModule> + '_ {
+    pub(crate) fn value_owners(
+        &self,
+    ) -> impl ExactSizeIterator<Item = tidepool_repr::SessionModule> + '_ {
         self.values.values().map(|value| value.input().owner)
     }
 

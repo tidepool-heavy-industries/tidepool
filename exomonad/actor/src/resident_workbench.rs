@@ -2037,6 +2037,10 @@ impl ReservedActorGeneration {
         ActorGenerationCandidateCustody(self.prepared.candidate.clone())
     }
 
+    pub(crate) fn publication_phase(&self) -> tidepool_runtime::session::PublicationPhase {
+        self.guard.decision.phase()
+    }
+
     pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
         ActorPublicationAttemptObserver(self.guard.attempt.clone())
     }
@@ -2355,6 +2359,9 @@ pub(crate) enum ActorPublicationFailureCause {
     InputMount,
     ActivationPreviewSuspended,
     Inspection,
+    InspectionScopeChanged,
+    InspectionWorldUnavailable,
+    InspectionWorldRejected(tidepool_toolchain::compiler_world::WorldQueryRejection),
     CompletedResultObservation,
     InterpreterSupport,
     ActorProtocol,
@@ -7841,6 +7848,9 @@ impl ResidentActorWorkbenchError {
             Self::InputMount(_) => Cause::InputMount,
             Self::ActivationPreviewSuspended { .. } => Cause::ActivationPreviewSuspended,
             Self::Inspection(_) => Cause::Inspection,
+            Self::InspectionScopeChanged { .. } => Cause::InspectionScopeChanged,
+            Self::InspectionWorldUnavailable(_) => Cause::InspectionWorldUnavailable,
+            Self::InspectionWorldRejected(reason) => Cause::InspectionWorldRejected(*reason),
             Self::CompletedResultObservation { .. } => Cause::CompletedResultObservation,
             Self::UnavailableInterpreterSupport { .. } => Cause::InterpreterSupport,
             Self::ActorProtocol(_) => Cause::ActorProtocol,
