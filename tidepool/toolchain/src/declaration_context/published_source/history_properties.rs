@@ -231,8 +231,9 @@ fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
     let mut projection = CompilerInputProjection::default();
     for mut role in changed.compiler_input_roles() {
         if role.is_published_source_original() {
+            let facts = PublishedSelectionFacts::from_role(&role).unwrap();
             let digest = changed
-                .published_selection_sha256(&root.descriptor.owner, &role)
+                .published_selection_sha256(&root.descriptor.owner, &facts)
                 .unwrap();
             if let CompilerInputRole::PublishedSourceOriginal {
                 selection_sha256, ..

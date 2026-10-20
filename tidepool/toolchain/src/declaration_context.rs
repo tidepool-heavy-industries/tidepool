@@ -3982,14 +3982,41 @@ impl RecoveredArtifactInventory {
         selection: &ArtifactGraphSelection,
         roles: &[CompilerInputRole],
     ) -> Result<RecoveredCompilerSelection, CompileError> {
+        let issued_roles = roles
+            .iter()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .collect::<BTreeSet<_>>();
+        let restored = self.restore_graph_selection_view(selection, issued_roles)?;
+        let compiler_projection = CompilerInputProjection::restore(&restored, roles)?;
+        Self::recovered_selection(restored, compiler_projection)
+    }
+
+    /// Restore a recorded snapshot's bound graph from its owner-keyed role facts.
+    /// The recorded owner, not an interface's later discovery, authenticates each
+    /// acquired role.
+    pub(crate) fn authenticate_recorded_graph_selection(
+        &self,
+        selection: &ArtifactGraphSelection,
+        roles: &imbl::OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
+    ) -> Result<RecoveredCompilerSelection, CompileError> {
+        let issued_roles = roles
+            .values()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .collect::<BTreeSet<_>>();
+        let restored = self.restore_graph_selection_view(selection, issued_roles)?;
+        let compiler_projection = CompilerInputProjection::acquire_recorded(&restored, roles)?;
+        Self::recovered_selection(restored, compiler_projection)
+    }
+
+    fn restore_graph_selection_view(
+        &self,
+        selection: &ArtifactGraphSelection,
+        issued_roles: BTreeSet<ArtifactId>,
+    ) -> Result<ArtifactView, CompileError> {
         let namespace = selection
             .namespace
             .iter()
             .map(|binding| binding.artifact)
-            .collect::<BTreeSet<_>>();
-        let issued_roles = roles
-            .iter()
-            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
             .collect::<BTreeSet<_>>();
         if namespace.len() != selection.namespace.len() || namespace != issued_roles {
             return Err(failure(
@@ -4033,9 +4060,13 @@ impl RecoveredArtifactInventory {
             ));
         }
         let inventory = ArtifactInventory::default();
-        let restored =
-            inventory.recover_selection(&inventory.empty_view(), entries, selection, &edges)?;
-        let compiler_projection = CompilerInputProjection::restore(&restored, roles)?;
+        inventory.recover_selection(&inventory.empty_view(), entries, selection, &edges)
+    }
+
+    fn recovered_selection(
+        restored: ArtifactView,
+        compiler_projection: CompilerInputProjection,
+    ) -> Result<RecoveredCompilerSelection, CompileError> {
         compiler_projection.validate_associations(&restored)?;
         Ok(RecoveredCompilerSelection {
             artifacts: restored,
@@ -4105,7 +4136,7 @@ impl RecoveredArtifactInventory {
         let snapshot = acquired.snapshot();
         let graph = snapshot.graph_selection().map_err(failure)?;
         let mut authenticated =
-            self.authenticate_graph_selection(&graph, &snapshot.compiler_roles())?;
+            self.authenticate_recorded_graph_selection(&graph, &snapshot.roles)?;
         authenticated.artifacts = authenticated
             .artifacts
             .recover_snapshot_scope_custody(snapshot.selection())?;
@@ -17675,13 +17706,17 @@ mod tests {
         assert_ne!(full_role, partial_role);
         assert_eq!(full_role.original(), partial_role.original());
         assert_eq!(full_role.interface(), partial_role.interface());
-        for (receiving, foreign_role) in [(&partial, full_role), (&full, partial_role)] {
+        for (receiving, foreign) in [(&partial, &full), (&full, &partial)] {
             let birth = receiving
                 .context()
                 .compiler_source_support()
                 .publication_birth_support(&root)
                 .unwrap();
-            let endorsement = PublishedOriginalEndorsement::new(root.clone(), foreign_role.clone());
+            let endorsement = PublishedOriginalEndorsement::from_acquired_support(
+                foreign.context().compiler_source_support(),
+                &root,
+            )
+            .unwrap();
             assert!(
                 matches!(
                     birth.publish_original(&endorsement),
@@ -17693,24 +17728,6 @@ mod tests {
                 "equal original/interface IDs and graph cannot substitute a different birth domain"
             );
         }
-        let full_birth = full
-            .context()
-            .compiler_source_support()
-            .publication_birth_support(&root)
-            .unwrap();
-        let passive = full_role.recorded_fact();
-        let passive_endorsement =
-            PublishedOriginalEndorsement::new(root.clone(), passive.as_role().clone());
-        assert!(
-            matches!(
-                full_birth.publish_original(&passive_endorsement),
-                Err(CompileError::ArtifactInventory(error))
-                    if matches!(&error.failure,
-                        ArtifactInventoryFailure::PublicationNativeDomainMismatch { owner }
-                            if owner == &root)
-            ),
-            "recorded publication facts must be acquired before endorsement"
-        );
         assert_ne!(
             full.context().semantic_sha256(),
             partial.context().semantic_sha256()
