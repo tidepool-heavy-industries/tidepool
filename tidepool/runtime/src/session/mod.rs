@@ -21,8 +21,8 @@ mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
     RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim,
-    RuntimeSourcePublicationView, RuntimeSourceReopen, SourceAdmissionError, SourceAdmissionHook,
-    SourceAdmissionPhase, SourceFenceTransitionFailure,
+    RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView, RuntimeSourceReopen,
+    SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase, SourceFenceTransitionFailure,
 };
 mod binding_table;
 mod dialect;
