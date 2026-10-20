@@ -168,7 +168,7 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
-    lost_retirements: Vec<generation::RetainedGenerationRetirement>,
+    lost_retirements: Vec<generation::RetainedGenerationRetirementRecord>,
     retirement_discards: Vec<generation::GenerationRetirementDiscard>,
     recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
@@ -228,11 +228,105 @@ pub(super) struct RunControlNativeCleanup {
 
 enum RunControlNativeExit {
     OwnerLost {
-        attempts: Vec<generation::RetainedGenerationRetirement>,
-        worker_transfers: HashMap<u64, WorkerTransfer>,
-        resource_transfers: HashMap<u64, ResourceTransfer>,
+        custody: parking_lot::Mutex<Option<RunControlNativeLoss>>,
     },
     Finalized,
+}
+
+struct RunControlNativeLoss {
+    attempts: Vec<generation::RetainedGenerationRetirementRecord>,
+    worker_transfers: HashMap<u64, WorkerTransfer>,
+    resource_transfers: HashMap<u64, ResourceTransfer>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeRecoveryUnavailable {
+    OwnerNotObserved,
+    Finalized,
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeRecoveryObservation {
+    OwnerNotObserved,
+    Finalized,
+    Recovering,
+    Retained {
+        attempts: usize,
+        completed: usize,
+        worker_transfers: usize,
+        resource_transfers: usize,
+    },
+}
+
+/// Only destruction of the actual RunState issues the terminal slot. A missing
+/// RPC reply never grants this unique checkout of its retained authority.
+struct RunControlNativeRecovery<'a> {
+    slot: &'a parking_lot::Mutex<Option<RunControlNativeLoss>>,
+    custody: Option<RunControlNativeLoss>,
+}
+
+impl RunControlNativeCleanup {
+    fn observation(&self) -> NativeRecoveryObservation {
+        match self.terminal.get() {
+            None => NativeRecoveryObservation::OwnerNotObserved,
+            Some(RunControlNativeExit::Finalized) => NativeRecoveryObservation::Finalized,
+            Some(RunControlNativeExit::OwnerLost { custody }) => match custody.lock().as_ref() {
+                None => NativeRecoveryObservation::Recovering,
+                Some(custody) => NativeRecoveryObservation::Retained {
+                    attempts: custody
+                        .attempts
+                        .iter()
+                        .filter(|record| {
+                            matches!(
+                                record,
+                                generation::RetainedGenerationRetirementRecord::Active(_)
+                            )
+                        })
+                        .count(),
+                    completed: custody
+                        .attempts
+                        .iter()
+                        .filter(|record| {
+                            matches!(
+                                record,
+                                generation::RetainedGenerationRetirementRecord::Completed { .. }
+                            )
+                        })
+                        .count(),
+                    worker_transfers: custody.worker_transfers.len(),
+                    resource_transfers: custody.resource_transfers.len(),
+                },
+            },
+        }
+    }
+
+    fn take_recovery(&self) -> Result<RunControlNativeRecovery<'_>, NativeRecoveryUnavailable> {
+        let slot = match self.terminal.get() {
+            None => return Err(NativeRecoveryUnavailable::OwnerNotObserved),
+            Some(RunControlNativeExit::Finalized) => {
+                return Err(NativeRecoveryUnavailable::Finalized)
+            }
+            Some(RunControlNativeExit::OwnerLost { custody }) => custody,
+        };
+        let custody = slot.lock().take().ok_or(NativeRecoveryUnavailable::Busy)?;
+        Ok(RunControlNativeRecovery {
+            slot,
+            custody: Some(custody),
+        })
+    }
+}
+
+impl Drop for RunControlNativeRecovery<'_> {
+    fn drop(&mut self) {
+        let Some(custody) = self.custody.take() else {
+            return;
+        };
+        // No cleanup, source transition, or payload destructor runs under this
+        // lock. An empty returned parcel records known settlement; None is Busy.
+        let displaced = self.slot.lock().replace(custody);
+        drop(displaced);
+    }
 }
 
 impl Drop for RunState {
@@ -398,7 +492,7 @@ struct ReservationRecord {
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
     dependency: Option<SourceDependency>,
     preparation: Option<u64>,
-    retirement: Option<generation::GenerationRetirementAttempt>,
+    retirement: generation::GenerationRetirementRecord,
 }
 
 impl ReservationRecord {
@@ -681,6 +775,16 @@ pub(super) enum RunControlMessage {
     CaptureGenerationRetirement {
         actor: ActorRef,
         observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+    },
+    GenerationPublicationReady {
+        actor: ActorRef,
+        observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+    },
+    #[cfg(test)]
+    DispatchCancelledGenerationPublication {
+        actor: ActorRef,
+        observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+        reply: oneshot::Sender<Result<(), generation::GenerationPublicationDispatchFailure>>,
     },
     GenerationPopulation {
         dependency: GenerationDependency,
@@ -1039,7 +1143,7 @@ fn begin_reservation_after(
     if state
         .reservations
         .get(&actor)
-        .is_some_and(|record| record.retirement.is_some())
+        .is_some_and(|record| record.retirement.is_active())
     {
         let _ = reply.send(Err(DirectoryError::LifetimeTransitionPending { actor }));
         return;
@@ -1082,7 +1186,7 @@ fn begin_reservation_after(
             reply: Some(reply),
             dependency,
             preparation: None,
-            retirement: None,
+            retirement: generation::GenerationRetirementRecord::Idle,
         },
     );
     if state
@@ -1162,6 +1266,13 @@ impl Actor for RunControl {
                 let outcome = state.begin_generation_retirement(&myself, preparation, inventory);
                 let _ = reply.send(outcome);
             }
+            RunControlMessage::GenerationPublicationReady { actor, observer } => {
+                state.generation_publication_ready(actor, observer);
+            }
+            #[cfg(test)]
+            RunControlMessage::DispatchCancelledGenerationPublication { actor, observer, reply } => {
+                let _ = reply.send(state.dispatch_cancelled_generation_publication(&myself, actor, observer));
+            }
             RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
                 state.capture_generation_retirement(actor, observer);
             }
@@ -1210,7 +1321,7 @@ impl Actor for RunControl {
                     && state
                         .reservations
                         .values()
-                        .all(|record| !record.preparation_pending() && record.retirement.is_none())
+                        .all(|record| !record.preparation_pending() && !record.retirement.is_active())
                     && state.worker_transfers.is_empty()
                     && state.resource_transfers.is_empty()
                     && state
@@ -2599,11 +2710,13 @@ impl RunControlClient {
         &self,
         terminal: &Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
     ) {
-        let Some(RunControlNativeExit::OwnerLost { resource_transfers, .. }) =
+        let Some(RunControlNativeExit::OwnerLost { custody }) =
             self.native_cleanup.terminal.get() else {
                 panic!("native transfer owner loss must be retained");
             };
-        let transfer = resource_transfers.values().find(|transfer|
+        let custody = custody.lock();
+        let custody = custody.as_ref().expect("the terminal custody is available");
+        let transfer = custody.resource_transfers.values().find(|transfer|
             Arc::ptr_eq(&transfer.terminal, terminal)).expect("same issued transfer retained");
         assert!(matches!(transfer.phase, TransferPhase::Settling { .. }));
         assert!(terminal.get().is_none());

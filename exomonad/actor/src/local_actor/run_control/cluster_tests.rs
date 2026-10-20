@@ -8,9 +8,13 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
     control.owner.get_cell().kill();
     task.await.unwrap();
     assert!(matches!(
-        retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
-            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+        retained.observation(),
+        NativeRecoveryObservation::Retained {
+            attempts: 0,
+            completed: 0,
+            worker_transfers: 0,
+            resource_transfers: 0
+        }
     ));
     assert!(matches!(
         control
@@ -20,9 +24,13 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
     ));
     drop(control);
     assert!(matches!(
-        retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
-            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+        retained.observation(),
+        NativeRecoveryObservation::Retained {
+            attempts: 0,
+            completed: 0,
+            worker_transfers: 0,
+            resource_transfers: 0
+        }
     ));
 }
 
@@ -36,16 +44,58 @@ async fn native_cleanup_retains_owner_loss_after_handler_panic() {
         .unwrap();
     task.await.unwrap();
     assert!(matches!(
-        retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
-            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+        retained.observation(),
+        NativeRecoveryObservation::Retained {
+            attempts: 0,
+            completed: 0,
+            worker_transfers: 0,
+            resource_transfers: 0
+        }
     ));
     assert!(control.finish_run().await.is_err());
     assert!(matches!(
-        retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
-            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+        retained.observation(),
+        NativeRecoveryObservation::Retained {
+            attempts: 0,
+            completed: 0,
+            worker_transfers: 0,
+            resource_transfers: 0
+        }
     ));
+}
+
+#[tokio::test]
+async fn native_recovery_checkout_requires_actual_owner_loss_and_returns_on_cancellation() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let retained = control.native_cleanup.clone();
+    assert!(matches!(
+        retained.take_recovery(),
+        Err(NativeRecoveryUnavailable::OwnerNotObserved)
+    ));
+    control.owner.get_cell().kill();
+    task.await.unwrap();
+    let recovery = retained.take_recovery().unwrap();
+    assert_eq!(
+        retained.observation(),
+        NativeRecoveryObservation::Recovering
+    );
+    assert!(matches!(
+        retained.take_recovery(),
+        Err(NativeRecoveryUnavailable::Busy)
+    ));
+    // Dropping a cancelled consumer returns the same empty actual parcel. An
+    // empty settled parcel is observable as retained, rather than forever Busy.
+    drop(recovery);
+    assert_eq!(
+        retained.observation(),
+        NativeRecoveryObservation::Retained {
+            attempts: 0,
+            completed: 0,
+            worker_transfers: 0,
+            resource_transfers: 0,
+        }
+    );
+    drop(retained.take_recovery().unwrap());
 }
 
 #[tokio::test]
@@ -116,6 +166,10 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
     assert!(matches!(
         control.native_cleanup.terminal.get(),
         Some(RunControlNativeExit::Finalized)
+    ));
+    assert!(matches!(
+        control.native_cleanup.take_recovery(),
+        Err(NativeRecoveryUnavailable::Finalized)
     ));
 }
 
