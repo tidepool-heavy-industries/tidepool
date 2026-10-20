@@ -662,6 +662,12 @@ impl GenerationRetirementCore {
             Self::Idle => obligations.push(Obligation::ReloadCandidateSettlementObligation(
                 Observation::ReloadObligationUnconfirmed,
             )),
+            Self::Completed {
+                completion: GenerationRetirementCompletion::UnreservedRefused,
+                ..
+            } => obligations.push(Obligation::ReloadCandidateSettlementObligation(
+                Observation::ReloadObligationUnconfirmed,
+            )),
             Self::Completed { .. } => {}
             Self::SourcesSettled { cutoff, .. } => {
                 capture = cutoff.capture();
@@ -834,38 +840,46 @@ impl GenerationRetirementCore {
             if let Some(observation) = owner.physical_obligation(capture) {
                 obligations.push(Obligation::ReloadPhysicalCleanupObligation(observation));
             }
-            if let GenerationRetirementWork::Observed(work) = &capture.work {
-                use crate::resident_actor::source_slots::{
-                    SourceRegistrationDependency, SourceRegistrationState,
-                };
-                for registration in &work.source_registrations {
-                    let observed = registration.observation();
-                    if observed.dependency != SourceRegistrationDependency::Dependent {
-                        continue;
-                    }
-                    let SourceRegistrationState::Open {
-                        resume_failure: Some(failure),
-                        ..
-                    } = observed.state
-                    else {
-                        continue;
+            if let GenerationSourceRestoration::Started(redispatches) = &capture.source_restoration
+            {
+                use crate::resident_actor::source_slots::SourceRedispatchOutcome;
+                for redispatch in redispatches {
+                    let (identity, observation, detail) = match redispatch {
+                        GenerationSourceRedispatch::InProgress(identity) => {
+                            (identity, Observation::ReloadObligationUnconfirmed, None)
+                        }
+                        GenerationSourceRedispatch::Observed(
+                            SourceRedispatchOutcome::Refused {
+                                identity, failure, ..
+                            },
+                        ) => (
+                            identity,
+                            Observation::ReloadObligationRefused,
+                            Some(failure.to_string()),
+                        ),
+                        GenerationSourceRedispatch::Observed(
+                            SourceRedispatchOutcome::NotAttempted
+                            | SourceRedispatchOutcome::Accepted { .. },
+                        ) => continue,
                     };
-                    match retirement_actor_identity(observed.identity.actor) {
+                    match retirement_actor_identity(identity.actor) {
                         Ok(actor) => obligations.push(Obligation::ReloadSourceDeliveryObligation(
                             tidepool_bridge_effects::RlResource::ReloadSourceBindingResource(
                                 actor,
-                                observed.identity.slot.to_string(),
+                                identity.slot.to_string(),
                             ),
-                            Observation::ReloadObligationRefused,
+                            observation,
                         )),
                         Err(_) => obligations.push(Obligation::ReloadDiagnosticDeliveryObligation(
                             Observation::ReloadObligationUnconfirmed,
                         )),
                     }
-                    secondary.push(RlCause {
-                        kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
-                        detail: failure.to_string(),
-                    });
+                    if let Some(detail) = detail {
+                        secondary.push(RlCause {
+                            kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
+                            detail,
+                        });
+                    }
                 }
             }
         }
@@ -1265,6 +1279,7 @@ struct GenerationRetirementCapture {
     work: GenerationRetirementWork,
     pending_claims: Result<usize, GenerationRetirementFenceError>,
     physical_closure: GenerationCapturePhysicalClosure,
+    source_restoration: GenerationSourceRestoration,
 }
 
 /// A wire projection may refuse a coordinate; the owning capture remains intact.
@@ -1280,41 +1295,65 @@ enum GenerationRetirementProjectionRefusal {
     OperationMissing,
 }
 
+/// Only redispatch initiated by this retirement is its delivery obligation.
+/// Canonical service queues and their historical failures remain independent.
+enum GenerationSourceRestoration {
+    NotStarted,
+    Started(Vec<GenerationSourceRedispatch>),
+}
+
+enum GenerationSourceRedispatch {
+    InProgress(crate::resident_actor::source_slots::SourceRegistrationIdentity),
+    Observed(crate::resident_actor::source_slots::SourceRedispatchOutcome),
+}
+
 impl GenerationRetirementCapture {
-    /// Called only after this attempt has restored A. The slot owns each
-    /// queued delivery and prevents replay of an already redispatched ordinal.
-    fn resume_deferred_sources(&self) {
+    /// Called only after this attempt has restored A. Record each selected
+    /// slot before dispatch so loss of the synchronous result stays unknown.
+    /// Neither uncertain nor refused dispatches are retried by reconciliation.
+    fn resume_deferred_sources(&mut self) {
         use crate::resident_actor::source_slots::SourceRegistrationDependency;
+        if !matches!(
+            self.source_restoration,
+            GenerationSourceRestoration::NotStarted
+        ) {
+            return;
+        }
+        self.source_restoration = GenerationSourceRestoration::Started(Vec::new());
+        let GenerationSourceRestoration::Started(redispatches) = &mut self.source_restoration
+        else {
+            return;
+        };
         let GenerationRetirementWork::Observed(work) = &self.work else {
             return;
         };
         for registration in &work.source_registrations {
-            if registration.observation().dependency == SourceRegistrationDependency::Dependent {
-                // Failure remains typed and observable on this SAME slot. It
-                // neither grants publication authority nor settles cleanup.
-                registration.resume_deferred();
+            let observed = registration.observation();
+            if observed.dependency != SourceRegistrationDependency::Dependent {
+                continue;
+            }
+            redispatches.push(GenerationSourceRedispatch::InProgress(observed.identity));
+            let outcome = registration.resume_deferred();
+            if let Some(redispatch) = redispatches.last_mut() {
+                *redispatch = GenerationSourceRedispatch::Observed(outcome);
             }
         }
     }
 
-    fn has_failed_source_handoff(&self) -> bool {
-        use crate::resident_actor::source_slots::{
-            SourceRegistrationDependency, SourceRegistrationState,
-        };
-        let GenerationRetirementWork::Observed(work) = &self.work else {
-            return false;
-        };
-        work.source_registrations.iter().any(|registration| {
-            let observed = registration.observation();
-            observed.dependency == SourceRegistrationDependency::Dependent
-                && matches!(
-                    observed.state,
-                    SourceRegistrationState::Open {
-                        resume_failure: Some(_),
-                        ..
-                    }
+    fn has_unsettled_source_redispatch(&self) -> bool {
+        use crate::resident_actor::source_slots::SourceRedispatchOutcome;
+        match &self.source_restoration {
+            GenerationSourceRestoration::NotStarted => false,
+            GenerationSourceRestoration::Started(redispatches) => redispatches.iter().any(|item| {
+                matches!(
+                    item,
+                    GenerationSourceRedispatch::InProgress(_)
+                        | GenerationSourceRedispatch::Observed(
+                            SourceRedispatchOutcome::Refused { .. }
+                        )
                 )
-        })
+            }),
+        }
     }
 
     fn blockers(
@@ -2718,6 +2757,7 @@ impl RunState {
             reservations,
             preparations,
             pending_claims,
+            source_restoration: GenerationSourceRestoration::NotStarted,
             physical_closure: GenerationCapturePhysicalClosure::Guarded {
                 actors: protected_actors,
                 cells: protected_cells,
@@ -2911,7 +2951,7 @@ impl RunState {
         else {
             return;
         };
-        if capture.has_failed_source_handoff()
+        if capture.has_unsettled_source_redispatch()
             || !self.capture_has_canonical_physical_owners(capture)
         {
             return;
