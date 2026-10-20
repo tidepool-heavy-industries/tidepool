@@ -7484,7 +7484,9 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                     .unwrap()
                     .clone(),
             ));
-            let broader = inventory
+            let broader = context
+                .artifact_view()
+                .inventory()
                 .admit_shared_with_demand(
                     context.artifact_view(),
                     vec![unrelated.clone()],
