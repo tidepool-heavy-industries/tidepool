@@ -249,10 +249,6 @@ impl ExecutionSourceOrigin {
             (Self::Neutral, Self::Neutral) => true,
             (Self::Actor(left), Self::Actor(right)) => left == right,
             (Self::Original(left), Self::Original(right)) => Arc::ptr_eq(left, right),
-            (Self::Actor(actor), Self::Original(original))
-            | (Self::Original(original), Self::Actor(actor)) => actor
-                .source_lease()
-                .is_ok_and(|lease| Arc::ptr_eq(&lease, original)),
             _ => false,
         }
     }
