@@ -14,7 +14,7 @@ use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
 use crate::exact_context::{
-    ContextRoot, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
+    MaterializedContext, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
 };
 use crate::CompileError;
 
@@ -713,7 +713,7 @@ pub struct CompilerWorldRestoration {
     logical_id: [u8; 32],
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
-    primary_root: ContextRoot,
+    primary_root: MaterializedContext,
     primary_blocks: ReachableBlocks,
     primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
     primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
@@ -1250,7 +1250,7 @@ impl CompilerWorld {
             world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)])
         }).collect();
         let (roots, primary_blocks) = prior.primary_blocks.replace_semantic_roots(&staged,
-            SemanticRoots { primary: *prior.primary_root.cid(),
+            SemanticRoots { primary: *prior.primary_root.root().cid(),
                 associations: *prior.primary_associations.root().cid(),
                 bindings: *bindings.root().cid(), lexical: prior.lexical_root })
             .map_err(|error| source_failure(error.to_string()))?;
@@ -2062,7 +2062,7 @@ impl CompilerWorldOpenInputs {
     fn materialize_primary(
         &self,
         producer: [u8; 32],
-    ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, ReachableBlocks), CompileError> {
+    ) -> Result<(Arc<ExactDeclarationContext>, MaterializedContext, ReachableBlocks), CompileError> {
         let primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
         let snapshot = primary_context.snapshot();
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
@@ -2070,12 +2070,12 @@ impl CompilerWorldOpenInputs {
         let context = materializer
             .materialize_context(None, &snapshot)
             .map_err(|error| source_failure(error.to_string()))?;
-        let primary_root = context.root().clone();
+        let primary_root = context;
         let staged = materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
         let primary_blocks = ReachableBlocks::default()
-            .replace_roots(&staged, vec![*primary_root.cid()])
+            .replace_roots(&staged, vec![*primary_root.root().cid()])
             .map_err(|error| source_failure(error.to_string()))?;
         let work = primary_blocks.work();
         crate::host_work::record_host_work(
@@ -2205,7 +2205,7 @@ impl CompilerWorldOpenInputs {
             .replace_semantic_roots(
                 &staged,
                 SemanticRoots {
-                    primary: *primary_root.cid(),
+                    primary: *primary_root.root().cid(),
                     associations: *primary_associations.root().cid(),
                     bindings: *bindings.root().cid(),
                     lexical: lexical_root,
@@ -2257,7 +2257,7 @@ impl CompilerWorldOpenInputs {
             world_array(vec![world_array(base), world_array(visible)]),
             acquisition,
             world_blob(&visibility),
-            world_blob(primary_root.cid().to_bytes()),
+            world_blob(primary_root.root().cid().to_bytes()),
             world_array(blocks),
         ]))?;
         std::fs::write(&descriptor, encoded)?;
