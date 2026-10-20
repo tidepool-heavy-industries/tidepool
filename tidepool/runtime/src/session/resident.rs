@@ -984,7 +984,7 @@ pub struct HostBindingPrototype {
     representation: HostRepresentation,
     authority_digest: [u8; 32],
     include_paths: Vec<std::path::PathBuf>,
-    _source_owner: Arc<dyn std::any::Any + Send + Sync>,
+    _source_owner: super::admission::RuntimeHostPrototypeSource,
 }
 
 impl HostBindingPrototype {
@@ -4308,10 +4308,16 @@ where
         plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: HostBindingType,
+        authority_digest: [u8; 32],
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state
-            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state.admit_world_planned_host_carrier_cell_in(
+            scope,
+            plan,
+            binding,
+            expected,
+            authority_digest,
+        )
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4614,7 +4620,7 @@ where
                 .get(&input.id().raw())
                 .map(|provenance| provenance.source_custody())
         };
-        let installed = self.state.install_certified_turn_in(
+        self.state.install_certified_turn_in(
             scope,
             metadata,
             target,
@@ -4622,11 +4628,7 @@ where
             demanded,
             inherited_needed,
             &retained_sources,
-        )?;
-        if !installed.source_keys().is_empty() {
-            self.advance_public_visibility(scope);
-        }
-        Ok(installed)
+        )
     }
 
     fn retire_failed_turn_source_instances(
@@ -6306,13 +6308,14 @@ where
             .code()
             .into_host_prototype()
             .map_err(SessionError::Compile)?;
+        let receipt = admission.prefix().admission().host_prototype_receipt()?;
         let prototype = Arc::new(HostBindingPrototype {
             compiler,
             code: Arc::new(code),
             representation: carrier.representation,
-            authority_digest: admission.prefix().admission().authority_digest()?,
-            include_paths: admission.prefix().admission().include_paths()?.to_vec(),
-            _source_owner: admission.prefix().admission().specification()?.clone(),
+            authority_digest: receipt.authority_digest,
+            include_paths: admission.item().include_paths().to_vec(),
+            _source_owner: receipt.source,
         });
         self.host_binding_prototypes
             .retain(|old| old.representation.host_type() != prototype.representation.host_type());
@@ -7927,6 +7930,7 @@ where
                 None => TurnImageAcquisition::Compile,
             },
             provenance,
+            checked.as_deref(),
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -7991,6 +7995,7 @@ where
         admission: AdmittedTurnCode<'a>,
         images: TurnImageAcquisition<'_>,
         provenance: PreparedProgramProvenance,
+        checked: Option<&CheckedTurnCompletion>,
     ) -> Result<InstalledAdmittedTurn<'a>, ResidentError> {
         if !Arc::ptr_eq(&provenance.code_owner, &admission.code.provenance) {
             return Err(ResidentError::ProvenanceCodeOwnerMismatch);
@@ -8017,15 +8022,29 @@ where
                     )?
                 }
             };
-            self.install_certified_turn_in(
-                scope,
-                &metadata,
-                target,
-                &resolved.source_evidence,
-                demanded,
-                &resolved.inherited_needed,
-            )?
-            .into_parts()
+            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+                self.binding_provenance.get(&input.id().raw()).map(|p| p.source_custody())
+            };
+            match checked {
+                Some(checked) => checked.install_certified_turn_in(
+                    &mut self.state,
+                    scope,
+                    &metadata,
+                    target,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                    &retained_sources,
+                )?,
+                None => self.install_certified_turn_in(
+                    scope,
+                    &metadata,
+                    target,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?,
+            }.into_parts()
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
@@ -8100,7 +8119,7 @@ where
             source_keys,
             provenance,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance)?;
+        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -13383,7 +13402,7 @@ mod source_origin_tests {
                 let before = resident.residency();
                 let compiled = tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
                 assert!(matches!(
-                    resident.install_admitted_turn(foreign, TurnImageAcquisition::Compile, pending),
+                    resident.install_admitted_turn(foreign, TurnImageAcquisition::Compile, pending, None),
                     Err(ResidentError::ProvenanceCodeOwnerMismatch),
                 ));
                 assert_eq!(resident.residency(), before);

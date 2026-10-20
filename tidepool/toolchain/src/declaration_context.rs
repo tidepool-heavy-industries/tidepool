@@ -3153,6 +3153,41 @@ impl RequestCompilerInputs {
         self.advance_program_support(projection_context, incoming)
     }
 
+    fn with_program_value_interface(
+        self: &Arc<Self>,
+        value: Arc<CertifiedValueInterface>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let primary = self.world_primary_context.as_ref().ok_or_else(|| {
+            failure("program value delta requires the actual World primary owner")
+        })?;
+        let owner = identity(value.interface().unit(), value.interface().module());
+        let support = self
+            .source_support
+            .admit_value_interfaces(std::slice::from_ref(&value))?;
+        let metadata =
+            support.type_interface_metadata(&self.metadata, std::slice::from_ref(&owner))?;
+        let mut facts = primary.owner.facts.clone();
+        facts.lexical = facts.lexical.append_issued([ExactLexicalNode {
+            owner,
+            imports: value
+                .requirements()
+                .iter()
+                .filter(|owner| facts.lexical.get(owner).is_some())
+                .cloned()
+                .collect(),
+        }])?;
+        facts.compiler_support = support.clone();
+        facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
+        let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        Ok(Arc::new(Self {
+            source_support: Arc::new(support),
+            metadata,
+            native_selection: self.native_selection.clone(),
+            original_sources: Arc::clone(&self.original_sources),
+            world_primary_context: Some(context),
+        }))
+    }
+
     pub(crate) fn shared_compiler_source_support(
         &self,
     ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
@@ -6200,10 +6235,42 @@ impl ExactRequestInputs {
 #[derive(Clone)]
 struct ProgramSourceSupport {
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
-    imports: Arc<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>>,
+    imports: Arc<imbl::OrdMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>>,
 }
 
 impl ProgramSourceSupport {
+    fn append_fragment(
+        previous: Option<&Self>,
+        incoming: &crate::artifact_inventory::CompilerSourceSupport,
+        imports: impl IntoIterator<Item = (ExactModuleIdentity, Vec<ExactModuleIdentity>)>,
+    ) -> Result<Self, CompileError> {
+        let compiler_support = match previous {
+            Some(previous) => {
+                previous
+                    .compiler_support
+                    .append_program_fragment(incoming)?
+                    .support
+            }
+            None => incoming.clone(),
+        };
+        let mut retained =
+            previous.map_or_else(imbl::OrdMap::new, |value| value.imports.as_ref().clone());
+        for (owner, mut requirements) in imports {
+            requirements.sort();
+            requirements.dedup();
+            if retained
+                .insert(owner, requirements.clone())
+                .is_some_and(|old| old != requirements)
+            {
+                return Err(failure("program support changed its original import graph"));
+            }
+        }
+        Ok(Self {
+            compiler_support,
+            imports: Arc::new(retained),
+        })
+    }
+
     fn extend(
         previous: Option<&Self>,
         compiler_support: crate::artifact_inventory::CompilerSourceSupport,
@@ -6214,7 +6281,7 @@ impl ProgramSourceSupport {
             None => compiler_support,
         };
         let mut retained =
-            previous.map_or_else(BTreeMap::new, |value| value.imports.as_ref().clone());
+            previous.map_or_else(imbl::OrdMap::new, |value| value.imports.as_ref().clone());
         for (owner, mut requirements) in imports {
             requirements.sort();
             requirements.dedup();
@@ -7168,16 +7235,16 @@ impl<'a> ProductInputFacts<'a> {
 
 /// Projected World input facts retained by the actual segment source issuer.
 /// Certification and item native selection borrow this same demanded owner.
-pub(crate) struct DemandedWorldCompilerInputs<'a> {
+pub(crate) struct DemandedWorldCompilerInputs {
     demand: DemandNativeInputs,
     groups: DemandCertifiedGroups,
     support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     binding: WorldCompilationIdentity,
-    context: &'a Arc<ExactDeclarationContext>,
+    context: Arc<ExactDeclarationContext>,
     checked_values: crate::checked_cell::CheckedValueImportAuthority,
 }
 
-impl<'a> DemandedWorldCompilerInputs<'a> {
+impl DemandedWorldCompilerInputs {
     /// Assemble the world product from the exact demand owner, its certified
     /// groups and the semantic support it projected. The binding is content
     /// identity only; the checked program remains the source of authority.
@@ -7186,7 +7253,7 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
         groups: DemandCertifiedGroups,
         support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         binding: WorldCompilationIdentity,
-        context: &'a Arc<ExactDeclarationContext>,
+        context: Arc<ExactDeclarationContext>,
         checked_values: crate::checked_cell::CheckedValueImportAuthority,
     ) -> Self {
         Self {
@@ -7211,8 +7278,8 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
         ProductCompilationBinding::World(&self.binding)
     }
 
-    pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
-        self.context
+    pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.context
     }
 
     pub(crate) fn checked_values(&self) -> &crate::checked_cell::CheckedValueImportAuthority {
@@ -7238,12 +7305,20 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
     /// and the projected support are the only executable input authority.
     fn facts(&self) -> ProductInputFacts<'_> {
         ProductInputFacts::from_demand(
-            self.context,
+            &self.context,
             &self.demand,
             &self.groups,
             Arc::clone(&self.support),
             &self.checked_values,
         )
+    }
+
+    fn program_facts<'a>(&'a self, program: &'a ProgramSourceSupportState) -> ProductInputFacts<'a> {
+        let mut facts = self.facts();
+        facts.source_lexical = &program.program_source_lexical;
+        facts.program_support = program.program_support.as_ref();
+        facts.source_selected_support = &program.source_selected_support;
+        facts
     }
 
     pub(crate) fn certified_selection(
@@ -9089,21 +9164,40 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
     package_imports: Arc<[u8]>,
 }
 
-/// One actual World segment's admitted source and original products. Its
-/// prefix state reuses the same source-support owner as finite compilation.
-pub(crate) struct WorldProgramSegment<'a> {
+/// One move-only compiler prefix. Runtime settlement authority remains outside
+/// this owner; it carries only actual input and source-output evidence.
+pub(crate) struct WorldProgramContinuation {
+    context: Arc<ExactDeclarationContext>,
+    inputs: Arc<RequestCompilerInputs>,
+    program: ProgramSourceSupportState,
+    private_input: Option<Arc<OriginalCompilerInputs>>,
+}
+
+impl WorldProgramContinuation {
+    pub(crate) fn begin(program: &crate::compiler_world::CheckedWorldCellProgram) -> Self {
+        Self {
+            context: Arc::clone(program.primary_context()),
+            inputs: Arc::clone(program.primary_compiler_inputs()),
+            program: ProgramSourceSupportState::default(),
+            private_input: None,
+        }
+    }
+}
+
+pub(crate) struct WorldProgramSegment {
     pub(crate) originals: crate::certified_products::CertifiedSegmentOriginals,
-    inputs: DemandedWorldCompilerInputs<'a>,
+    inputs: DemandedWorldCompilerInputs,
     binding: WorldCompilationIdentity,
+    stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
     source: ExactSourceAdmission,
     source_text: String,
     aliases: Vec<PathBuf>,
-    program: ProgramSourceSupportState,
+    continuation: WorldProgramContinuation,
 }
 
-impl WorldProgramSegment<'_> {
+impl WorldProgramSegment {
     pub(crate) fn planned_declaration(
-        &self,
+        &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
         stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
     ) -> Result<crate::checked_cell::PlannedCheckedDeclaration, CompileError> {
@@ -9129,6 +9223,7 @@ impl WorldProgramSegment<'_> {
             &self.product_admission(),
             &self.aliases,
         )?;
+        self.continuation.private_input = Some(Arc::clone(&output.inputs));
         Ok(crate::checked_cell::PlannedCheckedDeclaration {
             source: self.source_text.clone(),
             certificate: Arc::new(certificate),
@@ -9153,7 +9248,7 @@ impl WorldProgramSegment<'_> {
         self.inputs.groups.groups()
     }
     pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
-        &self.program.program_source_lexical
+        &self.continuation.program.program_source_lexical
     }
     pub(crate) fn original_execution_context(
         &self,
@@ -9165,37 +9260,216 @@ impl WorldProgramSegment<'_> {
         ExactProductAdmission {
             compilation_binding: ProductCompilationBinding::World(&self.binding),
             source: &self.source,
-            facts: self.inputs.facts(),
+            facts: self.inputs.program_facts(&self.continuation.program),
         }
     }
     pub(crate) fn admit_program_support(
         &mut self,
-        context: Arc<ExactDeclarationContext>,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
         support: &ArtifactView,
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.program.admit_program_support_inner(
-            self.inputs.facts().producer,
-            context,
-            support,
-            std::slice::from_ref(&self.source),
-            Some(produced),
-            Some(self.inputs.context),
+        let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
+            program,
+            &self.stage,
+            &self.source,
+            &self.source_text,
             selection,
+            support,
+        )?;
+        let context = &self.continuation.context;
+        let imports = self.source.home_imports()?;
+        let generated = self.source.generated_source_owner()?;
+        let executable = self.stage.identity().original_owner().is_none();
+        for owner in fragment.projection().snapshot_roles().keys() {
+            let entry = fragment
+                .implementation_entry(owner)
+                .expect("admitted fragment row");
+            if produced.matches_artifact(entry) {
+                if imports.contains_key(owner) || self.source.selected_originals.contains_key(owner)
+                {
+                    return Err(failure("produced type output became source support"));
+                }
+                continue;
+            }
+            let prior = context
+                .compiler_source_support()
+                .implementation_entry(owner);
+            if imports.contains_key(owner) {
+                if let Some(selected) = self.source.selected_originals.get(owner) {
+                    if prior.and_then(|entry| canonical_source_interface(entry))
+                        != Some(selected.interface())
+                        || canonical_source_interface(entry) != Some(selected.interface())
+                    {
+                        return Err(failure(
+                            "source-selected support has another original owner",
+                        ));
+                    }
+                } else if self
+                    .inputs
+                    .context
+                    .compiler_source_support()
+                    .implementation_entry(owner)
+                    .is_some_and(|entry| matches!(&entry.payload, ArtifactPayload::Original(_)))
+                {
+                    return Err(failure(
+                        "program support cannot select a retained hidden owner",
+                    ));
+                } else if prior.is_some_and(|previous| {
+                    canonical_source_interface(previous) != canonical_source_interface(entry)
+                }) {
+                    return Err(failure(
+                        "projected segment source changed its admitted canonical owner",
+                    ));
+                } else if canonical_source_interface(entry).is_none() {
+                    return Err(failure(
+                        "fresh program support lacks a canonical source seal",
+                    ));
+                }
+            } else if canonical_source_interface(entry).is_none()
+                && prior.is_none_or(|previous| previous.descriptor.id != entry.descriptor.id)
+            {
+                return Err(failure(
+                    "program support changed an inherited synthetic interface",
+                ));
+            }
+        }
+        let kind = |owner: &ExactModuleIdentity| {
+            fragment
+                .implementation_entry(owner)
+                .or_else(|| {
+                    context
+                        .compiler_source_support()
+                        .implementation_entry(owner)
+                })
+                .map(|entry| entry.descriptor.kind)
+        };
+        let roots = imports
+            .keys()
+            .filter(|owner| *owner != &generated)
+            .cloned()
+            .collect::<Vec<_>>();
+        let lexical = crate::declaration_join::keyed_source_lexical_closure(
+            &roots,
+            |owner| {
+                imports.get(owner).cloned().or_else(|| {
+                    context
+                        .owner
+                        .facts
+                        .lexical
+                        .get(owner)
+                        .map(|node| node.imports.clone())
+                })
+            },
+            &kind,
+        )?
+        .lexical;
+        let mut facts = context.owner.facts.clone();
+        facts.lexical = facts.lexical.append_issued(lexical.iter().cloned())?;
+        if !executable {
+            let edges = imports
+                .get(&generated)
+                .ok_or_else(|| failure("authored stage lacks original import evidence"))?;
+            facts.lexical = facts.lexical.append_issued([ExactLexicalNode {
+                owner: generated,
+                imports: edges
+                    .iter()
+                    .filter(|owner| facts.lexical.get(owner).is_some())
+                    .cloned()
+                    .collect(),
+            }])?;
+        }
+        facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
+        let projected = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let advanced = self
+            .continuation
+            .inputs
+            .advance_program_support(&projected, &fragment)?;
+        self.continuation.program.program_support = Some(ProgramSourceSupport::append_fragment(
+            self.continuation.program.program_support.as_ref(),
+            &fragment,
+            imports.into_iter().filter(|(owner, _)| {
+                !executable
+                    || owner
+                        != &self
+                            .source
+                            .generated_source_owner()
+                            .expect("validated generated owner")
+            }),
+        )?);
+        for node in lexical {
+            match self
+                .continuation
+                .program
+                .program_source_lexical
+                .iter()
+                .find(|old| old.owner == node.owner)
+            {
+                Some(old) if old != &node => {
+                    return Err(failure("program support changed its selected source graph"))
+                }
+                Some(_) => {}
+                None => self.continuation.program.program_source_lexical.push(node),
+            }
+        }
+        self.continuation
+            .program
+            .source_selected_support
+            .extend(self.source.selected_originals.keys().cloned());
+        self.continuation.inputs = advanced.inputs;
+        self.continuation.context = advanced.context;
+        Ok(Arc::clone(&self.continuation.context))
+    }
+
+    pub(crate) fn admit_value_interface(
+        &mut self,
+        value: Arc<CertifiedValueInterface>,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let inputs = self
+            .continuation
+            .inputs
+            .with_program_value_interface(value)?;
+        self.continuation.context = Arc::clone(
+            inputs
+                .world_primary_context
+                .as_ref()
+                .expect("World value owner"),
+        );
+        self.continuation.inputs = inputs;
+        Ok(Arc::clone(&self.continuation.context))
+    }
+
+    pub(crate) fn retain_private_output(&mut self, output: &IssuedOriginalOutput) {
+        self.continuation.private_input = Some(Arc::clone(&output.inputs));
+    }
+
+    pub(crate) fn finish(self) -> (WorldProgramContinuation, WorldStageSourceAdmission) {
+        (
+            self.continuation,
+            WorldStageSourceAdmission {
+                source: self.source,
+                text: self.source_text,
+                aliases: self.aliases,
+            },
         )
     }
+}
+
+pub(crate) struct WorldStageSourceAdmission {
+    pub(crate) source: ExactSourceAdmission,
+    pub(crate) text: String,
+    pub(crate) aliases: Vec<PathBuf>,
 }
 
 impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
-    pub(crate) fn demand_primary_inputs(&self) -> Result<DemandNativeInputs, CompileError> {
+    fn demand_inputs(&self, cold: &Arc<RequestCompilerInputs>) -> Result<DemandNativeInputs, CompileError> {
         let operation = self.program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| compiler_evidence_failure(error.into()))
         };
-        let cold = self.program.primary_compiler_inputs();
         let roles = cold.source_support.projection().snapshot_roles();
         let mut roots = BTreeSet::new();
         let mut native_roots = BTreeSet::new();
@@ -9291,25 +9565,26 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
-    ) -> Result<WorldProgramSegment<'a>, CompileError> {
+        continuation: WorldProgramContinuation,
+    ) -> Result<WorldProgramSegment, CompileError> {
         let program = self.program;
         let operation = program.validation().inventory.as_ref();
-        let demand = self.demand_primary_inputs()?;
+        let demand = self.demand_inputs(&continuation.inputs)?;
         let groups = demand.certify_receipt_groups(&receipt, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
         let checked_values =
             crate::checked_cell::CheckedValueImportAuthority::from_world_output(program)?;
-        let context = program.primary_context();
+        let context = &continuation.context;
         let binding = WorldCompilationIdentity::from_binding(&self.binding);
         let inputs = DemandedWorldCompilerInputs::from_demand(
             demand,
             groups,
             support,
             binding.clone(),
-            context,
+            Arc::clone(context),
             checked_values,
         );
-        let facts = inputs.facts();
+        let facts = inputs.program_facts(&continuation.program);
         // The physical evidence stays owned by the decoded receipt; retain
         // the exact bytes the receipt already carries for product admission.
         let source_path = self.source.source_path.clone();
@@ -9370,11 +9645,12 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         Ok(WorldProgramSegment {
             originals,
             inputs,
+            stage: Arc::clone(&self.binding.stage),
             binding,
             source,
             source_text: target_source,
             aliases: self.aliases,
-            program: ProgramSourceSupportState::default(),
+            continuation,
         })
     }
 
@@ -16514,6 +16790,7 @@ mod tests {
 
     #[test]
     fn compiler_role_conflict_diagnostics_preserve_shared_and_overlapping_births() {
+        use crate::exact_context::NativeOfferSnapshotBody;
         let root = identity("fixture", "Alpha");
         let dependency = identity("fixture", "Beta");
         let mut source = published_original_choice_history_fixture().clone();
@@ -16536,7 +16813,7 @@ mod tests {
                 imports: vec![],
             });
         });
-        let publish = |revision| {
+        let publish = |source: &ExactDeclarationContext, revision| {
             let prior = source
                 .issue_published_source_original(revision, "beta-input", &dependency)
                 .unwrap();
@@ -16552,9 +16829,66 @@ mod tests {
                 .snapshot_roles()[&root]
                 .clone()
         };
-        let first = publish("beta-first");
+        let first = publish(&source, "beta-first");
         let repeated = first.clone();
-        let overlapping = publish("beta-second");
+        let equivalent = publish(&source, "beta-second");
+        let original = first.original().unwrap();
+        let full = source
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == original)
+            .unwrap();
+        assert!(full.is_full());
+        let partial = full
+            .within_projection(
+                source.compiler_input_projection(),
+                &ArtifactInventory::default().empty_view(),
+            )
+            .unwrap()
+            .unwrap();
+        let (
+            NativeOfferSnapshotBody::Full(full_graph),
+            NativeOfferSnapshotBody::Partial(partial_graph),
+        ) = (full.snapshot_facts().body, partial.snapshot_facts().body)
+        else {
+            panic!("the checked withdrawal must change Full to Partial")
+        };
+        assert!(full_graph.snapshot().as_ref() == partial_graph.snapshot().as_ref());
+        let offers = source
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .map(|offer| {
+                if offer.original() == original {
+                    partial.clone()
+                } else {
+                    offer.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let projection = source.compiler_input_projection().clone();
+        let support = recover_fixture_compiler_support(
+            projection.clone(),
+            source.artifact_view().clone(),
+            offers,
+        )
+        .unwrap();
+        let rows = RequestNativeAvailability::issue_checked(
+            &projection,
+            support.artifacts(),
+            support.native_offers(),
+        )
+        .unwrap();
+        let partial_source = ExactDeclarationContext::from_authenticated_execution_support(
+            source.owner.facts.producer,
+            support.retain_normalized_availability(&rows).unwrap(),
+            source.lexical_graph().to_vec(),
+            target,
+            &[],
+        )
+        .unwrap();
+        let overlapping = publish(&partial_source, "beta-first");
         let authority = |role: &CompilerInputRole| match role {
             CompilerInputRole::PublishedSourceOriginal {
                 native_authority, ..
@@ -16563,8 +16897,15 @@ mod tests {
         };
         let first_authority = authority(&first);
         let repeated_authority = authority(&repeated);
+        let equivalent_authority = authority(&equivalent);
         let overlapping_authority = authority(&overlapping);
         assert!(Arc::ptr_eq(&first_authority, &repeated_authority));
+        assert!(!Arc::ptr_eq(&first_authority, &equivalent_authority));
+        assert_eq!(
+            first_authority.commitment(),
+            equivalent_authority.commitment(),
+            "first birth projects dependency publication markers to reusable originals"
+        );
         assert!(!Arc::ptr_eq(&first_authority, &overlapping_authority));
         assert_ne!(
             first_authority.commitment(),
@@ -16574,11 +16915,25 @@ mod tests {
         assert_eq!(first.original(), overlapping.original());
         let first_dependency = first_authority.roles[&dependency].as_role();
         let overlapping_dependency = overlapping_authority.roles[&dependency].as_role();
-        assert!(first_dependency.is_published_source_original());
-        assert!(overlapping_dependency.is_published_source_original());
+        assert!(matches!(
+            first_dependency,
+            CompilerInputRole::ReusableOriginal { .. }
+        ));
+        assert!(matches!(
+            overlapping_dependency,
+            CompilerInputRole::ReusableOriginal { .. }
+        ));
         assert_eq!(
             first_dependency.original(),
             overlapping_dependency.original()
+        );
+        assert_eq!(
+            first_authority.native_availability[&original].mode,
+            NativeTransportMode::Full
+        );
+        assert_eq!(
+            overlapping_authority.native_availability[&original].mode,
+            NativeTransportMode::IssuedGroups
         );
         let incoming = CompilerInputRole::InterfaceOnly {
             interface: source.compiler_input_projection().snapshot_roles()[&dependency].interface(),
@@ -16641,10 +16996,12 @@ mod tests {
         };
         let first = write_conflict(first);
         let repeated = write_conflict(repeated);
+        let equivalent = write_conflict(equivalent);
         let overlapping = write_conflict(overlapping);
         assert_eq!(first, repeated);
+        assert_eq!(first, equivalent);
         assert_ne!(first, overlapping);
-        assert!(first.len().abs_diff(overlapping.len()) < 128);
+        assert!(first.len().abs_diff(overlapping.len()) < 256);
     }
 
     proptest::proptest! {
@@ -19749,7 +20106,7 @@ mod tests {
             groups,
             support,
             binding,
-            &context,
+            Arc::clone(&context),
             crate::checked_cell::CheckedValueImportAuthority::default(),
         );
         assert!(world.is_world_compilation());
@@ -25117,7 +25474,7 @@ mod tests {
                     entries[&identity("fixture", "InstanceRelay")].descriptor.id,
                 ])
                 .unwrap(),
-            imports: Arc::new(BTreeMap::new()),
+            imports: Arc::new(imbl::OrdMap::new()),
         });
         let selected_support = &request
             .program
@@ -28329,7 +28686,7 @@ mod tests {
         let mut local = request.clone();
         local.program.program_support = Some(ProgramSourceSupport {
             compiler_support: persisted.compiler_source_support().clone(),
-            imports: Arc::new(BTreeMap::new()),
+            imports: Arc::new(imbl::OrdMap::new()),
         });
         let local_admission = local.validate_receipt(receipt, None, &empty).unwrap();
         assert_eq!(
@@ -28550,7 +28907,7 @@ mod tests {
                         .collect(),
                 )
                 .unwrap(),
-            imports: Arc::new(BTreeMap::new()),
+            imports: Arc::new(imbl::OrdMap::new()),
         });
         assert!(
             local.validate_receipt(receipt, None, &persisted).is_err(),

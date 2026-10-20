@@ -1149,6 +1149,9 @@ impl PersistentSession {
                     self.machine = Some(engine);
                     self.ensure_machine_incarnation();
                 }
+                if !keys.is_empty() {
+                    self.advance_public_visibility(scope);
+                }
                 Ok(InstalledCertifiedTurn {
                     program: target,
                     source_keys: keys,
