@@ -8,6 +8,7 @@ use ractor::{ActorRef as RactorRef, RpcReplyPort};
 
 pub mod lifecycle;
 use crate::WorkbenchRequest;
+pub(crate) use lifecycle::GenerationPublicationNotification;
 pub use lifecycle::{
     ActorAdmissionLease, AdmittedKernelEnvelope, LifecycleHandle, NativeProviderAdmission,
     NativeProviderSettlementError, NativeProviderStartError, NativeProviderTurnLease,

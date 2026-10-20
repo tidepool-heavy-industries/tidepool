@@ -521,10 +521,13 @@ impl LifecycleHandle {
     pub(crate) fn generation_published(
         &self,
         generation: Arc<crate::resident_workbench::ActorGeneration>,
-    ) {
-        let _ = self.address.cast(LifecycleCommand::Resident(Box::new(
+    ) -> super::GenerationPublicationNotification {
+        match self.address.cast(LifecycleCommand::Resident(Box::new(
             ResidentCommand::GenerationPublished(generation),
-        )));
+        ))) {
+            Ok(()) => super::GenerationPublicationNotification::Accepted,
+            Err(_) => super::GenerationPublicationNotification::Refused,
+        }
     }
 
     pub(crate) fn retire_resident(&self, terminal: crate::ActorTerminal) {

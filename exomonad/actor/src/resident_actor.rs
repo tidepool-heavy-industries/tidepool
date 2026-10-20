@@ -8903,7 +8903,7 @@ where
         })?;
         let publisher = workbench.generation_publisher(
             self.installed_tools.clone(),
-            crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle),
+            crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle.clone()),
         );
         let prepared = workbench
             .prepare_initial_generation(
@@ -8914,17 +8914,14 @@ where
                 prompts.clone(),
             )
             .await?;
-        let generation = publisher
+        publisher
             .publish(
                 prepared,
                 tidepool_runtime::session::PublicationDecision::new(),
                 crate::resident_workbench::ActorGenerationPublication::Terminal,
             )
             .await?
-            .into_initial_generation()?;
-        if let Some(lifecycle) = &self.lifecycle {
-            lifecycle.generation_published(generation);
-        }
+            .notify_initial_generation(&lifecycle)?;
         installation.prepared_tools.take();
         Ok(())
     }
@@ -16278,11 +16275,10 @@ mod tests {
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, ResidentError,
-        TurnClassification, TurnKind, WorkbenchCellItemKind,
-        WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt,
-        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-        WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,
-        WorkbenchTerminalTransfer,
+        TurnClassification, TurnKind, WorkbenchCellItemKind, WorkbenchExecutionId,
+        WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+        WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
     };
 
     #[test]

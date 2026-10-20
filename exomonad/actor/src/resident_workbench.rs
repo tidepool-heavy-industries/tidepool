@@ -2104,7 +2104,9 @@ impl ReservedActorGeneration {
             .map_err(
                 |settlement| ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned().into()))),
+                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
+                            detail.to_owned().into(),
+                        ))),
                         settlement,
                     }),
                 },
@@ -2118,7 +2120,9 @@ impl ReservedActorGeneration {
         settlement: UnstartedRetirementSourceSettlement,
     ) -> Result<(), (Self, UnstartedRetirementSourceSettlement)> {
         if matches!(self.guard.settlement, ActorPublicationState::Settled)
-            && settlement.attempt.ptr_eq(&Arc::downgrade(&self.guard.attempt))
+            && settlement
+                .attempt
+                .ptr_eq(&Arc::downgrade(&self.guard.attempt))
         {
             Ok(())
         } else {
@@ -2648,6 +2652,8 @@ enum PublicationSettlementError {
     BodyUnobserved,
     #[error("publication completion cannot establish whether visibility committed")]
     PublicationUnconfirmed,
+    #[error("the generation was published, but its lifecycle owner refused notification")]
+    NotificationRefused,
     #[error("retirement {stage} settlement failed: {source}")]
     Retirement {
         stage: RetirementSettlementStage,
@@ -3360,8 +3366,11 @@ where
             Arc::downgrade(&owner)
         };
         let obligations = match &prepared.commit {
-            PreparedGenerationCommit::Ephemeral { .. } => PublicationBodyObligations::DiagnosticOnly,
-            PreparedGenerationCommit::Restored { .. } | PreparedGenerationCommit::Durable { .. } => PublicationBodyObligations::Retained,
+            PreparedGenerationCommit::Ephemeral { .. } => {
+                PublicationBodyObligations::DiagnosticOnly
+            }
+            PreparedGenerationCommit::Restored { .. }
+            | PreparedGenerationCommit::Durable { .. } => PublicationBodyObligations::Retained,
         };
         if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner)
         {
@@ -3562,6 +3571,25 @@ impl ActorGenerationPublicationIssue {
 }
 
 impl ActorGenerationCommit {
+    pub(crate) fn notify_initial_generation(
+        self,
+        lifecycle: &crate::LifecycleHandle,
+    ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
+        if let Self::Published { generation, .. } = &self {
+            if lifecycle.generation_published(generation.clone())
+                == crate::kernel::GenerationPublicationNotification::Refused
+            {
+                return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Arc::new(Ok(self)),
+                        settlement: PublicationSettlementError::NotificationRefused,
+                    }),
+                });
+            }
+        }
+        self.into_initial_generation()
+    }
+
     pub(crate) fn into_initial_generation(
         self,
     ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
@@ -19480,19 +19508,22 @@ pub(crate) mod request_tests {
             crate::ActorSessionContext,
         ) {
             let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
-            let (mut context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                self.public.clone(),
-                self.captured.clone(),
-                None,
-                Some(&layers),
-            )
-            .expect("the actual captured source owner admits the original public context");
+            let (mut context, authority) =
+                crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    self.public.clone(),
+                    self.captured.clone(),
+                    None,
+                    Some(&layers),
+                )
+                .expect("the actual captured source owner admits the original public context");
             let frontend = self
                 .workbench
                 .shared_view()
                 .with_json_input(input)
                 .with_compilation_authority(authority);
-            let observation = frontend.capture_observation_scaffold(&context).await
+            let observation = frontend
+                .capture_observation_scaffold(&context)
+                .await
                 .expect("the production public preflight settles the input TYPE prototype");
             let descriptor =
                 crate::ActorDescriptor::new("actual-world-json-input", context.placement);
@@ -19583,7 +19614,8 @@ pub(crate) mod request_tests {
             .unwrap();
         let expected_close = match &boundary {
             WorldInputPlanBoundary::Actual => tidepool_runtime::CompilerTransactionClose::Clean,
-            WorldInputPlanBoundary::ForeignWorld(_) | WorldInputPlanBoundary::ForeignOriginal(_) => {
+            WorldInputPlanBoundary::ForeignWorld(_)
+            | WorldInputPlanBoundary::ForeignOriginal(_) => {
                 tidepool_runtime::CompilerTransactionClose::NotStarted
             }
         };
@@ -19643,7 +19675,9 @@ pub(crate) mod request_tests {
             .await;
         assert_eq!(
             closes.compiler_close_observations().as_slice(),
-            &[crate::termination::CompilerWorkClose::Settled(expected_close)],
+            &[crate::termination::CompilerWorkClose::Settled(
+                expected_close
+            )],
             "successful parser work confirms END; owner preflight refusal submits no request"
         );
         (result, input)
@@ -24159,7 +24193,8 @@ pub(crate) mod request_tests {
                 let captured = source
                     .capture_compiler_sources()
                     .map_err(|error| error.to_string())?;
-                if !captured.is_some_and(|captured| Arc::ptr_eq(&captured, &self.compiler_sources)) {
+                if !captured.is_some_and(|captured| Arc::ptr_eq(&captured, &self.compiler_sources))
+                {
                     return Err("source differs from the retained quoted compiler bytes".into());
                 }
                 Ok(())
@@ -24178,7 +24213,8 @@ pub(crate) mod request_tests {
                 _: tidepool_repr::PrincipalId,
                 _: &crate::CheckpointSourceLayer,
                 _: &[String],
-            ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+            ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload>
+            {
                 Err(crate::SourceLayerReload::Unavailable(
                     "the retained quoted source owner does not publish reloads".into(),
                 ))
@@ -24880,14 +24916,24 @@ pub(crate) mod request_tests {
                             control,
                         )
                         .await;
-                    } else if matches!(control, PublicationFailureControl::UnstartedSourceSettlements) {
+                    } else if matches!(
+                        control,
+                        PublicationFailureControl::UnstartedSourceSettlements
+                    ) {
                         let mut preparations = vec![prepared];
                         for _ in 0..2 {
-                            preparations.push(workbench.prepare_actor_generation(
-                                context.clone(), descriptor.clone(),
-                                ActorRequestSnapshot::Generation(initial.clone()),
-                                next_installation.clone(), prompts.clone(),
-                            ).await.unwrap());
+                            preparations.push(
+                                workbench
+                                    .prepare_actor_generation(
+                                        context.clone(),
+                                        descriptor.clone(),
+                                        ActorRequestSnapshot::Generation(initial.clone()),
+                                        next_installation.clone(),
+                                        prompts.clone(),
+                                    )
+                                    .await
+                                    .unwrap(),
+                            );
                         }
                         assert_unstarted_source_settlements(&workbench, state, preparations).await;
                     } else {
@@ -24975,12 +25021,12 @@ pub(crate) mod request_tests {
                         )
                         .await
                         .unwrap();
-                    let foreign_owner = ResidentActorWorkbench::<
-                        frunk::HNil,
-                        tidepool_mcp::CapturedOutput,
-                    >::new(
-                        Arc::new(ActorMachineRegistry::new()), source.clone(), None
-                    );
+                    let foreign_owner =
+                        ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
+                            Arc::new(ActorMachineRegistry::new()),
+                            source.clone(),
+                            None,
+                        );
                     assert!(matches!(
                         foreign_owner
                             .generation_publisher(
@@ -25081,7 +25127,9 @@ pub(crate) mod request_tests {
                             session
                                 .initialize_durable_public_scope(owner, scope)
                                 .map_err(|error| {
-                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    ))
                                 })?;
                             Ok(())
                         })
@@ -25164,13 +25212,16 @@ pub(crate) mod request_tests {
                     );
                     let mut private_context = replacement.context.clone();
                     private_context.placement.lexical_scope = execution.private_scope;
-                    let (private_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                        private_context,
-                        replacement.installation.source().clone(),
-                        Some(replacement.installation.clone()),
-                        Some(&source_layers),
-                    )
-                    .expect("replacement cells retain their actual installation and source owner");
+                    let (private_context, authority) =
+                        crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                            private_context,
+                            replacement.installation.source().clone(),
+                            Some(replacement.installation.clone()),
+                            Some(&source_layers),
+                        )
+                        .expect(
+                            "replacement cells retain their actual installation and source owner",
+                        );
                     let private = workbench
                         .shared_view()
                         .with_compilation_authority(authority)
@@ -25690,13 +25741,16 @@ pub(crate) mod request_tests {
             );
             let mut failed_context = context.clone();
             failed_context.placement.lexical_scope = execution.private_scope;
-            let (failed_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                failed_context,
-                generation_source.clone(),
-                None,
-                Some(&source_layers),
-            )
-            .expect("failed source preparation still requires its actual retained source owner");
+            let (failed_context, authority) =
+                crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    failed_context,
+                    generation_source.clone(),
+                    None,
+                    Some(&source_layers),
+                )
+                .expect(
+                    "failed source preparation still requires its actual retained source owner",
+                );
             let failed = workbench
                 .shared_view()
                 .with_compilation_authority(authority)

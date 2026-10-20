@@ -1685,9 +1685,10 @@ mod tests {
             assert!(primary_error
                 .to_string()
                 .contains("retained storage evidence"));
-            let refusal = refusal.into_settled_diagnostic().err().expect(
-                "source restoration cannot settle unassessed storage work",
-            );
+            let refusal = refusal
+                .into_settled_diagnostic()
+                .err()
+                .expect("source restoration cannot settle unassessed storage work");
             assert!(Arc::ptr_eq(&primary, refusal.outcome()));
         }
     }
@@ -1695,8 +1696,9 @@ mod tests {
     #[test]
     fn typed_durable_refusal_keeps_refusal_control_and_unassessed_obligations() {
         use super::super::{
-            ActorGenerationCommit, ActorGenerationPublicationRefusalObservation as Observation,
-            ActorGenerationPublicationIssue, ActorPublicationFailureCause as Cause,
+            ActorGenerationCommit, ActorGenerationPublicationIssue,
+            ActorGenerationPublicationRefusalObservation as Observation,
+            ActorPublicationFailureCause as Cause,
         };
         use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
         let fixture = PublicationFixture::replacement(true);
@@ -1706,13 +1708,13 @@ mod tests {
             guard,
             obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Ok(ActorGenerationCommit::Refused(
-                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(Box::new(
-                    StoreError {
+                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(
+                    Box::new(StoreError {
                         path: "typed-refusal-control.db".into(),
                         kind: StoreErrorKind::Storage,
                         detail: "actual typed storage cause".into(),
-                    },
-                )))),
+                    }),
+                ))),
             )),
         }
         .for_retirement();
@@ -3346,7 +3348,10 @@ mod tests {
             .register_resident(context, descriptor, false)
             .await
             .unwrap();
-        kernel.lifecycle().generation_published(expected.clone());
+        assert_eq!(
+            kernel.lifecycle().generation_published(expected.clone()),
+            crate::kernel::GenerationPublicationNotification::Accepted
+        );
         let observed = kernel
             .lifecycle()
             .public_owner(Some(expected.public_owner().clone()), false)
