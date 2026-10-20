@@ -99,7 +99,7 @@ import Tidepool.ConstructorIdentity (IdentityResolver, captureIdentityResolver)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.HomeProducts
-  ( CanonicalOriginalInput, canonicalOriginalVersion, recoverCanonicalOriginalWithPrevious
+  ( CanonicalOriginalInputs, lookupCanonicalOriginalInput, canonicalOriginalVersion, recoverCanonicalOriginalWithPrevious
   , OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
@@ -510,13 +510,13 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
 -- World acquisition supplies the same opaque input used by its compiler
 -- loader. Only reached executable demand enters the existing recovery cache.
 newPreparedCanonicalModuleTaskPreparer :: HscEnv -> PreparedBodyCache
-  -> Map Module CanonicalOriginalInput
+  -> CanonicalOriginalInputs
   -> IO (Map String Id -> Module
     -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
 newPreparedCanonicalModuleTaskPreparer env cache inputs =
   newPreparedOriginalTaskPreparer env cache
-    (\owner -> Map.lookup owner inputs >>= canonicalOriginalVersion)
-    (\owner previous -> case Map.lookup owner inputs of
+    (\owner -> lookupCanonicalOriginalInput inputs owner >>= canonicalOriginalVersion)
+    (\owner previous -> case lookupCanonicalOriginalInput inputs owner of
       Nothing -> pure Nothing
       Just input -> recoverCanonicalOriginalWithPrevious env input previous)
 

@@ -16,6 +16,7 @@ module Tidepool.ExactHydration
   , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
   , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
+  , HydratedExactInterfaces, hydrateExactScopeWithProducts, hydratedExactInterfaces
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , checkedValueOwner, noCheckedValueImports
@@ -118,7 +119,7 @@ import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit, isHomeUnitDefinite
 import GHC.Unit.Types (GenWithIsBoot(..), InstalledModuleWithIsBoot, UnitId)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprint0, fingerprintByteString, fingerprintString)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts, mi_decls)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts, mi_decls, mi_hsc_src)
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.ResumePackage (resolveResumeInterface)
@@ -1143,6 +1144,27 @@ hydrateExactScope env loaded = do
         pure ()
       else pure ()
   hydrateOriginalInterfaces env (map snd loaded)
+
+-- The interface reader and this hydration operation own the association.
+-- This is a compiler TYPE product, never native execution authority.
+newtype HydratedExactInterfaces = HydratedExactInterfaces [(ExactIfaceArtifact,HomeModInfo)]
+
+hydratedExactInterfaces :: HydratedExactInterfaces -> [(ExactIfaceArtifact,HomeModInfo)]
+hydratedExactInterfaces (HydratedExactInterfaces homes) = homes
+
+hydrateExactScopeWithProducts :: HscEnv -> [(ExactIfaceArtifact,ModIface)]
+  -> IO (HscEnv,HydratedExactInterfaces)
+hydrateExactScopeWithProducts env inputs = do
+  completed <- hydrateExactScope env inputs
+  homes <- forM inputs $ \(artifact,iface) -> do
+    home <- maybe (fail "hydrated interface lost its actual home") pure
+      (lookupHpt (hsc_HPT completed) (moduleName (mi_module iface)))
+    unless (mi_module (hm_iface home) == mi_module iface
+        && mi_hsc_src (hm_iface home) == mi_hsc_src iface
+        && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash (mi_final_exts iface))
+      (fail "hydrated interface differs from its admitted input")
+    pure (artifact,home)
+  pure (completed,HydratedExactInterfaces homes)
 
 -- Typechecking original compiler interfaces is shared by exact hydration and
 -- producer semantic checks. This issues GHC details, not admitted authority.
