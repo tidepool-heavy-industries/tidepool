@@ -7510,7 +7510,7 @@ mod tests {
             state.public_visibility_snapshot_in(execution.private_scope()),
             before
         );
-        let admission = state
+        let _admission = state
             .admit_planned_cell_for_execution(
                 execution.clone(),
                 original_plan,
@@ -8095,7 +8095,11 @@ mod tests {
         let before = prefix.snapshot();
         let requests = tidepool_extract_cmd::extract_spawn_count();
         cancellation.cancel();
-        assert!(fixture.resident.adopt_checked_declaration(reservation).is_err());
+        let failure = fixture.resident.adopt_checked_declaration(reservation).unwrap_err();
+        assert!(matches!(failure,
+            crate::session::SessionError::Compile(CompileError::Io(error))
+            if error.kind() == std::io::ErrorKind::Interrupted
+        ));
         assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
         assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
@@ -8105,20 +8109,33 @@ mod tests {
     #[serial_test::serial]
     fn checked_host_carrier_cancellation_after_reservation_preserves_prefix() {
         use crate::session::{HostBindingType, HostCarrier, HostPayload, SourceImports};
-        let mut fixture = CheckedHomeFixture::new();
-        let scope = fixture.execution.private_scope();
-        let view = fixture.resident.compile_view_for_execution(&fixture.execution).unwrap();
-        let imports = view.turn_imports(&SourceImports::from_specs(["import qualified Data.Text"]));
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let lib = crate::session::SessionLib::open(
+            tidepool_repr::SessionId(1008), root.path(), crate::session::ModuleEnv::standalone_default(),
+        ).unwrap().with_validation_include(effects.include_paths().to_vec());
+        let mut resident = crate::session::ResidentSession::from_persistent_for_test(
+            frunk::HNil, CheckedHomeOutput,
+            crate::session::PersistentSession::new(Some(lib), 1024 * 1024),
+        );
+        let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        let scope = source.scope();
+        resident.set_run_context(crate::session::SessionRunContext {
+            lexical_scope: scope, ..Default::default()
+        }).unwrap();
+        let view = resident.compile_view_in(scope).unwrap();
+        let imports = view.turn_imports(&SourceImports::from_specs(["qualified Data.Text"]));
         let specification = Arc::new(CellRecipe::new(
             "let carrier = Data.Text.pack \"\"".to_owned(),
-            crate::session::resident_cell_check_template(fixture.effects.preamble(), fixture.effects.row(), &imports),
-            crate::session::resident_workbench_templates(fixture.effects.preamble(), fixture.effects.row(), &imports)
+            crate::session::resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+            crate::session::resident_workbench_templates(effects.preamble(), effects.row(), &imports)
                 .into_iter().map(|template| (template.kind.wire_name().to_owned(), template.source)).collect(),
             view.injected_module_names(),
         ).unwrap());
-        let includes = view.include_paths(fixture.effects.include_paths());
-        let admitted = fixture.resident.with_source_compiler_transaction(
-            fixture.execution.retained_lexical_scope(),
+        let includes = view.include_paths(effects.include_paths());
+        let admitted = resident.with_source_compiler_transaction(
+            source,
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(), None, |_| {},
             |resident, settlement| {
@@ -8137,20 +8154,24 @@ mod tests {
         ).unwrap();
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
-        let prefix = fixture.resident.begin_cell_program(program).unwrap().unwrap();
-        let reservation = fixture.resident.admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap()).unwrap();
+        let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+        let reservation = resident.admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap()).unwrap();
         let TurnResult::Bind { bound, compiled, .. } = consume_cell_program_item(reservation.clone()).unwrap()
             else { panic!("expected actual host binder"); };
         let carrier = HostCarrier::from_checked(reservation, bound[0].clone(), compiled.into_code(), HostBindingType::TEXT).unwrap();
         let before = prefix.snapshot();
         let requests = tidepool_extract_cmd::extract_spawn_count();
         cancellation.cancel();
-        assert!(tidepool_testing::with_settlement(|settlement| {
-            fixture.resident.mount_checked_host_input(&carrier, HostPayload::Text("never mounted"), settlement)
-        }).is_err());
+        let failure = tidepool_testing::with_settlement(|settlement| {
+            resident.mount_checked_host_input(&carrier, HostPayload::Text("never mounted"), settlement)
+        }).unwrap_err();
+        assert!(matches!(failure,
+            crate::session::ResidentError::Session(crate::session::SessionError::Compile(CompileError::Io(error)))
+            if error.kind() == std::io::ErrorKind::Interrupted
+        ));
         assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-        assert!(fixture.resident.current_binding_in(scope, "carrier").is_none());
+        assert!(resident.current_binding_in(scope, "carrier").is_none());
         assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
     }
 
