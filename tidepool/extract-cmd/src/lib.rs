@@ -56,8 +56,9 @@ use exec_check::is_readable_executable_file;
 pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
-    PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity, WorldCellPlanRequest,
-    WorldCellOperandRequest, WorldCellPrepareRequest, WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
+    PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity,
+    WorldCellOperandRequest, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,
+    WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
