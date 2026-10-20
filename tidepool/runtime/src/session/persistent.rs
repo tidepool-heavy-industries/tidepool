@@ -4795,6 +4795,49 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    fn cold_world_acquisition_checks_original_before_capturing_source() {
+        use super::super::inspection::{
+            finish_admitted_compiler_world, run_admitted_compiler_world, WorldInspectionError,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 419);
+        let scope = session.mint_isolated_scope();
+        let original = session.adopt_initial_notebook_scope(scope).unwrap();
+        let other_scope = session.mint_isolated_scope();
+        let foreign = session.adopt_initial_notebook_scope(other_scope).unwrap();
+        let source = super::super::GenerationArtifactReference::capture(b"captured source".to_vec());
+        let admitted = session.capture_inspection_world_in(scope, &source, &original, |_| false).unwrap();
+        let captured = std::cell::Cell::new(false);
+        let settled = foreign.with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |owner, _| run_admitted_compiler_world(owner, admitted, || {
+                captured.set(true);
+                Ok(None)
+            }),
+        ).unwrap();
+        assert!(!captured.get(), "foreign source must refuse before source capture");
+        assert!(matches!(finish_admitted_compiler_world(settled),
+            Err(WorldInspectionError::Runtime(crate::RuntimeError::SourceAdmission(
+                super::super::SourceAdmissionError::ForeignTransaction
+            )))
+        ));
+        let admitted = session.capture_inspection_world_in(scope, &source, &original, |_| false).unwrap();
+        let settled = original.with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |owner, _| run_admitted_compiler_world(owner, admitted, || {
+                captured.set(true);
+                Ok(None)
+            }),
+        ).unwrap();
+        assert!(captured.get(), "the rightful owner reaches its source capture");
+        assert!(matches!(finish_admitted_compiler_world(settled), Err(WorldInspectionError::UnsupportedSource)));
+        assert!(session.lib().tips.get(&scope).is_none_or(|tip| tip.inspection_world.is_none()));
+    }
+
+    #[test]
     fn world_observation_refuses_changed_or_foreign_base() {
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
