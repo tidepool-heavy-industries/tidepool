@@ -3027,31 +3027,6 @@ impl CertifiedSourceSelection {
         }))
     }
 
-    /// Physical output membership is independent of native reuse labels and
-    /// already-issued group bindings. Only this output's bound producer rows
-    /// qualify; retained input availability cannot become a current product.
-    pub(crate) fn physical_current_original(
-        &self,
-        owner: &CachedHomeOwner,
-    ) -> CertResult<Option<crate::artifact_inventory::ArtifactId>> {
-        let Some(native) = self
-            .modules
-            .get(&(owner.unit.clone(), owner.module.clone()))
-            .and_then(ReceiptSourceSelection::native)
-        else {
-            return Ok(None);
-        };
-        if &native.owner != owner || !matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
-            return Ok(None);
-        }
-        match native.original {
-            ReceiptOriginalIdentity::Bound(original) => Ok(Some(original)),
-            ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
-                "physical current original identity is not bound",
-            )),
-        }
-    }
-
     /// Encoding bases borrow immutable facts only; native decisions still come
     /// from this selection's checked continuation and physical output.
     pub(crate) fn native_fact_base(
@@ -17567,14 +17542,18 @@ pub(crate) mod tests {
             item.issued_native_availability().next().unwrap(),
             &issued
         ));
-        assert_eq!(
-            physical.physical_current_original(product.owner()).unwrap(),
-            Some(native.descriptor.id),
-        );
-        assert_eq!(
-            item.physical_current_original(product.owner()).unwrap(),
-            physical.physical_current_original(product.owner()).unwrap()
-        );
+        let current_key = crate::artifact_inventory::NativeGroupKey {
+            artifact: native.descriptor.id,
+            original_ordinal: *native.native_group_ordinals.first().unwrap(),
+        };
+        assert!(physical
+            .current_product(current_key, &native)
+            .unwrap()
+            .is_some());
+        assert!(item
+            .current_product(current_key, &native)
+            .unwrap()
+            .is_some());
         let private = OriginalCompilerInputs::from_selection(&item, &item_view).unwrap();
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
@@ -17600,7 +17579,7 @@ pub(crate) mod tests {
         .unwrap();
         assert!(
             inherited
-                .physical_current_original(product.owner())
+                .current_product(current_key, &native)
                 .unwrap()
                 .is_none(),
             "carrying actual Full availability cannot restamp physical output membership"
