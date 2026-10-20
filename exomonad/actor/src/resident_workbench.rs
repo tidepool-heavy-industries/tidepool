@@ -10536,12 +10536,18 @@ where
                     .iter()
                     .any(|binding| binding.type_query().is_some())
                 {
-                    Some(snapshot_source.inspection_provenance(
+                    match snapshot_source.inspection_provenance(
                         session,
                         context,
                         snapshot_request.as_ref(),
                         tidepool_runtime::session::NameScope::Current,
-                    )?)
+                    ) {
+                        Ok(provenance) => Some(provenance),
+                        Err(ResidentActorWorkbenchError::CompileView(
+                            ActorCompileViewError::UnobservedSourceIdentity,
+                        )) => None,
+                        Err(error) => return Err(error),
+                    }
                 } else {
                     None
                 };
@@ -20421,6 +20427,20 @@ pub(crate) mod request_tests {
             "no compiler invocation scope installed"
         );
         let spawns = tidepool_extract_cmd::extract_spawn_count();
+        let absent = workbench
+            .query_scoped_world(
+                context.clone(),
+                tidepool_toolchain::compiler_world::WorldObservationQuestion::Expression(
+                    "()".into(),
+                ),
+                None,
+            )
+            .await
+            .expect("representational source absence is a typed query refusal");
+        assert!(matches!(
+            absent,
+            compiler_query::ScopedWorldInspection::Unsupported(_)
+        ));
         assert_eq!(
             workbench
                 .status_discovery(

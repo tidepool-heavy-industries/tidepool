@@ -902,8 +902,17 @@ where
         question: tidepool_toolchain::compiler_world::WorldObservationQuestion,
         expected: Option<ScopeProvenance>,
     ) -> Result<ScopedWorldInspection, ResidentActorWorkbenchError> {
-        let source = public_module_query_source(&context.source_layer)
-            .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
+        let source = match public_module_query_source(&context.source_layer) {
+            Ok(source) => source,
+            Err(QueryError::Unsupported(detail)) => {
+                return Ok(ScopedWorldInspection::Unsupported(detail));
+            }
+            Err(error) => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "source owner selection returned an unexpected refusal: {error:?}"
+                )))
+            }
+        };
         // Refuse an already stale pin before preparing any TYPE metadata.
         // The actual capture below repeats this after an awaited cold prototype
         // preparation, so a publication during preparation cannot slip through.
