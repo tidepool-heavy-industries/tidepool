@@ -21840,6 +21840,42 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap()
             });
+            if publication_failure.is_some() {
+                let second = Arc::new(
+                    workbench
+                        .install_tools_action(
+                            context.clone(),
+                            2,
+                            vec![],
+                            warmed.effects.clone(),
+                            InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
+                            ToolInstallationPurpose::InitialTools,
+                        )
+                        .await
+                        .unwrap()
+                        .tools,
+                );
+                assert!(Arc::ptr_eq(
+                    &first.code.prepared().unwrap(),
+                    &warmed.prepared
+                ));
+                assert!(Arc::ptr_eq(
+                    &second.code.prepared().unwrap(),
+                    &warmed.prepared
+                ));
+                assert_ne!(
+                    first._installation_scope.scope(),
+                    second._installation_scope.scope()
+                );
+                assert_eq!(first.surface(), second.surface());
+                let completed_executions =
+                    std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+                assert_eq!(
+                    completed_executions, warm_executions,
+                    "both actual component installations retain the same completed original"
+                );
+                return (first, second, completed_executions, warmed, None);
+            }
             if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral) {
                 let lease = InstalledToolLease::new(
                     context.actor,
@@ -22102,7 +22138,7 @@ pub(crate) mod request_tests {
                 second,
                 completed_executions,
                 warmed,
-                generation_zero_recovered,
+                Some(generation_zero_recovered),
             )
         };
         let (first, second, completed_executions, warmed, generation_zero_recovered) =
@@ -23099,7 +23135,13 @@ pub(crate) mod request_tests {
                     .semantic_sha256(),
                 "later declaration recovery preserves the original selection"
             );
-            assert_eq!(generation_zero_recovered.library(), None);
+            assert_eq!(
+                generation_zero_recovered
+                    .as_ref()
+                    .expect("source history performed actual recovery")
+                    .library(),
+                None
+            );
             assert_eq!(
                 std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
                 completed_executions,
