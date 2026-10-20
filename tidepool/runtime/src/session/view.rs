@@ -822,12 +822,61 @@ mod tests {
         }
         .canonicalize();
 
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let imports = SourceImports::from_specs(["Data.Text qualified as Text"]);
+        let pin = |view: &SessionCompileView| {
+            super::super::inspection::inspection_provenance(
+                view.admission_digest(),
+                5,
+                b"immutable-source-a",
+                &imports,
+                &inputs,
+                None,
+                super::super::NameScope::Current,
+            )
+        };
+        let original_pin = pin(&base);
+        let mut relocated = base.clone();
+        Arc::make_mut(&mut relocated.projection).root = PathBuf::from("/relocated-session");
+        assert!(original_pin.same_view(&pin(&relocated)));
+        let source_changed = super::super::inspection::inspection_provenance(
+            base.admission_digest(),
+            5,
+            b"immutable-source-b",
+            &imports,
+            &inputs,
+                None,
+            super::super::NameScope::Current,
+        );
+        assert!(!original_pin.same_view(&source_changed));
+        let import_changed = super::super::inspection::inspection_provenance(
+            base.admission_digest(),
+            5,
+            b"immutable-source-a",
+            &SourceImports::from_specs(["Data.Text qualified as Other"]),
+            &inputs,
+                None,
+            super::super::NameScope::Current,
+        );
+        assert!(!original_pin.same_view(&import_changed));
+        let mut hidden_changed = base.clone();
+        Arc::make_mut(&mut hidden_changed.projection)
+            .staged_hiding
+            .push((
+                SessionModule::val(Generation(5)),
+                vec![super::super::ExportItem::Value {
+                    name: "hidden".into(),
+                }],
+            ));
+        assert!(!original_pin.same_view(&pin(&hidden_changed)));
+
         // Only the reserved generation moved forward: a caller that reserved
         // its own generation before releasing its checkout must not see this
         // as staleness.
         let mut reserved_further = base.clone();
         reserved_further.next_value_generation = Generation(9);
         assert!(reserved_further.is_current_for(&base));
+        assert!(original_pin.same_view(&pin(&reserved_further)));
 
         // Another scope bound G7 and released G4: neither was reachable from
         // this turn, so the compile still stands.

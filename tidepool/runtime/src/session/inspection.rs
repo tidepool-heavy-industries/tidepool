@@ -13,6 +13,132 @@ use crate::{timing, CompileError};
 
 use super::assemble_inspection_module;
 
+/// Descriptive request identity observed by a query; never request authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InspectionRequestIdentity(u64);
+
+impl InspectionRequestIdentity {
+    pub const fn new(identity: u64) -> Self {
+        Self(identity)
+    }
+}
+
+/// Small actor facts captured by its source owner alongside the runtime view.
+/// This description grants no runtime or compiler admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InspectionActorObservation {
+    principal: tidepool_repr::PrincipalId,
+    effects: super::HaskellTypeSource,
+    request: Option<InspectionRequestIdentity>,
+    model_type: Option<super::HaskellTypeSource>,
+}
+
+impl InspectionActorObservation {
+    pub fn new(
+        principal: tidepool_repr::PrincipalId,
+        effects: super::HaskellTypeSource,
+        request: Option<InspectionRequestIdentity>,
+        model_type: Option<super::HaskellTypeSource>,
+    ) -> Self {
+        Self {
+            principal,
+            effects,
+            request,
+            model_type,
+        }
+    }
+
+    fn frame(&self, frame: &mut impl FnMut(&[u8])) {
+        fn ty(source: &super::HaskellTypeSource, frame: &mut impl FnMut(&[u8])) {
+            frame(source.expression().as_bytes());
+            frame(&(source.required_imports().specs().len() as u64).to_le_bytes());
+            for import in source.required_imports().specs() {
+                frame(import.as_bytes());
+            }
+        }
+        frame(&self.principal.identity.to_le_bytes());
+        frame(&self.principal.incarnation.to_le_bytes());
+        ty(&self.effects, frame);
+        match self.request {
+            Some(request) => {
+                frame(b"request");
+                frame(&request.0.to_le_bytes());
+            }
+            None => frame(b"no-request"),
+        }
+        match &self.model_type {
+            Some(source) => {
+                frame(b"model-type");
+                ty(source, frame);
+            }
+            None => frame(b"no-model-type"),
+        }
+    }
+}
+
+/// An immutable observational snapshot of one runtime base and the actor's
+/// exact import/projection membrane. It carries no admission authority. Its
+/// existing cached base digest is resolved only when an answer needs the pin.
+/// The base includes owner state hidden from authored imports, so observations
+/// may conservatively differ even when visible name lists are unchanged.
+pub struct InspectionScopeSnapshot {
+    pub(super) base: std::sync::Arc<super::persistent::CachedCompileView>,
+    pub(super) generation: u64,
+    pub(super) runtime_scope: tidepool_codegen::scope::ScopeId,
+    pub(super) source_revision: std::sync::Arc<[u8]>,
+    pub(super) selected_imports: super::SourceImports,
+    pub(super) inputs: super::RuntimeCompileInputs,
+    pub(super) actor: Option<InspectionActorObservation>,
+    pub(super) scope: NameScope,
+}
+
+impl InspectionScopeSnapshot {
+    pub fn provenance(&self) -> ScopeProvenance {
+        inspection_provenance(
+            self.base.digest(),
+            self.generation,
+            &self.source_revision,
+            &self.selected_imports,
+            &self.inputs,
+            self.actor.as_ref(),
+            self.scope.clone(),
+        )
+    }
+}
+
+/// Correlate observations without granting admission authority. The base is
+/// the runtime owner's existing cached semantic commitment; the actor inputs
+/// describe the deterministic import/projection membrane applied to that base.
+pub(super) fn inspection_provenance(
+    base: [u8; 32],
+    generation: u64,
+    source_revision: &[u8],
+    selected_imports: &super::SourceImports,
+    inputs: &super::RuntimeCompileInputs,
+    actor: Option<&InspectionActorObservation>,
+    scope: NameScope,
+) -> ScopeProvenance {
+    let mut fingerprint = blake3::Hasher::new();
+    let mut frame = |bytes: &[u8]| {
+        fingerprint.update(&(bytes.len() as u64).to_le_bytes());
+        fingerprint.update(bytes);
+    };
+    frame(b"runtime-inspection-view-v2");
+    frame(&base);
+    frame(source_revision);
+    frame(&serde_json::to_vec(selected_imports.specs()).expect("source imports serialize"));
+    inputs.frame_authorization(&mut frame);
+    match actor {
+        Some(actor) => { frame(b"actor"); actor.frame(&mut frame); }
+        None => frame(b"runtime-only"),
+    }
+    ScopeProvenance {
+        scope,
+        generation,
+        fingerprint: fingerprint.finalize().to_hex().to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum InspectionQuery {
     TypeOf(String),
@@ -341,7 +467,10 @@ impl AdmittedInspectionInputs {
 /// published primary context.
 pub struct AdmittedInspectionWorld {
     pub(super) base: InspectionWorldBase,
+    pub(super) custody: InspectionWorldCustody,
     pub(super) inputs: InspectionWorldInputs,
+    pub(super) observation:
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>>,
 }
 
 #[derive(Clone)]
@@ -351,8 +480,79 @@ pub(super) struct InspectionWorldBase {
     pub(super) owner: std::sync::Arc<super::admission::RuntimeAdmissionOwner>,
     pub(super) epoch: u64,
     pub(super) source: std::sync::Arc<super::GenerationArtifactReference>,
+    pub(super) original_source: InspectionWorldLeaseObservation,
+    pub(super) target: InspectionWorldLeaseObservation,
+}
+
+/// A cache observes exact runtime scope identity without keeping that scope
+/// alive. The canonical lease and its prerequisite DAG remain the only issuer.
+#[derive(Clone)]
+pub(super) struct InspectionWorldLeaseObservation(std::sync::Weak<super::RuntimeLexicalScopeLease>);
+
+impl InspectionWorldLeaseObservation {
+    pub(super) fn new(lease: &std::sync::Arc<super::RuntimeLexicalScopeLease>) -> Self {
+        Self(std::sync::Arc::downgrade(lease))
+    }
+
+    pub(super) fn matches(&self, lease: &std::sync::Arc<super::RuntimeLexicalScopeLease>) -> bool {
+        self.0.ptr_eq(&std::sync::Arc::downgrade(lease))
+    }
+
+    pub(super) fn same_observation(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+/// Real work retains both exact leases across capture, compiler END and
+/// installation. Installed associations never own this custody pair.
+#[derive(Clone)]
+pub(super) struct InspectionWorldCustody {
     pub(super) original_source: std::sync::Arc<super::RuntimeLexicalScopeLease>,
     pub(super) target: std::sync::Arc<super::RuntimeLexicalScopeLease>,
+}
+
+impl InspectionWorldBase {
+    /// Upgrade exact observations for an existing owner to validate. This
+    /// retains lifetime only; the caller still owns admission/settlement gates.
+    pub(super) fn observed_custody(
+        &self,
+    ) -> Result<InspectionWorldCustody, super::SourceAdmissionError> {
+        let original_source = self
+            .original_source
+            .0
+            .upgrade()
+            .ok_or(super::SourceAdmissionError::StaleSourceLease)?;
+        let target = self
+            .target
+            .0
+            .upgrade()
+            .ok_or(super::SourceAdmissionError::StaleSourceLease)?;
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [original_source.clone(), target.clone()],
+            |_| {
+                Ok(InspectionWorldCustody {
+                    original_source,
+                    target,
+                })
+            },
+        )
+    }
+
+    /// New work must acquire actual Open admission for both exact leases.
+    pub(super) fn acquire_custody(
+        &self,
+    ) -> Result<InspectionWorldCustody, super::SourceAdmissionError> {
+        let custody = self.observed_custody()?;
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [custody.original_source.clone(), custody.target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || custody,
+                )
+            },
+        )
+    }
 }
 
 pub(super) enum InspectionWorldInputs {
@@ -402,6 +602,7 @@ impl From<CompileError> for WorldInspectionError {
 /// compiler-issued world. Callers cannot attach an unrelated service result.
 pub struct PreparedInspectionWorld {
     pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
+    pub(super) custody: InspectionWorldCustody,
     origin: crate::CompilerTransactionOrigin,
     answer: tidepool_toolchain::compiler_world::WorldAnswer,
     provenance: ScopeProvenance,
@@ -417,12 +618,14 @@ pub struct CompletedInspectionWorld {
 /// Its source relationship stays owned by the runtime throughout compiler END.
 pub struct PreparedCompilerWorld {
     association: std::sync::Arc<InspectionWorldAssociation>,
+    pub(super) custody: InspectionWorldCustody,
     origin: crate::CompilerTransactionOrigin,
 }
 
 /// Only the matching settled compiler owner can issue an installable world.
 pub struct CompletedCompilerWorld {
     pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
+    pub(super) custody: InspectionWorldCustody,
     pub(super) cancellation: crate::HostAdmissionCancellation,
 }
 
@@ -440,19 +643,24 @@ pub fn run_admitted_compiler_world(
         WorldInspectionError,
     >,
 ) -> Result<PreparedCompilerWorld, WorldInspectionError> {
-    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
+    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.custody.original_source) {
         return Err(
             crate::RuntimeError::from(super::SourceAdmissionError::ForeignTransaction).into(),
         );
     }
     owner
-        .admit(Some(admitted.base.target.clone()))
+        .admit(Some(admitted.custody.target.clone()))
         .map_err(crate::RuntimeError::from)?;
     let origin = crate::CompilerTransactionOrigin::current().ok_or(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
     let cold = admitted.needs_source_capture();
-    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let world = acquire_compiler_world(
+        admitted.inputs,
+        &admitted.base,
+        admitted.observation,
+        capture_sources,
+    )?;
     tracing::debug!(
         target: "exomonad_harness::timing",
         cold,
@@ -467,6 +675,7 @@ pub fn run_admitted_compiler_world(
             base: admitted.base,
             world,
         }),
+        custody: admitted.custody,
         origin,
     })
 }
@@ -477,6 +686,7 @@ pub fn finish_admitted_compiler_world(
     let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
     Ok(CompletedCompilerWorld {
         association: prepared.association,
+        custody: prepared.custody,
         cancellation,
     })
 }
@@ -517,6 +727,9 @@ pub(super) fn finish_world_operation<T>(
 fn acquire_compiler_world(
     inputs: InspectionWorldInputs,
     base: &InspectionWorldBase,
+    observation: Option<
+        std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
+    >,
     capture_sources: impl FnOnce() -> Result<
         Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
         WorldInspectionError,
@@ -524,7 +737,10 @@ fn acquire_compiler_world(
 ) -> Result<std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>, WorldInspectionError>
 {
     match inputs {
-        InspectionWorldInputs::Published(world) => Ok(world),
+        InspectionWorldInputs::Published(world) => match observation {
+            None => Ok(world),
+            Some(observation) => Ok(world.with_observation_scaffold(Some(observation))?),
+        },
         InspectionWorldInputs::Cold {
             primary,
             bindings,
@@ -534,6 +750,10 @@ fn acquire_compiler_world(
             if sources.origin() != base.source.bytes() {
                 return Err(invalid("cold sources differ from the admitted source owner").into());
             }
+            let lexical = match observation {
+                None => lexical,
+                Some(observation) => lexical.with_observation(Some(observation))?,
+            };
             let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
                 primary, bindings, sources, lexical,
             )?;
@@ -567,6 +787,16 @@ pub struct ScopeBindingsAnswer {
 }
 
 impl AdmittedInspectionWorld {
+    /// Attach source-issued compiler description before any World acquisition.
+    /// This does not change the captured runtime/source admission.
+    pub fn with_observation_scaffold(
+        mut self,
+        observation: std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
+    ) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
     pub fn needs_source_capture(&self) -> bool {
         matches!(self.inputs, InspectionWorldInputs::Cold { .. })
     }
@@ -673,7 +903,10 @@ pub fn finish_admitted_world_inspection(
     >,
 ) -> Result<CompletedInspectionWorld, WorldInspectionError> {
     let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
-    Ok(CompletedInspectionWorld { prepared, cancellation })
+    Ok(CompletedInspectionWorld {
+        prepared,
+        cancellation,
+    })
 }
 
 /// Run one public-module observation without constructing query source or
@@ -686,17 +919,18 @@ pub fn run_admitted_world_inspection(
         WorldInspectionError,
     >,
     query: NameQuery,
+    observation: InspectionScopeSnapshot,
     kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
 ) -> Result<PreparedInspectionWorld, WorldInspectionError> {
-    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
+    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.custody.original_source) {
         return Err(
             crate::RuntimeError::from(super::SourceAdmissionError::ForeignTransaction).into(),
         );
     }
     owner
-        .admit(Some(admitted.base.target.clone()))
+        .admit(Some(admitted.custody.target.clone()))
         .map_err(crate::RuntimeError::from)?;
-    run_admitted_world_inspection_inner(admitted, capture_sources, query, kind)
+    run_admitted_world_inspection_inner(admitted, capture_sources, query, observation, kind)
 }
 
 fn run_admitted_world_inspection_inner(
@@ -706,6 +940,7 @@ fn run_admitted_world_inspection_inner(
         WorldInspectionError,
     >,
     query: NameQuery,
+    observation: InspectionScopeSnapshot,
     kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
 ) -> Result<PreparedInspectionWorld, WorldInspectionError> {
     use std::sync::Arc;
@@ -718,6 +953,13 @@ fn run_admitted_world_inspection_inner(
     let NameScope::PublicModule(module) = &query.scope else {
         return Err(invalid("world inspection requires a public module").into());
     };
+    if !observation.base.matches_key(&admitted.base.key)
+        || observation.runtime_scope != admitted.base.scope
+        || observation.generation != admitted.base.key.generation().0
+        || observation.scope != query.scope
+    {
+        return Err(invalid("inspection observation differs from its admitted base").into());
+    }
     let namespace = inspection_namespace(query.namespace);
     let question = match kind {
         PublicModuleQuestionKind::StructuredInfo => {
@@ -738,7 +980,12 @@ fn run_admitted_world_inspection_inner(
         InspectionWorldInputs::Published(world) => Some(*world.logical_id()),
         InspectionWorldInputs::Cold { .. } => None,
     };
-    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let world = acquire_compiler_world(
+        admitted.inputs,
+        &admitted.base,
+        admitted.observation,
+        capture_sources,
+    )?;
     let result = compiler_world::query_public_module(&endpoint()?, &world, question.clone())?;
     if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {
         return Err(invalid("world query returned a different logical world").into());
@@ -746,18 +993,7 @@ fn run_admitted_world_inspection_inner(
     if result.question() != &question {
         return Err(invalid("world result differs from its admitted question").into());
     }
-    let provenance = ScopeProvenance {
-        scope: query.scope.clone(),
-        generation: admitted.base.key.generation().0,
-        fingerprint: {
-            use std::fmt::Write;
-            let mut observation = String::from("compiler-world:");
-            for byte in result.world().logical_id() {
-                write!(&mut observation, "{byte:02x}").expect("String formatting");
-            }
-            observation
-        },
-    };
+    let provenance = observation.provenance();
     let world = Arc::clone(result.world());
     let mut answer = result.into_answer();
     match &mut answer {
@@ -770,6 +1006,7 @@ fn run_admitted_world_inspection_inner(
             base: admitted.base,
             world,
         }),
+        custody: admitted.custody,
         origin,
         answer,
         provenance,
@@ -789,7 +1026,6 @@ pub struct InspectionRequest<'a> {
     /// The actor's GHC effects type alias. Standalone inspections leave it absent.
     pub effects: Option<&'a super::HaskellTypeSource>,
 }
-
 
 /// Inspect an ordered batch without evaluating it or mutating the resident
 /// session. Every query sees the same preamble, imports, session modules, and
@@ -962,32 +1198,32 @@ fn run_inspection_batch(
         sources.insert(source_path.clone(), source);
         query_sources.push(source_path.clone());
         command.input(&source_path);
-            match query {
-                InspectionQuery::TypeOf(expression) => {
-                    command.inspect_type(expression);
-                }
-                InspectionQuery::Info(name) => {
-                    command.inspect_info(name);
-                }
-                InspectionQuery::TypeSearch(query) => {
-                    command.inspect_search(query);
-                }
-                InspectionQuery::TypeSearchBounded { pattern, budget } => {
-                    command.inspect_search_bounded(pattern, budget_u32(*budget)?);
-                }
-                InspectionQuery::ScopeBrowse => {
-                    command.inspect_scope_browse();
-                }
-                InspectionQuery::Browse { module, expanded } => {
-                    command.inspect_browse(module, *expanded);
-                }
-                InspectionQuery::StructuredInfo { query, provenance } => {
-                    command.inspect_structured_info(structured_request(query, provenance));
-                }
-                InspectionQuery::StructuredType { query, provenance } => {
-                    command.inspect_structured_type(structured_request(query, provenance));
-                }
-    }
+        match query {
+            InspectionQuery::TypeOf(expression) => {
+                command.inspect_type(expression);
+            }
+            InspectionQuery::Info(name) => {
+                command.inspect_info(name);
+            }
+            InspectionQuery::TypeSearch(query) => {
+                command.inspect_search(query);
+            }
+            InspectionQuery::TypeSearchBounded { pattern, budget } => {
+                command.inspect_search_bounded(pattern, budget_u32(*budget)?);
+            }
+            InspectionQuery::ScopeBrowse => {
+                command.inspect_scope_browse();
+            }
+            InspectionQuery::Browse { module, expanded } => {
+                command.inspect_browse(module, *expanded);
+            }
+            InspectionQuery::StructuredInfo { query, provenance } => {
+                command.inspect_structured_info(structured_request(query, provenance));
+            }
+            InspectionQuery::StructuredType { query, provenance } => {
+                command.inspect_structured_type(structured_request(query, provenance));
+            }
+        }
     }
     let mut batch_source = None;
     if let Some(expressions) = type_batch {
@@ -1500,6 +1736,47 @@ fn budget_u32(budget: usize) -> Result<u32, CompileError> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn actor_observation_is_bound_by_the_same_scope_identity_owner() {
+        let imports = super::super::SourceImports::default();
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let observe =
+            |identity, incarnation, row: &str, request: Option<u64>, model: Option<&str>| {
+                InspectionActorObservation::new(
+                    tidepool_repr::PrincipalId {
+                        identity,
+                        incarnation,
+                    },
+                    row.into(),
+                    request.map(InspectionRequestIdentity::new),
+                    model.map(Into::into),
+                )
+            };
+        let pin = |actor: &InspectionActorObservation| {
+            inspection_provenance(
+                [7; 32],
+                9,
+                b"source-owner",
+                &imports,
+                &inputs,
+                Some(actor),
+                NameScope::Current,
+            )
+        };
+        let original = observe(1, 2, "'[]", Some(41), None);
+        assert!(pin(&original).same_view(&pin(&original.clone())));
+        for changed in [
+            observe(3, 2, "'[]", Some(41), None),
+            observe(1, 3, "'[]", Some(41), None),
+            observe(1, 2, "'[Other]", Some(41), None),
+            observe(1, 2, "'[]", Some(42), None),
+            observe(1, 2, "'[]", None, None),
+            observe(1, 2, "'[]", Some(41), Some("Model Family")),
+        ] {
+            assert!(!pin(&original).same_view(&pin(&changed)));
+        }
+    }
+
+    #[test]
     fn admitted_inspection_refuses_sibling_pairing_with_shared_root_and_context() {
         use crate::session::{ModuleEnv, PersistentSession, SessionId, SessionLib};
         let root = tempfile::tempdir().unwrap();
@@ -1617,8 +1894,6 @@ mod tests {
             ]),
         ])
     }
-
-
 
     #[test]
     fn decodes_every_result_shape() {
@@ -1816,8 +2091,6 @@ mod tests {
         assert!(decode_inspections(&encoded(receipt("Guess"))).is_err());
     }
 
-
-
     #[test]
     fn qualified_info_and_browse_share_one_checked_target() {
         eval_harness::require_extract();
@@ -1865,7 +2138,6 @@ mod tests {
             ]
         ));
     }
-
 
     #[test]
     fn one_inspection_compile_answers_type_info_and_browse_queries() {

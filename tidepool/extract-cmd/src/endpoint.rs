@@ -1788,9 +1788,10 @@ impl CompilerEndpoint {
         } else {
             None
         };
+        let mut request_correlation = daemon::compile_request_correlation(&cwd, &cmd.request);
         let span = tracing::info_span!(
             "compile_request",
-            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request),
+            compile_request = %request_correlation,
             request_mode = %cmd.request.mode(),
             execution_layer = match self.transport { Transport::Scoped => "transaction_wrapper", Transport::Direct(_) => "physical", Transport::Daemon { .. } => "endpoint_submission" },
             physical_execution = physical_execution.as_deref(),
@@ -1862,11 +1863,15 @@ impl CompilerEndpoint {
                             io::Error::other("compiler transaction scope ended before execution"),
                         ));
                     };
-                    transaction.execute(cmd).map(|run| run.output)
+                    transaction.execute(cmd).map(|run| {
+                        request_correlation = run.request_correlation;
+                        run.output
+                    })
                 })?
             }
         };
         Ok(ExtractRun {
+            request_correlation,
             output,
             elapsed: start.elapsed(),
         })
@@ -2429,9 +2434,10 @@ impl CompilerTransaction {
                 io::Error::other("compiler transaction is closed"),
             )
         })?;
+        let request_correlation = daemon::compile_request_correlation(&cwd, &cmd.request);
         let span = tracing::info_span!(
             "compile_request",
-            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request),
+            compile_request = %request_correlation,
             request_mode = %cmd.request.mode(),
             execution_layer = if matches!(transport, TransactionTransport::Direct(_)) { "physical" } else { "endpoint_submission" },
             physical_execution = if matches!(transport, TransactionTransport::Direct(_)) { Some(format!("{}:{}", std::process::id(), PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed))) } else { None }.as_deref(),
@@ -2472,6 +2478,7 @@ impl CompilerTransaction {
             )?,
         };
         Ok(ExtractRun {
+            request_correlation,
             output,
             elapsed: start.elapsed(),
         })

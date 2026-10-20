@@ -1,7 +1,7 @@
 module DemandScopeTest (demandScopeChecks) where
 
 import Control.Exception (bracket)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, foldM)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
@@ -68,6 +68,20 @@ demandScopeChecks = do
                 (RenameRefusal,Left (InputDemandRenameRejected diagnostic))
                   | not (null diagnostic) -> putStrLn (name ++ ": " ++ diagnostic)
                 _ -> fail (name ++ ": wrong demand or refusal phase")
+              _ <- foldM (\(previous,previousBindings) changes -> do
+                updated <- updateSegmentDemandScope environment changes previous
+                let nextBindings = Map.mapMaybe id (Map.union (Map.fromList changes)
+                      (Map.map Just previousBindings))
+                rebuilt <- newSegmentDemandScope environment nextBindings
+                incrementalDemand <- typedSegmentInputOccurrences environment updated parsed
+                rebuiltDemand <- typedSegmentInputOccurrences environment rebuilt parsed
+                unless (incrementalDemand == rebuiltDemand)
+                  (fail (name ++ ": alias delta differs from a fresh GHC scope"))
+                pure (updated,nextBindings)) (scope,bindings)
+                  [ [("old",Just 100)]
+                  , [("id",Just 101),("old",Nothing)]
+                  , [("old",Just 102),("pure",Just 103)]
+                  , [("id",Nothing),("pure",Nothing),("old",Nothing)] ]
               forM_ demanded $ \selected -> forM_ selected $ \(alias,binding) ->
                 unless (Map.lookup alias bindings == Just binding)
                   (fail (name ++ ": lost exact alias/binding association"))

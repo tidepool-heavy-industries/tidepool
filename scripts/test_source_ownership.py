@@ -44,6 +44,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
     ('exomonad-host', frozenset({
         'exomonad/host/src/actor_host/deepseek_offline_acceptance.rs',
         'exomonad/host/src/actor_host/ordinary_demand_history_tests.rs',
+        'exomonad/host/src/actor_host/operation_identity_oracle.rs',
         'exomonad/host/src/actor_host/startup_context_acceptance_tests.rs',
         'exomonad/host/src/actor_host/startup_persona_acceptance_tests.rs',
         'exomonad/host/src/actor_host/coherent_reload_acceptance_tests.rs',

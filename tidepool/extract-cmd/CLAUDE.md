@@ -219,7 +219,13 @@ the original cwd and field order and replaces only the grant with its default.
 Compute it before late product placement; emitted worker bytes retain the admitted
 grant and physical paths. Scalar preparation events account ingress decoding,
 grant issuance, correlation and worker encoding, including work before the physical
-request span. They retain no request bodies.
+request span. They retain no request bodies. Standalone request events declare
+an execution layer at their issuing observer instead of relying on a parent span.
+Preparation uses its own layer and the issued daemon epoch/admission/ordinal;
+worker encoding retains that owner while overriding its enclosing physical layer.
+The observer retains preparation stages and costs separately, matches their exact
+request/correlation owner, and keeps unknown ownership or omitted samples incomplete.
+Worker encoding is included in service timing and is not additive execution time.
 
 Encoded request fields are transport data until operation admission. Admit one
 operation before its compiler or artifact I/O, and dispatch on that admitted sum

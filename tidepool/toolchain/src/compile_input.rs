@@ -973,12 +973,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             execution.original_instance_environment(),
-            &crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(vec![
-                crate::declaration_join::ExactModuleIdentity {
+            &crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(
+                vec![crate::declaration_join::ExactModuleIdentity {
                     unit: "main".into(),
                     module: "Root".into()
-                },
-            ]),
+                },]
+                .into()
+            ),
             "a consumed generated owner without its original interface is missing evidence",
         );
         let projected = execution.select_original_type_interfaces(&[], &[]).unwrap();

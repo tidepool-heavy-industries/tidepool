@@ -355,7 +355,7 @@ mod tests {
             incarnation: crate::Incarnation::FIRST,
         };
         let control = crate::WorkbenchExecutionControl::untracked();
-        let work = InvocationWork::new(actor, control.reservation_owner(actor).unwrap());
+        let work = InvocationWork::new_neutral(actor, control.reservation_owner(actor).unwrap());
         let cursor = ToolCursor::new(
             work.clone(),
             control.clone(),
@@ -396,7 +396,7 @@ mod tests {
             incarnation: crate::Incarnation::FIRST,
         };
         let control = crate::WorkbenchExecutionControl::untracked();
-        let work = InvocationWork::new(actor, control.reservation_owner(actor).unwrap());
+        let work = InvocationWork::new_neutral(actor, control.reservation_owner(actor).unwrap());
         let mut cursor = ToolCursor::new(work, control, CheckpointPublication::Resident, None);
         let session = tidepool_repr::SessionId(993);
         let machines = Arc::new(SessionRegistry::<(), u8>::new());

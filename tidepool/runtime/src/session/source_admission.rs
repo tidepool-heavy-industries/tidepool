@@ -41,6 +41,8 @@ pub enum SourceAdmissionError {
     StaleFence,
     #[error("source fence settlement did not commit its scoped reopen")]
     ReopenNotCommitted,
+    #[error("source cutoff did not commit its scoped fence")]
+    FenceNotCommitted,
     #[error("source admission for scope {scope:?} retains {count} unconfirmed actions")]
     Unconfirmed { scope: ScopeId, count: usize },
 }
@@ -181,6 +183,59 @@ impl RuntimeSourceAdmission {
     pub fn fence(&self) -> Result<RuntimeSourceFence, SourceAdmissionError> {
         self.fence_inner(false)
     }
+
+    /// Compare the selected owner while canonical custody and this own gate
+    /// remain locked. Commit must be the callback's last action. Active and
+    /// uncertain claims remain visible to the retirement owner after cutoff.
+    pub fn fence_with<E>(
+        &self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        compare: impl for<'a> FnOnce(RuntimeSourceFenceTransition<'a>) -> Result<(), E>,
+    ) -> Result<Result<RuntimeSourceFence, SourceFenceTransitionFailure<E>>, SourceAdmissionError>
+    {
+        if !lease.source_admission().same_owner(self) {
+            return Err(SourceAdmissionError::StaleSourceLease);
+        }
+        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
+            let mut state = self.0.state.lock();
+            if state.phase != SourceAdmissionPhase::Open {
+                return Err(SourceAdmissionError::Closed {
+                    scope: self.0.scope,
+                    phase: state.phase,
+                });
+            }
+            let attempt = state.next_attempt;
+            let next_attempt = attempt
+                .checked_add(1)
+                .ok_or(SourceAdmissionError::Exhausted)?;
+            let cutoff = ScopedSourceFence {
+                state: &mut state,
+                attempt,
+                next_attempt,
+            };
+            let outcome = compare(RuntimeSourceFenceTransition {
+                state: &mut *cutoff.state,
+                attempt,
+                next_attempt,
+            });
+            let committed = cutoff.state.phase == SourceAdmissionPhase::Fenced { attempt };
+            match (outcome, committed) {
+                (Ok(()), true) => Ok(Ok(RuntimeSourceFence {
+                    owner: self.clone(),
+                    attempt,
+                })),
+                (Ok(()), false) => Err(SourceAdmissionError::FenceNotCommitted),
+                (Err(error), false) => Ok(Err(SourceFenceTransitionFailure::Refused(error))),
+                (Err(error), true) => Ok(Err(SourceFenceTransitionFailure::Unconfirmed {
+                    fence: RuntimeSourceFence {
+                        owner: self.clone(),
+                        attempt,
+                    },
+                    error,
+                })),
+            }
+        })
+    }
     /// Publication cannot expose its target while a source action is active.
     /// Busy refusal leaves the existing phase untouched under this same lock.
     pub fn fence_if_idle(&self) -> Result<RuntimeSourceFence, SourceAdmissionError> {
@@ -305,6 +360,89 @@ pub struct RuntimeSourceFence {
     attempt: u64,
 }
 
+/// Publication may observe its exact held fence without reopening or retiring it.
+#[derive(Clone)]
+pub struct RuntimeSourcePublicationView {
+    owner: RuntimeSourceAdmission,
+    attempt: u64,
+}
+
+impl RuntimeSourcePublicationView {
+    pub(super) fn with_current<T>(
+        &self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, SourceAdmissionError> {
+        if !lease.source_admission().same_owner(&self.owner) {
+            return Err(SourceAdmissionError::StaleFence);
+        }
+        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
+            let state = self.owner.0.state.lock();
+            if state.phase
+                != (SourceAdmissionPhase::Fenced {
+                    attempt: self.attempt,
+                })
+            {
+                return Err(SourceAdmissionError::StaleFence);
+            }
+            if state.unconfirmed != 0 {
+                return Err(SourceAdmissionError::Unconfirmed {
+                    scope: self.owner.0.scope,
+                    count: state.unconfirmed,
+                });
+            }
+            if state.claims != 0 {
+                return Err(SourceAdmissionError::BootstrapBusy {
+                    claims: state.claims,
+                    unconfirmed: 0,
+                });
+            }
+            Ok(action())
+        })
+    }
+}
+
+/// A refusal before cutoff differs from a callback that failed after cutoff.
+/// The latter returns the same newly issued fence with its primary error.
+pub enum SourceFenceTransitionFailure<E> {
+    Refused(E),
+    Unconfirmed { fence: RuntimeSourceFence, error: E },
+}
+
+/// Borrowed transition of the existing gate. No independent phase flag can
+/// claim a cutoff that the owning gate did not commit.
+pub struct RuntimeSourceFenceTransition<'a> {
+    state: &'a mut AdmissionState,
+    attempt: u64,
+    next_attempt: u64,
+}
+
+impl RuntimeSourceFenceTransition<'_> {
+    pub fn commit(self) {
+        self.state.next_attempt = self.next_attempt;
+        self.state.phase = SourceAdmissionPhase::Fenced {
+            attempt: self.attempt,
+        };
+    }
+}
+
+struct ScopedSourceFence<'a> {
+    state: &'a mut AdmissionState,
+    attempt: u64,
+    next_attempt: u64,
+}
+
+impl Drop for ScopedSourceFence<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.state.next_attempt = self.next_attempt;
+            self.state.phase = SourceAdmissionPhase::Fenced {
+                attempt: self.attempt,
+            };
+        }
+    }
+}
+
 /// Evidence that only this own gate reopened. Ancestor gates may still refuse
 /// fresh work; this value grants no source admission.
 #[derive(Debug)]
@@ -339,6 +477,13 @@ impl Drop for ScopedReopen<'_> {
     }
 }
 impl RuntimeSourceFence {
+    pub fn publication_view(&self) -> RuntimeSourcePublicationView {
+        RuntimeSourcePublicationView {
+            owner: self.owner.clone(),
+            attempt: self.attempt,
+        }
+    }
+
     pub fn unconfirmed_claims(&self) -> usize {
         self.owner.0.state.lock().unconfirmed
     }
@@ -466,6 +611,157 @@ mod tests {
     use super::*;
     use crate::session::{PersistentSession, SessionError};
     use proptest::prelude::*;
+
+    #[test]
+    fn publication_view_requires_its_exact_still_held_fence() {
+        let mut session = PersistentSession::new(None, 0);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        let fence = lease.source_admission().fence().unwrap();
+        let view = fence.publication_view();
+        let ran = std::cell::Cell::new(false);
+        assert_eq!(
+            view.with_current(&other, || ran.set(true)),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        assert!(!ran.get());
+        view.with_current(&lease, || ran.set(true)).unwrap();
+        assert!(ran.replace(false));
+
+        fence.reopen(&lease).unwrap();
+        assert_eq!(
+            view.with_current(&lease, || ran.set(true)),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        let replacement = lease.source_admission().fence().unwrap();
+        assert_eq!(
+            view.with_current(&lease, || ran.set(true)),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        assert!(!ran.get());
+        replacement
+            .publication_view()
+            .with_current(&lease, || ran.set(true))
+            .unwrap();
+        assert!(ran.get());
+    }
+
+    #[test]
+    fn publication_view_keeps_pending_and_unconfirmed_source_obligations() {
+        for unconfirmed in [false, true] {
+            let mut session = PersistentSession::new(None, 0);
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let claim = lease.admit_source().unwrap();
+            let fence = lease.source_admission().fence().unwrap();
+            let view = fence.publication_view();
+            if unconfirmed {
+                claim.retain_unconfirmed();
+                assert!(matches!(
+                    view.with_current(&lease, || panic!("unconfirmed source cannot publish")),
+                    Err(SourceAdmissionError::Unconfirmed { count: 1, .. })
+                ));
+                assert_eq!(fence.unconfirmed_claims(), 1);
+            } else {
+                assert!(matches!(
+                    view.with_current(&lease, || panic!("pending source cannot publish")),
+                    Err(SourceAdmissionError::BootstrapBusy {
+                        claims: 1,
+                        unconfirmed: 0
+                    })
+                ));
+                drop(claim);
+                view.with_current(&lease, || ()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_cutoff_refusal_and_missing_commit_leave_gate_unchanged() {
+        let mut session = PersistentSession::new(None, 0);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let gate = lease.source_admission();
+        assert!(matches!(
+            gate.fence_with(&lease, |_| Err("selection changed")),
+            Ok(Err(SourceFenceTransitionFailure::Refused(
+                "selection changed"
+            )))
+        ));
+        assert_eq!(gate.0.state.lock().next_attempt, 0);
+        assert!(lease.admit_source().is_ok());
+        assert!(matches!(
+            gate.fence_with(&lease, |_| Ok::<_, ()>(())),
+            Err(SourceAdmissionError::FenceNotCommitted)
+        ));
+        assert_eq!(gate.0.state.lock().next_attempt, 0);
+        assert!(lease.admit_source().is_ok());
+    }
+
+    #[test]
+    fn scoped_cutoff_holds_gate_through_owner_compare_and_retains_active_claims() {
+        let mut session = PersistentSession::new(None, 0);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let gate = lease.source_admission();
+        let claim = lease.admit_source().unwrap();
+        let fence = match gate.fence_with(&lease, |transition| {
+            assert!(gate.0.state.try_lock().is_none());
+            transition.commit();
+            Ok::<_, ()>(())
+        }) {
+            Ok(Ok(fence)) => fence,
+            _ => panic!("the actual owner committed its cutoff"),
+        };
+        assert_eq!(fence.pending_claims(), 1);
+        assert!(lease.admit_source().is_err());
+        drop(claim);
+        fence.reopen(&lease).unwrap();
+        assert!(lease.admit_source().is_ok());
+    }
+
+    #[test]
+    fn scoped_cutoff_failed_after_commit_returns_same_fence_and_primary_cause() {
+        let mut session = PersistentSession::new(None, 0);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let gate = lease.source_admission();
+        let fence = match gate.fence_with(&lease, |transition| {
+            transition.commit();
+            Err("owner completion failed")
+        }) {
+            Ok(Err(SourceFenceTransitionFailure::Unconfirmed { fence, error })) => {
+                assert_eq!(error, "owner completion failed");
+                assert!(fence.owner.same_owner(gate));
+                assert_eq!(fence.attempt, 0);
+                fence
+            }
+            _ => panic!("a committed cutoff must retain its exact owner"),
+        };
+        assert!(lease.admit_source().is_err());
+        fence.reopen(&lease).unwrap();
+        assert!(lease.admit_source().is_ok());
+    }
+
+    #[test]
+    fn scoped_cutoff_unwind_before_or_after_commit_never_reopens_admission() {
+        for commit in [false, true] {
+            let mut session = PersistentSession::new(None, 0);
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let gate = lease.source_admission();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = gate.fence_with::<()>(&lease, |transition| {
+                    if commit {
+                        transition.commit();
+                    }
+                    panic!("cutoff owner unwound");
+                });
+            }))
+            .is_err());
+            assert!(matches!(
+                gate.0.state.lock().phase,
+                SourceAdmissionPhase::Fenced { attempt: 0 }
+            ));
+            assert_eq!(gate.0.state.lock().next_attempt, 1);
+            assert!(lease.admit_source().is_err());
+        }
+    }
 
     #[test]
     fn conditional_reopen_commits_under_compare_guard_but_preserves_parent_fence() {

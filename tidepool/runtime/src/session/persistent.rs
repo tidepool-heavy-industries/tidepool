@@ -256,7 +256,7 @@ pub struct PersistentSession {
     // Zero permanently disables cached witnesses after counter exhaustion.
     compiler_input_revision: u64,
     #[cfg(test)]
-    compile_view_bytes_hashed: std::sync::atomic::AtomicUsize,
+    compile_view_bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     certified_resolution_work: [std::sync::atomic::AtomicUsize; 2],
     /// Incremental indexes over `bindings`' live set (prepared-import
@@ -321,10 +321,72 @@ impl CompileViewKey {
     }
 }
 
-struct CachedCompileView {
+impl super::PreparedNotebookGeneration {
+    fn prospective_compiler_key(&self) -> Result<CompileViewKey, SessionError> {
+        let mut key = self
+            .compiler_key
+            .clone()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        key.public_epoch = self.epoch;
+        Ok(key)
+    }
+
+    fn validate_compiler_world(
+        &self,
+        completed: &super::CompletedCompilerWorld,
+    ) -> Result<(), SessionError> {
+        let base = &completed.association.base;
+        if !self.owner_stamp.matches(&base.owner)
+            || base.epoch != base.owner.epoch()
+            || base.scope != self.scope
+            || base.key != self.prospective_compiler_key()?
+            || base.source.as_ref() != &self.next.references.source
+            || !base.original_source.same_observation(&base.target)
+            || !base
+                .original_source
+                .matches(&completed.custody.original_source)
+            || !base.target.matches(&completed.custody.target)
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        Ok(())
+    }
+
+    pub fn with_compiler_world(
+        self,
+        completed: Arc<super::CompletedCompilerWorld>,
+    ) -> Result<super::PreparedNotebookGenerationWithWorld, SessionError> {
+        self.validate_compiler_world(&completed)?;
+        Ok(super::PreparedNotebookGenerationWithWorld {
+            prepared: self,
+            world: completed,
+        })
+    }
+}
+
+pub(super) struct CachedCompileView {
     key: Option<CompileViewKey>,
     view: SessionCompileView,
-    digest: [u8; 32],
+    digest: std::sync::OnceLock<[u8; 32]>,
+    #[cfg(test)]
+    bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CachedCompileView {
+    pub(super) fn matches_key(&self, key: &CompileViewKey) -> bool {
+        self.key.as_ref() == Some(key)
+    }
+
+    pub(super) fn digest(&self) -> [u8; 32] {
+        *self.digest.get_or_init(|| {
+            let (digest, bytes_hashed) = self.view.admission_commitment();
+            #[cfg(test)]
+            self.bytes_hashed.fetch_add(bytes_hashed, Ordering::Relaxed);
+            #[cfg(not(test))]
+            let _ = bytes_hashed;
+            digest
+        })
+    }
 }
 
 struct RecoveryInitialization {
@@ -432,7 +494,7 @@ impl PersistentSession {
             compile_views: parking_lot::Mutex::new(HashMap::new()),
             compiler_input_revision: 1,
             #[cfg(test)]
-            compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
+            compile_view_bytes_hashed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             certified_resolution_work: [const { std::sync::atomic::AtomicUsize::new(0) }; 2],
             binding_index: BindingIndex::new(),
@@ -1641,6 +1703,7 @@ impl PersistentSession {
             1,
         );
         let cached = self.scoped_compile_view_in(scope)?;
+        cached.digest();
         let injected_values = self
             .bindings
             .live_modules()
@@ -1660,7 +1723,40 @@ impl PersistentSession {
     }
 
     pub(super) fn compile_view_digest_in(&self, scope: ScopeId) -> Option<[u8; 32]> {
-        self.scoped_compile_view_in(scope).map(|view| view.digest)
+        self.scoped_compile_view_in(scope).map(|view| view.digest())
+    }
+
+    pub(super) fn capture_inspection_scope_in(
+        &self,
+        scope: ScopeId,
+        source_revision: &[u8],
+        selected_imports: &super::SourceImports,
+        inputs: &super::RuntimeCompileInputs,
+        actor: Option<&super::InspectionActorObservation>,
+        label: super::NameScope,
+    ) -> Result<super::inspection::InspectionScopeSnapshot, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let base = self
+            .scoped_compile_view_in(scope)
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let generation = base
+            .key
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .generation()
+            .0;
+        Ok(super::inspection::InspectionScopeSnapshot {
+            base,
+            generation,
+            runtime_scope: scope,
+            source_revision: Arc::from(source_revision),
+            selected_imports: selected_imports.clone(),
+            inputs: inputs.clone(),
+            actor: actor.cloned(),
+            scope: label,
+        })
     }
 
     pub(super) fn capture_inspection_world_in(
@@ -1691,7 +1787,9 @@ impl PersistentSession {
             );
             return Ok(AdmittedInspectionWorld {
                 base: association.base.clone(),
+                custody: association.base.acquire_custody()?,
                 inputs: InspectionWorldInputs::Published(association.world.clone()),
+                observation: None,
             });
         }
         tidepool_toolchain::timing::record_host_work(
@@ -1746,6 +1844,38 @@ impl PersistentSession {
             tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
                 scope.0, bindings,
             )?;
+        let lexical = self.capture_compiler_world_lexical_in(scope)?;
+        Ok(AdmittedInspectionWorld {
+            custody: super::inspection::InspectionWorldCustody {
+                original_source: original_source.clone(),
+                target: self.source_lease_in(scope)?,
+            },
+            base: InspectionWorldBase {
+                scope,
+                key,
+                owner: self.admission_owner().clone(),
+                epoch: self.admission_owner().epoch(),
+                source: Arc::new(source.clone()),
+                original_source: super::inspection::InspectionWorldLeaseObservation::new(
+                    original_source,
+                ),
+                target: super::inspection::InspectionWorldLeaseObservation::new(
+                    &self.source_lease_in(scope)?,
+                ),
+            },
+            inputs: InspectionWorldInputs::Cold {
+                primary: self.lib().current_exact_context_in(scope),
+                bindings,
+                lexical,
+            },
+            observation: None,
+        })
+    }
+
+    fn capture_compiler_world_lexical_in(
+        &self,
+        scope: ScopeId,
+    ) -> Result<tidepool_toolchain::compiler_world::CompilerWorldLexicalSurface, SessionError> {
         use tidepool_toolchain::compiler_world::{
             CompilerWorldLexicalSurface, WorldDeclarationSelection,
         };
@@ -1762,26 +1892,10 @@ impl PersistentSession {
                 }
                 None
             };
-        let lexical = CompilerWorldLexicalSurface::from_publication(
+        Ok(CompilerWorldLexicalSurface::from_publication(
             self.lib().workbench_imports_in(scope).into_specs(),
             declaration,
-        )?;
-        Ok(AdmittedInspectionWorld {
-            base: InspectionWorldBase {
-                scope,
-                key,
-                owner: self.admission_owner().clone(),
-                epoch: self.admission_owner().epoch(),
-                source: Arc::new(source.clone()),
-                original_source: original_source.clone(),
-                target: self.source_lease_in(scope)?,
-            },
-            inputs: InspectionWorldInputs::Cold {
-                primary: self.lib().current_exact_context_in(scope),
-                bindings,
-                lexical,
-            },
-        })
+        )?)
     }
 
     pub(super) fn inspection_world_base_is_current(
@@ -1793,10 +1907,10 @@ impl PersistentSession {
         Arc::ptr_eq(&base.owner, self.admission_owner())
             && base.epoch == self.admission_owner().epoch()
             && base.source.sha256() == source.sha256()
-            && Arc::ptr_eq(&base.original_source, original_source)
+            && base.original_source.matches(original_source)
             && self
                 .source_lease_in(base.scope)
-                .is_ok_and(|lease| Arc::ptr_eq(&lease, &base.target))
+                .is_ok_and(|lease| base.target.matches(&lease))
             && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
     }
 
@@ -1808,6 +1922,7 @@ impl PersistentSession {
     ) -> bool {
         self.install_compiler_world_association_if_current(
             &completed.prepared.association,
+            &completed.prepared.custody,
             &completed.cancellation,
             source,
             original_source,
@@ -1817,17 +1932,24 @@ impl PersistentSession {
     pub(super) fn install_compiler_world_association_if_current(
         &mut self,
         association: &Arc<super::inspection::InspectionWorldAssociation>,
+        custody: &super::inspection::InspectionWorldCustody,
         cancellation: &crate::HostAdmissionCancellation,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> bool {
         super::RuntimeLexicalScopeLease::with_source_leases(
-            [original_source.clone(), association.base.target.clone()],
+            [custody.original_source.clone(), custody.target.clone()],
             |leases| {
                 super::RuntimeSourceAdmission::with_open_admissions(
                     leases.iter().map(|lease| lease.source_admission()),
                     || {
-                        if cancellation.checkpoint().is_err()
+                        if !association
+                            .base
+                            .original_source
+                            .matches(&custody.original_source)
+                            || !association.base.target.matches(&custody.target)
+                            || !Arc::ptr_eq(original_source, &custody.original_source)
+                            || cancellation.checkpoint().is_err()
                             || !self.inspection_world_base_is_current(
                                 &association.base,
                                 source,
@@ -1855,6 +1977,40 @@ impl PersistentSession {
             },
         )
         .unwrap_or(false)
+    }
+
+    pub(super) fn with_current_compiler_world<T>(
+        &self,
+        completed: &super::CompletedCompilerWorld,
+        publication: &super::RuntimeSourcePublicationView,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, SessionError> {
+        let association = &completed.association;
+        publication.with_current(&completed.custody.target, || {
+            completed
+                .cancellation
+                .checkpoint()
+                .map_err(tidepool_toolchain::CompileError::from)?;
+            if !self.inspection_world_base_is_current(
+                &association.base,
+                &association.base.source,
+                &completed.custody.original_source,
+            ) || !association
+                .base
+                .original_source
+                .matches(&completed.custody.original_source)
+                || !association.base.target.matches(&completed.custody.target)
+                || !self
+                    .lib()
+                    .tips
+                    .get(&association.base.scope)
+                    .and_then(|state| state.inspection_world.as_ref())
+                    .is_some_and(|installed| Arc::ptr_eq(installed, association))
+            {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+            Ok(action())
+        })?
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
@@ -1899,13 +2055,13 @@ impl PersistentSession {
             }
         }
         let view = self.build_scoped_compile_view(scope, lib);
-        let (digest, bytes_hashed) = view.admission_commitment();
-        #[cfg(test)]
-        self.compile_view_bytes_hashed
-            .fetch_add(bytes_hashed, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(not(test))]
-        let _ = bytes_hashed;
-        let cached = Arc::new(CachedCompileView { digest, view, key });
+        let cached = Arc::new(CachedCompileView {
+            view,
+            key,
+            digest: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            bytes_hashed: self.compile_view_bytes_hashed.clone(),
+        });
         if cached.key.is_some() {
             self.compile_views.lock().insert(scope, cached.clone());
         }
@@ -3564,10 +3720,11 @@ impl PersistentSession {
                 .get(&public_scope)
                 .and_then(|tip| tip.inspection_world.as_ref())
                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            let public_custody = public.base.observed_custody()?;
             if !self.inspection_world_base_is_current(
                 &public.base,
                 &public.base.source,
-                &public.base.original_source,
+                &public_custody.original_source,
             ) || !self.inspection_world_base_is_current(
                 &world.private.base,
                 &world.source,
@@ -3774,7 +3931,10 @@ impl PersistentSession {
                 let mut roots = vec![
                     world.original_source.clone(),
                     world.target.clone(),
-                    world.private.base.target.clone(),
+                    intent
+                        .retained_private_scope()
+                        .ok_or(SessionError::WorldCellPublicationBaseStale)?
+                        .clone(),
                 ];
                 if let Some(public) = self
                     .lib
@@ -3782,8 +3942,9 @@ impl PersistentSession {
                     .and_then(|lib| lib.tips.get(&ticket.public_scope))
                     .and_then(|tip| tip.inspection_world.as_ref())
                 {
-                    roots.push(public.base.original_source.clone());
-                    roots.push(public.base.target.clone());
+                    let current = public.base.observed_custody()?;
+                    roots.push(current.original_source);
+                    roots.push(current.target);
                 }
                 return super::RuntimeLexicalScopeLease::with_source_leases(roots, |leases| {
                     super::RuntimeSourceAdmission::with_open_admissions(
@@ -3941,11 +4102,12 @@ impl PersistentSession {
                 .get(&ticket.public_scope)
                 .and_then(|tip| tip.inspection_world.as_ref())
                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            let public_custody = public.base.observed_custody()?;
             if !self.inspection_world_base_is_current(
                 &public.base,
                 &public.base.source,
-                &public.base.original_source,
-            ) || !Arc::ptr_eq(&public.base.target, &world.target)
+                &public_custody.original_source,
+            ) || !public.base.target.matches(&world.target)
             {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
@@ -3984,8 +4146,10 @@ impl PersistentSession {
                     owner: self.admission_owner().clone(),
                     epoch: self.admission_owner().epoch(),
                     source: world.source.clone(),
-                    original_source: world.original_source.clone(),
-                    target: world.target.clone(),
+                    original_source: super::inspection::InspectionWorldLeaseObservation::new(
+                        &world.original_source,
+                    ),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(&world.target),
                 },
                 world: successor,
             }))
@@ -4033,13 +4197,27 @@ impl PersistentSession {
             public_visibility_epochs,
             ..
         } = self;
-        let world_promotion = promoted_world.as_ref().map(|published| (
-            *world_execution.as_ref().expect("World promotion has its original execution").world()
-                .expect("World execution was selected").private.world.logical_id(),
-            *lib.as_ref().expect("preflight library").tips.get(&public_scope)
-                .and_then(|tip| tip.inspection_world.as_ref()).expect("prepared public World").world.logical_id(),
-            *published.world.logical_id(),
-        ));
+        let world_promotion = promoted_world.as_ref().map(|published| {
+            (
+                *world_execution
+                    .as_ref()
+                    .expect("World promotion has its original execution")
+                    .world()
+                    .expect("World execution was selected")
+                    .private
+                    .world
+                    .logical_id(),
+                *lib.as_ref()
+                    .expect("preflight library")
+                    .tips
+                    .get(&public_scope)
+                    .and_then(|tip| tip.inspection_world.as_ref())
+                    .expect("prepared public World")
+                    .world
+                    .logical_id(),
+                *published.world.logical_id(),
+            )
+        });
         let outcome = lib
             .as_mut()
             .expect("preflight library")
@@ -5045,6 +5223,149 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    #[ignore = "requires the dedicated rooted compiler-world lifetime group"]
+    fn completed_world_holds_exact_source_custody_until_install_and_abandonment() {
+        use super::super::inspection::{
+            finish_admitted_compiler_world, run_admitted_compiler_world,
+        };
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 418);
+        let original = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original_scope = original.scope();
+        let target_scope = session.mint_isolated_scope();
+        let target = session
+            .prepared_lexical_scope_lease_with_source(target_scope, Some(original.clone()))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original, &target));
+        assert!(target
+            .prerequisites()
+            .iter()
+            .any(|lease| Arc::ptr_eq(lease, &original)));
+
+        let source_owner = Arc::new(tempfile::tempdir().unwrap());
+        let body = include_bytes!("fixtures/world-lifetime.hs");
+        let path = PathBuf::from("WorldLifetime.hs");
+        std::fs::write(source_owner.path().join(&path), body).unwrap();
+        let manifest = tidepool_toolchain::cache::SourceRootManifest::from_file_digests([(
+            path.clone(),
+            blake3::hash(body).to_hex().to_string(),
+        )])
+        .unwrap();
+        let revision = tidepool_toolchain::cache::source_manifests_identity(
+            b"runtime-world-lifetime-test",
+            &[manifest.clone()],
+        );
+        let reference = super::super::GenerationArtifactReference::capture(
+            serde_json::to_vec(&(source_owner.path(), revision)).unwrap(),
+        );
+        let sources = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                vec![CapturedCompilerSourceRoot {
+                    manifest,
+                    bodies: [(path, Arc::<[u8]>::from(body.as_slice()))]
+                        .into_iter()
+                        .collect(),
+                }],
+                Arc::from(reference.bytes()),
+                source_owner,
+            )
+            .unwrap(),
+        );
+        let admitted = session
+            .capture_inspection_world_in(target_scope, &reference, &original, |_| false)
+            .unwrap();
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| run_admitted_compiler_world(owner, admitted, || Ok(Some(sources))),
+            )
+            .unwrap();
+        assert!(
+            matches!(settled.close(), crate::CompilerTransactionClose::Clean),
+            "actual World acquisition close {:?}, primary {:?}",
+            settled.close(),
+            settled.action().as_ref().err()
+        );
+        let completed = finish_admitted_compiler_world(settled).unwrap();
+        let observation = completed.association.clone();
+        let world = completed.world().clone();
+        drop(original);
+        drop(target);
+        session.reap_admission_leases();
+        assert!(session.scope_tree().is_live(original_scope));
+        assert!(session.scope_tree().is_live(target_scope));
+        assert!(session.install_compiler_world_association_if_current(
+            &completed.association,
+            &completed.custody,
+            &completed.cancellation,
+            &reference,
+            &completed.custody.original_source
+        ));
+
+        // Observation is not fresh admission: earned custody can still be
+        // validated while its source is Fenced, and new work must refuse.
+        let fence = completed
+            .custody
+            .original_source
+            .source_admission()
+            .fence()
+            .unwrap();
+        assert!(observation.base.observed_custody().is_ok());
+        assert!(observation.base.acquire_custody().is_err());
+        fence.reopen(&completed.custody.original_source).unwrap();
+
+        // A real native root makes the final scope release observable. This
+        // owner-state fixture does not claim a checked notebook-cell success.
+        let original = completed.custody.original_source.clone();
+        let settled = session
+            .with_source_compiler_transaction(
+                original.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "held", 1408,
+                    );
+                    let id = entry.id;
+                    let handle = entry.value.handle;
+                    session.bind_in(target_scope, entry).unwrap();
+                    (id, handle)
+                },
+            )
+            .unwrap();
+        let (id, handle) = settled.into_outcome().action;
+        drop(original);
+        assert!(session.bindings().get(id).is_some());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_some());
+        drop(completed);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(target_scope));
+        assert!(!session.scope_tree().is_live(original_scope));
+        assert!(session.bindings().get(id).is_none());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+        assert!(observation.base.observed_custody().is_err());
+        assert!(observation.base.acquire_custody().is_err());
+        assert_eq!(world.logical_id(), observation.world.logical_id());
+    }
+
+    #[test]
     fn world_observation_refuses_changed_or_foreign_base() {
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
@@ -5109,7 +5430,7 @@ mod checkpoint_scope_tests {
         use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        let session = publication_session(&recovery, root.path(), 419);
+        let mut session = publication_session(&recovery, root.path(), 419);
         let observation = HostWorkObservation::new();
         assert!(session.compile_views.lock().is_empty());
         let digest = observation.scope(|| session.compile_view_digest_in(ScopeId::ROOT).unwrap());
@@ -5131,6 +5452,105 @@ mod checkpoint_scope_tests {
                 .snapshot()
                 .get(HostWorkCounter::CompileViewDigestInputByte),
             first.get(HostWorkCounter::CompileViewDigestInputByte)
+        );
+        let imports = super::super::SourceImports::default();
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let before = session
+            .capture_inspection_scope_in(
+                ScopeId::ROOT,
+                b"observation-only-source",
+                &imports,
+                &inputs,
+                None,
+                super::super::NameScope::Current,
+            )
+            .unwrap();
+        session.reserve_value_generations(3).unwrap();
+        let work = HostWorkObservation::new();
+        let after = work
+            .scope(|| {
+                session.capture_inspection_scope_in(
+                    ScopeId::ROOT,
+                    b"observation-only-source",
+                    &imports,
+                    &inputs,
+                None,
+                    super::super::NameScope::Current,
+                )
+            })
+            .unwrap();
+        assert!(
+            before.provenance().same_view(&after.provenance()),
+            "allocation alone cannot move the observed scope"
+        );
+        assert_eq!(work.snapshot().get(HostWorkCounter::CompileViewBuild), 0);
+        assert_eq!(
+            work.snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            0
+        );
+    }
+
+    #[test]
+    fn inspection_scope_snapshot_defers_digest_and_retains_immutable_base() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 420);
+        let scope = session.mint_isolated_scope();
+        let imports = super::super::SourceImports::default();
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let observed = HostWorkObservation::new();
+        let snapshot = observed
+            .scope(|| {
+                session.capture_inspection_scope_in(
+                    scope,
+                    b"observation-only-source",
+                    &imports,
+                    &inputs,
+                None,
+                    super::super::NameScope::Current,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            observed
+                .snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            0
+        );
+        assert_eq!(session.compile_view_bytes_hashed.load(Ordering::Relaxed), 0);
+        session.reserve_value_generations(3).unwrap();
+        let repeated = session
+            .capture_inspection_scope_in(
+                scope,
+                b"observation-only-source",
+                &imports,
+                &inputs,
+                None,
+                super::super::NameScope::Current,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&snapshot.base, &repeated.base));
+        session.retire_scope(scope);
+        assert!(matches!(session.capture_inspection_scope_in(
+            scope, b"observation-only-source", &imports, &inputs,
+                None, super::super::NameScope::Current,
+        ), Err(SessionError::DeadScope(dead)) if dead == scope));
+        let pin = snapshot.provenance();
+        assert!(session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0);
+        let resolved = HostWorkObservation::new();
+        let repeated_pin = resolved.scope(|| repeated.provenance());
+        assert!(pin.same_view(&repeated_pin));
+        assert_eq!(
+            resolved
+                .snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            0
+        );
+        assert_eq!(
+            resolved.snapshot().get(HostWorkCounter::CompileViewBuild),
+            0
         );
     }
 
@@ -5334,6 +5754,28 @@ mod checkpoint_scope_tests {
         assert_eq!(session.lib().scope_tip(scope), tip);
     }
 
+    fn source_action<T>(
+        session: &mut PersistentSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(&mut PersistentSession) -> T,
+    ) -> T {
+        let settled = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| action(session),
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        settled.into_outcome().action
+    }
+
     #[test]
     fn scoped_view_commitment_reuses_unchanged_binding_owner_witness() {
         use std::sync::atomic::Ordering;
@@ -5344,18 +5786,22 @@ mod checkpoint_scope_tests {
             let mut session = publication_session(&recovery, dir.path(), 410);
             let public = session.mint_isolated_scope();
             let scope = session.mint_detached_scope(public).unwrap();
-            for index in 0..count {
-                let entry = super::super::prepared::tests::rooted_publication_fixture(
-                    &mut session,
-                    &format!("value{index}"),
-                    410 + index,
-                );
-                session.bind_in(scope, entry).unwrap();
-            }
+            let source = session.adopt_initial_notebook_scope(scope).unwrap();
+            source_action(&mut session, &source, |session| {
+                for index in 0..count {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session,
+                        &format!("value{index}"),
+                        410 + index,
+                    );
+                    session.bind_in(scope, entry).unwrap();
+                }
+            });
             let cached = session.scoped_compile_view_in(scope).unwrap();
+            cached.digest();
             let hashed = session.compile_view_bytes_hashed.load(Ordering::Relaxed);
             for _ in 0..100 {
-                assert_eq!(session.compile_view_digest_in(scope), Some(cached.digest));
+                assert_eq!(session.compile_view_digest_in(scope), Some(cached.digest()));
                 let reader = session.compile_view_in(scope).unwrap();
                 assert!(Arc::ptr_eq(&reader.projection, &cached.view.projection));
             }
@@ -5367,7 +5813,9 @@ mod checkpoint_scope_tests {
                 &session.scoped_compile_view_in(scope).unwrap(),
                 &cached
             ));
-            eprintln!("scoped view bindings={count} initial_hashed_bytes={hashed} repeated_checks=100 additional_hashed_bytes=0");
+            eprintln!(
+                "scoped view bindings={count} initial_hashed_bytes={hashed} repeated_checks=100 additional_hashed_bytes=0"
+            );
             session.retire_scope(scope);
             assert!(!session.compile_views.lock().contains_key(&scope));
         }
@@ -5379,9 +5827,12 @@ mod checkpoint_scope_tests {
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
         let mut session = publication_session(&recovery, dir.path(), 417);
         let scope = session.mint_isolated_scope();
-        let original =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 417);
-        session.bind_in(scope, original).unwrap();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        source_action(&mut session, &source, |session| {
+            let original =
+                super::super::prepared::tests::rooted_publication_fixture(session, "answer", 417);
+            session.bind_in(scope, original).unwrap();
+        });
         let reader = session.compile_view_in(scope).unwrap();
         let last_reader = reader.clone();
         let weak = Arc::downgrade(&reader.projection);
@@ -5393,9 +5844,11 @@ mod checkpoint_scope_tests {
         assert!(!Arc::ptr_eq(&reader.projection, &staged.projection));
         assert_eq!(reader.turn_imports(&SourceImports::new()), original_imports);
         assert!(!staged.is_current_for(&reader));
-        let replacement =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 419);
-        session.bind_in(scope, replacement).unwrap();
+        source_action(&mut session, &source, |session| {
+            let replacement =
+                super::super::prepared::tests::rooted_publication_fixture(session, "answer", 419);
+            session.bind_in(scope, replacement).unwrap();
+        });
         let latest = session.compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&reader.projection, &latest.projection));
         assert!(!latest.is_current_for(&reader));
@@ -5424,10 +5877,14 @@ mod checkpoint_scope_tests {
         let cached = session.scoped_compile_view_in(private).unwrap();
         let initial = session.compile_view_in(private).unwrap();
         let sibling = session.mint_isolated_scope();
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "sibling", 411);
-        let module = entry.module;
-        session.bind_in(sibling, entry).unwrap();
+        let source = session.adopt_initial_notebook_scope(sibling).unwrap();
+        let module = source_action(&mut session, &source, |session| {
+            let entry =
+                super::super::prepared::tests::rooted_publication_fixture(session, "sibling", 411);
+            let module = entry.module;
+            session.bind_in(sibling, entry).unwrap();
+            module
+        });
         session.set_val_gen(Generation(500));
         let view = session.compile_view_in(private).unwrap();
         assert_eq!(view.next_value_generation(), Generation(501));
@@ -5438,7 +5895,7 @@ mod checkpoint_scope_tests {
         assert!(view.injected_values().contains(&module));
         assert!(view.visible_values().is_empty());
         assert!(!view.reachable_values().contains(&module));
-        assert_eq!(view.admission_digest(), cached.digest);
+        assert_eq!(view.admission_digest(), cached.digest());
         assert!(Arc::ptr_eq(
             &session.scoped_compile_view_in(private).unwrap(),
             &cached
@@ -5450,17 +5907,22 @@ mod checkpoint_scope_tests {
         let dir = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
         let mut session = publication_session(&recovery, dir.path(), 412);
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 412);
-        session.bind(entry).unwrap();
-        let scope = ScopeId::ROOT;
+        let scope = session.mint_isolated_scope();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        source_action(&mut session, &source, |session| {
+            let entry =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 412);
+            session.bind_in(scope, entry).unwrap();
+        });
         let before = session.scoped_compile_view_in(scope).unwrap();
-        let replacement =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 414);
-        session.bind(replacement).unwrap();
+        source_action(&mut session, &source, |session| {
+            let replacement =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 414);
+            session.bind_in(scope, replacement).unwrap();
+        });
         let rebound = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&before, &rebound));
-        assert_ne!(before.digest, rebound.digest);
+        assert_ne!(before.digest(), rebound.digest());
         let turn = super::super::render::DeclTurn {
             normalized: Default::default(),
             external_imports: SourceImports::new(),
@@ -5474,7 +5936,7 @@ mod checkpoint_scope_tests {
         let generation = session.lib_mut().log.push(turn);
         session.lib_mut().set_scope_tip_in(scope, generation);
         let declared = session.scoped_compile_view_in(scope).unwrap();
-        assert_ne!(declared.digest, rebound.digest);
+        assert_ne!(declared.digest(), rebound.digest());
         // Same session/path/tip counters cannot reuse another library's cache.
         let mut replacement = SessionLib::open(
             session.lib().session_id(),
@@ -5496,7 +5958,7 @@ mod checkpoint_scope_tests {
         *session.lib_mut() = replacement;
         let replaced = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&declared, &replaced));
-        assert_ne!(declared.digest, replaced.digest);
+        assert_ne!(declared.digest(), replaced.digest());
     }
 
     #[test]
@@ -8899,6 +9361,7 @@ impl PersistentSession {
         let staged = staged
             .with_compiler_context(context)
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+        let compiler_key = self.compile_view_key_in(scope);
         Ok(super::PreparedNotebookGeneration {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             domain: state.domain_id,
@@ -8910,7 +9373,106 @@ impl PersistentSession {
             next,
             expected,
             source,
+            compiler_key,
         })
+    }
+
+    /// Capture the prospective World from this owner's exact staged B facts.
+    pub(super) fn capture_notebook_generation_world(
+        &self,
+        prepared: &super::PreparedNotebookGeneration,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        hidden: impl Fn(tidepool_repr::SessionVarId) -> bool,
+    ) -> Result<super::AdmittedInspectionWorld, SessionError> {
+        if !Arc::ptr_eq(&self.source_lease_in(prepared.scope)?, original_source) {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
+        if !prepared.owner_stamp.matches(self.admission_owner())
+            || self.public_visibility_snapshot_in(prepared.scope).as_ref()
+                != Some(&prepared.snapshot)
+            || self.compile_view_key_in(prepared.scope).as_ref() != prepared.compiler_key.as_ref()
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        if let Some(source) = &prepared.source {
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::ColdBootstrap,
+                1,
+            );
+            return Ok(super::inspection::AdmittedInspectionWorld {
+                custody: super::inspection::InspectionWorldCustody {
+                    original_source: original_source.clone(), target: original_source.clone(),
+                },
+                base: super::inspection::InspectionWorldBase {
+                    scope: prepared.scope,
+                    key: prepared.prospective_compiler_key()?,
+                    owner: self.admission_owner().clone(),
+                    epoch: self.admission_owner().epoch(),
+                    source: Arc::new(prepared.next.references.source.clone()),
+                    original_source: super::inspection::InspectionWorldLeaseObservation::new(original_source),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(original_source),
+                },
+                observation: None,
+                inputs: super::inspection::InspectionWorldInputs::Cold {
+                    primary: Some(source.context.exact().clone()),
+                    bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
+                        prepared.scope.0,
+                        Vec::new(),
+                    )?,
+                    lexical: self.capture_compiler_world_lexical_in(prepared.scope)?,
+                },
+            });
+        }
+        let mut admitted = self.capture_inspection_world_in(
+            prepared.scope,
+            &prepared.next.references.source,
+            original_source,
+            hidden,
+        )?;
+        admitted.base.key = prepared.prospective_compiler_key()?;
+        Ok(admitted)
+    }
+
+    /// Publication consumes the same durable candidate that acquired its World.
+    pub fn commit_notebook_generation_with_world(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.commit_notebook_generation_world_mode(prepared, publication, source, on_visible, false)
+    }
+
+    pub fn commit_notebook_generation_with_world_continuing(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.commit_notebook_generation_world_mode(prepared, publication, source, on_visible, true)
+    }
+
+    fn commit_notebook_generation_world_mode(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+        continuing: bool,
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        let super::PreparedNotebookGenerationWithWorld { prepared, world } = prepared;
+        let target = world.custody.target.clone();
+        source.with_current(&target, || {
+            self.commit_notebook_generation_with_completion(
+                prepared,
+                publication,
+                on_visible,
+                continuing,
+                Some(world),
+            )
+        })?
     }
 
     /// The caller holds its generation issuance fence through this operation.
@@ -8921,7 +9483,13 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.commit_notebook_generation_with_completion(prepared, publication, on_visible, false)
+        self.commit_notebook_generation_with_completion(
+            prepared,
+            publication,
+            on_visible,
+            false,
+            None,
+        )
     }
 
     /// Commit an intermediate generation and keep the same execution decision
@@ -8933,7 +9501,13 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.commit_notebook_generation_with_completion(prepared, publication, on_visible, true)
+        self.commit_notebook_generation_with_completion(
+            prepared,
+            publication,
+            on_visible,
+            true,
+            None,
+        )
     }
 
     fn commit_notebook_generation_with_completion(
@@ -8942,7 +9516,18 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
         continuing: bool,
+        compiler_world: Option<Arc<super::CompletedCompilerWorld>>,
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        if let Some(world) = &compiler_world {
+            prepared.validate_compiler_world(world)?;
+            world
+                .cancellation
+                .checkpoint()
+                .map_err(tidepool_toolchain::CompileError::from)?;
+            if self.compile_view_key_in(prepared.scope).as_ref() != prepared.compiler_key.as_ref() {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+        }
         let super::PreparedNotebookGeneration {
             owner_stamp,
             domain: issued_domain,
@@ -8954,6 +9539,7 @@ impl PersistentSession {
             next,
             expected,
             source,
+            compiler_key: _,
         } = prepared;
         if !owner_stamp.matches(self.admission_owner())
             || self.public_visibility_snapshot_in(scope).as_ref() != Some(&snapshot)
@@ -9055,6 +9641,12 @@ impl PersistentSession {
             scope,
             self.admission_owner().epoch(),
         );
+        if let Some(world) = &compiler_world {
+            world
+                .cancellation
+                .checkpoint()
+                .map_err(tidepool_toolchain::CompileError::from)?;
+        }
         let Some(claim) = publication.claim_commit() else {
             return Ok(super::durable_owner_disposition(
                 super::StoreDisposition::Refused(super::StoreRefusal::StaleEpoch),
@@ -9116,6 +9708,13 @@ impl PersistentSession {
                 lib.durable_public_scopes = scopes;
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(scope, epoch);
+                if let Some(world) = compiler_world {
+                    self.lib_mut()
+                        .tips
+                        .get_mut(&scope)
+                        .expect("committed notebook scope")
+                        .inspection_world = Some(world.association.clone());
+                }
                 on_visible(readiness.clone());
                 match receipt.installed_blocking() {
                     Ok(context) => {

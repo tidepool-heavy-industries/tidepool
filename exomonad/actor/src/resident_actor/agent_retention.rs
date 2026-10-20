@@ -184,7 +184,7 @@ mod tests {
     use crate::resident_actor::invocation_work::tests::{Fixture, Owner};
 
     fn work(owner: ActorRef) -> Arc<InvocationWork> {
-        InvocationWork::new(
+        InvocationWork::new_neutral(
             owner,
             RequestReservationOwner::Workbench {
                 execution: WorkbenchExecutionId::from_digest([71; 16]),

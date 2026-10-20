@@ -2004,7 +2004,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         );
         for chosen in [&left, &right] {
             let private = OriginalCompilerInputs {
-            native_fact_base:None,
+                native_fact_base: None,
                 native_availability: RequestNativeAvailability::issue_checked(
                     &projection,
                     &retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
@@ -2158,7 +2158,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let b = base.select_roots(vec![b_id]).unwrap();
     let offers = vec![a_offer, b_offer];
     let private = OriginalCompilerInputs {
-            native_fact_base:None,
+        native_fact_base: None,
         native_availability: RequestNativeAvailability::issue_checked(
             &projection,
             &retain_native_offers(&b, &offers).unwrap(),
@@ -5841,7 +5841,9 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 .compiler_inputs()
                 .metadata
                 .retained
-                .selected_native_groups,
+                .selected_native_groups
+                .as_ref()
+                .clone(),
             custody
         );
         let wire = scope(&request);
@@ -6381,7 +6383,9 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .compiler_inputs()
             .metadata
             .retained
-            .selected_native_groups,
+            .selected_native_groups
+            .as_ref()
+            .clone(),
         selected_before
     );
     assert_exact_offer(&native_context, "full-authored-exact-offer", true);
@@ -6729,7 +6733,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         let private = OriginalCompilerInputs {
-            native_fact_base:None,
+            native_fact_base: None,
             native_availability: RequestNativeAvailability::issue_checked(
                 &projection,
                 &custody,
@@ -9971,8 +9975,7 @@ fn whole_selected_input_still_refuses_group_outside_its_issued_availability() {
         artifact: entry.descriptor.id,
         original_ordinal: 9001,
     };
-    Arc::make_mut(&mut metadata.retained)
-        .selected_native_groups
+    Arc::make_mut(&mut Arc::make_mut(&mut metadata.retained).selected_native_groups)
         .insert(unsupported);
     let error =
         NativeInputSelection::issue_checked(&projection, &metadata, &view, support.native_offers())
@@ -10046,12 +10049,6 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     .unwrap();
     let view = inputs.artifacts().clone();
     let continuation = ContinuationNativeInputs::from_selection(&selection, &projection).unwrap();
-    assert!(matches!(
-        selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
-        Err(crate::certified_products::CertificationError::Mismatch(
-            "complete native selection payload"
-        ))
-    ));
     let completed = continuation.complete_products(&view).unwrap();
     assert_eq!(completed.entries.len(), 1);
     let entry = Arc::clone(&completed.entries[0]);
@@ -10060,6 +10057,12 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     assert!(Arc::ptr_eq(
         &entry,
         &view.metadata_snapshot().artifacts[&id]
+    ));
+
+    assert!(matches!(
+        selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
+        Err(crate::certified_products::CertificationError::MissingRetainedCustody { artifact })
+            if artifact == id
     ));
 
     // Equal payloads in a separately issued scope do not supply this request's binding.

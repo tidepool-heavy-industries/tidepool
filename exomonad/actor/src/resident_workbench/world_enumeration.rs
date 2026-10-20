@@ -110,12 +110,24 @@ where
         expected: Option<ScopeProvenance>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = self.access.source.config.clone();
+        let request_scope = self.request_scope.clone();
+        let snapshot_request_scope = request_scope.clone();
         let snapshot_source = source.clone();
         let snapshot = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &snapshot_source)?;
-                let current = structured_provenance(&view, &snapshot_source, NameScope::Current);
+                let current = match snapshot_source.inspection_provenance(
+                    session,
+                    context, snapshot_request_scope.as_ref(),
+                    NameScope::Current,
+                ) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        return Ok(ScopeBindingsSnapshot::Refused(
+                            unobserved_inspection_source(error)?,
+                        ))
+                    }
+                };
                 if let Some(expected) = pinned_scope_moved(expected, &current) {
                     return Ok(ScopeBindingsSnapshot::Stale { expected, current });
                 }
@@ -163,15 +175,17 @@ where
                     ScopeBindingsSnapshot::Ready { current, answer } => {
                         // Validate and resume under the same machine checkout so
                         // publication cannot move between the check and delivery.
-                        let view = actor_compile_view(session, context, &source)?;
-                        let observed = structured_provenance(&view, &source, NameScope::Current);
-                        if !observed.same_view(&current) {
-                            ScopeBindingsOutcome::ScopeChanged {
-                                before: current,
-                                after: observed,
+                        match source.inspection_provenance(session, context, request_scope.as_ref(), NameScope::Current) {
+                            Ok(observed) if !observed.same_view(&current) => {
+                                ScopeBindingsOutcome::ScopeChanged {
+                                    before: current,
+                                    after: observed,
+                                }
                             }
-                        } else {
-                            ScopeBindingsOutcome::Names(answer, current)
+                            Ok(_) => ScopeBindingsOutcome::Names(answer, current),
+                            Err(error) => ScopeBindingsOutcome::Error(
+                                unobserved_inspection_source(error)?,
+                            ),
                         }
                     }
                 };
@@ -193,6 +207,36 @@ mod tests {
             generation,
             fingerprint: fingerprint.into(),
         }
+    }
+
+    #[test]
+    fn scope_observation_refuses_only_unobserved_source_identity() {
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::CompileView(
+                ActorCompileViewError::UnobservedSourceIdentity,
+            )),
+            Ok(QueryError::Unsupported(_)),
+        ));
+        let scope = ScopeId::ROOT;
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope)),
+            )),
+            Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::DeadScope(actual),
+            ))) if actual == scope,
+        ));
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::Compile(CompileError::Io(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ))),
+            Err(ResidentActorWorkbenchError::Compile(CompileError::Io(error)))
+                if error.kind() == std::io::ErrorKind::PermissionDenied,
+        ));
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::InvocationCancelled),
+            Err(ResidentActorWorkbenchError::InvocationCancelled),
+        ));
     }
 
     #[test]

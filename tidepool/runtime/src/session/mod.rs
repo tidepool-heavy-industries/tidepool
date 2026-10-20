@@ -20,7 +20,9 @@ mod admission;
 mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, RuntimeSourceLeaseClaim, RuntimeSourceReopen, SourceAdmissionError,
+    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
+    RuntimeSourcePublicationView,
+    SourceAdmissionError, SourceFenceTransitionFailure,
     SourceAdmissionHook, SourceAdmissionPhase,
 };
 mod binding_table;
@@ -86,7 +88,8 @@ pub use inspection::{
     AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo, CompletedCompilerWorld,
     CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,
+    InspectionRequest, InspectionResult, InspectionScopeSnapshot, InspectionActorObservation, InspectionRequestIdentity, NameNamespace, NameQuery, NameScope,
+    QueryError,
     ScopeBindingsAnswer, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
     WorldInspectionError, SCOPE_BINDING_LIMIT,
 };
@@ -218,7 +221,7 @@ mod notebook_generation;
 pub use notebook_generation::{
     ActiveNotebookGeneration, ComposedPromptSnapshot, DurableGenerationReferences,
     GenerationArtifactReference, NotebookGenerationError, NotebookGenerationId,
-    PreparedNotebookGeneration,
+    PreparedNotebookGeneration, PreparedNotebookGenerationWithWorld,
 };
 
 use std::collections::{BTreeMap, HashMap};

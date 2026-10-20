@@ -29,6 +29,8 @@ mod drain_wait;
 #[cfg(test)]
 mod forest_shutdown_tests;
 pub(crate) mod forms;
+mod generation_inventory;
+pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
 pub(crate) mod green;
 mod green_notebook;
 #[cfg(test)]
@@ -4466,7 +4468,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }))
     }
 
-    fn actor_effect_owner(&self, actor: ActorRef) -> CurrentEffectOwner<'static> {
+    fn actor_effect_owner(
+        &self,
+        actor: ActorRef,
+    ) -> Result<
+        CurrentEffectOwner<'static>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
         let control = crate::resident_workbench::execution_control();
         let reservation_owner = control
             .as_ref()
@@ -4482,10 +4490,29 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(work) => work,
             None => {
                 let work = match &reservation_owner {
-                    Some(reservation) => self
-                        .workbench_executions
-                        .lock()
-                        .callback_root(actor, reservation.clone()),
+                    Some(reservation) => {
+                        let source = self.actor_callback_execution.as_ref().map_or_else(
+                            || self.actor_program_snapshot.as_ref().map_or(
+                                crate::resident_workbench::generation_admission::SourceDependency::Unqualified,
+                                |snapshot| snapshot.source_dependency().clone(),
+                            ),
+                            |execution| execution.source_dependency().clone(),
+                        );
+                        let retained = self.workbench_executions.lock().find_callback_root(
+                            actor,
+                            reservation,
+                            &source,
+                        );
+                        match retained {
+                            Some(root) => root,
+                            None => WorkbenchExecutions::admit_callback_root(
+                                &self.workbench_executions,
+                                actor,
+                                reservation.clone(),
+                                source,
+                            )?,
+                        }
+                    }
                     None => self.workbench_executions.lock().actor_scope_root(actor),
                 };
                 let _ = work.bind_model(
@@ -4495,7 +4522,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 work
             }
         };
-        CurrentEffectOwner::Actor {
+        Ok(CurrentEffectOwner::Actor {
             callback_scope: self
                 .actor_callback_execution
                 .as_ref()
@@ -4508,7 +4535,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             publication: self.checkpoint_publication.clone(),
             reservation_owner,
             control,
-        }
+        })
     }
 
     fn begin_native_request_model_budget(&self, actor: ActorRef) {
@@ -4517,7 +4544,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         {
             return;
         }
-        if let Some(model) = self.actor_effect_owner(actor).model() {
+        if let Some(model) = self
+            .actor_effect_owner(actor)
+            .ok()
+            .and_then(|owner| owner.model())
+        {
             model.begin_request_budget();
         }
     }
@@ -8337,7 +8368,7 @@ where
                         .resolve_effect(
                             kernel,
                             context,
-                            self.actor_effect_owner(context.actor),
+                            self.actor_effect_owner(context.actor)?,
                             ancestry,
                             boundary,
                         )
@@ -8368,6 +8399,14 @@ where
                     "request presentation was rejected: {error:?}"
                 ))
             })?;
+        let installed_tools = prepared
+            .as_ref()
+            .and_then(|prepared| prepared.installation.prepared_tools.clone())
+            .or_else(|| self.installed_tools.current());
+        let activation_source = match &installed_tools {
+            Some(lease) => lease.source().clone(),
+            None => self.freeze_installed_source(context.actor)?,
+        };
         let already_installed = self.policy_installed;
         let (owner, bootstrap, prepared_installation) = match prepared {
             Some(prepared) => (
@@ -8394,26 +8433,29 @@ where
             drop(input);
             return Ok(InteractivePark::Cancelled(request.request));
         }
+        let (public_compile_context, public_authority) = WorkbenchCompilationAuthority::admit(
+            context.clone(), activation_source.clone(), installed_tools.clone(),
+            self.environment.source_layers.as_ref(),
+        ).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let workbench = self.environment.request_workbench(
+            request.response.clone(), request.request, request.type_evidence.clone(),
+        ).with_compilation_authority(public_authority);
+        let observation = workbench.capture_activation_observation_scaffold(
+            &public_compile_context, &input,
+        )?;
         let private = Arc::new(
             self.environment
                 .runner
                 .begin_private_execution(
-                    context.clone(),
+                    public_compile_context,
                     owner.clone(),
                     tidepool_runtime::session::PublicationDecision::new(),
+                    Some(observation),
                 )
                 .await?,
         );
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = private.private_scope;
-        let installed_tools = prepared_installation
-            .as_ref()
-            .and_then(|installation| installation.prepared_tools.clone())
-            .or_else(|| self.installed_tools.current());
-        let activation_source = match &installed_tools {
-            Some(lease) => lease.source().clone(),
-            None => self.freeze_installed_source(context.actor)?,
-        };
         let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
             private_context.clone(),
             activation_source.clone(),
@@ -8421,13 +8463,7 @@ where
             self.environment.source_layers.as_ref(),
         )
         .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-        let workbench = self
-            .environment
-            .request_workbench(
-                request.response.clone(),
-                request.request,
-                request.type_evidence.clone(),
-            )
+        let workbench = workbench
             .with_compilation_authority(authority)
             .with_private_execution(private.clone());
         #[cfg(test)]
@@ -9667,7 +9703,7 @@ where
                     .resolve_effect(
                         kernel,
                         context,
-                        self.actor_effect_owner(context.actor),
+                        self.actor_effect_owner(context.actor)?,
                         ancestry,
                         boundary,
                     )
@@ -9911,7 +9947,7 @@ where
                         .resolve_effect(
                             kernel,
                             context,
-                            self.actor_effect_owner(context.actor),
+                            self.actor_effect_owner(context.actor)?,
                             ancestry,
                             boundary,
                         )
@@ -12745,29 +12781,17 @@ where
                 }
                 Ok(None) => {}
             }
-            self.workbench_executions
-                .lock()
-                .begin(execution, request.clone(), key.as_ref());
-            self.workbench_executions.lock().bind_provider_finalization(
-                execution,
-                key.as_ref(),
-                Some(&control),
-            );
         }
-        let work = InvocationWork::new(
+        let work = self.workbench_executions.lock().begin_selecting_invocation(
             actor,
-            control
-                .reservation_owner(actor)
-                .expect("admitted tool reservation"),
+            execution.as_ref().expect("tool control issues an execution"),
+            request.as_ref().expect("tool execution carries its request"),
+            key.as_ref(),
+            &control,
         );
         let _ = work.bind_model(
             self.environment.cell_model_factory.as_deref(),
             &self.descriptor,
-        );
-        self.workbench_executions.lock().retain_invocation_work(
-            work.clone(),
-            execution.as_ref(),
-            key.as_ref(),
         );
         crate::OwnedActorTask::serial(move |mut behavior: Box<Self>, kernel| {
             Box::pin(async move {
@@ -13268,12 +13292,27 @@ where
             };
             let execution = entry.execution().relocated(context);
             let context = execution.activation_context();
-            let previous_callback = self.actor_callback_execution.replace(execution);
             let reservation_owner = RequestReservationOwner::Route(watch);
-            let route_work = self
-                .workbench_executions
-                .lock()
-                .callback_root(context.actor, reservation_owner.clone());
+            let route_work = match WorkbenchExecutions::admit_callback_root(
+                &self.workbench_executions,
+                context.actor,
+                reservation_owner.clone(),
+                context.source_dependency().clone(),
+            ) {
+                Ok(work) => work,
+                Err(error) => {
+                    let notifications = self.environment.requests.finish_route(
+                        context.actor,
+                        watch,
+                        Err(error.to_string()),
+                    );
+                    self.publish_watch_notifications(notifications).await;
+                    return Err(Self::workbench_failure(
+                        ResidentActorWorkbenchError::SourceAdmission(error),
+                    ));
+                }
+            };
+            let previous_callback = self.actor_callback_execution.replace(execution);
             let compiler_owner = self.environment.runner.compiler_scope(
                 crate::resident_workbench::CompilerCloseOwner::Invocation {
                     work: route_work.clone(),
@@ -13366,7 +13405,7 @@ where
                                 .resolve_effect(
                                     kernel,
                                     &context,
-                                    self.actor_effect_owner(context.actor),
+                                    self.actor_effect_owner(context.actor)?,
                                     &crate::CallAncestry::begin(context.actor),
                                     boundary,
                                 )
@@ -16051,9 +16090,8 @@ mod tests {
     }
     use super::{
         checkpoint_capture_delivered, disposition_for_non_command_failure,
-        failed_checkpoint_cleanup_response, settlement_refusal,
-        workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
-        ChildExitObservations,
+        failed_checkpoint_cleanup_response, settlement_refusal, workbench_failure_after_operations,
+        workbench_failure_after_unit, workbench_response, ChildExitObservations,
     };
 
     proptest::proptest! {
@@ -16183,11 +16221,11 @@ mod tests {
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, ResidentError,
-        TurnClassification, TurnKind,
-        TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
-        WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
-        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-        WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+        TurnClassification, TurnKind, TypeMatch, TypeMatchQuality, WorkbenchCellItemKind,
+        WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt,
+        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+        WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,
+        WorkbenchTerminalTransfer,
     };
 
     #[test]
@@ -16768,7 +16806,6 @@ mod tests {
         assert_eq!(effect["fields"]["effect"], "commandRun");
         assert_eq!(effect["fields"]["disposition"], "Committed");
     }
-
 
     #[test]
     fn child_exit_observation_tracks_exact_processing_order() {
