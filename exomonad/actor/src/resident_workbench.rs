@@ -7605,6 +7605,8 @@ pub enum ResidentActorWorkbenchError {
     },
     #[error("inspection world unavailable: {0}")]
     InspectionWorldUnavailable(String),
+    #[error("inspection world rejected the query: {0:?}")]
+    InspectionWorldRejected(tidepool_toolchain::compiler_world::WorldQueryRejection),
     #[error("completed result observation failed: {detail}")]
     CompletedResultObservation {
         detail: String,
@@ -10504,10 +10506,7 @@ where
         context: crate::ActorSessionContext,
     ) -> Result<String, ResidentActorWorkbenchError> {
         use compiler_query::FinishedScopedWorldInspection as F;
-        use tidepool_toolchain::compiler_world::{
-            WorldObservationOutcome as O, WorldObservationQuestion as Q,
-        };
-        use tidepool_toolchain::inspection::ScopedReply;
+        use tidepool_toolchain::compiler_world::WorldObservationQuestion as Q;
 
         let source = self.access.source.config.clone();
         let snapshot_source = source.clone();
@@ -10597,28 +10596,7 @@ where
                             ))
                         }
                         F::QueryError(_) => None,
-                        F::Answer {
-                            outcome: O::Rejected(_),
-                            ..
-                        }
-                        | F::Answer {
-                            outcome: O::Answer(ScopedReply::Error(_)),
-                            ..
-                        } => None,
-                        F::Answer {
-                            outcome:
-                                O::Answer(ScopedReply::Expression {
-                                    expression: actual,
-                                    display,
-                                    ..
-                                }),
-                            ..
-                        } if actual == expression => Some(display),
-                        F::Answer { .. } => {
-                            return Err(ResidentActorWorkbenchError::InspectionWorldUnavailable(
-                                "status type answer differs from its admitted expression".into(),
-                            ))
-                        }
+                        F::Answer { outcome, .. } => status_binding_type(&expression, outcome)?,
                     };
                     if let Some(display) = display {
                         let binding = &mut bindings[index];
@@ -16289,6 +16267,30 @@ fn generated_binds_verdict(binders: &[String]) -> TurnClassification {
     }
 }
 
+fn status_binding_type(
+    expression: &str,
+    outcome: tidepool_toolchain::compiler_world::WorldObservationOutcome,
+) -> Result<Option<String>, ResidentActorWorkbenchError> {
+    use tidepool_toolchain::compiler_world::{
+        WorldObservationOutcome as O, WorldQueryRejection as R,
+    };
+    use tidepool_toolchain::inspection::ScopedReply;
+    match outcome {
+        O::Rejected(R::Unsupported) | O::Answer(ScopedReply::Error(_)) => Ok(None),
+        O::Rejected(reason @ (R::Unavailable | R::Corrupt)) => {
+            Err(ResidentActorWorkbenchError::InspectionWorldRejected(reason))
+        }
+        O::Answer(ScopedReply::Expression {
+            expression: actual,
+            display,
+            ..
+        }) if actual == expression => Ok(Some(display)),
+        O::Answer(_) => Err(ResidentActorWorkbenchError::InspectionWorldUnavailable(
+            "status type answer differs from its admitted expression".into(),
+        )),
+    }
+}
+
 fn render_binding_status(bindings: &[tidepool_runtime::session::WorkbenchBinding]) -> String {
     if bindings.is_empty() {
         return "no persistent bindings".into();
@@ -20348,6 +20350,30 @@ pub(crate) mod request_tests {
                 "unsupported source performed {counter:?}"
             );
         }
+    }
+
+    #[test]
+    fn binding_status_keeps_world_refusal_distinct_from_unknown_type() {
+        use tidepool_toolchain::compiler_world::{
+            WorldObservationOutcome as O, WorldQueryRejection as R,
+        };
+        assert!(matches!(
+            status_binding_type("answer", O::Rejected(R::Unsupported)),
+            Ok(None)
+        ));
+        for reason in [R::Unavailable, R::Corrupt] {
+            assert!(matches!(status_binding_type("answer", O::Rejected(reason)),
+                Err(ResidentActorWorkbenchError::InspectionWorldRejected(actual)) if actual == reason));
+        }
+        assert!(matches!(
+            status_binding_type(
+                "answer",
+                O::Answer(tidepool_toolchain::inspection::ScopedReply::Error(
+                    tidepool_runtime::session::QueryError::Unsupported("no type".into())
+                ))
+            ),
+            Ok(None)
+        ));
     }
 
     #[test]
