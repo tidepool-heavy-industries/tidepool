@@ -122,9 +122,13 @@ fn transitive_oracle(
                         &selected,
                         &BTreeSet::from([key]),
                         NativeClosureStage::ColdValidation,
+                        &|_| None,
+                        &BTreeMap::new(),
                     )?
                     .0[&LogicalNodeKey::Group(key)]
-                    .clone()
+                    .iter()
+                    .map(|(target, edge)| (target.logical(), edge.clone()))
+                    .collect()
             }
         };
         let actual = rows[source]
