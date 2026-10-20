@@ -529,6 +529,28 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
         CompilerInputProjection::restore(&view, &selected.roles()).unwrap(),
         selected
     );
+    assert_eq!(
+        CompilerInputProjection::acquire_recorded(&view, selected.recorded_roles()).unwrap(),
+        selected
+    );
+    let mut misowned = selected.recorded_roles().clone();
+    let (selected_owner, role) = misowned
+        .iter()
+        .next()
+        .map(|(owner, role)| (owner.clone(), role.clone()))
+        .unwrap();
+    misowned.remove(&selected_owner);
+    misowned.insert(
+        ExactModuleIdentity {
+            unit: "foreign_unit".into(),
+            module: "Foreign".into(),
+        },
+        role,
+    );
+    assert!(
+        CompilerInputProjection::acquire_recorded(&view, &misowned).is_err(),
+        "recorded roles are authenticated by their retained owner key"
+    );
     for role in selected.roles() {
         for stale_id in [Some(role.interface()), role.original()]
             .into_iter()

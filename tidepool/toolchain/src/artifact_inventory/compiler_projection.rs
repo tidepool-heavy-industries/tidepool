@@ -78,7 +78,7 @@ impl PublicationNativeAuthority {
             ));
         }
         let artifacts = artifacts.select_issued(vec![*original], selection)?;
-        let prior = CompilerInputProjection::from_recorded_roles(facts.roles.clone())
+        let prior = CompilerInputProjection::acquire_recorded(&artifacts, &facts.roles)?
             .bind_publications(&artifacts)?;
         let empty = CompilerSourceSupport::new(prior.clone(), artifacts, [], Default::default())?;
         let restored = empty.restore_native_maps(
@@ -298,11 +298,13 @@ impl RecordedCompilerRole {
     pub(crate) fn as_role(&self) -> &CompilerInputRole {
         &self.0
     }
-}
-impl std::ops::Deref for RecordedCompilerRole {
-    type Target = CompilerInputRole;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    /// Read the recorded interface fact without exposing the live role surface.
+    pub(crate) fn interface(&self) -> ArtifactId {
+        self.0.interface()
+    }
+    /// Read the recorded original fact without exposing the live role surface.
+    pub(crate) fn original(&self) -> Option<ArtifactId> {
+        self.0.original()
     }
 }
 impl PartialEq<CompilerInputRole> for RecordedCompilerRole {
@@ -2348,12 +2350,11 @@ impl CompilerSourceSupport {
                 ));
             }
             let prior = self.publication_birth_support(root)?;
-            return prior.publish_original(
-                &crate::declaration_context::PublishedOriginalEndorsement::new(
-                    root.clone(),
-                    role.clone(),
-                ),
-            );
+            let endorsement =
+                crate::declaration_context::PublishedOriginalEndorsement::from_acquired_support(
+                    self, root,
+                )?;
+            return prior.publish_original(&endorsement);
         }
         let artifacts = match role {
             CompilerInputRole::PublishedSourceOriginal { selection, .. } => {
@@ -2658,18 +2659,30 @@ impl CompilerRolePayloads<'_> {
 }
 
 impl CompilerInputProjection {
-    // Cold restoration authenticates these facts against its actual view next.
-    fn from_recorded_roles(
-        recorded_roles: imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
-    ) -> Self {
-        let roles = recorded_roles
-            .iter()
-            .map(|(owner, role)| (owner.clone(), role.as_role().clone()))
-            .collect();
-        Self {
-            roles,
-            recorded_roles,
+    /// Acquire durable role facts against the exact view that must supply their
+    /// payloads. The recorded owner key is authoritative; a role whose
+    /// interface resolves to another owner is not admitted.
+    pub(crate) fn acquire_recorded(
+        view: &ArtifactView,
+        recorded_roles: &imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
+    ) -> Result<Self, CompileError> {
+        let metadata = view.metadata_snapshot();
+        let mut projection = Self::default();
+        for (owner, fact) in recorded_roles {
+            let role = fact.as_role();
+            if metadata
+                .artifacts
+                .get(&role.interface())
+                .is_none_or(|entry| &entry.descriptor.owner != owner)
+            {
+                return Err(failure(
+                    "recorded compiler role differs from its retained owner",
+                ));
+            }
+            projection.admit_role(owner.clone(), role.clone())?;
         }
+        projection.validate(view)?;
+        Ok(projection)
     }
 
     fn bind_publications(&self, artifacts: &ArtifactView) -> Result<Self, CompileError> {

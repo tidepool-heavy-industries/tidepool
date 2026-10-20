@@ -29,14 +29,62 @@ pub(crate) struct PublishedOriginalEndorsement {
 }
 
 impl PublishedOriginalEndorsement {
-    pub(crate) fn new(owner: ExactModuleIdentity, role: CompilerInputRole) -> Self {
-        Self { owner, role }
+    /// Endorse the role this acquired support already selected for `owner`.
+    /// Callers supply the owner, never a separately assembled role fact.
+    pub(crate) fn from_acquired_support(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        owner: &ExactModuleIdentity,
+    ) -> Result<Self, CompileError> {
+        let role = support
+            .projection()
+            .snapshot_roles()
+            .get(owner)
+            .ok_or_else(|| failure("publication lacks its issued compiler role"))?
+            .clone();
+        Ok(Self {
+            owner: owner.clone(),
+            role,
+        })
     }
     pub(crate) fn owner(&self) -> &ExactModuleIdentity {
         &self.owner
     }
     pub(crate) fn role(&self) -> &CompilerInputRole {
         &self.role
+    }
+}
+
+struct PublishedSelectionFacts<'a> {
+    interface: ArtifactId,
+    original: ArtifactId,
+    source_revision: &'a str,
+    original_input_identity: &'a str,
+    selection: &'a crate::artifact_inventory::ExactArtifactSelection,
+    native_authority: &'a crate::artifact_inventory::PublicationNativeAuthority,
+}
+
+impl<'a> PublishedSelectionFacts<'a> {
+    fn from_role(role: &'a CompilerInputRole) -> Result<Self, CompileError> {
+        let CompilerInputRole::PublishedSourceOriginal {
+            interface,
+            original,
+            source_revision,
+            original_input_identity,
+            selection,
+            native_authority,
+            ..
+        } = role
+        else {
+            return Err(failure("published selection lacks its issued policy"));
+        };
+        Ok(Self {
+            interface: *interface,
+            original: *original,
+            source_revision,
+            original_input_identity,
+            selection,
+            native_authority,
+        })
     }
 }
 
@@ -129,20 +177,14 @@ impl ExactDeclarationContext {
     fn published_selection_sha256(
         &self,
         root: &ExactModuleIdentity,
-        role: &CompilerInputRole,
+        facts: &PublishedSelectionFacts<'_>,
     ) -> Result<[u8; 32], CompileError> {
-        let CompilerInputRole::PublishedSourceOriginal {
-            interface,
-            original,
-            source_revision,
-            original_input_identity,
-            selection,
-            native_authority,
-            ..
-        } = role
-        else {
-            return Err(failure("published selection lacks its issued policy"));
-        };
+        let interface = facts.interface;
+        let original = &facts.original;
+        let source_revision = facts.source_revision;
+        let original_input_identity = facts.original_input_identity;
+        let selection = facts.selection;
+        let native_authority = facts.native_authority;
         if source_revision.is_empty() || original_input_identity.is_empty() {
             return Err(failure(
                 "published selection lacks its source revision identity",
@@ -239,6 +281,65 @@ impl ExactDeclarationContext {
         Ok(Sha256::digest(bytes).into())
     }
 
+    /// Build the complete published role from this context's own selected
+    /// original, native owner and lexical closure. The digest is computed
+    /// before construction so no placeholder role is ever admitted.
+    fn endorse_published_original(
+        &self,
+        root: &ExactModuleIdentity,
+        revision: &str,
+        input_identity: &str,
+    ) -> Result<PublishedOriginalEndorsement, CompileError> {
+        let metadata = self.compiler_metadata_snapshot()?;
+        let entry = metadata
+            .entries
+            .get(root)
+            .ok_or_else(|| failure("published root lacks its issued compiler original"))?;
+        if !matches!(entry.payload, ArtifactPayload::Original(_)) {
+            return Err(failure("published root has only interface custody"));
+        }
+        let original = entry.descriptor.id;
+        let interface = self
+            .owner
+            .facts
+            .compiler_support
+            .projection()
+            .roles()
+            .into_iter()
+            .find(|role| role.original() == Some(original))
+            .ok_or_else(|| failure("published root lacks its exact interface role"))?
+            .interface();
+        let selection = crate::artifact_inventory::ExactArtifactSelection::capture(
+            self.owner.facts.compiler_support.artifacts(),
+        );
+        let native_authority = crate::artifact_inventory::PublicationNativeAuthority::capture(
+            &self.owner.facts.compiler_support,
+        )?;
+        let selection_sha256 = self.published_selection_sha256(
+            root,
+            &PublishedSelectionFacts {
+                interface,
+                original,
+                source_revision: revision,
+                original_input_identity: input_identity,
+                selection: &selection,
+                native_authority: &native_authority,
+            },
+        )?;
+        Ok(PublishedOriginalEndorsement {
+            owner: root.clone(),
+            role: CompilerInputRole::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision: revision.into(),
+                original_input_identity: input_identity.into(),
+                selection,
+                selection_sha256,
+                native_authority,
+            },
+        })
+    }
+
     pub(super) fn validate_published_source_originals(&self) -> Result<(), CompileError> {
         let roles = self
             .owner
@@ -271,7 +372,8 @@ impl ExactDeclarationContext {
                     .ok_or_else(|| failure("published interface is outside retained custody"))?
                     .descriptor
                     .owner;
-                if self.published_selection_sha256(root, &role)? != *selection_sha256 {
+                let facts = PublishedSelectionFacts::from_role(&role)?;
+                if self.published_selection_sha256(root, &facts)? != *selection_sha256 {
                     return Err(failure(
                         "published original selection differs from its issued closure",
                     ));
@@ -479,16 +581,6 @@ impl ExactDeclarationContext {
             return Err(failure("published root has only interface custody"));
         }
         let mut context = self.published_context_for_root(root, entry.descriptor.id)?;
-        let interface = context
-            .owner
-            .facts
-            .compiler_support
-            .projection()
-            .roles()
-            .into_iter()
-            .find(|role| role.original() == Some(entry.descriptor.id))
-            .ok_or_else(|| failure("published root lacks its exact interface role"))?
-            .interface();
         if let Some(CompilerInputRole::PublishedSourceOriginal {
             source_revision,
             original_input_identity,
@@ -512,30 +604,7 @@ impl ExactDeclarationContext {
                 "publication reissue conflicts with its issued source identity",
             ));
         }
-        let mut role = CompilerInputRole::PublishedSourceOriginal {
-            interface,
-            original: entry.descriptor.id,
-            source_revision: revision.into(),
-            original_input_identity: input_identity.into(),
-            selection: crate::artifact_inventory::ExactArtifactSelection::capture(
-                &context.owner.facts.compiler_support.artifacts(),
-            ),
-            selection_sha256: [0; 32],
-            native_authority: crate::artifact_inventory::PublicationNativeAuthority::capture(
-                &context.owner.facts.compiler_support,
-            )?,
-        };
-        let digest = context.published_selection_sha256(root, &role)?;
-        if let CompilerInputRole::PublishedSourceOriginal {
-            selection_sha256, ..
-        } = &mut role
-        {
-            *selection_sha256 = digest;
-        }
-        let endorsement = PublishedOriginalEndorsement {
-            owner: root.clone(),
-            role,
-        };
+        let endorsement = context.endorse_published_original(root, revision, input_identity)?;
         let updated = context
             .owner
             .facts
