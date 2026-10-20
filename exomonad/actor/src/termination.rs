@@ -244,7 +244,7 @@ pub(crate) enum ExecutionSourceBindingError {
 }
 
 impl ExecutionSourceBindingError {
-    fn into_source_error(self) -> tidepool_runtime::session::SourceAdmissionError {
+    pub(crate) fn into_source_error(self) -> tidepool_runtime::session::SourceAdmissionError {
         match self {
             Self::Admission(error) => error,
             Self::NeutralOwner => {

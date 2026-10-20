@@ -12057,6 +12057,7 @@ where
                             .map_err(ResidentActorWorkbenchError::ToolDeclarations)?;
                         Ok(ResidentActorBoundary::ToolAwait(
                             crate::resident_tools::ResidentToolAwait {
+                                original_source: session.parked_site_original_source(&hole, site)?,
                                 continuation: hole,
                                 declarations,
                                 synopsis,

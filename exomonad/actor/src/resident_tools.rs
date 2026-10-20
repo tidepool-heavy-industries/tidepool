@@ -741,6 +741,7 @@ impl Drop for HostedCellPublication {
 /// A policy waiting for its next invocation.
 pub(crate) struct ResidentToolAwait {
     pub(crate) continuation: ResidentHole,
+    pub(crate) original_source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     pub(crate) declarations: Vec<exomonad_tool::ToolDeclaration>,
     pub(crate) synopsis: String,
     pub(crate) initial_user_message: Option<String>,
