@@ -565,6 +565,8 @@ pub struct WorldObservationScaffold {
         crate::declaration_join::RequestHelperRecipe,
         Arc<crate::checked_cell::RequestTypeSignatures>,
     )>,
+    input_type: Option<Arc<crate::checked_cell::ExactCheckedSignature>>,
+    type_contexts: Arc<[Arc<ExactDeclarationContext>]>,
     metadata_bytes: u64,
 }
 
@@ -577,6 +579,8 @@ impl WorldObservationScaffold {
             crate::declaration_join::RequestHelperRecipe,
             Arc<crate::checked_cell::RequestTypeSignatures>,
         )>,
+        input_type: Option<Arc<crate::checked_cell::ExactCheckedSignature>>,
+        type_contexts: Vec<Arc<ExactDeclarationContext>>,
     ) -> Result<Self, CompileError> {
         if fragment.is_empty() || fragment.contains('\0') {
             return Err(source_failure("invalid protected observation fragment"));
@@ -603,6 +607,8 @@ impl WorldObservationScaffold {
             fragment,
             static_imports: static_imports.into(),
             request_types,
+            input_type,
+            type_contexts: type_contexts.into(),
             metadata_bytes: 0,
         };
         let bytes = world_bytes(&scaffold.value())?.len() as u64;
@@ -611,6 +617,12 @@ impl WorldObservationScaffold {
         }
         scaffold.metadata_bytes = bytes;
         Ok(scaffold)
+    }
+
+    /// Actual selected original TYPE owners, retained separately from wire data.
+    /// The World primary issuer validates and incorporates their canonical roles.
+    pub fn type_contexts(&self) -> &[Arc<ExactDeclarationContext>] {
+        &self.type_contexts
     }
 
     fn value(&self) -> ciborium::value::Value {
@@ -622,18 +634,30 @@ impl WorldObservationScaffold {
             .into(),
             world_text(self.fragment.as_ref()),
             world_array(self.static_imports.iter().map(world_text).collect()),
-            self.request_types.as_ref().map_or(
-                ciborium::value::Value::Null,
-                |(recipe, signatures)| {
-                    world_array(vec![
-                        world_text(recipe.as_str()),
-                        signatures.authorization_value(),
-                    ])
-                },
-            ),
+            if self.request_types.is_none() && self.input_type.is_none() {
+                ciborium::value::Value::Null
+            } else {
+                world_array(vec![
+                    self.request_types.as_ref().map_or(
+                        ciborium::value::Value::Null,
+                        |(recipe, signatures)| {
+                            world_array(vec![
+                                world_text(recipe.as_str()),
+                                signatures.authorization_value(),
+                            ])
+                        },
+                    ),
+                    self.input_type
+                        .as_ref()
+                        .map_or(ciborium::value::Value::Null, |signature| {
+                            crate::checked_cell::encode_signature(signature)
+                        }),
+                ])
+            },
         ])
     }
 }
+
 /// Source syntax selected by the runtime's captured publication. Runtime grants
 /// remain in the admission that owns this description.
 #[derive(Clone, Debug)]
@@ -4790,6 +4814,108 @@ mod identity_tests {
     }
 
     #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn recovered_authored_facade_keeps_its_issuing_primary_product() {
+        use crate::declaration_join::{
+            ExactLexicalNode, ExactModuleIdentity, RecoveryDeclarationOrigin,
+            RecoveryDeclarationSelection,
+        };
+        use tidepool_repr::{Generation, SessionModule};
+        let module = SessionModule::lib(Generation(61));
+        let mut branches = Vec::new();
+        for body in ["-- source revision A", "-- source revision B"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = format!(
+                "module {} (answer) where\nanswer :: Int\nanswer = 41\n{body}\n",
+                module.module_name()
+            );
+            let path = root.path().join(module.relative_hs_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &source).unwrap();
+            let certificate = Arc::new(
+                crate::artifacts::test_support::certify_authored_declaration(
+                    module,
+                    &path,
+                    &source,
+                    &[root.path().to_path_buf()],
+                    root.path(),
+                )
+                .unwrap(),
+            );
+            let owner = ExactModuleIdentity {
+                unit: certificate.product().owner().unit.clone(),
+                module: module.module_name(),
+            };
+            let context = Arc::new(
+                ExactDeclarationContext::new(
+                    &[certificate.clone()],
+                    &[],
+                    vec![ExactLexicalNode {
+                        owner: owner.clone(),
+                        imports: Vec::new(),
+                    }],
+                )
+                .unwrap(),
+            );
+            let artifact = context
+                .compiler_input_projection()
+                .snapshot_roles()
+                .get(&owner)
+                .unwrap()
+                .interface();
+            branches.push((root, certificate, owner, context, artifact));
+        }
+        let (_, first, owner, primary, artifact) = &branches[0];
+        let (_, second, _, foreign, foreign_artifact) = &branches[1];
+        assert_eq!(
+            first.lexical_exports(),
+            second.lexical_exports(),
+            "both actual products publish the same exported names and types"
+        );
+        assert_ne!(first.source_sha256(), second.source_sha256());
+        assert_ne!(
+            artifact, foreign_artifact,
+            "different original source certificates exercise distinct canonical products"
+        );
+        let recovered = crate::artifacts::test_support::with_settlement(|settlement| {
+            crate::declaration_join::certify_recovered_declaration_tip_in_context(
+                primary.clone(),
+                RecoveryDeclarationSelection {
+                    origin: RecoveryDeclarationOrigin::Authored {
+                        generation: module.gen().0,
+                        introduced_exports: first.introduced_exports().to_vec(),
+                    },
+                    root: owner.clone(),
+                    lexical: primary.lexical_graph().to_vec(),
+                    exports: first.lexical_exports().to_vec(),
+                    instances: first.instances().clone(),
+                    family_closure: first.family_closure().to_vec(),
+                },
+                &[],
+                settlement,
+            )
+        })
+        .unwrap();
+        let lexical = crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
+            Vec::new(),
+            Some(crate::compiler_world::WorldDeclarationSelection::Recovered(
+                Arc::new(recovered),
+            )),
+        )
+        .unwrap();
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        lexical.materialize(primary, &mut materializer).unwrap();
+        assert!(
+            matches!(
+                lexical.materialize(foreign, &mut materializer),
+                Err(CompileError::ExtractFailed(_))
+            ),
+            "a distinct actual product must fail the writer's source validation"
+        );
+    }
+
+    #[test]
     fn lexical_surface_preserves_order_qualification_and_explicit_empty_imports() {
         let primary = ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap();
         let root = |imports: &[&str]| {
@@ -4826,6 +4952,8 @@ mod identity_tests {
                     Arc::from(fragment),
                     imports.iter().map(|spec| (*spec).to_owned()).collect(),
                     None,
+                    None,
+                    Vec::new(),
                 )
                 .unwrap(),
             )
@@ -4881,7 +5009,9 @@ mod identity_tests {
                     WorldObservationProfile::Workbench,
                     Arc::from(fragment),
                     imports,
-                    None
+                    None,
+                    None,
+                    Vec::new(),
                 )
                 .is_err()
             );

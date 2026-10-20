@@ -729,6 +729,7 @@ enum HostCarrierOrigin {
     Checked {
         admission: Arc<super::RuntimeCheckedItemAdmission>,
         binder: BoundBinder,
+        type_owner: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     },
     Interface {
         admission: Arc<super::RuntimeHostBindingAdmission>,
@@ -833,10 +834,12 @@ impl HostCarrier {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
+        let type_owner = tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
+            .map_err(SessionError::Compile)?;
         Ok(Self {
             code: Arc::new(code.into_owned()),
             representation,
-            origin: HostCarrierOrigin::Checked { admission, binder },
+            origin: HostCarrierOrigin::Checked { admission, binder, type_owner },
         })
     }
 
@@ -845,7 +848,7 @@ impl HostCarrier {
         &self,
     ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, binder } => Ok((admission, binder)),
+            HostCarrierOrigin::Checked { admission, binder, .. } => Ok((admission, binder)),
             HostCarrierOrigin::Reusable(_) | HostCarrierOrigin::Interface { .. } => {
                 Err(ResidentError::UnsupportedCheckedTurn)
             }
@@ -860,6 +863,31 @@ impl HostCarrier {
             | HostCarrierOrigin::Interface { binder, .. } => Ok(binder),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
+    }
+
+    fn type_owner(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>, ResidentError> {
+        match &self.origin {
+            HostCarrierOrigin::Checked { type_owner, .. } => Ok(type_owner),
+            HostCarrierOrigin::Interface { proof, .. } => Ok(proof.prototype()),
+            HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
+        }
+    }
+
+    /// Borrow the native type already retained by this exact checked carrier.
+    /// Generic representation-only embeddings do not supply this witness.
+    pub fn type_signature(
+        &self,
+    ) -> Result<&tidepool_toolchain::checked_cell::ExactCheckedSignature, ResidentError> {
+        Ok(self.type_owner()?.signature())
+    }
+
+    /// Retain the exact selected original type context, without execution custody.
+    pub fn type_context(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError> {
+        Ok(self.type_owner()?.context())
     }
 
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
@@ -5790,16 +5818,7 @@ where
         if !admission.prefix().admission().belongs_to(&self.state) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        let execution = carrier
-            .code
-            .certification
-            .as_ref()
-            .as_ref()
-            .and_then(|certification| certification.checked_execution())
-            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let compiler =
-            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
-                .map_err(SessionError::Compile)?;
+        let compiler = carrier.type_owner()?.clone();
         let code = carrier
             .code()
             .into_host_prototype()

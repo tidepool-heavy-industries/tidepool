@@ -484,6 +484,7 @@ mod failure_diagnostic_tests;
 #[derive(Clone)]
 pub struct ActorWorkbenchSource {
     preamble: Arc<str>,
+    observation_preamble: Option<Arc<str>>,
     base_include: Arc<[PathBuf]>,
     workbench_imports: SourceImports,
     /// The workspace's `[haskell] spec` key, when it names one. Rule two of
@@ -1046,6 +1047,7 @@ impl ActorWorkbenchSource {
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
             preamble: preamble.into(),
+            observation_preamble: None,
             toolset_support: base_include.clone().into(),
             toolset_support_manifests: Default::default(),
             base_include: base_include.into(),
@@ -4367,6 +4369,17 @@ impl ActorWorkbenchSource {
         context: &crate::ActorSessionContext,
         request_scope: Option<&RequestWorkbenchScope>,
     ) -> Self {
+        let observation = match request_scope {
+            Some(scope) => self.request_preamble_for(
+                scope.request,
+                context.haskell_effects_alias.expression(),
+                PreambleBindings::TypeObservation,
+            ),
+            None => self.preamble.to_string(),
+        };
+        self.observation_preamble = Some(
+            actor_preamble_for(&observation, context, PreambleBindings::TypeObservation).into(),
+        );
         if let Some(scope) = request_scope {
             self.request_helper_recipe =
                 tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
@@ -4376,6 +4389,106 @@ impl ActorWorkbenchSource {
         }
         self.preamble = actor_preamble(&self.preamble, context).into();
         self
+    }
+
+    fn observation_scaffold(
+        &self,
+        context: &crate::ActorSessionContext,
+        profile: tidepool_toolchain::compiler_world::WorldObservationProfile,
+        input: Option<&HostInputType>,
+    ) -> Result<
+        Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
+        ResidentActorWorkbenchError,
+    > {
+        use tidepool_toolchain::compiler_world::{
+            WorldObservationProfile, WorldObservationScaffold,
+        };
+        let protected = self.observation_preamble.as_deref().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "observation requires its common actor source producer".into(),
+            )
+        })?;
+        let mut fragment = cell_module_preamble(
+            &hide_preamble_exports(
+                protected,
+                &[tidepool_runtime::session::ExportItem::Value {
+                    name: "print".into(),
+                }],
+            ),
+            "TidepoolWorldObservation",
+        )?;
+        let effects = match profile {
+            WorldObservationProfile::Workbench => context.haskell_effects_alias.expression(),
+            WorldObservationProfile::HostCarrier => "'[]",
+        };
+        let inert = PreambleBindings::TypeObservation.body(String::new);
+        fragment.push_str(&format!("\n__tidepool_inspection_row :: Eff {effects} ()\n__tidepool_inspection_row = {inert}\n"));
+        let mut type_contexts = Vec::new();
+        let request_types = if self.request_helper_recipe
+            == tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply
+        {
+            let annotations = self
+                .request_annotations()
+                .map_err(ResidentActorWorkbenchError::Compile)?
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "request observation lacks original type annotations".into(),
+                    )
+                })?;
+            let original = annotations
+                .evidence()
+                .original_request_context()
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "request observation lacks original type context".into(),
+                    )
+                })?;
+            let signatures = original.request_types().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "request observation lacks original native signatures".into(),
+                )
+            })?;
+            let mut selected = vec![signatures.reply()];
+            selected.extend(signatures.progress());
+            type_contexts.push(Arc::new(
+                original
+                    .declarations()
+                    .select_original_type_interfaces(&[], &selected)
+                    .map_err(ResidentActorWorkbenchError::Compile)?,
+            ));
+            Some((annotations.helper_recipe(), signatures.clone()))
+        } else {
+            None
+        };
+        let input_type = match input {
+            Some(input) => {
+                let signature = &input.signature;
+                let original = &input.context;
+                type_contexts.push(Arc::new(
+                    original
+                        .select_original_type_interfaces(&[], &[signature.as_ref()])
+                        .map_err(ResidentActorWorkbenchError::Compile)?,
+                ));
+                fragment.push_str(&format!(
+                    "\ninput :: TidepoolActivationInput\ninput = {inert}\n"
+                ));
+                Some(signature.clone())
+            }
+            None => None,
+        };
+        let mut imports = context.selected_source_imports();
+        imports.extend(&self.workbench_imports);
+        Ok(Arc::new(
+            WorldObservationScaffold::new(
+                profile,
+                fragment.into(),
+                imports.specs().to_vec(),
+                request_types,
+                input_type,
+                type_contexts,
+            )
+            .map_err(ResidentActorWorkbenchError::Compile)?,
+        ))
     }
 }
 
@@ -8620,6 +8733,10 @@ where
             .map(|scope| scope.admission.clone());
         self.access
             .with_compiler_machine(context.clone(), move |session, context, _, settlement| {
+                let type_signature = Arc::new(carrier.type_signature()
+                    .map_err(ResidentActorWorkbenchError::Resident)?.clone());
+                let type_context = carrier.type_context()
+                    .map_err(ResidentActorWorkbenchError::Resident)?.clone();
                 let original_binder = carrier
                     .binding()
                     .map_err(ResidentActorWorkbenchError::Resident)?;
@@ -8654,6 +8771,7 @@ where
                     module: binder.module.clone(),
                     name: binder.name.clone(),
                     binder,
+                    type_evidence: Some(HostInputType { signature: type_signature, context: type_context }),
                 };
                 Ok(HostInputRetirement::new(
                     &mount_access,
@@ -14458,6 +14576,13 @@ struct MountedHostInput {
     binder: BoundBinder,
     module: String,
     name: String,
+    type_evidence: Option<HostInputType>,
+}
+
+#[derive(Clone)]
+struct HostInputType {
+    signature: Arc<tidepool_toolchain::checked_cell::ExactCheckedSignature>,
+    context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
 }
 
 /// Session root for retiring the exact mounted host binding under its checkout.
@@ -14545,6 +14670,7 @@ where
         module: binder.module.clone(),
         name: binder.name.clone(),
         binder,
+        type_evidence: None,
     })
 }
 
