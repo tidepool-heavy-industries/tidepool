@@ -1941,18 +1941,55 @@ struct ActorPublicationAttempt {
 enum PublicationAuthority {
     World(generation_admission::WorldPublication),
     TargetFence {
-        fence: tidepool_runtime::session::RuntimeSourceFence,
+        fence: PublicationFence,
         prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
     },
+}
+
+/// Moving the affine fence into reopening must not move its cleanup owner.
+enum PublicationFence {
+    Held(tidepool_runtime::session::RuntimeSourceFence),
+    ReopenAttempted,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PublicationSettlementError {
+    #[error(transparent)]
+    Source(#[from] tidepool_runtime::session::SourceAdmissionError),
+    #[error("publication no longer owns its exact installation or world")]
+    SelectionChanged,
+    #[error("publication's actor or preparation owner is unavailable")]
+    OwnerUnavailable,
+    #[error("publication already attempted to reopen its source fence")]
+    ReopenAttempted,
+}
+
+impl PublicationFence {
+    fn reopen(
+        &mut self,
+        target: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        settle: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
+        let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        fence.reopen_with(target, settle)?.map(|_reopened| ())
+    }
+}
+
+enum ActorPublicationState {
+    Armed(PublicationAuthority),
+    Settled,
 }
 
 struct ActorPublicationGuard {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
-    authority: Option<PublicationAuthority>,
+    settlement: ActorPublicationState,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
     owner: ActorPublicationOwner,
-    settled: bool,
     #[cfg(test)]
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
@@ -1961,6 +1998,7 @@ struct ActorPublicationGuard {
 pub(super) struct PublicationSettlementProbe {
     pub(super) entered: std::sync::mpsc::SyncSender<()>,
     pub(super) release: Mutex<std::sync::mpsc::Receiver<()>>,
+    pub(super) unwind: bool,
 }
 #[cfg(test)]
 impl PublicationSettlementProbe {
@@ -1970,6 +2008,7 @@ impl PublicationSettlementProbe {
             .lock()
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
+        assert!(!self.unwind, "publication settlement control unwound");
     }
 }
 
@@ -2003,7 +2042,7 @@ impl ActorPublicationGuard {
                     .transpose()?;
                 let fence = target.runtime_admission().fence_if_idle()?;
                 PublicationAuthority::TargetFence {
-                    fence,
+                    fence: PublicationFence::Held(fence),
                     prerequisite,
                 }
             }
@@ -2037,10 +2076,9 @@ impl ActorPublicationGuard {
         Ok(Some(Self {
             state,
             attempt,
-            authority: Some(authority),
+            settlement: ActorPublicationState::Armed(authority),
             decision,
             owner,
-            settled: false,
             #[cfg(test)]
             settlement_probe: None,
         }))
@@ -2061,14 +2099,20 @@ impl ActorPublicationGuard {
                 &outcome,
                 Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
             );
-        if known_unpublished {
-            self.refused();
+        let settlement = if known_unpublished {
+            self.refused()
         } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
-            if !self.confirmed() {
-                return Ok(ActorGenerationCommit::Unconfirmed(
-                    "publication lost its exact operational selection before settlement".into(),
-                ));
-            }
+            self.confirmed()
+        } else {
+            return outcome;
+        };
+        if let Err(settlement) = settlement {
+            return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                failure: Box::new(ActorPublicationSettlementFailure {
+                    outcome,
+                    settlement,
+                }),
+            });
         }
         outcome
     }
@@ -2077,20 +2121,23 @@ impl ActorPublicationGuard {
         ActorPublicationVisibility {
             state: self.state.clone(),
             attempt: self.attempt.clone(),
-            world: match &self.authority {
-                Some(PublicationAuthority::World(world)) => Some(world.visibility()),
-                Some(PublicationAuthority::TargetFence { .. }) | None => None,
+            world: match &self.settlement {
+                ActorPublicationState::Armed(PublicationAuthority::World(world)) => {
+                    Some(world.visibility())
+                }
+                ActorPublicationState::Armed(PublicationAuthority::TargetFence { .. })
+                | ActorPublicationState::Settled => None,
             },
         }
     }
 
-    fn refused(mut self) {
+    fn refused(mut self) -> Result<(), PublicationSettlementError> {
         let restore = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner.with_live_source_settlement(|| {
                 let mut record = self.state.0.lock();
                 let current = &mut record.availability;
                 if !matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt)) {
-                    return Err(());
+                    return Err(PublicationSettlementError::SelectionChanged);
                 }
                 *current = match &self.attempt.expected {
                     ActorRequestSnapshot::Bootstrap(lease) => InstalledToolsAvailability::Available(lease.clone()),
@@ -2101,16 +2148,17 @@ impl ActorPublicationGuard {
                 if let Some(probe) = &self.settlement_probe { probe.wait(); }
                 reopen.commit();
                 Ok(())
-            }).unwrap_or(Err(()))
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
         };
-        self.settled = self
-            .authority
-            .take()
-            .expect("one publication authority")
-            .refused_when(&self.attempt.target, restore);
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        authority.refused_when(&self.attempt.target, restore)?;
+        self.settlement = ActorPublicationState::Settled;
+        Ok(())
     }
 
-    fn confirmed(mut self) -> bool {
+    fn confirmed(mut self) -> Result<(), PublicationSettlementError> {
         let promote = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner
                 .with_live_source_settlement(|| {
@@ -2128,7 +2176,7 @@ impl ActorPublicationGuard {
                         _ => None,
                     };
                     let Some(generation) = selected else {
-                        return Err(());
+                        return Err(PublicationSettlementError::SelectionChanged);
                     };
                     *current = InstalledToolsAvailability::Generation(generation);
                     #[cfg(test)]
@@ -2138,23 +2186,22 @@ impl ActorPublicationGuard {
                     reopen.commit();
                     Ok(())
                 })
-                .unwrap_or(Err(()))
+                .ok_or(PublicationSettlementError::OwnerUnavailable)?
         };
-        let confirmed = self
-            .authority
-            .take()
-            .expect("one publication authority")
-            .confirmed_when(&self.attempt.target, promote);
-        self.settled = confirmed;
-        confirmed
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        authority.confirmed_when(&self.attempt.target, promote)?;
+        self.settlement = ActorPublicationState::Settled;
+        Ok(())
     }
 }
 
 impl Drop for ActorPublicationGuard {
     fn drop(&mut self) {
-        if self.settled {
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
             return;
-        }
+        };
         self.decision.request_cancellation();
         let state = self.state.clone();
         let attempt = self.attempt.clone();
@@ -2182,18 +2229,7 @@ impl Drop for ActorPublicationGuard {
                 _ => {}
             }
         };
-        if let Some(mut authority) = self.authority.take() {
-            authority.unavailable(mark_installed);
-            if let PublicationAuthority::TargetFence {
-                prerequisite: authority_prerequisite,
-                ..
-            } = &mut authority
-            {
-                if let Some(claim) = authority_prerequisite.take() {
-                    claim.retain_unconfirmed();
-                }
-            }
-        }
+        authority.unavailable(mark_installed);
         // WorldPublication drops prerequisite claims only after both locks unlock.
     }
 }
@@ -2258,50 +2294,51 @@ impl PublicationAuthority {
     fn unavailable(&mut self, mark_installed: impl FnOnce()) {
         match self {
             Self::World(world) => world.unavailable(mark_installed),
-            Self::TargetFence { .. } => mark_installed(),
+            Self::TargetFence { prerequisite, .. } => {
+                mark_installed();
+                if let Some(claim) = prerequisite.take() {
+                    claim.retain_unconfirmed();
+                }
+            }
         }
     }
 
     fn refused_when(
-        self,
+        &mut self,
         target: &generation_admission::GenerationDependency,
         restore: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
-        ) -> Result<(), ()>,
-    ) -> bool {
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
         match self {
             Self::World(world) => world.refused_when(restore),
             Self::TargetFence {
                 fence,
                 prerequisite,
             } => {
-                let refused = fence
-                    .reopen_with(target.runtime_lease(), restore)
-                    .is_ok_and(|result| result.is_ok());
-                drop(prerequisite);
-                refused
+                fence.reopen(target.runtime_lease(), restore)?;
+                drop(prerequisite.take());
+                Ok(())
             }
         }
     }
 
     fn confirmed_when(
-        self,
+        &mut self,
         target: &generation_admission::GenerationDependency,
         promote: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
-        ) -> Result<(), ()>,
-    ) -> bool {
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
         match self {
             Self::World(world) => world.confirmed_when(promote),
             Self::TargetFence {
                 fence,
                 prerequisite,
             } => {
-                let confirmed = fence
-                    .reopen_with(target.runtime_lease(), promote)
-                    .is_ok_and(|result| result.is_ok());
-                drop(prerequisite);
-                confirmed
+                fence.reopen(target.runtime_lease(), promote)?;
+                drop(prerequisite.take());
+                Ok(())
             }
         }
     }
@@ -2468,6 +2505,47 @@ pub(crate) enum ActorGenerationCommit {
     },
     Refused(String),
     Unconfirmed(String),
+}
+
+/// A primary publication outcome and its independent failed source settlement.
+/// The outcome stays typed until the actor's final diagnostic boundary.
+pub struct ActorPublicationSettlementFailure {
+    outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    settlement: PublicationSettlementError,
+}
+
+impl std::fmt::Debug for ActorPublicationSettlementFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActorPublicationSettlementFailure")
+            .field("settlement", &self.settlement)
+            .field("primary", &self.to_string())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ActorPublicationSettlementFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.outcome {
+            Ok(ActorGenerationCommit::Published { generation, .. }) => {
+                write!(formatter, "generation {:?} became visible", generation.id())?;
+            }
+            Ok(ActorGenerationCommit::Refused(reason)) => {
+                write!(formatter, "publication refused: {reason}")?
+            }
+            Ok(ActorGenerationCommit::Unconfirmed(reason)) => {
+                write!(formatter, "publication unconfirmed: {reason}")?
+            }
+            Err(error) => write!(formatter, "{error}")?,
+        }
+        write!(formatter, "; source settlement failed: {}", self.settlement)
+    }
+}
+
+impl std::error::Error for ActorPublicationSettlementFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.settlement)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -6282,6 +6360,11 @@ pub enum ResidentActorWorkbenchError {
     PreparedEntryAbsent { recipe: String },
     #[error("source preparation compiler admission refused: {0}")]
     PreparationAdmission(#[source] Arc<ResidentActorWorkbenchError>),
+    #[error("{failure}")]
+    PublicationSettlement {
+        #[source]
+        failure: Box<ActorPublicationSettlementFailure>,
+    },
     #[error("resident workbench execution failed: {0}")]
     Resident(#[from] ResidentError),
     /// The response that answers a boundary's effect was already handed to
@@ -6381,6 +6464,8 @@ impl ResidentActorWorkbenchError {
             Self::InvocationCancelled => {
                 Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
             }
+            Self::PublicationSettlement { failure } => failure.outcome.as_ref().err()
+                .and_then(|primary| primary.execution_failure_kind()),
             Self::Resident(error) | Self::Delivered(error) => {
                 resident_prepared_failure_kind(error)
             }
@@ -6407,6 +6492,7 @@ impl ResidentActorWorkbenchError {
     /// The run owner must stop admission and recover before any further execution.
     pub fn requires_recovery(&self) -> bool {
         match self {
+            Self::PublicationSettlement { .. } => true,
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),
@@ -6449,6 +6535,11 @@ impl ResidentActorWorkbenchError {
             Self::CellCheck(failure) => Some(activation_compile_diagnostic(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
             Self::RendererProduction { failure } => renderer_production_diagnostic(failure),
+            Self::PublicationSettlement { failure } => Some(tidepool_toolchain::failclass::FailureEnvelope::new(
+                FailureClass::Infra,
+                tidepool_toolchain::failclass::Phase::Compile,
+                failure.to_string(),
+            )),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
             Self::Kernel(error) => error.diagnostic.clone(),
             Self::Resident(ResidentError::Session(error))

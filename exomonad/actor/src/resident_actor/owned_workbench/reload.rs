@@ -59,8 +59,16 @@ where
                     crate::resident_workbench::ActorGenerationPublication::Terminal
                 },
             )
-            .await
-            .map_err(unreadable)?;
+            .await;
+        let result = match result {
+            Err(error) if error.requires_recovery() => {
+                return Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(
+                    report.candidate,
+                    error.to_string(),
+                ))
+            }
+            result => result.map_err(unreadable)?,
+        };
         match result {
             ActorGenerationCommit::Published {
                 generation,
