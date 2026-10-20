@@ -46,9 +46,10 @@ worldRequestBoundaries = do
   worldAcquisitionDiagnostics
   requireObservationPackageEnvironment
   let root = replicate 64 'a'
-      resident = ExactInputsRequest root (ResidentExactInputs "foreign-worker-realization")
+      foreignReference = replicate 64 '1' ++ ".7"
+      resident = ExactInputsRequest root (ResidentExactInputs foreignReference)
       complete = ExactInputsRequest root (CompleteExactInputs "/unavailable/world-inputs.cbor")
-      question = WorldQueryRequest root "foreign-worker-realization" (WorldPublicModuleQuery (WorldPublicInfo
+      question = WorldQueryRequest root foreignReference (WorldPublicModuleQuery (WorldPublicInfo
         (StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
           (InspectionProvenance 1 "display-only")))) "/unavailable/world-answer.bin"
       body = BS.pack [136,1,88,32] <> BS.replicate 32 170 <> BS.pack [0,105] <> "Data.List"
@@ -75,8 +76,8 @@ worldRequestBoundaries = do
   requirePhase CompilerTransactionReleased lateEnsure
   try lateQuery >>= requireCancellation
   let recipe = WorldCellRecipe "(this must not parse" "module CellCheck where" []
-      cellPlan = WorldCellPlanRequest root "foreign-worker-realization" recipe Nothing "/unavailable/cell-plan.cbor"
-      cellPrepare = WorldCellPrepareRequest root "foreign-worker-realization" recipe Nothing "untrusted-receipt" (BS.replicate 32 1) 17
+      cellPlan = WorldCellPlanRequest root foreignReference recipe Nothing "/unavailable/cell-plan.cbor"
+      cellPrepare = WorldCellPrepareRequest root foreignReference recipe Nothing "untrusted-receipt" (BS.replicate 32 1) 17
         [] "/unavailable/cell-operation" "/unavailable/cell-prepared.cbor"
       decode fields = case workerRequestFromArgv (workerArgv fields) of
         Right (Just request) -> pure request

@@ -246,8 +246,8 @@ import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
-  , WorldResidency(..), WorldNonRetentionReason(..)
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), validExactInputsRequest, EnsureExactInputsOutcome(..), ExactInputsRejection(..)
+  , WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), publicQuestionInspection, publicQuestionIsType, WorldObservationQuery(..), InspectionRequest(..), StructuredInspection(..), StructuredNameScope(..)
   , WorldCellPlanRequest(..), WorldCellPrepareRequest(..), WorldCellOperandRequest(..), WorldCellRecipe(..), PlannedCellSlot(..)
   , StructuredNameNamespace(..), InspectionProvenance(..) )
@@ -1466,12 +1466,24 @@ data CompilerUniverse = CompilerUniverse
 -- Immutable logical inputs and the NameCache-bound HPT have separate owners.
 -- This realization is indexed by its universe and strongly borrowed by one
 -- active compiler scope through confirmed END.
-data HeldCompilerWorld = HeldCompilerWorld WorldInputFacts String WorldMaterialization (IORef WorldPreparedModules)
+-- Only actual World acquisition issues this accelerator. Transport strings
+-- are compared at the scope boundary; they do not construct held bindings.
+newtype IssuedWorldRealization = IssuedWorldRealization String deriving (Eq)
+
+worldRealizationText :: IssuedWorldRealization -> String
+worldRealizationText (IssuedWorldRealization value) = value
+
+newWorldRealization :: BS.ByteString -> IO IssuedWorldRealization
+newWorldRealization instanceNonce = do
+  unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+  pure (IssuedWorldRealization (hexBytes instanceNonce ++ "." ++ show unique))
+
+data HeldCompilerWorld = HeldCompilerWorld WorldInputFacts IssuedWorldRealization WorldMaterialization (IORef WorldPreparedModules)
 
 -- A retained closed request carries correlation, never a second payload hold.
 -- The scope revalidates this binding and borrows its actual held payload only
 -- after the fresh executor and phase checks have succeeded.
-data HeldWorldQueryBinding = HeldWorldQueryBinding !String !String
+data HeldWorldQueryBinding = HeldWorldQueryBinding !String !IssuedWorldRealization
 
 data WorldHomeSource = WorldHomeSource Int FilePath FilePath BS.ByteString
 data WorldMaterialization = WorldMaterialization FilePath FilePath [FilePath]
@@ -1489,13 +1501,13 @@ data WorldDependencyPolicy = WorldDependencyPolicy BS.ByteString BS.ByteString B
 data WorldCompletedDependencies = WorldCompletedDependencies WorldDependencyPolicy WorldModuleVersions
 
 data WorldDependencyAttempt = WorldDependencyAttempt
-  String String WorldDependencyPolicy (Map.Map FilePath WorldHomeSource)
+  String IssuedWorldRealization WorldDependencyPolicy (Map.Map FilePath WorldHomeSource)
   WorldModuleVersions ModIfaceCache (IORef GutsMemo) (IORef CompilerRecoveryCaches)
   (IORef CompilerInterpreterState)
 
 -- No held world, mutable attempt, source tree or backing lease escapes in this
 -- pending result. The scope resolves the actual held owner again at commit.
-data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String String WorldDependencyPolicy
+data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String IssuedWorldRealization WorldDependencyPolicy
   (IORef (Maybe WorldModuleVersions))
 
 -- Immutable private versions remain paired with the actual pending completion
@@ -1805,7 +1817,7 @@ releaseWorldMaterialization (WorldMaterialization directory _ _ _ _ _ _ _ (World
 
 -- The caller is the service's authenticated successor issuer. Equal source
 -- seals can validate that exact base's inherited backing, never select a base.
-retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldSuccessorInputs -> String
+retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldSuccessorInputs -> IssuedWorldRealization
   -> (HeldCompilerWorld -> IO result) -> IO result
 retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized preparedRef) successorInputs reference publish = mask $ \_ -> do
   let facts = worldSuccessorFacts successorInputs
@@ -1864,7 +1876,7 @@ retireCompilerWorldBacking timing universeRef world@(HeldCompilerWorld facts ref
     result -> [(CompilerScopeRestore,
       observeCompilerWorld timing universe
         (case result of BodySucceeded True -> WorldBackingRemoved; _ -> WorldBackingRemoveFailed)
-        (worldInputsIdentity facts) reference (Just world))]
+        (worldInputsIdentity facts) (worldRealizationText reference) (Just world))]
   void (finishCompletion (appendCleanupFailures completed observed))
 
 observeCompilerWorld :: Bool -> CompilerUniverse -> WorldRetentionEvent -> String -> String
@@ -7301,18 +7313,21 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   held <- readIORef heldWorld
                   case held of
                     Just (HeldCompilerWorld facts issued _ _)
-                      | root == worldInputsIdentity facts && reference == issued -> do
+                      | root == worldInputsIdentity facts && reference == worldRealizationText issued -> do
                           let identity = worldInputsIdentity facts
-                          _ <- evaluate (length identity + length issued)
+                          _ <- evaluate (length identity + length (worldRealizationText issued))
                           pure (Just (HeldWorldQueryBinding identity issued))
                     _ -> pure Nothing
-                ensureWorld (ExactInputsRequest root acquisition) = runGuarded $ do
+                ensureWorld request
+                  | not (validExactInputsRequest request) = runGuarded (pure (ExactInputsRejected InvalidRealization))
+                  | otherwise = ensureAdmittedWorld request
+                ensureAdmittedWorld (ExactInputsRequest root acquisition) = runGuarded $ do
                   selected <- readIORef universe
                   held <- readIORef heldWorld
                   let install event world@(HeldCompilerWorld facts reference _ _) = do
                         writeIORef heldWorld (Just world)
-                        observeCompilerWorld timing selected event root reference (Just world)
-                        pure (ExactInputsReady (worldInputsIdentity facts) reference
+                        observeCompilerWorld timing selected event root (worldRealizationText reference) (Just world)
+                        pure (ExactInputsReady (worldInputsIdentity facts) (worldRealizationText reference)
                           (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                       publish world@(HeldCompilerWorld facts reference _ _) = do
                         selected <- readIORef universe
@@ -7322,7 +7337,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
                         retired <- evaluate (selected {universeWorlds=retiredWorlds})
                         held <- evaluate (Just world)
-                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference
+                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) (worldRealizationText reference)
                           (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                         -- Retire old private owners before unlinking their backing.
                         -- The shared reservation remains conservative until cleanup
@@ -7331,7 +7346,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         failures <- attemptReleases
                           [(CompilerScopeRestore, do
                               observeCompilerWorld timing retired WorldEvicted
-                                (worldInputsIdentity oldFacts) oldReference (Just old)
+                                (worldInputsIdentity oldFacts) (worldRealizationText oldReference) (Just old)
                               retireCompilerWorldBacking timing universe old)
                           | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
                         released <- captureCompletion (pure ())
@@ -7359,12 +7374,12 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       SuccessorExactInputs predecessor reference manifest -> do
                         let previous = case held <|> lookupCompilerWorld predecessor (universeWorlds selected) of
                               Just world@(HeldCompilerWorld facts issued _ _)
-                                | worldInputsIdentity facts == predecessor && issued == reference -> Just world
+                                | worldInputsIdentity facts == predecessor && worldRealizationText issued == reference -> Just world
                               _ -> Nothing
                         case previous of
                           Nothing -> do
                             observeCompilerWorld timing selected WorldNeedsAcquisition root reference Nothing
-                            pure (ExactInputsNeedsAcquisition root)
+                            pure (ExactInputsNeedsAcquisition root (if take 64 reference /= hexBytes (servicePackageWorkerInstance association) then WorldDifferentWorker else WorldNotResidentOnThisWorker))
                           Just base@(HeldCompilerWorld baseFacts _ _ _) -> do
                             acquired <- try (readWorldSuccessorWithOwner (universeOriginalInputs selected) baseFacts manifest)
                             case acquired of
@@ -7379,24 +7394,23 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                 | otherwise -> case lookupCompilerWorld root (universeWorlds selected) of
                                     Just world -> install WorldCompleteReused world
                                     Nothing -> do
-                                      unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+                                      issued <- newWorldRealization (servicePackageWorkerInstance association)
                                       let facts = worldSuccessorFacts successor
-                                          issued = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
                                       (ready,world,committed) <- retainHeldWorldSuccessor universe base successor issued publish
                                       emitCount timing "world.successor.inherited_realizations" 1
                                       let event = case lookupCompilerWorld root (universeWorlds committed) of
                                             Just _ -> WorldAdmittedRetained
                                             Nothing -> WorldAdmittedActiveOnly
-                                      observeCompilerWorld timing committed event root issued (Just world)
+                                      observeCompilerWorld timing committed event root (worldRealizationText issued) (Just world)
                                       pure ready
                       ResidentExactInputs reference ->
                         case held of
-                          Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentHeldHit world
+                          Just world@(HeldCompilerWorld _ issued _ _) | worldRealizationText issued == reference -> install WorldResidentHeldHit world
                           _ -> case lookupCompilerWorld root (universeWorlds selected) of
-                            Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentRetainedHit world
+                            Just world@(HeldCompilerWorld _ issued _ _) | worldRealizationText issued == reference -> install WorldResidentRetainedHit world
                             _ -> do
                               observeCompilerWorld timing selected WorldNeedsAcquisition root reference Nothing
-                              pure (ExactInputsNeedsAcquisition root)
+                              pure (ExactInputsNeedsAcquisition root (if take 64 reference /= hexBytes (servicePackageWorkerInstance association) then WorldDifferentWorker else WorldNotResidentOnThisWorker))
                       CompleteExactInputs manifest -> do
                         acquired <- try (readWorldInputsWithOwner (universeOriginalInputs selected) manifest)
                         case acquired of
@@ -7422,15 +7436,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             | otherwise -> case held <|> lookupCompilerWorld root (universeWorlds selected) of
                                 Just world -> install WorldCompleteReused world
                                 Nothing -> do
-                                    unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+                                    reference <- newWorldRealization (servicePackageWorkerInstance association)
                                     directory <- maybe (throwIO WorldQueryUnavailable) pure (universeWorldDirectory selected)
                                     (ready,world,committed) <- materializeWorldSourcesWithRelease
                                       (void . releaseRegisteredWorldMaterialization universe) directory (worldInputsSources facts)
                                       (worldInputsSourceModuleHints facts) $ \materialized -> do
                                         table <- newIORef emptyWorldPreparedModules
-                                        let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
-                                            world = HeldCompilerWorld facts reference materialized table
-                                        _ <- evaluate (length reference)
+                                        let world = HeldCompilerWorld facts reference materialized table
+                                        _ <- evaluate (length (worldRealizationText reference))
                                         current <- readIORef universe
                                         writeIORef universe current
                                           {universeWorlds=registerWorldBacking materialized (universeWorlds current)}
@@ -7441,7 +7454,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                           Just _ -> WorldAdmittedRetained
                                           Nothing -> WorldAdmittedActiveOnly
                                         HeldCompilerWorld _ reference _ _ = world
-                                    observeCompilerWorld timing committed event root reference (Just world)
+                                    observeCompilerWorld timing committed event root (worldRealizationText reference) (Just world)
                                     pure ready
                 queryWorld expected grant executor question = runGuarded $ do
                   requireCompilerExecutorOpen executor
@@ -7450,7 +7463,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (Just (HeldWorldQueryBinding identity reference),Just world@(HeldCompilerWorld current issued _ _))
                       | worldInputsIdentity current == identity && issued == reference
                         && worldQueryIdentity question == identity
-                        && worldQueryRealization question == reference -> do
+                        && worldQueryRealization question == worldRealizationText reference -> do
                           selected <- readIORef universe
                           let requireQueryActive = do
                                 caller <- myThreadId
@@ -7478,7 +7491,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (Just (HeldWorldQueryBinding identity reference),Just (HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPlanIdentity question == identity
-                        && worldCellPlanRealization question == reference ->
+                        && worldCellPlanRealization question == worldRealizationText reference ->
                           planHeldWorldCell parserFlags facts (worldCellPlanRecipe question) (worldCellPlanOperand question)
                     _ -> throwIO WorldCellUnavailable
                 validateWorldCell grant executor question = runGuarded $ do
@@ -7487,7 +7500,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   case held of
                     Just (HeldCompilerWorld facts issued _ _)
                       | worldCellPrepareIdentity question == worldInputsIdentity facts
-                        && worldCellPrepareRealization question == issued -> do
+                        && worldCellPrepareRealization question == worldRealizationText issued -> do
                           admitted <- validateHeldWorldCell parserFlags facts question
                           case admitted of
                             Left refusal -> pure (Left refusal)
@@ -7553,7 +7566,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (HeldWorldQueryBinding identity reference,Just world@(HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
-                        && worldCellPrepareRealization question == reference -> do
+                        && worldCellPrepareRealization question == worldRealizationText reference -> do
                           -- Request binding already parsed and admitted this
                           -- immutable recipe. Consumption rechecks held-world
                           -- liveness but does not reparse the same plan.
@@ -7589,7 +7602,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (HeldWorldQueryBinding identity reference,Just world@(HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
-                        && worldCellPrepareRealization question == reference ->
+                        && worldCellPrepareRealization question == worldRealizationText reference ->
                           commitHeldWorldDependencies pending world
                     _ -> throwIO WorldCellUnavailable
                 runOperation :: forall result. Ghc result -> IO result
@@ -7648,7 +7661,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               | not (null initialFailures) = WorldHeldEndQuarantined
                               | null uncached = WorldHeldEndRetained
                               | otherwise = WorldHeldEndRetiring
-                        observeCompilerWorld timing selected event (worldInputsIdentity facts) reference (Just world))
+                        observeCompilerWorld timing selected event (worldInputsIdentity facts) (worldRealizationText reference) (Just world))
                     | world@(HeldCompilerWorld facts reference _ _) <- maybe [] pure retained]
                   -- Oversize/nonresident worlds remain active through actual
                   -- scope release. A failed restore keeps backing with the

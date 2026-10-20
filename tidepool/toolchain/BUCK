@@ -1198,6 +1198,7 @@ tidepool_rust_test_cases(
     case_compiler_modes = {"artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES": "0",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",

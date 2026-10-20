@@ -200,7 +200,13 @@ handwritten content addresses; changing this dependency requires a fresh matched
 package-profile/provider/boot qualification before rooted reuse.
 The logical world retains raw
 immutable facts; its universe realization owns NameCache-bound interfaces, and
-the active `CompilerScope` holds that realization through END. Home queries
+the active `CompilerScope` holds that realization through END. A realization
+reference is the issuing worker's 32-byte lowercase nonce and canonical unsigned
+serial. It accelerates lookup, never authorizes execution or promises residency.
+Without an actual reference Rust sends the retained Complete owner directly;
+only a typed lookup miss permits reconstruction from that same owner. Actual
+BEGIN placement remains outside World/request identity, and admission residency
+is an observation rather than a lease. Home queries
 check only captured source roots with the world-only preprocessing guard;
 prepared queries use their exact completed HPT. They never manufacture an
 expression checking target or fall back to ambient source after refusal.

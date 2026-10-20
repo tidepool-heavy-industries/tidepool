@@ -3,10 +3,10 @@
 -- options; CLI compatibility is owned by the launcher layer.
 module Tidepool.ExtractRequest
   ( CompileWorkload(..)
-  , ExactInputsRequest(..), ExactInputsAcquisition(..)
+  , ExactInputsRequest(..), ExactInputsAcquisition(..), validExactInputsRequest
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..), publicQuestionInspection, publicQuestionIsType
   , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
-  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..), WorldNonRetentionReason(..), encodeEnsureExactInputsOutcomeWithin
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
   , InspectionRequest(..)
   , StructuredInspection(..)
@@ -52,11 +52,23 @@ data ExactInputsAcquisition
 
 validExactInputsRequest :: ExactInputsRequest -> Bool
 validExactInputsRequest (ExactInputsRequest root acquisition) = valid root && case acquisition of
-  ResidentExactInputs reference -> validReference reference
+  ResidentExactInputs reference -> validWorldRealizationReference reference
   CompleteExactInputs manifest -> validReference manifest
   SuccessorExactInputs predecessor reference manifest ->
-    valid predecessor && validReference reference && validReference manifest
+    valid predecessor && validWorldRealizationReference reference && validReference manifest
   where valid = validWorldIdentity
+
+-- Inspect only the fixed nonce plus at most twenty decimal digits. This
+-- grammar check stays bounded even for an unfinished transport reference.
+validWorldRealizationReference :: String -> Bool
+validWorldRealizationReference value = case splitAt 64 value of
+  (nonce,'.':suffix) | validWorldIdentity nonce -> case splitAt 21 suffix of
+    (digits,_) | length digits > 20 -> False
+    (digits,[]) -> case reads digits :: [(Word64,String)] of
+      [(unique,"")] -> show unique == digits
+      _ -> False
+    _ -> False
+  _ -> False
 
 validWorldIdentity :: String -> Bool
 validWorldIdentity value = length value == 64 && all (\c -> c >= '0' && c <= '9' || c >= 'a' && c <= 'f') value
@@ -152,7 +164,7 @@ utf8Within limit = (<= limit) . toInteger . LBS.length
 
 validWorldCellPlanRequest :: WorldCellPlanRequest -> Bool
 validWorldCellPlanRequest request = validWorldIdentity (worldCellPlanIdentity request)
-  && validReference (worldCellPlanRealization request)
+  && validWorldRealizationReference (worldCellPlanRealization request)
   && validWorldCellRecipe (worldCellPlanRecipe request)
   && maybe True validWorldCellOperand (worldCellPlanOperand request)
   && validWorldCellPath (worldCellPlanOutput request)
@@ -164,7 +176,7 @@ data PlannedCellModuleKind = PlannedLibrary | PlannedValue deriving (Eq,Ord)
 
 validWorldCellPrepareRequest :: WorldCellPrepareRequest -> Bool
 validWorldCellPrepareRequest request = validWorldIdentity (worldCellPrepareIdentity request)
-  && validReference (worldCellPrepareRealization request)
+  && validWorldRealizationReference (worldCellPrepareRealization request)
   && validWorldCellRecipe (worldCellPrepareRecipe request)
   && not (BS.null (worldCellPreparePlan request)) && BS.length (worldCellPreparePlan request) <= 8 * 1024 * 1024
   && BS.length (worldCellPrepareAdmission request) == 32
@@ -190,7 +202,7 @@ validWorldCellPrepareRequest request = validWorldIdentity (worldCellPrepareIdent
 
 validWorldQueryRequest :: WorldQueryRequest -> Bool
 validWorldQueryRequest request = validWorldIdentity (worldQueryIdentity request)
-  && validReference (worldQueryRealization request) && validReference (worldQueryOutput request)
+  && validWorldRealizationReference (worldQueryRealization request) && validReference (worldQueryOutput request)
   && case worldQueryQuestion request of
     WorldPublicModuleQuery question -> case structuredScope (publicQuestionInspection question) of
       StructuredPublicModule name -> validReference name
@@ -205,9 +217,13 @@ validWorldQueryRequest request = validWorldIdentity (worldQueryIdentity request)
 
 data EnsureExactInputsOutcome
   = ExactInputsReady String String WorldResidency
-  | ExactInputsNeedsAcquisition String
+  | ExactInputsNeedsAcquisition String WorldAcquisitionMiss
   | ExactInputsRejected ExactInputsRejection
   deriving (Eq, Show)
+
+-- Known lookup facts about the requested issued realization, not eviction events.
+data WorldAcquisitionMiss = WorldNotResidentOnThisWorker | WorldDifferentWorker
+  deriving (Eq,Show)
 
 -- Storage observations from the actual admission; neither constructor pins a worker.
 data WorldResidency = WorldRetainedAtAdmission | WorldActiveOnly WorldNonRetentionReason
@@ -223,18 +239,21 @@ data ExactInputsRejection
 -- frame length are charged to the existing aggregate response payload budget.
 encodeEnsureExactInputsOutcomeWithin :: Integer -> EnsureExactInputsOutcome -> Maybe BS.ByteString
 encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
-  ExactInputsReady root reference residency | validWorldIdentity root -> do
+  ExactInputsReady root reference residency | validWorldIdentity root && validWorldRealizationReference reference -> do
     storage <- residencyFrame residency
     encodedRoot <- referenceFrame (budget - 13) root
     encodedReference <- referenceFrame (budget - 9 - toInteger (BS.length encodedRoot) - toInteger (BS.length storage)) reference
-    pure ("TPEXO003" <> BS.singleton 0 <> encodedRoot <> encodedReference <> storage)
+    pure ("TPEXO004" <> BS.singleton 0 <> encodedRoot <> encodedReference <> storage)
   ExactInputsReady _ _ _ -> Nothing
-  ExactInputsNeedsAcquisition root | validWorldIdentity root ->
-    ("TPEXO003" <>) . (BS.singleton 1 <>) <$> referenceFrame (budget - 9) root
-  ExactInputsNeedsAcquisition _ -> Nothing
+  ExactInputsNeedsAcquisition root reason | validWorldIdentity root -> do
+    encoded <- referenceFrame (budget - 10) root
+    pure ("TPEXO004" <> BS.singleton 1 <> encoded <> BS.singleton (case reason of
+      WorldNotResidentOnThisWorker -> 0
+      WorldDifferentWorker -> 1))
+  ExactInputsNeedsAcquisition _ _ -> Nothing
   ExactInputsRejected cause
     | budget < 10 -> Nothing
-    | otherwise -> Just ("TPEXO003" <> BS.pack [2, rejectionTag cause])
+    | otherwise -> Just ("TPEXO004" <> BS.pack [2, rejectionTag cause])
   where
     residencyFrame WorldRetainedAtAdmission = Just (BS.singleton 0)
     residencyFrame (WorldActiveOnly (WorldStorageAllowanceExceeded required limit))
@@ -665,7 +684,7 @@ workerRequestFlag = "--worker-request-v" ++ show workerRequestVersion
 
 -- The launcher flag and byte framing describe the same grammar version.
 workerRequestVersion :: Int
-workerRequestVersion = 27
+workerRequestVersion = 28
 
 workerRequestMagic :: BS.ByteString
 workerRequestMagic = TE.encodeUtf8 (T.pack ("TPREQ" ++ replicate (3 - length version) '0' ++ version))

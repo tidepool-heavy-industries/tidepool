@@ -94,7 +94,7 @@ import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan
   , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
   , preparedCompilationWorldInputs, prepareCompilationOriginals)
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..)
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
@@ -1897,7 +1897,7 @@ worldResidencyHistories handles work producer profile parcel scopePath = do
       retained WorldRetainedAtAdmission = True
       retained _ = False
       requireMiss root outcome = case outcome of
-        ExactInputsNeedsAcquisition missing | missing == root -> pure ()
+        ExactInputsNeedsAcquisition missing WorldNotResidentOnThisWorker | missing == root -> pure ()
         other -> fail ("nonresident World did not request acquisition: " ++ show other)
   (firstPath,firstRoot,firstEntries) <- create "residency-first" largeFiles
   (secondPath,secondRoot,_) <- create "residency-second" (largeFiles ++ [("residency/second.txt","different captured source")])

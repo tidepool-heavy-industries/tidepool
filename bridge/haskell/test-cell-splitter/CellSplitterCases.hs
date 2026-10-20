@@ -85,8 +85,8 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..)
-  , encodeEnsureExactInputsOutcomeWithin
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
+  , WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..), encodeEnsureExactInputsOutcomeWithin
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..)
   , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , StructuredInspection(..), InspectionProvenance(..)
@@ -986,14 +986,18 @@ checkingSourceRequestRoundTrip = do
       other -> fail ("retired fold/type-pin field accepted: " ++ show other)
 
   let world = replicate 64 'a'
-      resident = ExactInputsRequest world (ResidentExactInputs "realized")
+      realization = replicate 64 '1' ++ ".7"
+      resident = ExactInputsRequest world (ResidentExactInputs realization)
       exactFields = [EnsureExactInputs resident]
   [exactFlag, exactPayload] <- pure (workerArgv exactFields)
-  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v27" exactFlag
+  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v28" exactFlag
   assertEqual "source-free request matches independent Rust fixture"
-    "54505245513032370001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
-  forM_ [resident, ExactInputsRequest world (CompleteExactInputs "/scope.cbor")
-    , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "predecessor-realization" "/successor.cbor")] $ \inputs ->
+    "5450524551303238000100000001000000010000003940000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610042000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e37" exactPayload
+  forM_ [resident
+    , ExactInputsRequest world (ResidentExactInputs (replicate 64 'a' ++ ".0"))
+    , ExactInputsRequest world (ResidentExactInputs (replicate 64 'a' ++ ".18446744073709551615"))
+    , ExactInputsRequest world (CompleteExactInputs "/scope.cbor")
+    , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') realization "/successor.cbor")] $ \inputs ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
       Right (Just request) -> do
         assertEqual "exact acquisition is its own operation" (Right (EnsureExactInputsOperation inputs))
@@ -1009,13 +1013,13 @@ checkingSourceRequestRoundTrip = do
       case workerRequestFromArgv (workerArgv mixed) of
         Left _ -> pure ()
         other -> fail ("mixed source-free request accepted: " ++ show other)
-  forM_ [ExactInputsRequest "" (ResidentExactInputs "realized")
-        , ExactInputsRequest "root\0other" (ResidentExactInputs "realized")
-        , ExactInputsRequest "root" (ResidentExactInputs "")
-        , ExactInputsRequest "root" (CompleteExactInputs "")
-        , ExactInputsRequest world (SuccessorExactInputs "bad-root" "reference" "/successor.cbor")
+  forM_ [ExactInputsRequest "" (ResidentExactInputs realization)
+        , ExactInputsRequest "root\0other" (ResidentExactInputs realization)
+        , ExactInputsRequest world (ResidentExactInputs "")
+        , ExactInputsRequest world (CompleteExactInputs "")
+        , ExactInputsRequest world (SuccessorExactInputs "bad-root" realization "/successor.cbor")
         , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "" "/successor.cbor")
-        , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "reference" "")] $ \invalid ->
+        , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') realization "")] $ \invalid ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs invalid]) of
       Left _ -> pure ()
       other -> fail ("invalid opaque transport reference accepted: " ++ show other)
@@ -1024,13 +1028,18 @@ checkingSourceRequestRoundTrip = do
       Left _ -> pure ()
       other -> fail ("truncated exact inputs accepted: " ++ show other)
   let framedWorld = "\64\0\0\0" <> BS.replicate 64 97
+      framedReference = "\66\0\0\0" <> BS.replicate 64 49 <> ".7"
       outcomeCases =
-        [ (ExactInputsReady world "realized" WorldRetainedAtAdmission, "TPEXO003\0" <> framedWorld <> "\8\0\0\0realized" <> BS.singleton 0)
-        , (ExactInputsNeedsAcquisition world, "TPEXO003\1" <> framedWorld)
-        , (ExactInputsRejected UnsupportedOperation, "TPEXO003\2\0")
-        , (ExactInputsRejected InvalidRealization, "TPEXO003\2\1")
-        , (ExactInputsRejected InvalidRoot, "TPEXO003\2\2")
-        , (ExactInputsRejected AcquisitionRejected, "TPEXO003\2\3") ]
+        [ (ExactInputsReady world realization WorldRetainedAtAdmission,
+            "TPEXO004\0" <> framedWorld <> framedReference <> "\0")
+        , (ExactInputsReady world realization (WorldActiveOnly (WorldStorageAllowanceExceeded 129 128)),
+            "TPEXO004\0" <> framedWorld <> framedReference <> "\1\129\0\0\0\0\0\0\0\128\0\0\0\0\0\0\0")
+        , (ExactInputsNeedsAcquisition world WorldNotResidentOnThisWorker, "TPEXO004\1" <> framedWorld <> "\0")
+        , (ExactInputsNeedsAcquisition world WorldDifferentWorker, "TPEXO004\1" <> framedWorld <> "\1")
+        , (ExactInputsRejected UnsupportedOperation, "TPEXO004\2\0")
+        , (ExactInputsRejected InvalidRealization, "TPEXO004\2\1")
+        , (ExactInputsRejected InvalidRoot, "TPEXO004\2\2")
+        , (ExactInputsRejected AcquisitionRejected, "TPEXO004\2\3") ]
   forM_ outcomeCases $ \(outcome, bytes) ->
     assertEqual "source-free result matches closed independent Rust fixture" (Just bytes)
       (encodeEnsureExactInputsOutcomeWithin (toInteger (BS.length bytes)) outcome)
@@ -1038,23 +1047,29 @@ checkingSourceRequestRoundTrip = do
     forM_ [0 .. toInteger (BS.length bytes) - 1] $ \budget ->
       assertEqual "source-free result charges its complete envelope" Nothing
         (encodeEnsureExactInputsOutcomeWithin budget outcome)
-  assertEqual "UTF-8 framing charges bytes instead of characters"
-    (Just ("TPEXO003\0" <> framedWorld <> "\2\0\0\0\206\187" <> BS.singleton 0))
-    (encodeEnsureExactInputsOutcomeWithin 84 (ExactInputsReady world "λ" WorldRetainedAtAdmission))
-  assertEqual "UTF-8 expansion cannot exceed the payload budget" Nothing
-    (encodeEnsureExactInputsOutcomeWithin 83 (ExactInputsReady world "λ" WorldRetainedAtAdmission))
-  assertEqual "over-budget reference does not force its complete construction" Nothing
-    (encodeEnsureExactInputsOutcomeWithin 84 (ExactInputsReady world
-      (replicate 100000 'x' ++ error "source-free encoder forced beyond its budget") WorldRetainedAtAdmission))
-  forM_ [ExactInputsReady world "" WorldRetainedAtAdmission, ExactInputsNeedsAcquisition "root\0other"] $ \invalid ->
-    assertEqual "source-free outcomes reject invalid opaque transport text" Nothing
-      (encodeEnsureExactInputsOutcomeWithin 100 invalid)
+  forM_ [ "", "realized", "λ", realization ++ "\0other"
+        , replicate 64 'A' ++ ".7", replicate 64 '1' ++ ".00", replicate 64 '1' ++ ".07"
+        , replicate 64 '1' ++ ".+7", replicate 64 '1' ++ ".-7"
+        , replicate 64 '1' ++ ".18446744073709551616" ] $ \invalid -> do
+    case workerRequestFromArgv (workerArgv [EnsureExactInputs (ExactInputsRequest world (ResidentExactInputs invalid))]) of
+      Left _ -> pure ()
+      other -> fail ("noncanonical realization reference accepted: " ++ show other)
+    assertEqual "source-free outcomes reject noncanonical realization references" Nothing
+      (encodeEnsureExactInputsOutcomeWithin 1024 (ExactInputsReady world invalid WorldRetainedAtAdmission))
+  assertEqual "invalid infinite reference is refused without forcing its complete construction" Nothing
+    (encodeEnsureExactInputsOutcomeWithin 1024 (ExactInputsReady world
+      (replicate 64 '1' ++ "." ++ repeat '7') WorldRetainedAtAdmission))
+  assertEqual "reference grammar inspects at most one character beyond its maximum length" Nothing
+    (encodeEnsureExactInputsOutcomeWithin 1024 (ExactInputsReady world
+      (realization ++ replicate 20 '0' ++ error "reference grammar forced beyond its bound") WorldRetainedAtAdmission))
+  assertEqual "source-free outcomes reject invalid world identity" Nothing
+    (encodeEnsureExactInputsOutcomeWithin 1024 (ExactInputsNeedsAcquisition "root\0other" WorldNotResidentOnThisWorker))
   let publicInspection = StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
         (InspectionProvenance 1 "display-only")
-      query = WorldQueryRequest world "realized" (WorldPublicModuleQuery (WorldPublicInfo publicInspection)) "answer.bin"
+      query = WorldQueryRequest world realization (WorldPublicModuleQuery (WorldPublicInfo publicInspection)) "answer.bin"
   [_, queryPayload] <- pure (workerArgv [WorldQuery query])
   assertEqual "world public query matches the frozen field 58 byte layout"
-    "5450524551303237000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
+    "5450524551303238000100000001000000010000003a400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e37000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
   forM_ [WorldPublicInfo, WorldPublicType] $ \constructor -> do
     let selected = query { worldQueryQuestion = WorldPublicModuleQuery (constructor publicInspection) }
     case workerRequestFromArgv (workerArgv [WorldQuery selected]) of
@@ -1085,11 +1100,11 @@ checkingSourceRequestRoundTrip = do
         other -> fail ("invalid world query accepted: " ++ show other)
 
   let cellRecipe = WorldCellRecipe "x <- pure 1" "{{CELL_IMPORTS}}\n{{CELL_BODY}}" [("bind","module Bind where")]
-      cellPlan = WorldCellPlanRequest world "held" cellRecipe Nothing "plan.cbor"
-      cellPrepare = WorldCellPrepareRequest world "held" cellRecipe Nothing "plan-receipt" (BS.replicate 32 98) 17
+      cellPlan = WorldCellPlanRequest world realization cellRecipe Nothing "plan.cbor"
+      cellPrepare = WorldCellPrepareRequest world realization cellRecipe Nothing "plan-receipt" (BS.replicate 32 98) 17
         [(0,PlannedBind 7),(1,PlannedExpression 8 "it")] "operation" "prepared.cbor"
-      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303237000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72")
-              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303237000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626211000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
+      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303238000100000001000000010000003b400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e370b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72")
+              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303238000100000001000000010000003c400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e370b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626211000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
   let operand = Just (WorldCellOperandRequest "private-input.cbor" (BS.replicate 32 7))
   forM_ [WorldCellPlan cellPlan {worldCellPlanOperand=operand}
     ,WorldCellPrepare cellPrepare {worldCellPrepareOperand=operand}] $ \field -> do

@@ -16,6 +16,20 @@ use tidepool_extract_cmd::{
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
 fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
+    // The declared runner boots the service before starting this libtest.
+    // Its zero optional storage forces a genuine miss after confirmed END.
+    assert_eq!(
+        std::env::var("TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES").as_deref(),
+        Ok("0")
+    );
+    let observation = crate::host_work::HostWorkObservation::new();
+    observation.scope(|| real_world_value_selection_with_reference_observation(&observation));
+}
+
+fn real_world_value_selection_with_reference_observation(
+    observation: &Arc<crate::host_work::HostWorkObservation>,
+) {
+    use crate::host_work::HostWorkCounter as Counter;
     let ((endpoint, world, source, prepared), admission) = settle(|| {
         let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
             .expect("declared compiler deployment");
@@ -48,7 +62,21 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             sources,
             CompilerWorldLexicalSurface::from_publication(Vec::new(), None)?,
         )?;
+        let before = observation.snapshot();
         let world = crate::compiler_world::open_world(inputs, &endpoint)?;
+        let after = observation.snapshot();
+        assert_eq!(
+            after.get(Counter::WorldEnsureResidentProbe),
+            before.get(Counter::WorldEnsureResidentProbe)
+        );
+        assert_eq!(
+            after.get(Counter::WorldEnsureComplete),
+            before.get(Counter::WorldEnsureComplete) + 1
+        );
+        assert!(matches!(
+            world.last_admission_residency()?,
+            Some(tidepool_extract_cmd::WorldResidency::ActiveOnly(_))
+        ));
         let checked = prepare_checked(
             &endpoint,
             &world,
@@ -75,7 +103,9 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
     )
     .expect("operand from the actual checked execution owner");
 
+    let logical_world = *world.logical_id();
     for used in [false, true] {
+        let before = observation.snapshot();
         let (prepared, admission) = settle(|| {
             let checked = prepare_checked(
                 &endpoint,
@@ -102,6 +132,24 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             assert_physical_selection(&checked, &operand)?;
             prepare_world_cell_program(checked)
         });
+        let after = observation.snapshot();
+        assert!(
+            after.get(Counter::WorldEnsureResidentProbe)
+                > before.get(Counter::WorldEnsureResidentProbe)
+        );
+        assert_eq!(
+            after.get(Counter::WorldEnsureNeedsAcquisition),
+            before.get(Counter::WorldEnsureNeedsAcquisition) + 1
+        );
+        assert_eq!(
+            after.get(Counter::WorldEnsureComplete),
+            before.get(Counter::WorldEnsureComplete) + 1
+        );
+        assert_eq!(world.logical_id(), &logical_world);
+        assert!(matches!(
+            world.last_admission_residency().unwrap(),
+            Some(tidepool_extract_cmd::WorldResidency::ActiveOnly(_))
+        ));
         let program = prepared
             .seal(&admission)
             .expect("actual selected native END");
@@ -115,6 +163,28 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         });
         assert_eq!(requires_operand, used);
     }
+    // A malformed accepted response must retire its own transaction. Keep this
+    // negative operation after the independent successful physical-owner path.
+    let crossed = settle_compiler_transaction_cancellable(
+        CompilerTransactionCancellation::new(),
+        |_| {},
+        || {
+            crate::compiler_world::assert_actual_world_reference_pairing(
+                &world,
+                endpoint.identity(),
+            )
+        },
+    );
+    assert!(
+        crossed.action().is_ok(),
+        "actual response mutation control: {:?}",
+        crossed.action()
+    );
+    assert!(
+        matches!(crossed.close(), CompilerTransactionClose::Retired(evidence) if evidence.reason == tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest),
+        "crossed response must poison its actual transaction: {:?}",
+        crossed.close()
+    );
 }
 
 fn settle<T>(action: impl FnOnce() -> Result<T, CompileError>) -> (T, HostAdmissionCancellation) {
