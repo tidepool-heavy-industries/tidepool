@@ -239,7 +239,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
 /// Only the fresh scoped producer constructs this intermediate product.
 pub struct RuntimePreparedTargetsDraft {
     artifacts: CompiledArtifacts,
-    source: Arc<session::RuntimeLexicalScopeLease>,
+    source: Arc<session::RuntimeOriginalSource>,
     origin: CompilerTransactionOrigin,
 }
 
@@ -247,8 +247,8 @@ pub struct RuntimePreparedTargetsDraft {
 /// Read-only artifact access cannot issue a new execution product.
 pub struct RuntimePreparedTargets {
     artifacts: CompiledArtifacts,
-    source: Arc<session::RuntimeLexicalScopeLease>,
-    // Standalone compilation owns the issuing session as well as its lease.
+    source: Arc<session::RuntimeOriginalSource>,
+    // Standalone compilation owns the issuing session as well as its source.
     _standalone: Option<parking_lot::Mutex<session::PersistentSession>>,
 }
 
