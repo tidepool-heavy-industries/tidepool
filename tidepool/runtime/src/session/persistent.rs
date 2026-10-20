@@ -3741,10 +3741,13 @@ impl PersistentSession {
 
     /// Admit bootstrap only against the exact already published actor surface.
     pub fn begin_durable_public_bootstrap(
-        &self,
+        &mut self,
         owner: RecoveryPublicOwner,
         scope: ScopeId,
     ) -> Result<DurablePublicBootstrap, SessionError> {
+        self.validate_durable_public_admission(&owner, scope)?;
+        let store = self.lib().held_recovery_store()?;
+        self.reserve_admitted_machine_incarnation(store.as_ref())?;
         let initial = self.validate_durable_public_admission(&owner, scope)?;
         let lib = self.lib();
         let state = lib.durable_graph.as_ref().expect("validated graph");
@@ -6499,6 +6502,81 @@ mod checkpoint_scope_tests {
             PublicManifestCommit::Durable
         ));
         (session, public, owner)
+    }
+
+    #[test]
+    fn durable_bootstrap_reserves_lazy_machine_before_first_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(929),
+            root.path().join("session"),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let owner = public_owner("root/lazy-bootstrap");
+        assert!(matches!(
+            session
+                .initialize_durable_public_scope(owner.clone(), public)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        ));
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .machine_incarnation,
+            None
+        );
+        assert!(session
+            .begin_durable_public_bootstrap(public_owner("root/foreign-bootstrap"), public)
+            .is_err());
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .machine_incarnation,
+            None,
+            "refused owners cannot reserve this runtime's machine identity"
+        );
+
+        let first = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let second = session
+            .begin_durable_public_bootstrap(owner, public)
+            .unwrap();
+        let incarnation = first.initial.machine_incarnation;
+        assert!(incarnation.is_some());
+        assert_eq!(second.initial.machine_incarnation, incarnation);
+        assert!(session.prepared_mut().is_none());
+
+        let binding = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "firstInstallation",
+            929,
+        );
+        session.bind_in(public, binding).unwrap();
+        session.advance_public_visibility(public);
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .machine_incarnation,
+            incarnation
+        );
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(first).unwrap(),
+            PublicManifestCommit::Durable
+        ));
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(second),
+            Err(SessionError::WrongPublicManifestTicket)
+        ));
     }
 
     #[test]

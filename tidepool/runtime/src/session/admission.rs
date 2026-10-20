@@ -2973,6 +2973,20 @@ impl PersistentSession {
         self.lib().held_recovery_store()
     }
 
+    // Tickets issued before the first native installation must name the same
+    // machine lifetime that installation adopts, without allocating an engine.
+    pub(super) fn reserve_admitted_machine_incarnation(
+        &mut self,
+        store: Option<&super::recovery_store::RunRecoveryStore>,
+    ) -> Result<(), SessionError> {
+        let admission = store
+            .map(|store| store.begin_native_transition())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        self.ensure_machine_incarnation();
+        super::complete_native_transition(admission)
+    }
+
     pub(super) fn capture_value_interfaces(
         &self,
         view: &super::SessionCompileView,
@@ -4626,15 +4640,7 @@ impl PersistentSession {
         // The lazy machine has one reserved lifetime identity before any
         // compiler offer captures it. Bootstrap adopts this identity rather
         // than invalidating another independently admitted private cell.
-        {
-            let admission = store
-                .as_ref()
-                .map(|store| store.begin_native_transition())
-                .transpose()
-                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            self.ensure_machine_incarnation();
-            super::complete_native_transition(admission)?;
-        }
+        self.reserve_admitted_machine_incarnation(store.as_ref())?;
         let visibility = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
