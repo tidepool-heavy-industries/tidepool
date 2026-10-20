@@ -4652,6 +4652,17 @@ where
         )
     }
 
+    /// Validate the exact installed World while its publication fence is held.
+    pub fn with_current_compiler_world<T>(
+        &self,
+        completed: &super::CompletedCompilerWorld,
+        publication: &super::RuntimeSourcePublicationView,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, SessionError> {
+        self.state
+            .with_current_compiler_world(completed, publication, action)
+    }
+
     /// Capture checked value inputs while the matching resident view is owned.
     pub fn capture_inspection_inputs(
         &self,
