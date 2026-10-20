@@ -839,6 +839,7 @@ fn identify_request(
 ) {
     tracing::info!(
         target: "tidepool_extract_cmd::endpoint",
+        execution_layer = "endpoint_submission",
         daemon_epoch = %hex(&epoch.0),
         admission_id = admission.0,
         request_ordinal = ordinal.0,
@@ -1704,6 +1705,8 @@ fn service_transaction(
                 tracing::info!(
                     run_id,
                     %compile_request,
+                    execution_layer = "request_preparation",
+                    daemon_epoch = %hex(epoch),
                     admission_id = admission_id.0,
                     request_ordinal = request_ordinal.0,
                     phase = "compiler_request_preparation",
@@ -3939,6 +3942,7 @@ impl Worker {
         let encoding_started = Instant::now();
         let bytes = encode_request(cwd, &request.worker_argv());
         tracing::info!(
+            execution_layer = "request_preparation",
             phase = "compiler_request_preparation",
             stage = "worker_encoding",
             placement_ns,
@@ -7020,6 +7024,7 @@ tidepool-reuse-error: witness failed\n";
             .collect();
         assert_eq!(identified.len(), finished.len());
         for (client, physical) in identified.iter().zip(&finished) {
+            assert_eq!(client["fields"]["execution_layer"], "endpoint_submission");
             for field in [
                 "compile_request",
                 "daemon_epoch",
@@ -7052,6 +7057,9 @@ tidepool-reuse-error: witness failed\n";
         for ((index, event), ordinal) in preparation.iter().zip([1, 2]) {
             let fields = &event["fields"];
             assert_eq!(fields["compile_request"], client_digest);
+            assert_eq!(fields["execution_layer"], "request_preparation");
+            assert_eq!(fields["daemon_epoch"], hex(&[9; 32]));
+            assert!(fields.get("physical_execution").is_none());
             assert_eq!(fields["admission_id"], 41);
             assert_eq!(fields["request_ordinal"], ordinal);
             assert_eq!(fields["typed_decodes"], 1);
@@ -7087,12 +7095,25 @@ tidepool-reuse-error: witness failed\n";
         assert_eq!(encodings.len(), 2);
         for event in encodings {
             assert_eq!(event["span"]["compile_request"], client_digest);
+            assert_eq!(event["span"]["execution_layer"], "physical");
+            assert_eq!(event["fields"]["execution_layer"], "request_preparation");
+            assert_eq!(event["span"]["daemon_epoch"], hex(&[9; 32]));
+            assert_eq!(event["span"]["admission_id"], 41);
             for key in ["placement_ns", "encoding_ns", "worker_encoded_bytes"] {
                 assert!(
                     event["fields"][key].as_u64().is_some(),
                     "missing bounded encoding metric {key}"
                 );
             }
+        }
+        if let Some(artifacts) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+            // The bounded emitted trace lets the reporting owner replay these
+            // actual request stages without another compiler or daemon run.
+            fs::write(
+                PathBuf::from(artifacts).join("request-preparation-trace.jsonl"),
+                trace.text(),
+            )
+            .unwrap();
         }
         assert_eq!(served, 2);
     }
