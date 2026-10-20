@@ -192,6 +192,7 @@ enum PrivateExecutionCompilerBasis {
         private_key: super::persistent::CompileViewKey,
         source: Arc<super::GenerationArtifactReference>,
         original_source: Arc<RuntimeLexicalScopeLease>,
+        public_target: Arc<RuntimeLexicalScopeLease>,
         admitted: PublicVisibilitySnapshot,
         admitted_context:
             Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
@@ -205,6 +206,7 @@ pub(super) struct WorldExecutionAdmissionFacts {
     pub(super) published: Arc<super::inspection::InspectionWorldAssociation>,
     pub(super) source: Arc<super::GenerationArtifactReference>,
     pub(super) original_source: Arc<RuntimeLexicalScopeLease>,
+    pub(super) public_target: Arc<RuntimeLexicalScopeLease>,
     pub(super) admitted: PublicVisibilitySnapshot,
     pub(super) admitted_context:
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
@@ -520,12 +522,15 @@ impl PendingHostValueWrite {
             || !Arc::ptr_eq(&before.world, &after.world)
             || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
             || !Arc::ptr_eq(&before.base.source, &after.base.source)
-            || !Arc::ptr_eq(&before.base.original_source, &after.base.original_source)
-            || !Arc::ptr_eq(&before.base.target, &after.base.target)
+            || !before
+                .base
+                .original_source
+                .same_observation(&after.base.original_source)
+            || !before.base.target.same_observation(&after.base.target)
             || !session.inspection_world_base_is_current(
                 &after.base,
                 &after.base.source,
-                &after.base.original_source,
+                &execution.original_source()?,
             )
             || !session
                 .lib()
@@ -589,7 +594,7 @@ impl PendingHostValueWrite {
             || !session.inspection_world_base_is_current(
                 &mount.after.base,
                 &mount.after.base.source,
-                &mount.after.base.original_source,
+                &execution.original_source()?,
             )
             || !session
                 .lib()
@@ -721,6 +726,7 @@ impl PrivateExecutionAdmission {
                 published,
                 source,
                 original_source,
+                public_target,
                 admitted,
                 admitted_context,
                 ..
@@ -728,6 +734,7 @@ impl PrivateExecutionAdmission {
                 published: published.clone(),
                 source: source.clone(),
                 original_source: original_source.clone(),
+                public_target: public_target.clone(),
                 admitted: admitted.clone(),
                 admitted_context: admitted_context.clone(),
             }),
@@ -1815,7 +1822,11 @@ impl CheckedTurnCompletion {
             None
         };
         let predecessor_world = state.snapshot.world().map(|world| *world.logical_id());
-        let bound_binding_ids = native.bindings.iter().map(|binding| binding.id.raw()).collect::<Vec<_>>();
+        let bound_binding_ids = native
+            .bindings
+            .iter()
+            .map(|binding| binding.id.raw())
+            .collect::<Vec<_>>();
         settle_checked_snapshot(
             session,
             &mut state,
@@ -1829,10 +1840,15 @@ impl CheckedTurnCompletion {
         if let Some((private, values)) = completed_values {
             private.completed_values.lock().extend(values);
         }
-        if let (Some(predecessor_world), Some(successor),
-            tidepool_toolchain::checked_cell::CellProgramBasis::World(output)) =
-            (predecessor_world, state.snapshot.world(), self.prefix.program.basis())
-        {
+        if let (
+            Some(predecessor_world),
+            Some(successor),
+            tidepool_toolchain::checked_cell::CellProgramBasis::World(output),
+        ) = (
+            predecessor_world,
+            state.snapshot.world(),
+            self.prefix.program.basis(),
+        ) {
             tracing::debug!(target: "exomonad_harness::timing",
                 base_logical_world = ?output.logical().logical_id(),
                 predecessor_world = ?predecessor_world,
@@ -3446,6 +3462,7 @@ impl PersistentSession {
             })
             .cloned()
             .ok_or(SessionError::MissingPublishedCompilerWorld(public_scope))?;
+        let custody = published.base.acquire_custody()?;
         let admitted = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
@@ -3456,7 +3473,8 @@ impl PersistentSession {
             WorldExecutionAdmissionFacts {
                 published,
                 source,
-                original_source: original_source.clone(),
+                original_source: custody.original_source,
+                public_target: custody.target,
                 admitted,
                 admitted_context,
             },
@@ -3500,6 +3518,7 @@ impl PersistentSession {
                 .ok_or(SessionError::StaleStagedDeclaration)?,
             source: world.source,
             original_source: world.original_source,
+            public_target: world.public_target,
             admitted: world.admitted,
             admitted_context: world.admitted_context,
         };
@@ -3536,7 +3555,7 @@ impl PersistentSession {
             [
                 facts.original_source.clone(),
                 prepared.scope_lease.clone(),
-                facts.published.base.target.clone(),
+                facts.public_target.clone(),
             ],
             |leases| {
                 super::RuntimeSourceAdmission::with_open_admissions(
@@ -3565,8 +3584,13 @@ impl PersistentSession {
                                 owner: prepared.owner.clone(),
                                 epoch: prepared.owner_epoch,
                                 source: facts.source.clone(),
-                                original_source: facts.original_source.clone(),
-                                target: prepared.scope_lease.clone(),
+                                original_source:
+                                    super::inspection::InspectionWorldLeaseObservation::new(
+                                        &facts.original_source,
+                                    ),
+                                target: super::inspection::InspectionWorldLeaseObservation::new(
+                                    &prepared.scope_lease,
+                                ),
                             },
                             world: facts.published.world.clone(),
                         });
@@ -4204,8 +4228,13 @@ impl PersistentSession {
                                 owner: self.admission_owner().clone(),
                                 epoch: self.admission_owner().epoch(),
                                 source: source.clone(),
-                                original_source: original_source.clone(),
-                                target: target.clone(),
+                                original_source:
+                                    super::inspection::InspectionWorldLeaseObservation::new(
+                                        &original_source,
+                                    ),
+                                target: super::inspection::InspectionWorldLeaseObservation::new(
+                                    &target,
+                                ),
                             },
                             world: successor.clone(),
                         });
@@ -4473,10 +4502,11 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let (original_source, source) = match &execution.compiler_basis {
-            PrivateExecutionCompilerBasis::World { published, .. } => (
-                published.base.original_source.clone(),
-                published.base.source.clone(),
-            ),
+            PrivateExecutionCompilerBasis::World {
+                published,
+                original_source,
+                ..
+            } => (original_source.clone(), published.base.source.clone()),
             PrivateExecutionCompilerBasis::Finite { .. } => {
                 return Err(SessionError::WorldCellRequiresServicePreparation)
             }
