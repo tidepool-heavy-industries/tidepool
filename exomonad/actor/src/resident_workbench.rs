@@ -20145,26 +20145,30 @@ pub(crate) mod request_tests {
                         Some(refusal.clone()),
                     )
                     .await;
+                let rejected = match rejected {
+                    Ok(_) => panic!("closed source admitted a World query"),
+                    Err(error) => error,
+                };
                 use tidepool_runtime::session::{SourceAdmissionError, SourceAdmissionPhase};
                 // Either capture or later compiler admission may observe the
                 // fence first. The refused source owner and phase must survive
                 // that boundary; the error's wrapper does not choose the owner.
                 let (scope, phase) = match &rejected {
-                    Err(ResidentActorWorkbenchError::SourceAdmission(SourceAdmissionError::Closed {
+                    ResidentActorWorkbenchError::SourceAdmission(SourceAdmissionError::Closed {
                         scope,
                         phase,
-                    }))
-                    | Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                    })
+                    | ResidentActorWorkbenchError::Resident(ResidentError::Session(
                         tidepool_runtime::session::SessionError::SourceAdmission(
                             SourceAdmissionError::Closed { scope, phase },
                         ),
-                    )))
-                    | Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(
+                    ))
+                    | ResidentActorWorkbenchError::Resident(ResidentError::Run(
                         tidepool_runtime::RuntimeError::SourceAdmission(SourceAdmissionError::Closed {
                             scope,
                             phase,
                         }),
-                    ))) => (scope, phase),
+                    )) => (scope, phase),
                     _ => panic!("query lost the exact closed-source refusal: {rejected:?}"),
                 };
                 assert_eq!(*scope, lease.scope(), "{rejected:?}");
