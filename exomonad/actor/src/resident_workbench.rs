@@ -21042,7 +21042,8 @@ pub(crate) mod request_tests {
                 assert_real_publisher_checkout_loss(workbench, state, prepared).await;
             }
             PublicationFailureControl::ReplacementFrozenSource => {
-                let source = prepared.candidate.installation.source();
+                let source = prepared.candidate.installation.source().clone();
+                let reference = source.generation_evidence().unwrap().reference.clone();
                 let captured = source.capture_compiler_sources().unwrap().unwrap();
                 let candidate = ActorGenerationCandidateCustody(prepared.candidate.clone());
                 let world = prepared.candidate.compiler_world.clone();
@@ -21066,6 +21067,87 @@ pub(crate) mod request_tests {
                     .same_candidate(&ActorGenerationCandidateCustody(prepared.candidate.clone())));
                 assert!(Arc::ptr_eq(&world, &prepared.candidate.compiler_world));
                 assert_eq!(world.world().logical_id(), &logical);
+                let terminal = crate::CompilerPreparationOwner::new();
+                let publisher = workbench.generation_publisher(
+                    state.clone(),
+                    ActorPublicationOwner::Preparation(terminal.client()),
+                );
+                let ActorGenerationReservation::Reserved(reserved) = publisher
+                    .reserve(
+                        prepared,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        ActorGenerationPublication::Terminal,
+                    )
+                    .unwrap()
+                else {
+                    panic!("the actual frozen candidate must reserve after draft C changes");
+                };
+                assert!(candidate.same_candidate(&reserved.candidate_custody()));
+                let ActorGenerationCommit::Published { generation, .. } =
+                    publisher.publish_reserved(reserved).await.unwrap()
+                else {
+                    panic!("the actual frozen candidate must publish after draft C changes");
+                };
+                assert!(Arc::ptr_eq(
+                    &state.current_generation().unwrap(),
+                    &generation
+                ));
+                assert_eq!(
+                    generation
+                        .installation()
+                        .source()
+                        .generation_evidence()
+                        .unwrap()
+                        .reference,
+                    reference
+                );
+                let context = generation.context().clone();
+                let original = generation.scope().clone();
+                let installed_reference = reference.clone();
+                let admitted = workbench
+                    .access
+                    .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                        session
+                            .capture_inspection_world_in(
+                                original.scope(),
+                                &installed_reference,
+                                &original,
+                            )
+                            .map_err(ResidentError::Session)
+                            .map_err(ResidentActorWorkbenchError::from)
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    !admitted.needs_source_capture(),
+                    "installed B must expose its existing World"
+                );
+                let dependency = context.source_dependency().clone();
+                let work = crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .with_source_dependency(&dependency)
+                    .admit_work()
+                    .unwrap();
+                let warmed = spawn_blocking_in_span(move || {
+                    let settled = work
+                        .run_source_compiler_phase(
+                            &dependency,
+                            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                            |owner, _| {
+                                tidepool_runtime::session::run_admitted_compiler_world(
+                                    owner,
+                                    admitted,
+                                    || panic!("installed B must not recapture draft C"),
+                                )
+                            },
+                        )
+                        .unwrap();
+                    tidepool_runtime::session::finish_admitted_compiler_world(settled).unwrap()
+                })
+                .await
+                .unwrap();
+                assert!(Arc::ptr_eq(warmed.world(), world.world()));
+                assert_eq!(warmed.world().logical_id(), &logical);
             }
         }
     }
