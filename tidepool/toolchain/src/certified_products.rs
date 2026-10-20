@@ -22562,7 +22562,7 @@ pub(crate) mod tests {
                     .compiler_source_support()
                     .input_decisions()
                     .recorded_facts(),
-                &decisions
+                decisions.recorded_facts()
             );
             assert!(context.artifact_view().selected_native_groups().is_empty());
             assert_eq!(
