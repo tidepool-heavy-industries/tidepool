@@ -8,6 +8,8 @@ use crate::resident_workbench::generation_admission::{GenerationDependency, Sour
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Identity of the actual registration issuer; native forwarding never
+/// replaces its actor incarnation or reuses its ordinal.
 pub(crate) struct SourceRegistrationIdentity {
     pub(crate) actor: ActorRef,
     pub(crate) slot: usize,
@@ -15,6 +17,7 @@ pub(crate) struct SourceRegistrationIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceRegistrationDependency {
+    Independent,
     Dependent,
     Unclassified,
 }
@@ -50,6 +53,7 @@ enum SourceSlotState {
     Closed {
         target: SourceTarget,
         rejected: usize,
+        settled_delivery: u64,
     },
 }
 struct SourceSlot {
@@ -57,50 +61,95 @@ struct SourceSlot {
     state: Mutex<SourceSlotState>,
 }
 
+/// Correlates a redispatched input with the same actual slot and issuing
+/// incarnation. Only this slot owner can construct it; it grants no source
+/// admission and does not create an execution.
+#[derive(Clone)]
+pub(crate) struct SourceSlotDelivery {
+    slot: std::sync::Weak<SourceSlot>,
+    ordinal: u64,
+}
+impl std::fmt::Debug for SourceSlotDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceSlotDelivery")
+            .field("ordinal", &self.ordinal)
+            .finish_non_exhaustive()
+    }
+}
+impl SourceSlotDelivery {
+    fn matches(&self, slot: &Arc<SourceSlot>) -> bool {
+        self.slot
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&owner, slot))
+    }
+}
+
 /// The capture retains the actual registration, not a reconstructed stop address.
 #[derive(Clone)]
 pub(crate) struct CapturedSourceRegistration {
     slot: Arc<SourceSlot>,
     dependency: SourceRegistrationDependency,
+    cutoff: tidepool_runtime::session::RuntimeSourceAdmission,
 }
 
 impl CapturedSourceRegistration {
     pub(crate) fn observation(&self) -> SourceRegistrationObservation {
-        let state = match &*self.slot.state.lock() {
-            SourceSlotState::Open(open) => SourceRegistrationState::Open {
-                deferred: open.deferred.len(),
-                resume_failure: open.resume_failure.clone(),
-            },
-            SourceSlotState::Closed { rejected, .. } => SourceRegistrationState::Closed {
-                rejected: *rejected,
-            },
+        let (source, state) = match &*self.slot.state.lock() {
+            SourceSlotState::Open(open) => (
+                Some(open.binding.execution.source_dependency().clone()),
+                SourceRegistrationState::Open {
+                    deferred: open.deferred.len(),
+                    resume_failure: open.resume_failure.clone(),
+                },
+            ),
+            SourceSlotState::Closed { rejected, .. } => (
+                None,
+                SourceRegistrationState::Closed {
+                    rejected: *rejected,
+                },
+            ),
         };
         SourceRegistrationObservation {
             identity: self.slot.identity.clone(),
-            dependency: self.dependency,
+            dependency: source.as_ref().map_or(self.dependency, |source| {
+                source_relation(source, &self.cutoff)
+            }),
             state,
         }
     }
 
-    /// Only the selected registration loses its roots and subscription. Input
-    /// already admitted to this slot is settled as refused without mapping it.
+    /// Redispatch retained, unrun input only after the exact source reopened.
     pub(crate) fn resume_deferred(&self) -> SourceRegistrationObservation {
         resume_slot(&self.slot);
         self.observation()
     }
 
+    /// Drop only this registration and settle each retained logical input once.
     pub(crate) fn close(&self) -> SourceRegistrationObservation {
+        let source = match &*self.slot.state.lock() {
+            SourceSlotState::Open(open) => Some(open.binding.execution.source_dependency().clone()),
+            _ => None,
+        };
+        let Some(source) = source else {
+            return self.observation();
+        };
+        if source_relation(&source, &self.cutoff) != SourceRegistrationDependency::Dependent {
+            return self.observation();
+        }
         let discarded = {
             let mut state = self.slot.state.lock();
             match &*state {
-                SourceSlotState::Open(open) => {
+                SourceSlotState::Open(open)
+                    if open.binding.execution.source_dependency() == &source =>
+                {
                     let closed = SourceSlotState::Closed {
                         target: open.binding.target,
                         rejected: open.deferred.len(),
+                        settled_delivery: open.next_delivery - 1,
                     };
                     Some(std::mem::replace(&mut *state, closed))
                 }
-                SourceSlotState::Closed { .. } => None,
+                SourceSlotState::Closed { .. } | SourceSlotState::Open(_) => None,
             }
         };
         // Subscription guards can enter RequestRegistry; never drop them under
@@ -119,6 +168,8 @@ struct SourceSlotsState {
     connections: Option<ActorSourceConnections>,
 }
 
+/// Held by source() across both map_source and run_receiver. Source retirement
+/// cannot finish while that pre-cutoff executable callback is still active.
 pub(super) struct AdmittedSourceDelivery {
     pub(super) binding: SourceBinding,
     pub(super) delivery: SourceDelivery,
@@ -198,6 +249,10 @@ impl SourceSlots {
     }
     pub(super) fn install_connections(&self, mut connections: ActorSourceConnections) {
         let mut state = self.0.lock();
+        assert!(
+            state.connections.is_none(),
+            "source destination is installed once"
+        );
         for slot in &state.slots {
             if let SourceSlotState::Open(open) = &mut *slot.state.lock() {
                 open.connection = Some(connections.take_slot(slot.identity.slot));
@@ -251,25 +306,20 @@ impl SourceSlots {
         slots
             .into_iter()
             .filter_map(|slot| {
-                let relation = match &*slot.state.lock() {
-                    SourceSlotState::Open(open) => match open.binding.execution.source_dependency()
-                    {
-                        SourceDependency::Unqualified => {
-                            Some(SourceRegistrationDependency::Unclassified)
-                        }
-                        source => match source.source_lease() {
-                            Ok(source) if source.source_admission().depends_on(dependency) => {
-                                Some(SourceRegistrationDependency::Dependent)
-                            }
-                            Ok(_) => None,
-                            Err(_) => Some(SourceRegistrationDependency::Unclassified),
-                        },
-                    },
+                let source = match &*slot.state.lock() {
+                    SourceSlotState::Open(open) => {
+                        Some(open.binding.execution.source_dependency().clone())
+                    }
                     SourceSlotState::Closed { .. } => None,
                 }?;
+                let relation = source_relation(&source, dependency);
+                if relation == SourceRegistrationDependency::Independent {
+                    return None;
+                }
                 Some(CapturedSourceRegistration {
                     slot,
                     dependency: relation,
+                    cutoff: dependency.clone(),
                 })
             })
             .collect()
@@ -289,17 +339,53 @@ impl SourceSlots {
             })
             .collect()
     }
-    pub(super) fn admit_delivery(&self, mut delivery: SourceDelivery) -> SourceDeliveryAdmission {
+    pub(super) fn admit_delivery(&self, delivery: SourceDelivery) -> SourceDeliveryAdmission {
+        self.admit_delivery_observed(delivery, || ())
+    }
+    #[cfg(test)]
+    pub(super) fn admit_delivery_after_source_observation(
+        &self,
+        delivery: SourceDelivery,
+        observe: impl FnOnce(),
+    ) -> SourceDeliveryAdmission {
+        self.admit_delivery_observed(delivery, observe)
+    }
+    fn admit_delivery_observed(
+        &self,
+        mut delivery: SourceDelivery,
+        observe: impl FnOnce(),
+    ) -> SourceDeliveryAdmission {
         let Some(slot) = self.0.lock().slots.get(delivery.slot).cloned() else {
             return SourceDeliveryAdmission::Rejected(
                 "source delivery names an unissued slot".into(),
             );
         };
+        if delivery
+            .slot_delivery
+            .as_ref()
+            .is_some_and(|marker| !marker.matches(&slot))
+        {
+            return SourceDeliveryAdmission::Rejected(
+                "source redelivery belongs to another issuing slot".into(),
+            );
+        }
         let binding = {
             let mut state = slot.state.lock();
             match &mut *state {
-                SourceSlotState::Closed { target, rejected } if *target == delivery.target => {
-                    *rejected += 1;
+                SourceSlotState::Closed {
+                    target,
+                    rejected,
+                    settled_delivery,
+                } if *target == delivery.target => {
+                    if let Some(marker) = &delivery.slot_delivery {
+                        if marker.ordinal > *settled_delivery {
+                            return SourceDeliveryAdmission::Rejected(
+                                "source redelivery was never issued".into(),
+                            );
+                        }
+                    } else {
+                        *rejected += 1;
+                    }
                     return SourceDeliveryAdmission::Closed(slot.identity.clone());
                 }
                 SourceSlotState::Open(open) if open.binding.target == delivery.target => {
@@ -319,10 +405,13 @@ impl SourceSlots {
             .source_dependency()
             .source_lease()
             .and_then(|_| binding.execution.source_dependency().claim());
+        observe();
         let mut state = slot.state.lock();
         let SourceSlotState::Open(open) = &mut *state else {
             if let SourceSlotState::Closed { rejected, .. } = &mut *state {
-                *rejected += 1;
+                if delivery.slot_delivery.is_none() {
+                    *rejected += 1;
+                }
             }
             return SourceDeliveryAdmission::Closed(slot.identity.clone());
         };
@@ -331,7 +420,8 @@ impl SourceSlots {
                 "source registration changed during delivery admission".into(),
             );
         }
-        if let Some(marker) = delivery.slot_delivery {
+        if let Some(marker) = &delivery.slot_delivery {
+            let marker = marker.ordinal;
             if open.redispatched != Some(marker)
                 || open.deferred.front().map(|(id, _)| *id) != Some(marker)
             {
@@ -363,6 +453,8 @@ impl SourceSlots {
         }
         if delivery.slot_delivery.is_none() {
             let Some(next) = open.next_delivery.checked_add(1) else {
+                drop(state);
+                drop(claim);
                 return SourceDeliveryAdmission::Rejected(
                     "source slot delivery ordinal exhausted".into(),
                 );
@@ -425,7 +517,7 @@ impl SourceSlots {
     }
 
     /// Replacement already holds its actual source and lifecycle admission.
-    /// A captured registration cannot be exchanged for another handler.
+    /// Transfer the same slot so captures can reobserve its current binding.
     pub(super) fn adopt_replacement(
         &self,
         previous: &Self,
@@ -434,9 +526,6 @@ impl SourceSlots {
         let mut old = previous.0.lock();
         if old.slots.len() != bindings.len() {
             return Err("replacement changed stable source slots".into());
-        }
-        if old.slots.iter().any(|slot| Arc::strong_count(slot) != 1) {
-            return Err("source registration is retained by an active retirement capture".into());
         }
         if old.slots.iter().zip(&bindings).any(|(slot, binding)| {
             matches!(&*slot.state.lock(), SourceSlotState::Open(_)) && binding.is_none()
@@ -447,34 +536,24 @@ impl SourceSlots {
         if !state.slots.is_empty() {
             return Err("replacement recipient already owns source slots".into());
         }
-        let actor = state
+        state
             .owner
             .ok_or("replacement recipient source owner is unavailable")?;
         let mut discarded = Vec::new();
-        for (ordinal, (slot, binding)) in old.slots.drain(..).zip(bindings).enumerate() {
-            let slot = Arc::try_unwrap(slot).unwrap_or_else(|_| {
-                unreachable!("slot capture excluded under source owner borrow")
-            });
-            let next = match (slot.state.into_inner(), binding) {
-                (SourceSlotState::Open(mut open), Some(binding)) => {
-                    discarded.push(std::mem::replace(&mut open.binding, binding));
-                    SourceSlotState::Open(open)
+        for (slot, binding) in old.slots.drain(..).zip(bindings) {
+            {
+                let mut slot_state = slot.state.lock();
+                match (&mut *slot_state, binding) {
+                    (SourceSlotState::Open(open), Some(binding)) => {
+                        discarded.push(std::mem::replace(&mut open.binding, binding))
+                    }
+                    (SourceSlotState::Closed { .. }, binding) => discarded.extend(binding),
+                    (SourceSlotState::Open(_), None) => {
+                        unreachable!("live replacement binding validated above")
+                    }
                 }
-                (SourceSlotState::Closed { target, rejected }, binding) => {
-                    discarded.extend(binding);
-                    SourceSlotState::Closed { target, rejected }
-                }
-                (SourceSlotState::Open(_), None) => {
-                    unreachable!("live replacement binding validated above")
-                }
-            };
-            state.slots.push(Arc::new(SourceSlot {
-                identity: SourceRegistrationIdentity {
-                    actor,
-                    slot: ordinal,
-                },
-                state: Mutex::new(next),
-            }));
+            }
+            state.slots.push(slot);
         }
         state.connections = old.connections.take();
         drop(state);
@@ -532,7 +611,12 @@ fn resume_slot(slot: &Arc<SourceSlot>) {
     };
     let marker = *marker;
     let mut delivery = delivery.clone();
-    delivery.slot_delivery = Some(marker);
+    delivery.slot_delivery = Some(SourceSlotDelivery {
+        slot: Arc::downgrade(slot),
+        ordinal: marker,
+    });
+    // dispatch is solely a nonblocking LifecycleCommand::Source mailbox send.
+    // It cannot invoke a mapper or reenter this slot synchronously.
     let result = open
         .connection
         .as_ref()
@@ -550,5 +634,21 @@ fn resume_slot(slot: &Arc<SourceSlot>) {
         Err(error) => {
             open.resume_failure = Some(error);
         }
+    }
+}
+
+fn source_relation(
+    source: &SourceDependency,
+    cutoff: &tidepool_runtime::session::RuntimeSourceAdmission,
+) -> SourceRegistrationDependency {
+    match source {
+        SourceDependency::Unqualified => SourceRegistrationDependency::Unclassified,
+        source => match source.source_lease() {
+            Ok(source) if source.source_admission().depends_on(cutoff) => {
+                SourceRegistrationDependency::Dependent
+            }
+            Ok(_) => SourceRegistrationDependency::Independent,
+            Err(_) => SourceRegistrationDependency::Unclassified,
+        },
     }
 }

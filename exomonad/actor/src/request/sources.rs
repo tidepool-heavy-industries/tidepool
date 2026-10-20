@@ -151,7 +151,7 @@ pub(crate) enum SourceEvent {
 /// handles or retires it. Later publications cannot replace that value.
 #[derive(Debug, Clone)]
 pub struct SourceDelivery {
-    pub(crate) slot_delivery: Option<u64>,
+    pub(crate) slot_delivery: Option<crate::resident_actor::source_slots::SourceSlotDelivery>,
     pub(crate) slot: usize,
     pub(crate) target: SourceTarget,
     pub(crate) event: SourceEvent,
@@ -517,7 +517,7 @@ impl RequestRecord {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::KernelMessage;
     use ractor::{Actor, ActorProcessingErr};
@@ -570,16 +570,16 @@ mod tests {
         }
     }
 
-    struct DirectoryFixture {
+    pub(crate) struct DirectoryFixture {
         directory: crate::LocalActorDirectory,
         task: ractor::concurrency::JoinHandle<()>,
     }
     impl DirectoryFixture {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let (directory, task) = crate::LocalActorDirectory::start().await.unwrap();
             Self { directory, task }
         }
-        async fn spawn(
+        pub(crate) async fn spawn(
             &self,
             events: mpsc::UnboundedSender<SourceDelivery>,
             predecessor: Option<ActorRef>,
@@ -644,7 +644,9 @@ mod tests {
         ActorRef::first(crate::ActorId(id))
     }
 
-    async fn receive(events: &mut mpsc::UnboundedReceiver<SourceDelivery>) -> SourceDelivery {
+    pub(crate) async fn receive(
+        events: &mut mpsc::UnboundedReceiver<SourceDelivery>,
+    ) -> SourceDelivery {
         tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
             .await
             .unwrap()

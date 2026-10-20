@@ -1137,3 +1137,299 @@ async fn cancellation_cleanup_refusal_rolls_back_claim_and_retirement_keeps_unce
     drop(behavior);
     owner.finish().await;
 }
+
+#[tokio::test]
+async fn source_registration_slots_preserve_independent_callbacks_and_deferred_input() {
+    use crate::request::sources::tests::{receive, DirectoryFixture};
+    use crate::request::sources::{CallbackExecution, SourceBinding, SourceEvent};
+    use crate::resident_actor::source_slots::{
+        SourceDeliveryAdmission, SourceRegistrationState, SourceSlots,
+    };
+
+    // Both executable mappings come from this one actual compiled fixture;
+    // each installation retains its independently issued source scope.
+    let fixture = Fixture::compile_mode(true);
+    let (behavior, owner) = fixture.behavior().await;
+    let recipient_fixture = DirectoryFixture::start().await;
+    let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (recipient, address, task) = recipient_fixture.spawn(send, None).await;
+    let actor = recipient.identity();
+    let context_a = behavior.context(actor);
+    let session_b = SessionId(0xE211);
+    let (machine_b, source_b) = behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(async { fixture.machine(session_b) })
+        .await;
+    let context_b = ActorDescriptor::new(
+        "independent source callback",
+        crate::ActorPlacement {
+            session: session_b,
+            resource_scope: RealmId::ROOT,
+            lexical_scope: source_b.source_lease().unwrap().scope(),
+        },
+    )
+    .with_source_dependency(source_b)
+    .session_context(actor);
+    behavior
+        .environment
+        .runner
+        .machines_for_test()
+        .insert_idle(session_b, Box::new(machine_b));
+    let source_a = context_a.source_dependency().source_lease().unwrap();
+    let source_b = context_b.source_dependency().source_lease().unwrap();
+    let entry_a = Arc::new(
+        retain(
+            &behavior.environment.runner,
+            context_a.placement.session,
+            "replacementLifecycleMapper",
+        )
+        .await,
+    );
+    let entry_b = Arc::new(
+        retain(
+            &behavior.environment.runner,
+            session_b,
+            "replacementLifecycleMapper",
+        )
+        .await,
+    );
+    let weak_a = Arc::downgrade(&entry_a);
+    let weak_b = Arc::downgrade(&entry_b);
+    let target = crate::request::sources::SourceTarget::Lifecycle(actor);
+    let slots = SourceSlots::default();
+    slots.bind_owner(actor);
+    slots.install_connections(
+        behavior
+            .environment
+            .requests
+            .attach_sources(actor, recipient.clone(), &[])
+            .unwrap(),
+    );
+    for (entry, context) in [(entry_a, context_a.clone()), (entry_b, context_b.clone())] {
+        slots
+            .attach(
+                SourceBinding {
+                    target,
+                    entry,
+                    execution: CallbackExecution::from_context(context),
+                },
+                |connections, slot| {
+                    connections.attach_lifecycle(slot, &recipient);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    let initial_a = receive(&mut events).await;
+    let initial_b = receive(&mut events).await;
+    assert_eq!((initial_a.slot, initial_b.slot), (0, 1));
+    let first = match slots.admit_delivery(initial_a.clone()) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("A admits before fence"),
+    };
+    let fence = source_a.source_admission().fence().unwrap();
+    assert_eq!(
+        fence.pending_claims(),
+        1,
+        "the real callback admission keeps its source claim through the body"
+    );
+    let captured_a = slots.capture_source(source_a.source_admission());
+    assert_eq!(captured_a.len(), 1);
+    assert_eq!(captured_a[0].observation().identity.actor, actor);
+    assert_eq!(captured_a[0].observation().identity.slot, 0);
+    drop(first);
+    assert_eq!(fence.pending_claims(), 0);
+    let independent = match slots.admit_delivery(initial_b) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("independent B stays admitted"),
+    };
+    drop(independent);
+    assert!(matches!(
+        slots.admit_delivery(initial_a.clone()),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    assert!(matches!(
+        captured_a[0].resume_deferred().state,
+        SourceRegistrationState::Open { deferred: 1, .. }
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "fenced input never reaches the mapper"
+    );
+    fence
+        .reopen_with(source_a.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    captured_a[0].resume_deferred();
+    let marked_first = receive(&mut events).await;
+    assert!(marked_first.slot_delivery.is_some());
+    let mut wrong_slot = marked_first.clone();
+    wrong_slot.slot = 1;
+    assert!(
+        matches!(
+            slots.admit_delivery(wrong_slot),
+            SourceDeliveryAdmission::Rejected(_)
+        ),
+        "the ordinal is authenticated to the actual issuing slot, not just a number"
+    );
+    // New mailbox input may arrive before the marked old head. It queues
+    // behind the exact old event instead of overtaking it.
+    let mut next = initial_a.clone();
+    next.event = SourceEvent::Lifecycle(crate::ActorLifecycle::Paused("newer input".into()));
+    assert!(matches!(
+        slots.admit_delivery(next),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    captured_a[0].resume_deferred();
+    assert!(
+        events.try_recv().is_err(),
+        "repeated resume does not resend the marked head"
+    );
+    let mut mapped = 0;
+    for delivery in [Some(marked_first.clone()), None] {
+        let delivery = match delivery {
+            Some(delivery) => delivery,
+            None => receive(&mut events).await,
+        };
+        let admitted = match slots.admit_delivery(delivery) {
+            SourceDeliveryAdmission::Admitted(delivery) => delivery,
+            _ => panic!("marked head admits once"),
+        };
+        behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(behavior.environment.runner.map_source(
+                admitted.binding.execution.activation_context(),
+                admitted.binding.entry.clone(),
+                admitted.delivery.event.clone(),
+            ))
+            .await
+            .unwrap();
+        mapped += 1;
+        drop(admitted);
+    }
+    assert_eq!(mapped, 2, "each accepted original is mapped exactly once");
+    assert!(matches!(
+        slots.admit_delivery(marked_first),
+        SourceDeliveryAdmission::Rejected(_)
+    ));
+    assert!(events.try_recv().is_err());
+    assert!(matches!(
+        captured_a[0].observation().state,
+        SourceRegistrationState::Open {
+            deferred: 0,
+            resume_failure: None
+        }
+    ));
+    let race_fence = source_a.source_admission().fence().unwrap();
+    assert!(matches!(
+        slots.admit_delivery_after_source_observation(initial_a.clone(), || {
+            race_fence
+                .reopen_with(source_a.original_source(), |reopen| {
+                    reopen.commit();
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+                .unwrap();
+        }),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    // No driver resume runs after queue insertion in this interleaving. The
+    // owning post-store gate check must redispatch the same original itself.
+    let race_marked = receive(&mut events).await;
+    let admitted = match slots.admit_delivery(race_marked) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("reopen race retains its original input"),
+    };
+    behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.environment.runner.map_source(
+            admitted.binding.execution.activation_context(),
+            admitted.binding.entry.clone(),
+            admitted.delivery.event.clone(),
+        ))
+        .await
+        .unwrap();
+    mapped += 1;
+    drop(admitted);
+    assert_eq!(mapped, 3);
+
+    let fence = source_a.source_admission().fence().unwrap();
+    assert!(matches!(
+        slots.admit_delivery(initial_a.clone()),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    fence
+        .reopen_with(source_a.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    captured_a[0].resume_deferred();
+    let closing_marked = receive(&mut events).await;
+    let fence = source_a.source_admission().fence().unwrap();
+    let closing = slots.capture_source(source_a.source_admission());
+    assert!(matches!(
+        closing[0].close().state,
+        SourceRegistrationState::Closed { rejected: 1 }
+    ));
+    assert!(matches!(
+        slots.admit_delivery(closing_marked),
+        SourceDeliveryAdmission::Closed(_)
+    ));
+    assert!(
+        matches!(
+            closing[0].observation().state,
+            SourceRegistrationState::Closed { rejected: 1 }
+        ),
+        "late marked input was already settled by close and is not counted twice"
+    );
+    assert!(
+        weak_a.upgrade().is_none(),
+        "closing the actual slot releases A executable custody"
+    );
+    assert!(
+        weak_b.upgrade().is_some(),
+        "B executable custody remains with B's slot"
+    );
+    assert!(matches!(
+        slots.admit_delivery(initial_a),
+        SourceDeliveryAdmission::Closed(_)
+    ));
+    assert!(matches!(
+        captured_a[0].observation().state,
+        SourceRegistrationState::Closed { rejected: 2 }
+    ));
+    assert_eq!(slots.len(), 2, "closed ordinal remains a tombstone");
+    assert!(slots.capture_source(source_a.source_admission()).is_empty());
+    assert_eq!(slots.capture_source(source_b.source_admission()).len(), 1);
+    recipient
+        .terminal()
+        .publish_paused("independent callback still connected".into());
+    let independent = receive(&mut events).await;
+    assert_eq!(
+        independent.slot, 1,
+        "only A's native subscription was detached"
+    );
+    assert!(events.try_recv().is_err());
+    assert!(recipient.terminal().requested_shutdown().is_none());
+    fence
+        .reopen_with(source_a.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    drop(slots);
+    drop(captured_a);
+    drop(behavior);
+    address.stop(None);
+    task.await.unwrap();
+    owner.finish().await;
+}
