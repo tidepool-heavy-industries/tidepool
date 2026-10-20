@@ -56,15 +56,23 @@ pub(crate) struct WorkbenchOperationDiagnosticOwner {
     operation: WorkbenchOperationId,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WorkbenchDiagnosticRefusal {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum WorkbenchDiagnosticRefusal {
+    #[error("admitted execution journal is unavailable") ]
     ExecutionMissing,
+    #[error("operation execution differs from its admitted journal") ]
     ExecutionChanged,
+    #[error("operation invocation allocation differs from its admitted owner") ]
     InvocationChanged,
+    #[error("unrecorded operation execution is already terminal") ]
     ExecutionTerminal,
+    #[error("operation diagnostic owner was already admitted") ]
     OperationAlreadyAdmitted,
+    #[error("admitted operation diagnostic record is unavailable") ]
     OperationMissing,
+    #[error("operation diagnostic evidence differs from its issued projection") ]
     DifferentEvidence,
+    #[error("operation diagnostic retention capacity is unavailable") ]
     RetentionCapacityUnavailable,
 }
 
