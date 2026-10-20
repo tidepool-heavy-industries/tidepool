@@ -1684,10 +1684,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof':
             'owned-resident'})
         self.assertNotIn('TIDEPOOL_TEST_TRACE_PROFILE', history['env'])
-        reference = self.rule("tidepool/toolchain", "toolchain_world_value_selection_test",
+        reference = self.rule("tidepool/toolchain", "toolchain_world_reference_history_test",
                               "tidepool_rust_test_cases")
         self.assertEqual(reference['env']['TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES'], '0')
-        for name in ["toolchain_world_native_seal_test", "toolchain_world_original_seal_test",
+        for name in ["toolchain_world_value_selection_test", "toolchain_world_native_seal_test", "toolchain_world_original_seal_test",
                      "toolchain_world_mixed_seal_test", "toolchain_world_lifetime_test"]:
             other = self.rule("tidepool/toolchain", name, "tidepool_rust_test_cases")
             self.assertNotIn('TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES', other['env'])

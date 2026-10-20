@@ -16,67 +16,8 @@ use tidepool_extract_cmd::{
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
 fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
-    // The declared runner boots the service before starting this libtest.
-    // Its zero optional storage forces a genuine miss after confirmed END.
-    assert_eq!(
-        std::env::var("TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES").as_deref(),
-        Ok("0")
-    );
-    let observation = crate::host_work::HostWorkObservation::new();
-    observation.scope(|| real_world_value_selection_with_reference_observation(&observation));
-}
-
-fn real_world_value_selection_with_reference_observation(
-    observation: &Arc<crate::host_work::HostWorkObservation>,
-) {
-    use crate::host_work::HostWorkCounter as Counter;
     let ((endpoint, world, source, prepared), admission) = settle(|| {
-        let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
-            .expect("declared compiler deployment");
-        let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
-            .expect("configured compiler endpoint");
-        let endpoint =
-            AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
-        let root = Arc::new(tempfile::tempdir()?);
-        let body = b"module Module where\n";
-        std::fs::write(root.path().join("Module.hs"), body)?;
-        let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
-            vec![CapturedCompilerSourceRoot {
-                manifest: crate::cache::SourceRootManifest::from_file_digests([(
-                    PathBuf::from("Module.hs"),
-                    blake3::hash(body).to_hex().to_string(),
-                )])
-                .expect("actual captured source manifest"),
-                bodies: BTreeMap::from([(
-                    PathBuf::from("Module.hs"),
-                    Arc::<[u8]>::from(body.as_slice()),
-                )]),
-            }],
-            Arc::from(&b"world-selection-source"[..]),
-            root,
-        )?);
-        let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
-        let inputs = ModuleCandidateOffer::compiler_world_inputs(
-            None,
-            CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
-            sources,
-            CompilerWorldLexicalSurface::from_publication(Vec::new(), None)?,
-        )?;
-        let before = observation.snapshot();
-        let world = crate::compiler_world::open_world(inputs, &endpoint)?;
-        let after = observation.snapshot();
-        assert_eq!(
-            after.get(Counter::WorldEnsureResidentProbe),
-            before.get(Counter::WorldEnsureResidentProbe)
-        );
-        assert_eq!(
-            after.get(Counter::WorldEnsureComplete),
-            before.get(Counter::WorldEnsureComplete) + 1
-        );
-        assert!(matches!(
-            world.last_admission_residency()?,
-            Some(tidepool_extract_cmd::WorldResidency::ActiveOnly(_))
-        ));
+        let (endpoint, world, source) = open_empty_world()?;
         let checked = prepare_checked(
             &endpoint,
             &world,
@@ -103,9 +44,7 @@ fn real_world_value_selection_with_reference_observation(
     )
     .expect("operand from the actual checked execution owner");
 
-    let logical_world = *world.logical_id();
     for used in [false, true] {
-        let before = observation.snapshot();
         let (prepared, admission) = settle(|| {
             let checked = prepare_checked(
                 &endpoint,
@@ -132,24 +71,6 @@ fn real_world_value_selection_with_reference_observation(
             assert_physical_selection(&checked, &operand)?;
             prepare_world_cell_program(checked)
         });
-        let after = observation.snapshot();
-        assert!(
-            after.get(Counter::WorldEnsureResidentProbe)
-                > before.get(Counter::WorldEnsureResidentProbe)
-        );
-        assert_eq!(
-            after.get(Counter::WorldEnsureNeedsAcquisition),
-            before.get(Counter::WorldEnsureNeedsAcquisition) + 1
-        );
-        assert_eq!(
-            after.get(Counter::WorldEnsureComplete),
-            before.get(Counter::WorldEnsureComplete) + 1
-        );
-        assert_eq!(world.logical_id(), &logical_world);
-        assert!(matches!(
-            world.last_admission_residency().unwrap(),
-            Some(tidepool_extract_cmd::WorldResidency::ActiveOnly(_))
-        ));
         let program = prepared
             .seal(&admission)
             .expect("actual selected native END");
@@ -163,28 +84,92 @@ fn real_world_value_selection_with_reference_observation(
         });
         assert_eq!(requires_operand, used);
     }
-    // A malformed accepted response must retire its own transaction. Keep this
-    // negative operation after the independent successful physical-owner path.
-    let crossed = settle_compiler_transaction_cancellable(
-        CompilerTransactionCancellation::new(),
-        |_| {},
-        || {
-            crate::compiler_world::assert_actual_world_reference_pairing(
-                &world,
-                endpoint.identity(),
-            )
-        },
+}
+
+#[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_world_reference_history_test owns it"]
+fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() {
+    use crate::host_work::HostWorkCounter as Counter;
+    assert_eq!(
+        std::env::var("TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES").as_deref(),
+        Ok("0")
     );
-    assert!(
-        crossed.action().is_ok(),
-        "actual response mutation control: {:?}",
-        crossed.action()
-    );
-    assert!(
-        matches!(crossed.close(), CompilerTransactionClose::Retired(evidence) if evidence.reason == tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest),
-        "crossed response must poison its actual transaction: {:?}",
-        crossed.close()
-    );
+    let observation = crate::host_work::HostWorkObservation::new();
+    observation.scope(|| {
+        let ((endpoint, world, _), _) = settle(open_empty_world);
+        let initial = observation.snapshot();
+        assert_eq!(initial.get(Counter::WorldEnsureResidentProbe), 0);
+        assert_eq!(initial.get(Counter::WorldEnsureComplete), 1);
+        assert!(matches!(world.last_admission_residency().unwrap(), Some(tidepool_extract_cmd::WorldResidency::ActiveOnly(_))));
+        let logical_world = *world.logical_id();
+        for _ in 0..2 {
+            let before = observation.snapshot();
+            settle(|| {
+                let answer = crate::compiler_world::query_public_module(&endpoint, &world,
+                    crate::compiler_world::PublicModuleQuestion::structured_type(
+                        "Data.List".into(), tidepool_extract_cmd::InspectionNamespace::Value, "map".into()))?;
+                assert!(Arc::ptr_eq(answer.world(), &world));
+                assert!(matches!(answer.answer(), crate::compiler_world::WorldAnswer::Type { .. }), "actual query answer: {:?}", answer.answer());
+                Ok(())
+            });
+            let after = observation.snapshot();
+            assert_eq!(after.get(Counter::WorldEnsureResidentProbe), before.get(Counter::WorldEnsureResidentProbe) + 1);
+            assert_eq!(after.get(Counter::WorldEnsureNeedsAcquisition), before.get(Counter::WorldEnsureNeedsAcquisition) + 1);
+            assert_eq!(after.get(Counter::WorldEnsureComplete), before.get(Counter::WorldEnsureComplete) + 1);
+            assert_eq!(world.logical_id(), &logical_world);
+            assert!(matches!(world.last_admission_residency().unwrap(), Some(tidepool_extract_cmd::WorldResidency::ActiveOnly(_))));
+        }
+        let crossed = settle_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(), |_| {},
+            || crate::compiler_world::assert_actual_world_reference_pairing(&world, endpoint.identity()));
+        assert!(crossed.action().is_ok(), "actual response mutation control: {:?}", crossed.action());
+        assert!(matches!(crossed.close(), CompilerTransactionClose::Retired(evidence)
+            if evidence.reason == tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest),
+            "crossed response must poison its actual transaction: {:?}", crossed.close());
+    });
+}
+
+fn open_empty_world() -> Result<
+    (
+        AdmittedCompilerEndpoint,
+        Arc<CompilerWorld>,
+        WorldSourceSelection,
+    ),
+    CompileError,
+> {
+    let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+        .expect("declared compiler deployment");
+    let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
+        .expect("configured compiler endpoint");
+    let endpoint =
+        AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
+    let root = Arc::new(tempfile::tempdir()?);
+    let body = b"module Module where\n";
+    std::fs::write(root.path().join("Module.hs"), body)?;
+    let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
+        vec![CapturedCompilerSourceRoot {
+            manifest: crate::cache::SourceRootManifest::from_file_digests([(
+                PathBuf::from("Module.hs"),
+                blake3::hash(body).to_hex().to_string(),
+            )])
+            .expect("actual captured source manifest"),
+            bodies: BTreeMap::from([(
+                PathBuf::from("Module.hs"),
+                Arc::<[u8]>::from(body.as_slice()),
+            )]),
+        }],
+        Arc::from(&b"world-selection-source"[..]),
+        root,
+    )?);
+    let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
+    let inputs = ModuleCandidateOffer::compiler_world_inputs(
+        None,
+        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+        sources,
+        CompilerWorldLexicalSurface::from_publication(Vec::new(), None)?,
+    )?;
+    let world = crate::compiler_world::open_world(inputs, &endpoint)?;
+    Ok((endpoint, world, source))
 }
 
 fn settle<T>(action: impl FnOnce() -> Result<T, CompileError>) -> (T, HostAdmissionCancellation) {
