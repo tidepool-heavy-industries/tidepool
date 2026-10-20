@@ -74,6 +74,25 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         let program = prepared
             .seal(&admission)
             .expect("actual selected native END");
+        let first = program.items()[0]
+            .native_products()
+            .expect("first target owner");
+        let second = program.items()[1]
+            .native_products()
+            .expect("second target owner");
+        let first_bindings = first.target.artifacts().selected_native_binding_rows().1;
+        let second_bindings = second.target.artifacts().selected_native_binding_rows().1;
+        assert!(
+            !first_bindings.is_empty(),
+            "first item selects executable code"
+        );
+        for binding in first_bindings {
+            assert!(
+                second_bindings.contains(&binding),
+                "ordered native progress must retain the prior target's exact binding"
+            );
+            assert!(second.target.certified_groups().get(binding).is_some());
+        }
         let requires_operand = program.items().iter().any(|item| {
             item.native()
                 .expect("executable item")

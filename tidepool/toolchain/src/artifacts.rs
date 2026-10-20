@@ -1002,17 +1002,14 @@ pub fn prepare_world_cell_program(
                     &generated,
                     &certified.recovery_products,
                 )?;
-                let prior_view = native_prefix
-                    .as_ref()
-                    .map_or_else(|| segment.artifacts(), |prefix| prefix.artifact_view());
-                let prior_groups = native_prefix.as_ref().map_or_else(
-                    || segment.group_baseline(),
-                    |prefix| {
-                        crate::declaration_context::CertifiedNativeGroupBaseline::Target(
-                            prefix.target.certified_groups(),
-                        )
+                let cursor = match native_prefix.as_ref() {
+                    Some(prefix) => SegmentItemDemand::from_target(&mut artifacts, &prefix.target),
+                    None => SegmentItemDemand {
+                        selection: &mut artifacts,
+                        view: segment.artifacts(),
+                        groups: segment.group_baseline(),
                     },
-                );
+                };
                 let admitted = admit_native_target_products(
                     *program.producer_sha256(),
                     &target,
@@ -1023,11 +1020,7 @@ pub fn prepare_world_cell_program(
                     Some(entry),
                     None,
                     None,
-                    Some(SegmentItemDemand {
-                        selection: &mut artifacts,
-                        view: prior_view,
-                        groups: prior_groups,
-                    }),
+                    Some(cursor),
                     &mut validation,
                 )?;
                 let output = crate::declaration_context::IssuedOriginalOutput::from_segment_item(
@@ -1156,6 +1149,23 @@ struct SegmentItemDemand<'a> {
     groups: crate::declaration_context::CertifiedNativeGroupBaseline<'a>,
 }
 
+impl<'a> SegmentItemDemand<'a> {
+    /// Native progress borrows one target owner for both its selected view and
+    /// certified rows. The original output retains independent compiler custody.
+    fn from_target(
+        selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
+        target: &'a crate::artifact_inventory::CertifiedTargetNativeInputs,
+    ) -> Self {
+        Self {
+            selection,
+            view: target.artifacts(),
+            groups: crate::declaration_context::CertifiedNativeGroupBaseline::Target(
+                target.certified_groups(),
+            ),
+        }
+    }
+}
+
 struct SegmentCursor {
     next: usize,
     end: usize,
@@ -1172,23 +1182,19 @@ enum SegmentNativePrefix {
 }
 
 impl SegmentNativePrefix {
-    fn artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
+    fn item_demand<'a>(
+        &'a self,
+        selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
+    ) -> SegmentItemDemand<'a> {
         match self {
-            Self::Initial(request) => request.compiler_inputs().artifacts(),
-            Self::Advanced(products) => products.artifact_view(),
-        }
-    }
-
-    fn groups(&self) -> crate::declaration_context::CertifiedNativeGroupBaseline<'_> {
-        match self {
-            Self::Initial(request) => {
-                crate::declaration_context::CertifiedNativeGroupBaseline::InitialRequest(request)
-            }
-            Self::Advanced(products) => {
-                crate::declaration_context::CertifiedNativeGroupBaseline::Target(
-                    products.target.certified_groups(),
-                )
-            }
+            Self::Initial(request) => SegmentItemDemand {
+                selection,
+                view: request.compiler_inputs().artifacts(),
+                groups: crate::declaration_context::CertifiedNativeGroupBaseline::InitialRequest(
+                    request,
+                ),
+            },
+            Self::Advanced(products) => SegmentItemDemand::from_target(selection, &products.target),
         }
     }
 }
@@ -1245,11 +1251,9 @@ impl ItemAdmission<'_> {
             self.ordinal,
             admission_digest,
             &self.segment.source,
-            SegmentItemDemand {
-                selection: &mut self.segment.artifacts,
-                view: self.cursor.native_prefix.artifacts(),
-                groups: self.cursor.native_prefix.groups(),
-            },
+            self.cursor
+                .native_prefix
+                .item_demand(&mut self.segment.artifacts),
             validation,
         )?;
         timing.advance("support_context_continuation");
