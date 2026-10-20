@@ -8630,12 +8630,9 @@ impl ProgramAdmissionContinuation {
         let groups = if self.groups.matches_view(inputs.compiler.artifacts()) {
             Arc::clone(&self.groups)
         } else {
-            Arc::new(certify_artifact_view_groups(
+            Arc::new(certify_selected_artifact_view_groups_with_validation(
                 inputs.compiler.artifacts(),
-                &[],
-                None,
-                &[],
-                Some(CertifiedNativeGroupBaseline::Target(&self.groups)),
+                Some(&self.groups),
                 &mut validation,
             )?)
         };
@@ -12770,9 +12767,7 @@ impl ExactDeclarationContext {
         let start = std::time::Instant::now();
         let groups = certify_artifact_view_groups(
             view,
-            &[],
             None,
-            &[],
             Some(CertifiedNativeGroupBaseline::Rows(&keyed)),
             &mut validation,
         )?;
@@ -13405,12 +13400,10 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
     )
     .map_err(compiler_evidence_failure)?;
     inventory
-        .certify_selected_scope(
+        .validate_selected_scope(
             crate::certified_products::SelectedOriginalGroupScope::View(view),
-            &BTreeMap::new(),
             validation,
         )
-        .map(|_| ())
         .map_err(compiler_evidence_failure)
 }
 
@@ -13534,27 +13527,20 @@ pub(crate) fn certify_bound_artifact_view_groups_with_validation(
     baseline: CertifiedNativeGroupBaseline<'_>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
-    certify_artifact_view_groups(
-        view,
-        candidates,
-        Some(candidates),
-        &[],
-        Some(baseline),
-        validation,
-    )
+    certify_artifact_view_groups(view, Some(candidates), Some(baseline), validation)
 }
 
-/// Admit only the inventory's selected dependency closure. Original byte custody
-/// remains complete; previously admitted groups must survive unchanged.
-#[cfg(test)]
-pub(crate) fn certify_artifact_view_groups_with_validation(
+pub(crate) fn certify_selected_artifact_view_groups_with_validation(
     view: &ArtifactView,
-    candidates: &[PendingCertifiedGroup],
-    baseline: &[PendingCertifiedGroup],
+    baseline: Option<&CertifiedArtifactGroupBindings>,
     validation: &mut PackageInterfaceValidation,
-) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
-    certify_artifact_view_groups(view, candidates, None, baseline, None, validation)
-        .map(|groups| groups.groups().to_vec())
+) -> Result<CertifiedArtifactGroupBindings, CompileError> {
+    certify_artifact_view_groups(
+        view,
+        None,
+        baseline.map(CertifiedNativeGroupBaseline::Target),
+        validation,
+    )
 }
 
 pub(crate) fn certify_issued_artifact_view_groups_with_validation(
@@ -13565,9 +13551,7 @@ pub(crate) fn certify_issued_artifact_view_groups_with_validation(
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
     certify_artifact_view_groups(
         view,
-        candidates,
         Some(candidates),
-        &[],
         baseline.map(CertifiedNativeGroupBaseline::Target),
         validation,
     )
@@ -13575,9 +13559,7 @@ pub(crate) fn certify_issued_artifact_view_groups_with_validation(
 
 fn certify_artifact_view_groups(
     view: &ArtifactView,
-    candidates: &[PendingCertifiedGroup],
-    issued: Option<&crate::certified_products::IssuedGroupCandidates>,
-    baseline: &[PendingCertifiedGroup],
+    candidates: Option<&crate::certified_products::IssuedGroupCandidates>,
     bound_baseline: Option<CertifiedNativeGroupBaseline<'_>>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
@@ -13590,7 +13572,6 @@ fn certify_artifact_view_groups(
             _ => None,
         })
         .collect::<BTreeMap<_, _>>();
-    let exact_baseline = issued.is_some() || bound_baseline.is_some();
     let (view_stamp, selected_bindings) = view.selected_native_binding_rows();
     validation
         .inventory
@@ -13599,79 +13580,36 @@ fn certify_artifact_view_groups(
         )
         .map_err(|error| compiler_evidence_failure(error.into()))?;
     let selected = selected_bindings.iter().copied().collect::<BTreeSet<_>>();
-    let mut original_ids = BTreeMap::new();
-    if !exact_baseline {
-        for (artifact, product) in &available {
-            original_ids
-                .entry(product.owner())
-                .or_insert_with(Vec::new)
-                .push(*artifact);
-        }
-    }
-    #[derive(Clone, Copy, Debug)]
-    enum GroupAdmissionPhase {
-        Candidate,
-        Baseline,
-    }
-    let selected_key = |phase: GroupAdmissionPhase, group: &PendingCertifiedGroup| {
-        let artifact = match original_ids.get(group.owner()).map(Vec::as_slice) {
-            Some([artifact]) => *artifact,
-            Some(artifacts) => {
-                return Err(failure(
-                    crate::certified_products::CertificationError::OriginalSelectionConflict(
-                        Box::new(crate::certified_products::OriginalSelectionConflict {
-                            selected: group.owner().clone(),
-                            artifacts: artifacts.to_vec(),
-                        }),
-                    ),
-                ));
-            }
-            None => {
-                return Err(failure(format!(
-                    "certified group has no exact original artifact: phase={phase:?} owner={:?} ordinal={} selected_groups={} available_originals={}",
-                    group.owner(),
-                    group.group().original_ordinal(),
-                    metadata.selected_native_groups.len(),
-                    available.len(),
-                )));
-            }
-        };
-        Ok(crate::artifact_inventory::NativeGroupKey {
-            artifact,
-            original_ordinal: group.group().original_ordinal(),
-        })
-    };
     let mut current = Vec::new();
     let mut current_positions = BTreeMap::new();
-    for group in candidates {
-        let key = match issued {
-            Some(issued) => crate::artifact_inventory::NativeGroupKey {
-                artifact: issued.artifact(group),
-                original_ordinal: group.group().original_ordinal(),
-            },
-            None => selected_key(GroupAdmissionPhase::Candidate, group)?,
-        };
+    for (group, key) in candidates.into_iter().flat_map(|issued| {
+        issued.iter().map(move |group| {
+            (
+                group,
+                NativeGroupKey {
+                    artifact: issued.artifact(group),
+                    original_ordinal: group.group().original_ordinal(),
+                },
+            )
+        })
+    }) {
         if metadata.selected_native_groups.contains(&key) {
-            if if exact_baseline {
-                available
-                    .get(&key.artifact)
-                    .is_none_or(|product| product.owner() != group.owner())
-            } else {
-                selected_key(GroupAdmissionPhase::Candidate, group)? != key
-            } {
+            if available
+                .get(&key.artifact)
+                .is_none_or(|product| product.owner() != group.owner())
+            {
                 return Err(failure(
                     "selected candidate differs from its original issuer",
                 ));
             }
-            // Baseline comparison uses the first candidate; certification below
-            // retains responsibility for duplicate-current refusal.
+            // A physical current row is unique even when several selected
+            // scoped aliases later share it.
             if current_positions.insert(key, current.len()).is_some() {
                 return Err(failure("duplicate current original ordinal"));
             }
             current.push(group.clone());
         }
     }
-    let mut baseline_keys = BTreeSet::new();
     let mut inherit =
         |key: NativeGroupKey, group: &PendingCertifiedGroup| -> Result<(), CompileError> {
             crate::host_work::checkpoint()?;
@@ -13696,19 +13634,6 @@ fn certify_artifact_view_groups(
             }
             Ok(())
         };
-    let initial = match bound_baseline {
-        None => baseline,
-        _ => &[],
-    };
-    for group in initial {
-        let key = selected_key(GroupAdmissionPhase::Baseline, group)?;
-        if !baseline_keys.insert(key) {
-            return Err(failure(
-                "artifact view duplicated a previously selected group",
-            ));
-        }
-        inherit(key, group)?;
-    }
     let mut inherit_binding = |binding: crate::artifact_inventory::NativeGroupBinding,
                                group: &PendingCertifiedGroup|
      -> Result<(), CompileError> {
@@ -22026,6 +21951,10 @@ mod tests {
             ArtifactBindingNode, ExactArtifactSelection, NativeArtifactDemand,
         };
         use crate::certified_products::PendingImportOwner;
+        let producer = b"scoped materialization producer";
+        let producer_sha =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                .sha256();
         let products = ["ScopedMaterialization", "OtherMaterialization"].map(|module| {
             crate::certified_products::tests::recovered_witness_fixtures(&[
                 crate::certified_products::fixture_finalized_product(
@@ -22035,7 +21964,7 @@ mod tests {
                         7,
                         &BTreeMap::new(),
                     ),
-                    [2; 32],
+                    producer_sha,
                 ),
             ])
             .remove(0)
@@ -22045,13 +21974,17 @@ mod tests {
             CompilerSupportFixture::Complete(inputs) => inputs,
             _ => unreachable!(),
         };
-        let context = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_issued_compiler_support(inputs.compiler_source_support())
-            .unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(inputs.compiler_source_support())
+                .unwrap(),
+        );
         let entries = products
             .iter()
-            .map(|product| Arc::new(ArtifactEntry::original([2; 32], product.clone()).unwrap()))
+            .map(|product| {
+                Arc::new(ArtifactEntry::original(producer_sha, product.clone()).unwrap())
+            })
             .collect::<Vec<_>>();
         let inventory = ArtifactInventory::default();
         let available = inventory
@@ -22133,6 +22066,95 @@ mod tests {
             first_metadata.materialization_key(),
             second_metadata.materialization_key()
         );
+        // Exercise the receiving request path as well as the lower writer:
+        // its base context is unchanged while private exact scopes differ.
+        let scaffold = ProtectedScaffoldRequirements::default();
+        let request_inputs = |view: &ArtifactView| {
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &view.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+            let private = OriginalCompilerInputs::from_selection(&selection, view).unwrap();
+            let request = scaffold.compiler_inputs(&context, Some(&private)).unwrap();
+            (request, private)
+        };
+        let (first_inputs, first_private) = request_inputs(first.artifacts());
+        let (second_inputs, second_private) = request_inputs(&second);
+        let first_request_bindings = first_inputs
+            .artifacts()
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let second_request_bindings = second_inputs
+            .artifacts()
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_ne!(first_request_bindings, second_request_bindings);
+        assert_eq!(
+            NativeCompilerTransport::lower_metadata(&first_inputs).materialization_key(),
+            NativeCompilerTransport::lower_metadata(&second_inputs).materialization_key()
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let prepare =
+            |name: &str, inputs: RequestCompilerInputs, private: OriginalCompilerInputs| {
+                context
+                    .prepare_compilation_from_metadata(
+                        &scratch.path().join(name),
+                        producer,
+                        None,
+                        NativeCompilerTransport::lower(inputs),
+                        &scaffold,
+                        Some(private),
+                        RequestInputTransport::OwnedArena,
+                    )
+                    .unwrap()
+            };
+        let first_request = prepare("first", first_inputs, first_private);
+        let second_request = prepare("second", second_inputs, second_private);
+        assert!(!Arc::ptr_eq(
+            first_request.materialization.as_ref().unwrap(),
+            second_request.materialization.as_ref().unwrap()
+        ));
+        for (request, expected) in [
+            (&first_request, &first_request_bindings),
+            (&second_request, &second_request_bindings),
+        ] {
+            assert_eq!(
+                request
+                    .groups
+                    .bindings
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                *expected
+            );
+            assert!(request
+                .groups
+                .matches_view(request.compiler_inputs().artifacts()));
+            let hit = request
+                .compiler_inputs()
+                .artifacts()
+                .retained_materialization(&request.transport_metadata)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&hit, request.materialization.as_ref().unwrap()));
+            let rows =
+                RetainedArtifactMaterialization::selected_group_refs([hit.as_ref()], expected);
+            let cached = CertifiedArtifactGroupBindings::from_issued_rows(
+                request.compiler_inputs().artifacts(),
+                &rows,
+            )
+            .unwrap();
+            assert!(expected
+                .iter()
+                .all(|binding| cached.get(*binding).is_some()));
+        }
         let materialize = |view: &ArtifactView, metadata: &CompilerArtifactMetadata| {
             view.retain_materialization(metadata, |parents| {
                 context.materialize_retained_artifacts(
@@ -22182,25 +22204,48 @@ mod tests {
             .1
             .into_iter()
             .collect::<BTreeSet<_>>();
+        let weak_first = Arc::downgrade(&first_owner);
+        let weak_second = Arc::downgrade(&second_owner);
         let captured = RetainedArtifactMaterialization::capture_custody(
             &[first_owner, second_owner],
             &joined_metadata.retained.artifacts,
             &aliases,
         )
         .unwrap();
-        assert!(captured._parents.is_empty());
-        assert_eq!(captured.groups.len(), 2);
-        let rows = captured.groups.values().collect::<Vec<_>>();
-        assert!(rows[0].same_issuance(rows[1]));
         let detached_rows =
             RetainedArtifactMaterialization::selected_group_refs([captured.as_ref()], &aliases);
         let detached =
             CertifiedArtifactGroupBindings::from_issued_rows(&joined, &detached_rows).unwrap();
-        assert_eq!(detached.bindings.len(), 2);
-        assert_eq!(detached.groups.len(), 1);
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(detached.groups().len(), 1);
+        let rows = aliases
+            .iter()
+            .map(|binding| detached.get(*binding).unwrap())
+            .collect::<Vec<_>>();
+        assert!(std::ptr::eq(rows[0], rows[1]));
         let mut missing = detached_rows;
         missing.remove(aliases.first().unwrap());
         assert!(CertifiedArtifactGroupBindings::from_issued_rows(&joined, &missing).is_err());
+        let paths = captured
+            .selected_rows(&joined_metadata)
+            .values()
+            .map(|row| row.artifact().interface.path)
+            .collect::<Vec<_>>();
+        drop(first_request);
+        drop(second_request);
+        drop(first);
+        drop(second);
+        drop(broad);
+        drop(joined);
+        drop(available);
+        drop(inputs);
+        drop(context);
+        assert!(weak_first.upgrade().is_none());
+        assert!(weak_second.upgrade().is_none());
+        assert!(paths.iter().all(|path| path.is_file()));
+        assert!(aliases
+            .iter()
+            .all(|binding| detached.get(*binding).is_some()));
     }
 
     #[test]
