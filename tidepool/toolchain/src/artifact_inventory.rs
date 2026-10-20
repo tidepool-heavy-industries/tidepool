@@ -3074,7 +3074,7 @@ impl SelectedOwners {
     fn planned_edges(
         &self,
         state: &InventoryState,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
         groups: &BTreeSet<NativeGroupKey>,
         stage: NativeClosureStage,
     ) -> Result<
@@ -3085,7 +3085,7 @@ impl SelectedOwners {
         CompileError,
     > {
         let mut planned = BTreeMap::new();
-        for (id, entry) in entries {
+        for (id, entry) in entries.iter() {
             planned.insert(
                 LogicalNodeKey::Artifact(*id),
                 self.dependencies(state, entry, entries)?
@@ -3179,7 +3179,7 @@ impl SelectedOwners {
         &self,
         state: &InventoryState,
         entry: &ArtifactEntry,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
     ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
         let canonical = match &entry.payload {
             ArtifactPayload::Canonical(interface) => Some(interface),
@@ -3237,7 +3237,7 @@ impl SelectedOwners {
         };
         for owner in entry.interface_seals.keys() {
             let id = resolve(owner, &ArtifactDependency::Interface)?;
-            entry.validate_interface_seal(owner, &entries[&id])?;
+            entry.validate_interface_seal(owner, entries.get(&id).expect("selected owner has its admitted row"))?;
         }
         let mut edges = BTreeSet::new();
         for owner in &entry.requirements {
@@ -3262,7 +3262,7 @@ impl SelectedOwners {
                     diagnostic_artifacts: None,
                     native_refusal: None,
                     owner_conflict: Some(ArtifactOwnerConflictEvidence::NativeCanonicalCarrier {
-                        selected: Arc::clone(&entries[&id]),
+                        selected: Arc::clone(entries.get(&id).expect("selected owner has its admitted row")),
                         incoming: Arc::new(carrier),
                     }),
                 }
@@ -3318,12 +3318,14 @@ fn validate_existing_rows(
 
 /// Private physical-segment custody. It never becomes an item view wholesale.
 /// Namespace and native owner choice are fixed by the compiler's certified roles.
+#[derive(Clone)]
 pub(crate) struct BoundArtifactSelection {
     view: ArtifactView,
-    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    owners: SelectedOwners,
-    captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
-    materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    entries: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owners: Arc<SelectedOwners>,
+    captured_facts: Arc<BTreeMap<ArtifactId, ArtifactFactsHandle>>,
+    materializations: Arc<[Arc<crate::declaration_context::RetainedArtifactMaterialization>]>,
     groups: BTreeMap<NativeGroupKey, NativeGroupBinding>,
     native_source: crate::certified_products::CertifiedSourceSelection,
     source_receipts: NativeSourceReceipts,
@@ -3377,6 +3379,16 @@ impl From<native_availability::NativeGroupTarget> for PlannedTarget {
 }
 
 impl BoundArtifactSelection {
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        &self.physical_inputs
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        &self.native_source
+    }
+
     #[cfg(test)]
     pub(crate) fn observed_binding_state(
         &self,
@@ -3604,21 +3616,37 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<BoundArtifactSelection, CompileError> {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("physical segment belongs to another inventory"));
+        }
         let captured_facts = entries
             .iter()
             .map(|entry| (entry.descriptor.id, entry.facts.clone()))
             .collect();
-        let view = self.admit_certified_with_demand(
-            parent,
-            entries,
-            NativeArtifactDemand::ScopeInterfaces,
-            selection,
-        )?;
+        let mut selection = selection.clone();
+        let physical = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                parent,
+                entries,
+            )?,
+        );
+        self.index_admitted_segment(parent, physical, captured_facts, &selection)
+    }
+
+    fn index_admitted_segment(
+        &self,
+        parent: &ArtifactView,
+        physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<BoundArtifactSelection, CompileError> {
+        let view = physical_inputs.issued_artifacts().clone();
         let entries = view
             .entries()
             .into_iter()
             .map(|entry| (entry.descriptor.id, entry))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<imbl::OrdMap<_, _>>();
         let state = self.0.lock().expect("inventory lock");
         let namespace_entries = view
             .namespace()
@@ -3640,10 +3668,11 @@ impl ArtifactInventory {
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
         Ok(BoundArtifactSelection {
             view,
+            physical_inputs,
             entries,
-            owners,
-            captured_facts,
-            materializations,
+            owners: Arc::new(owners),
+            captured_facts: Arc::new(captured_facts),
+            materializations: materializations.into(),
             groups: BTreeMap::new(),
             native_source: selection.clone(),
             source_receipts: NativeSourceReceipts::default(),
@@ -3730,7 +3759,7 @@ impl ArtifactInventory {
                 &allowed_values,
             )
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let mut materialization_parents = fixed.materializations.clone();
+        let mut materialization_parents = fixed.materializations.to_vec();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
         let mut state = self.0.lock().expect("inventory lock");
         let unbound = demanded
@@ -11119,7 +11148,9 @@ mod tests {
                 &physical,
                 entries,
             )
-            .unwrap();
+            .unwrap()
+            .issued_artifacts()
+            .clone();
             let closure = current.selected_original_closure(&issued).unwrap();
             let expected = closure
                 .native_closure()

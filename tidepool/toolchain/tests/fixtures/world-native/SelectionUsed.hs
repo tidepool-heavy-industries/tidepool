@@ -1,2 +1,2 @@
 let currentSelection = (1 :: Int)
-let laterSelection = input + currentSelection
+let laterSelection = OperandEvidence.{{OPERAND_BINDER}} + currentSelection

@@ -415,7 +415,9 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
-    authored_artifacts: Option<crate::artifact_inventory::ArtifactView>,
+    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    bound: Option<crate::artifact_inventory::BoundArtifactSelection>,
+    authored: bool,
 }
 
 impl CertifiedSegmentOriginals {
@@ -550,24 +552,38 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        // Original stages have no target view. Keep this same physical issuer
-        // for their authored closure; executable items use their bound cursor.
-        let physical =
+        let entries = artifact_entries
+            .iter()
+            .chain(&value_entries)
+            .cloned()
+            .collect();
+        let admitted = if authored.is_some() {
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
-                artifact_entries
-                    .iter()
-                    .chain(&value_entries)
-                    .cloned()
-                    .collect(),
+                entries,
             )
-            .map_err(|error| {
-                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                    stage = "segment_native_availability", %error,
-                    "compiler original selection refused");
-                CertificationError::OriginalClosure(Box::new(error))
-            })?;
+            .map(|physical| (Arc::new(physical), None))
+        } else {
+            compiler_inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(
+                    compiler_inputs.artifacts(),
+                    entries,
+                    &products.source_selection,
+                )
+                .map(|bound| {
+                    products.source_selection = bound.source_selection().clone();
+                    (Arc::clone(bound.physical_inputs()), Some(bound))
+                })
+        };
+        let (physical, bound) = admitted.map_err(|error| {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "segment_native_availability", %error,
+                "compiler original selection refused");
+            CertificationError::OriginalClosure(Box::new(error))
+        })?;
         timing.advance("finish_segment");
         let value_entry_index = value_entries
             .iter()
@@ -578,7 +594,9 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
-            authored_artifacts: authored.map(|_| physical),
+            physical_inputs: physical,
+            bound,
+            authored: authored.is_some(),
             package_availability,
             raw,
             receipt,
@@ -616,11 +634,26 @@ impl CertifiedSegmentOriginals {
     pub(crate) fn authored_artifacts(
         &self,
     ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
-        self.authored_artifacts
-            .as_ref()
-            .ok_or(CertificationError::Mismatch(
+        if !self.authored {
+            return Err(CertificationError::Mismatch(
                 "executable segment has no authored original stage",
-            ))
+            ));
+        }
+        Ok(self.physical_inputs().issued_artifacts())
+    }
+
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        &self.physical_inputs
+    }
+
+    pub(crate) fn bound_artifacts(
+        &self,
+    ) -> CertResult<crate::artifact_inventory::BoundArtifactSelection> {
+        self.bound.clone().ok_or(CertificationError::Mismatch(
+            "authored original stage has no executable cursor",
+        ))
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
@@ -17052,7 +17085,9 @@ pub(crate) mod tests {
                     &inventory.empty_view(),
                     vec![entry.clone()],
                 )
-                .unwrap();
+                .unwrap()
+                .issued_artifacts()
+                .clone();
                 let private =
                     OriginalCompilerInputs::from_selection(&physical, &completed).unwrap();
                 let support =
@@ -17489,7 +17524,9 @@ pub(crate) mod tests {
             &inventory.empty_view(),
             entries.clone(),
         )
-        .unwrap();
+        .unwrap()
+        .issued_artifacts()
+        .clone();
         let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
         let [issued] = physical_availability.as_slice() else {
             panic!("one physical native product");
