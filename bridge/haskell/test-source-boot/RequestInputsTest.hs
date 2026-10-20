@@ -76,7 +76,8 @@ import Tidepool.ExactScope
   , exactInputRetentionLimits, commitWorldInputRetention
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
-import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation)
+import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation
+  , prepareWorldCell, commitPreparedWorldDependencies)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
@@ -1424,8 +1425,13 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             reference <- case ready of
               ExactInputsReady _ realization -> pure realization
               other -> fail ("real preparation could not acquire its captured world: " ++ show other)
-            let recipe = WorldCellRecipe "(1 :: Int)"
-                  "module CellCheck where\n{{CELL_IMPORTS}}\n{{CELL_DECLS}}\n{{CELL_BODY}}" []
+            let template = unlines
+                  ["{-# LANGUAGE DataKinds #-}","{{CELL_PRAGMAS}}","module CellCheck where"
+                  ,"import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
+                  ,"{{CELL_DECLS}}"
+                  ,"__tidepool_cell_check :: Eff '[] ()"
+                  ,"__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"]
+                recipe = WorldCellRecipe "let answer = (1 :: Int)" template []
                 planOut = work </> "cell-plan.cbor"
                 planRequest = WorldCellPlanRequest identity reference recipe planOut
             planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
@@ -1437,14 +1443,14 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                 (worldCellTemplate recipe) (worldCellSource recipe)) >>= either (liftIO . fail . show) pure
               let items = cellPlanItems plan
               liftIO $ unless (length items == 1
-                  && sbKind (cellAnalysisVerdict (head items)) == KExpr
+                  && sbKind (cellAnalysisVerdict (head items)) == KBind
                   && length (cellInferenceSegments plan) == 1)
-                (fail ("admission fixture is not one executable expression item: items="
+                (fail ("admission fixture is not one executable bind item: items="
                   ++ show (length items)
                   ++ " kinds=" ++ show (map (sbKind . cellAnalysisVerdict) items)
                   ++ " sources=" ++ show (map cellAnalysisSource items)
                   ++ " segments=" ++ show (length (cellInferenceSegments plan))))
-              liftIO (pure [(0, PlannedExpression 1 "observation")])
+              liftIO (pure [(0, PlannedBind 1)])
             let directory = work </> "cell-admission"
                 prepareRequest = WorldCellPrepareRequest identity reference recipe planBytes
                   (BS.replicate 32 7) slots directory (directory </> "prepared.cbor")
@@ -1453,6 +1459,41 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             validated <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
               validation <- boundWorldCellPreparation request
               forM_ validation $ \admitted -> do
+                completions <- prepareWorldCell request >>= either
+                  (fail . ("real world preparation refused: " ++) . show) pure
+                completion <- case completions of
+                  [value] -> pure value
+                  _ -> fail "real world preparation did not emit exactly one compiler completion"
+                output <- BS.readFile (worldCellPrepareOutput prepareRequest)
+                itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
+                  Right (remaining,TList [TString "TPCWPREP3",_,_,_
+                    ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
+                    ,_,_,_,TList [_]]) | BL.null remaining -> pure sha
+                  _ -> fail "real world preparation omitted its exact item and typed segment manifest"
+                let itemDirectory = directory </> "item-0"
+                item <- BS.readFile (itemDirectory </> "world-item.cbor")
+                unless (SHA.hash item == itemSha)
+                  (fail "real world item differs from its terminal output manifest")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict item) of
+                  Right (remaining,TList fields) | BL.null remaining,length fields == 13 ->
+                    case last fields of
+                      TList files -> forM_ files $ \entry -> case entry of
+                        TList [TString name,TBytes sha] -> do
+                          bytes <- BS.readFile (itemDirectory </> T.unpack name)
+                          unless (SHA.hash bytes == sha) (fail "emitted world file differs from its item proof")
+                        _ -> fail "real world item omitted an exact file seal"
+                      _ -> fail "real world item omitted its captured files"
+                  _ -> fail "real world preparation omitted its actual item proof"
+                crossedCommit <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \other ->
+                  try (commitPreparedWorldDependencies other completion) :: IO (Either InputRejection ())
+                unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                    (const False) crossedCommit)
+                  (fail "foreign request committed another preparation's pending dependencies")
+                commitPreparedWorldDependencies request completion
+                replay <- try (commitPreparedWorldDependencies request completion) :: IO (Either InputRejection ())
+                unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                    (const False) replay)
+                  (fail "world dependency commitment replayed after consumption")
                 -- Consumption enters the same scope while its phase is Running.
                 -- It must reach stage policy, not re-run a Ready-only guard.
                 unsupported <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment
