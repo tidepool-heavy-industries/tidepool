@@ -141,7 +141,7 @@ import Tidepool.TypePolicy (nominalHeadsOfType)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
   , preparePlannedDeclaration, certifyPlannedDeclaration, admitLocalNativeDeclaration
-  , renderPlannedDeclarationInventory, plannedInterfaceFingerprint )
+  , renderPlannedDeclarationInventory, plannedInterfaceFingerprint, originalDeclarationWrapper )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , SessionModule(..), SessionModuleKind(..), Generation(..)
@@ -1310,7 +1310,7 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
   reserved <- case checkedReservedModules admission of
     [owner] -> pure owner
     _ -> throwIO InvalidDeclarationReservation
-  wrapper <- originalDeclarationWrapper template
+  wrapper <- either fail pure (originalDeclarationWrapper template)
   let directory = outDir </> "planned-declaration"
       sourcePath = directory </> reserved ++ ".hs"
       planned plan = either rejectPlan pure (preparePlannedDeclaration reserved wrapper plan)
@@ -1401,15 +1401,6 @@ programInterfaceRequirements prepared unit owner = do
 exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
 exactProgramProductVersion scope unit owner source =
   exactProgramProductVersionFromDigest scope unit owner (shaHex (TE.encodeUtf8 (T.pack source)))
-
-originalDeclarationWrapper :: String -> IO String
-originalDeclarationWrapper template = do
-  let marker = "\n__tidepoolInEffectRow ::"
-      (prefix, remaining) = T.breakOn (T.pack marker) (T.pack template)
-  when (T.null remaining) (fail "original declaration requires canonical whole-cell recipe")
-  let stripped = T.replace "{{CELL_PRAGMAS}}" "" prefix
-  when ("{{" `T.isInfixOf` T.replace "{{CELL_IMPORTS}}" "" stripped) (fail "original declaration wrapper has an unknown placeholder")
-  pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: ()\n__result = ()\n")
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'classifyWithFlags' would have produced, so the rest of
