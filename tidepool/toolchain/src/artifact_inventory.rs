@@ -911,13 +911,15 @@ impl NativeOriginalRequirement {
         self.qualify_checked_lease(&view.lease, &state, graph, scope)
     }
 
-    fn qualify_checked_lease(
+    /// Selected-view requirements intentionally have no compiler namespace.
+    /// Their exact root-to-carrier-to-canonical edges retain the issuing pair;
+    /// a group's scope alone never identifies its carrier binding.
+    fn namespace_pair_in(
         &self,
-        lease: &ViewLease,
         state: &InventoryState,
         graph: &ArtifactGraphSelection,
-        scope: NativeAvailabilityQualificationScope,
-    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
+        canonical: ArtifactId,
+    ) -> Option<(ArtifactBinding, ArtifactBinding)> {
         let carrier = if let Some(carrier) = graph
             .namespace
             .iter()
@@ -949,21 +951,48 @@ impl NativeOriginalRequirement {
                 })
                 .collect::<BTreeSet<_>>();
             if carriers.len() != 1 {
-                return Ok(None);
+                return None;
             }
             *carriers.first().expect("one issued native carrier")
         };
-        if matches!(
-            scope,
-            NativeAvailabilityQualificationScope::CurrentNamespace
-        ) && lease
-            .selection
-            .namespace
-            .get(&self.original)
-            .is_some_and(|selected| *selected != carrier)
+        let canonical_binding = {
+            let bindings = state
+                .outgoing(InventoryNodeKey::Artifact(carrier))
+                .filter_map(|(target, dependency)| match target {
+                    InventoryNodeKey::Artifact(binding)
+                        if binding.artifact == canonical
+                            && *dependency == ArtifactDependency::Interface
+                            && graph.bindings.contains(&binding) =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            if bindings.len() != 1 {
+                return None;
+            }
+            *bindings.first().expect("one issued canonical carrier")
+        };
+        if !graph.bindings.contains(&carrier)
+            || graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == canonical)
+                .is_some_and(|selected| *selected != canonical_binding)
         {
-            return Ok(None);
+            return None;
         }
+        Some((carrier, canonical_binding))
+    }
+
+    fn qualify_checked_lease(
+        &self,
+        lease: &ViewLease,
+        state: &InventoryState,
+        graph: &ArtifactGraphSelection,
+        scope: NativeAvailabilityQualificationScope,
+    ) -> Result<Option<QualifiedNativeAvailability>, CompileError> {
         let entry = &lease.payloads[&self.original];
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(admission_failure(
@@ -977,45 +1006,19 @@ impl NativeOriginalRequirement {
                 .module_interface()
                 .ok_or_else(|| failure("private original lacks canonical carrier"))?,
         );
-        let canonical_binding = match scope {
-            NativeAvailabilityQualificationScope::CurrentNamespace => {
-                let Some(binding) = lease.selection.namespace.get(&canonical).copied() else {
-                    return Ok(None);
-                };
-                binding
-            }
-            NativeAvailabilityQualificationScope::IssuedClosure => {
-                let bindings = state
-                    .outgoing(InventoryNodeKey::Artifact(carrier))
-                    .filter_map(|(target, dependency)| match target {
-                        InventoryNodeKey::Artifact(binding)
-                            if binding.artifact == canonical
-                                && *dependency == ArtifactDependency::Interface
-                                && graph.bindings.contains(&binding) =>
-                        {
-                            Some(binding)
-                        }
-                        _ => None,
-                    })
-                    .collect::<BTreeSet<_>>();
-                if bindings.len() != 1 {
-                    return Ok(None);
-                }
-                *bindings.first().expect("one issued canonical carrier")
-            }
+        let Some((carrier, canonical_binding)) = self.namespace_pair_in(state, graph, canonical)
+        else {
+            return Ok(None);
         };
-        if !graph.bindings.contains(&canonical_binding)
-            || graph
-                .namespace
-                .iter()
-                .find(|binding| binding.artifact == canonical)
-                .is_some_and(|selected| *selected != canonical_binding)
-            || !state
-                .outgoing(InventoryNodeKey::Artifact(carrier))
-                .any(|(target, dependency)| {
-                    target == InventoryNodeKey::Artifact(canonical_binding)
-                        && *dependency == ArtifactDependency::Interface
-                })
+        if matches!(
+            scope,
+            NativeAvailabilityQualificationScope::CurrentNamespace
+        ) && (lease
+            .selection
+            .namespace
+            .get(&self.original)
+            .is_some_and(|selected| *selected != carrier)
+            || lease.selection.namespace.get(&canonical).copied() != Some(canonical_binding))
         {
             return Ok(None);
         }
@@ -4841,17 +4844,14 @@ impl ArtifactInventory {
                     .module_interface()
                     .ok_or_else(|| failure("native canonical carrier missing"))?,
             );
-            let binding = |id| {
-                graph
-                    .namespace
-                    .iter()
-                    .copied()
-                    .find(|binding| binding.artifact == id)
-                    .ok_or_else(|| {
-                        failure("native namespace proof lacks its selected artifact binding")
+            let (carrier, canonical) = requirement
+                .namespace_pair_in(&state, graph, canonical)
+                .ok_or_else(|| {
+                    admission_failure(ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: requirement.original,
                     })
-            };
-            retain_namespace_pair(binding(requirement.original)?, binding(canonical)?)?;
+                })?;
+            retain_namespace_pair(carrier, canonical)?;
         }
         if let Some(ids) = &namespace_ids {
             for id in ids {
@@ -5149,7 +5149,9 @@ impl ArtifactInventory {
             .filter(|(_, matching)| !matching.is_empty())
             .map(|(key, matching)| (key, *matching.first().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        let resolve_target = |target: PlannedTarget, scope: Option<ArtifactSelectionId>| -> Result<InventoryNodeKey, CompileError> {
+        let resolve_target = |target: PlannedTarget,
+                              scope: Option<ArtifactSelectionId>|
+         -> Result<InventoryNodeKey, CompileError> {
             let existing = match target {
                 PlannedTarget::ExactGroup(binding) => Some(InventoryNodeKey::Group(binding)),
                 PlannedTarget::NewGroup(group) => {
