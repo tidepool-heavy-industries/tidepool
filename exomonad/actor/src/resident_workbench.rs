@@ -7422,9 +7422,37 @@ fn resident_error_diagnostic(
 }
 
 fn resident_error_requires_recovery(error: &ResidentError) -> bool {
-    matches!(error, ResidentError::Session(
-        tidepool_runtime::session::SessionError::RecoveryStore(error)
-    ) if error.kind == tidepool_runtime::session::StoreErrorKind::RecoveryRequired)
+    match error {
+        ResidentError::Session(error) => session_error_requires_recovery(error),
+        ResidentError::Run(error) => runtime_error_requires_recovery(error),
+        ResidentError::ActivationInputConsumed { source, .. }
+        | ResidentError::ActivationMountCommitted { source, .. } => {
+            resident_error_requires_recovery(source)
+        }
+        _ => false,
+    }
+}
+
+fn runtime_error_requires_recovery(error: &tidepool_runtime::RuntimeError) -> bool {
+    match error {
+        tidepool_runtime::RuntimeError::Session(error) => session_error_requires_recovery(error),
+        tidepool_runtime::RuntimeError::CompilerClose {
+            primary: Some(primary),
+            ..
+        } => runtime_error_requires_recovery(primary),
+        _ => false,
+    }
+}
+
+fn session_error_requires_recovery(error: &tidepool_runtime::session::SessionError) -> bool {
+    use tidepool_runtime::session::{SessionError, StoreErrorKind, StoreRefusal};
+    match error {
+        SessionError::RecoveryStore(error) => error.kind == StoreErrorKind::RecoveryRequired,
+        SessionError::RecoveryStoreRefused(StoreRefusal::Storage(error)) => {
+            error.kind == StoreErrorKind::RecoveryRequired
+        }
+        _ => false,
+    }
 }
 
 fn activation_renderer_failure_diagnostic(
