@@ -8419,7 +8419,7 @@ pub(super) mod tests {
                         ));
                         assert_ne!(
             session.bindings().scope_snapshot(session.scope_tree(), foreign_scope).unwrap(),
-            resolved.source_plan.snapshot,
+            session.bindings().scope_snapshot(session.scope_tree(), scope).unwrap(),
             "the live foreign scope has a genuinely different source-instance snapshot"
         );
                         assert!(matches!(
