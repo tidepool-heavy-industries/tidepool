@@ -598,7 +598,7 @@ impl OriginalCompilerInputs {
         )?;
         timing.advance("finish_new_products");
         selection
-            .finish_new_product_availability(&metadata.retained, &native.availability.0)
+            .finish_new_product_availability(&metadata.retained, &native.availability)
             .map_err(compiler_evidence_failure)?;
         timing.finish(true);
         // Return only physical custody. Continuation decisions belong to a
@@ -1326,7 +1326,7 @@ impl NativeAvailabilitySnapshotFacts {
 /// records those same rows for capture without a deferred row/contribution census.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RequestNativeAvailability(
-    Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    Arc<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
 );
 
@@ -1460,7 +1460,7 @@ impl RequestNativeAvailability {
     /// Cold construction owns the one row census. Successors carry both roots
     /// and update facts only for a changed mode or contribution membership.
     fn from_rows(
-        rows: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+        rows: Arc<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     ) -> Result<Self, CompileError> {
         let mut facts = imbl::OrdMap::new();
         for (id, row) in rows.iter() {
@@ -1568,7 +1568,7 @@ impl RequestNativeAvailability {
     pub(crate) fn from_issued_rows(
         rows: impl IntoIterator<Item = Arc<NativeTransportAvailability>>,
     ) -> Result<Self, CompileError> {
-        let mut result = BTreeMap::new();
+        let mut result = imbl::OrdMap::new();
         for row in rows {
             Self::merge_row(&mut result, row)?;
         }
@@ -1576,7 +1576,7 @@ impl RequestNativeAvailability {
     }
 
     fn merge_row(
-        rows: &mut BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
+        rows: &mut imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>,
         row: Arc<NativeTransportAvailability>,
     ) -> Result<NativeAvailabilityRowMerge, CompileError> {
         let id = row.original.descriptor.id;
@@ -1620,8 +1620,8 @@ impl RequestNativeAvailability {
     }
 
     pub(crate) fn merge(&self, incoming: &Self) -> Result<NativeAvailabilityMerge, CompileError> {
-        // The existing row-map copy is separate from fact maintenance; snapshot
-        // capture never copies this map or enumerates its rows.
+        // Both roots share untouched structural nodes. An incoming row edits
+        // only its search path; retained permission rows keep their exact owner.
         let mut rows = (*self.0).clone();
         let mut facts = self.1.clone();
         let mut disposition = NativeAvailabilityRowMerge::Unchanged;
@@ -1774,7 +1774,7 @@ impl RequestNativeAvailability {
                 selected_ids.insert(*id);
             }
         }
-        let mut rows = BTreeMap::new();
+        let mut rows = imbl::OrdMap::new();
         // Every selected key is looked up in this same row owner below. Equal
         // cardinality therefore preserves its exact membership on success.
         let same_membership = selected_ids.len() == self.0.len();
@@ -1920,7 +1920,7 @@ impl RequestNativeAvailability {
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
         let metadata = artifacts.metadata_snapshot();
-        let mut rows = BTreeMap::new();
+        let mut rows = imbl::OrdMap::new();
         for (id, fact) in facts {
             if *id != fact.original {
                 return Err(failure("normalized native row identity differs"));
@@ -2911,7 +2911,7 @@ impl NativeInputSelection {
                     }),
                 ))
             })
-            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+            .collect::<Result<imbl::OrdMap<_, _>, CompileError>>()?;
         Self::from_normalized_rows(
             roles,
             projection,
@@ -19560,6 +19560,82 @@ mod tests {
     }
 
     #[test]
+    fn native_availability_delta_preserves_snapshot_and_untouched_row_owners() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        for unrelated in [1, 32, 128] {
+            let cold = demanded_native_fixture(unrelated, NativeArtifactDemand::AllGroups, false);
+            let incoming =
+                demanded_native_fixture(unrelated + 1, NativeArtifactDemand::AllGroups, false);
+            let previous = &cold.native_selection.availability;
+            let added = incoming
+                .native_selection
+                .availability
+                .rows()
+                .find(|row| previous.issued_row(row.original_artifact_id()).is_none())
+                .expect("one genuinely issued new row")
+                .clone();
+            let id = added.original_artifact_id();
+            let incoming = RequestNativeAvailability::from_issued_rows([added.clone()]).unwrap();
+            let before = previous.snapshot_facts().unwrap();
+            let mut expected = before
+                .iter()
+                .map(|(key, fact)| (*key, fact.clone()))
+                .collect::<BTreeMap<_, _>>();
+            expected.insert(
+                id,
+                RequestNativeAvailability::row_snapshot_facts(&added).unwrap(),
+            );
+            let retained = previous.rows().cloned().collect::<Vec<_>>();
+            let references = retained.iter().map(Arc::strong_count).collect::<Vec<_>>();
+            NATIVE_AVAILABILITY_FACT_WORK.with(|work| work.set((0, 0)));
+            let updated = match previous.merge(&incoming).unwrap() {
+                NativeAvailabilityMerge::Changed(updated) => updated,
+                NativeAvailabilityMerge::Unchanged(_) => {
+                    panic!("actual new row must change the owner")
+                }
+            };
+            let fact_work = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+            let path_references = retained
+                .iter()
+                .zip(&references)
+                .map(|(row, before)| Arc::strong_count(row) - before)
+                .sum::<usize>();
+            assert_eq!(
+                fact_work,
+                (0, 1),
+                "only the incoming row changes maintained facts"
+            );
+            assert_eq!(
+                previous.snapshot_facts().unwrap(),
+                before,
+                "retained pre-update snapshot is isolated"
+            );
+            assert_eq!(
+                updated
+                    .snapshot_facts()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
+                expected
+            );
+            assert!(Arc::ptr_eq(updated.issued_row(id).unwrap(), &added));
+            for row in &retained {
+                assert!(
+                    Arc::ptr_eq(updated.issued_row(row.original_artifact_id()).unwrap(), row),
+                    "unchanged rows retain exact contribution handles"
+                );
+            }
+            if unrelated == 128 {
+                assert!(
+                    path_references < unrelated,
+                    "persistent insertion must not clone every baseline row reference"
+                );
+            }
+            eprintln!("native_availability_delta unrelated={unrelated} changed_facts={} structural_row_reference_copies={path_references}", fact_work.1);
+        }
+    }
+
+    #[test]
     fn unchanged_native_availability_reuses_fact_root_across_histories() {
         use crate::artifact_inventory::NativeArtifactDemand;
         for unrelated in [0, 32, 128] {
@@ -19982,7 +20058,13 @@ mod tests {
         }
         Ok(ReferenceNativeCompilerTransport {
             metadata,
-            availability: normalized.0,
+            availability: Arc::new(
+                normalized
+                    .0
+                    .iter()
+                    .map(|(id, row)| (*id, Arc::clone(row)))
+                    .collect(),
+            ),
             advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
         })
     }
@@ -20020,7 +20102,15 @@ mod tests {
         );
         match (expected, actual) {
             (Ok(expected), Ok(actual)) => {
-                assert_eq!(actual.availability.0, expected.availability);
+                assert_eq!(
+                    actual
+                        .availability
+                        .0
+                        .iter()
+                        .map(|(id, row)| (*id, Arc::clone(row)))
+                        .collect::<BTreeMap<_, _>>(),
+                    *expected.availability
+                );
                 assert_eq!(actual.advertised.0, expected.advertised.0);
                 Some(expected)
             }
@@ -20106,8 +20196,15 @@ mod tests {
                 &expected.metadata.retained
             ));
             assert_eq!(
-                physical.inputs.native_selection.availability.0,
-                expected.availability
+                physical
+                    .inputs
+                    .native_selection
+                    .availability
+                    .0
+                    .iter()
+                    .map(|(id, row)| (*id, Arc::clone(row)))
+                    .collect::<BTreeMap<_, _>>(),
+                *expected.availability
             );
             assert_eq!(
                 physical.inputs.native_selection.advertised.0,
@@ -20131,7 +20228,8 @@ mod tests {
             );
 
             let mut invalid = source.native_availability().0.as_ref().clone();
-            let row = Arc::make_mut(invalid.values_mut().next().expect("native row"));
+            let id = *invalid.keys().next().expect("native row");
+            let row = Arc::make_mut(invalid.get_mut(&id).unwrap());
             row.mode = NativeTransportMode::Full;
             row.contributions = Arc::from([]);
             let invalid = RequestNativeAvailability::from_rows(Arc::new(invalid)).unwrap();
@@ -20180,8 +20278,8 @@ mod tests {
                 if remove { rows.remove(id); }
             }
             if change_canonical {
-                if let Some(row) = rows.values_mut().next() {
-                    let row = Arc::make_mut(row);
+                if let Some(id) = rows.keys().next().copied() {
+                    let row = Arc::make_mut(rows.get_mut(&id).unwrap());
                     row.canonical = row.original.descriptor.id;
                 }
             }

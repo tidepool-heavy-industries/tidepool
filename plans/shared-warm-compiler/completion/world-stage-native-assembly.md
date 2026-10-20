@@ -117,3 +117,32 @@ Rust executable SHA-256 is
 `3fa7ddd5b304479c18867c593f5fb3265edab0f08370ea1acf46aa290d653650`;
 the pre-extraction executable is
 `743c75bb11772e70b3698dd073225c8c3ebdffc33f5ff440a704415d451ac21a`.
+
+## Native row owner checkpoint
+
+The same `RequestNativeAvailability` row owner now stores an
+`Arc<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>`. The outer Arc
+preserves existing acquisition identity; the persistent map shares untouched
+structural nodes. Merge rules, contribution handles, qualification and typed
+refusals remain unchanged. The completion handoff borrows this issued owner
+through `issued_row` rather than requiring a raw map representation. Independent
+reference transport tests retain their BTreeMap model at observation boundaries.
+
+The genuine issued-row insertion control keeps an immutable pre-update snapshot
+and constructs the expected post-update fact map independently. Across 1/32/128
+unrelated rows, one added native row changes exactly one maintained fact and
+copies 3/8/8 baseline row references through structural paths. Every unchanged
+row retains its exact Arc and contribution handles. This does not yet establish
+the complete staged continuation's cost: the existing native offer slices and
+private input vectors can still copy or scan broader pointer inventories.
+
+Final build `77af94ea-7e6d-4605-bd37-f4a6590f358b` compiled production/cfg(test)
+consumers and executed six controls, **6 passed, exit 0**: changed-row snapshot
+isolation, unchanged root reuse, exact historical dependency intersection,
+missing/conflicting issued-row refusal, exact original identity among equal
+owners, and actual producing-cohort completion. Evidence:
+`/srv/swarm/evidence/inanna/world-stage-native-persistent-rows-final-20261020`.
+Earlier compilation failures exposed raw-map assumptions in the completion
+handoff and test observation types; they are retained under the corresponding
+`world-stage-native-persistent-rows*` evidence roots. No broad map conversion was
+added to a production handoff to satisfy those errors.

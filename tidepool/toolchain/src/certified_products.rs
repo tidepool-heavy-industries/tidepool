@@ -3071,10 +3071,7 @@ impl CertifiedSourceSelection {
     pub(crate) fn finish_new_product_availability(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
-        issued: &BTreeMap<
-            crate::artifact_inventory::ArtifactId,
-            Arc<crate::declaration_context::NativeTransportAvailability>,
-        >,
+        issued: &crate::declaration_context::RequestNativeAvailability,
     ) -> CertResult<()> {
         for selected in Arc::make_mut(&mut self.modules).values_mut() {
             let ReceiptSourceSelection::Native { interface, native } = selected else {
@@ -3087,7 +3084,7 @@ impl CertifiedSourceSelection {
                 continue;
             }
             let id = native.original_artifact_id()?;
-            let original = issued.get(&id).ok_or(CertificationError::Mismatch(
+            let original = issued.issued_row(id).ok_or(CertificationError::Mismatch(
                 "new product lacks exact issued native availability",
             ))?;
             let entry = native.original_entry(*interface, metadata)?;
@@ -12649,11 +12646,7 @@ pub(crate) mod tests {
         let mut selected =
             CertifiedSourceSelection::from_compiler_projection(&projection, &metadata, &operation)
                 .unwrap();
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
+        let issued = support.native_availability();
         selected
             .finish_new_product_availability(&metadata, &issued)
             .unwrap();
@@ -12669,7 +12662,9 @@ pub(crate) mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(
             &actual,
-            issued[&entry.descriptor.id]
+            issued
+                .issued_row(entry.descriptor.id)
+                .unwrap()
                 .target_original(product.owner())
                 .unwrap()
         ));
@@ -12734,17 +12729,13 @@ pub(crate) mod tests {
             &completed[0],
             &view.metadata_snapshot().artifacts[&entry.descriptor.id]
         ));
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
+        let issued = support.native_availability();
         selected
             .finish_new_product_availability(&view.metadata_snapshot(), &issued)
             .unwrap();
         assert!(Arc::ptr_eq(
             selected.issued_native_availability().next().unwrap(),
-            &issued[&entry.descriptor.id]
+            issued.issued_row(entry.descriptor.id).unwrap()
         ));
         assert!(
             selected.complete_native_entries(&view).unwrap().is_empty(),
