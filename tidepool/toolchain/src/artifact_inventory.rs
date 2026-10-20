@@ -339,6 +339,31 @@ impl AdmittedTargetArtifacts {
         &self.artifacts
     }
 
+    /// Narrow this issuer's already chosen roots to one authenticated target.
+    /// Exact bindings and their historical edges remain those of this owner.
+    pub(crate) fn for_ordinary_target(
+        &self,
+        imports: Vec<crate::certified_products::PendingImportOwner>,
+    ) -> Result<TargetNativeInputs, CompileError> {
+        let ids = self.selection.roots.iter().map(|group| group.binding.artifact())
+            .collect::<BTreeSet<_>>();
+        let entries = ids.iter()
+            .map(|id| Arc::clone(&self.artifacts.lease.payloads[id]))
+            .collect::<Vec<_>>();
+        let expected = certified_target_source_groups(&entries, &imports)?;
+        let mut admitted = self.clone();
+        admitted.selection.roots = self.selection.roots.iter().copied()
+            .filter(|group| expected.contains(&NativeGroupKey {
+                artifact: group.binding.artifact(),
+                original_ordinal: group.original_ordinal,
+            }))
+            .collect::<Vec<_>>().into();
+        if admitted.selection.roots.len() != expected.len() {
+            return Err(failure("ordinary target exceeds its admitted native roots"));
+        }
+        Ok(admitted.bind_target(None, imports))
+    }
+
     /// Final target observations are moved under the same admission owner.
     /// Resolution checks their correspondence at the consuming boundary.
     pub(crate) fn bind_target(
@@ -476,6 +501,19 @@ impl ResolvedNativeTarget<'_> {
     pub(crate) fn imports(&self) -> &[crate::certified_products::PendingImportOwner] {
         self.owner.imports()
     }
+    pub(crate) fn original_owner(
+        &self,
+        group: NativeGroupBinding,
+    ) -> Result<&tidepool_repr::execution_schema::CachedHomeOwner, CompileError> {
+        if !self.groups.contains(&group) {
+            return Err(failure("native source row is outside its resolved target"));
+        }
+        match &self.owner.artifacts().lease.payloads[&group.binding.artifact()].payload {
+            ArtifactPayload::Original(product) => Ok(product.owner()),
+            _ => Err(failure("resolved native source lacks its Original payload")),
+        }
+    }
+
     pub(crate) fn native_sites(
         &self,
     ) -> Result<crate::checked_cell::SelectedNativeSites, CompileError> {

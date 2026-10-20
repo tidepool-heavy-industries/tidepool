@@ -565,6 +565,7 @@ impl YieldSites {
 /// target in the same [`CompiledArtifacts`] (one GHC session, one merged
 /// `meta.cbor`).
 pub struct TargetArtifact {
+    native_inputs: Option<crate::artifact_inventory::TargetNativeInputs>,
     pub asks: YieldSites,
     /// Versioned execution program decoded under the exact host contract.
     pub prepared: PreparedArtifact,
@@ -1043,6 +1044,7 @@ pub fn prepare_world_cell_program(
                 let execution = segment.original_execution_context(output.compiler_inputs())?;
                 segment.retain_private_output(&output);
                 let products = Arc::new(SealedTurnProducts {
+                    prepared: target.clone(),
                     original: SealedOriginalEvidence::Exact { output, execution },
                     target: admitted.target,
                     original_compile_input: None,
@@ -3418,6 +3420,7 @@ impl NativeTurnOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
+    prepared: Arc<PreparedProgram>,
     original: SealedOriginalEvidence,
     target: crate::artifact_inventory::TargetNativeInputs,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
@@ -3473,44 +3476,100 @@ impl PhysicalCurrentNativeGroup<'_> {
     }
 }
 
-impl SealedTurnProducts {
-    /// Inspect only the actual group requested by a receiving native installer.
-    /// Historical payload custody and native reuse labels cannot qualify it.
-    pub fn physical_current_native_group(
-        &self,
-        group: &certified_products::PendingCertifiedGroup,
-        binding: crate::artifact_inventory::NativeGroupBinding,
-    ) -> Result<Option<PhysicalCurrentNativeGroup<'_>>, CompileError> {
-        if !self
-            .target
-            .artifacts()
-            .contains_issued_native_group(binding)
-        {
-            return Err(CompileError::ExtractFailed(
-                "native source group is outside its target acquisition".into(),
-            ));
+/// Read-only sites of the physical target completed by this output issuer.
+pub struct PhysicalCurrentNativeTarget<'a> {
+    prepared: &'a PreparedProgram,
+}
+
+impl PhysicalCurrentNativeTarget<'_> {
+    pub fn sites(&self) -> impl Iterator<Item = u64> + '_ {
+        self.prepared.sites().iter().map(|site| site.site)
+    }
+}
+
+/// Borrowed rows from one exact target resolution and its physical output.
+/// A row cannot be supplied independently of that operation's selected issuer.
+pub struct ResolvedNativeSourceProducts<'a> {
+    _resolved: crate::artifact_inventory::ResolvedNativeTarget<'a>,
+    prepared: &'a PreparedProgram,
+    rows: Vec<ResolvedNativeSourceProduct<'a>>,
+}
+
+/// Compiler-only source membership, coissued with the exact chosen binding.
+pub struct ResolvedNativeSourceProduct<'a> {
+    group: &'a certified_products::PendingCertifiedGroup,
+    binding: crate::artifact_inventory::NativeGroupBinding,
+    physical_current: bool,
+}
+
+impl<'a> ResolvedNativeSourceProduct<'a> {
+    pub fn group(&self) -> &'a certified_products::PendingCertifiedGroup {
+        self.group
+    }
+    pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
+        self.binding
+    }
+    pub fn physical_current(&self) -> Option<PhysicalCurrentNativeGroup<'a>> {
+        self.physical_current.then_some(PhysicalCurrentNativeGroup { group: self.group })
+    }
+}
+
+impl<'a> ResolvedNativeSourceProducts<'a> {
+    pub fn target(&self) -> PhysicalCurrentNativeTarget<'a> {
+        PhysicalCurrentNativeTarget { prepared: self.prepared }
+    }
+
+    pub fn groups(&self) -> impl Iterator<Item = &ResolvedNativeSourceProduct<'a>> {
+        self.rows.iter()
+    }
+
+    fn issue(
+        resolved: crate::artifact_inventory::ResolvedNativeTarget<'a>,
+        prepared: &'a PreparedProgram,
+        groups: &'a [certified_products::PendingCertifiedGroup],
+        selection: &certified_products::CertifiedSourceSelection,
+    ) -> Result<Self, CompileError> {
+        let mut available = BTreeMap::new();
+        for group in groups {
+            let key = (group.owner(), group.group().original_ordinal());
+            if available.insert(key, group).is_some() {
+                return Err(CompileError::ExtractFailed("native source group has competing output members".into()));
+            }
         }
-        let actual = self
-            .certified_groups
-            .iter()
-            .find(|actual| actual.same_issuance(group))
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("native group belongs to another sealed output".into())
+        let mut rows = Vec::with_capacity(resolved.groups().len());
+        for binding in resolved.groups().iter().copied() {
+            let owner = resolved.original_owner(binding)?;
+            let group = *available.get(&(owner, binding.original_ordinal)).ok_or_else(|| {
+                CompileError::ExtractFailed("resolved native source lacks its certified output member".into())
             })?;
-        if binding.original_ordinal != actual.group().original_ordinal() {
-            return Err(CompileError::ExtractFailed(
-                "native source group ordinal differs from its target acquisition".into(),
-            ));
+            let physical_current = selection.physical_current_original(owner)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                == Some(binding.binding.artifact());
+            rows.push(ResolvedNativeSourceProduct { group, binding, physical_current });
         }
-        if self
-            .source_selection()
-            .physical_current_original(actual.owner())
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-            != Some(binding.binding.artifact())
-        {
-            return Ok(None);
-        }
-        Ok(Some(PhysicalCurrentNativeGroup { group: actual }))
+        Ok(Self { _resolved: resolved, prepared, rows })
+    }
+}
+
+impl CompiledArtifacts {
+    /// Resolve only the target issued in this bundle, preserving its exact roots.
+    /// Raw decoded programs have no selecting owner and return no source proof.
+    pub fn native_source_products(&self, name: &str) -> Result<Option<ResolvedNativeSourceProducts<'_>>, CompileError> {
+        let target = self.targets.get(name).ok_or_else(|| CompileError::ExtractFailed("native source target is absent".into()))?;
+        let Some(inputs) = &target.native_inputs else { return Ok(None); };
+        let selection = self.source_selection.as_ref().ok_or_else(|| CompileError::ExtractFailed("issued native target lacks its source selection".into()))?;
+        ResolvedNativeSourceProducts::issue(inputs.resolve()?, target.prepared.prepared(), &self.certified_groups, selection).map(Some)
+    }
+}
+
+impl SealedTurnProducts {
+    pub fn native_source_products(&self) -> Result<ResolvedNativeSourceProducts<'_>, CompileError> {
+        ResolvedNativeSourceProducts::issue(
+            self.resolve_native_execution()?,
+            &self.prepared,
+            &self.certified_groups,
+            self.source_selection(),
+        )
     }
 
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
@@ -4199,6 +4258,7 @@ fn seal_turn_outputs_with_validation(
         module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     }
     Ok(Some(SealedTurnProducts {
+        prepared: prepared.clone(),
         original,
         target: target_native,
         original_compile_input,
@@ -6073,7 +6133,7 @@ fn compile_invocation_inner(
         let compiler_inputs = exact_request
             .as_ref()
             .map(|request| request.compiler_inputs());
-        artifacts.artifact_view =
+        let admitted_targets =
             crate::declaration_context::certified_selected_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     &producer,
@@ -6088,9 +6148,8 @@ fn compile_invocation_inner(
                 ),
                 &mut validation,
                 &certified.source_selection,
-            )?
-            .artifacts()
-            .clone();
+            )?;
+        artifacts.artifact_view = admitted_targets.artifacts().clone();
         let selected_groups =
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 &artifacts.artifact_view,
@@ -6123,6 +6182,9 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
+                target.native_inputs = Some(admitted_targets.for_ordinary_target(
+                    target.pending_imports.clone(),
+                )?);
             }
         }
         timing::record_stage_with_owners(
@@ -6686,6 +6748,7 @@ pub(crate) fn assemble(
         targets.insert(
             r.target.clone(),
             TargetArtifact {
+                native_inputs: None,
                 asks,
                 prepared,
                 pending_imports: Vec::new(),
