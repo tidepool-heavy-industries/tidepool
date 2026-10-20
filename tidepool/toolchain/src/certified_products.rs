@@ -18226,7 +18226,9 @@ pub(crate) mod tests {
         let output = OriginalCompilerInputs::from_selection(&original, &issued).unwrap();
         let closure = original.selected_original_closure(&issued).unwrap();
         eprintln!(
-            "initial completed native rows: R={} G={}",
+            "initial completed native rows: R={:?} G={:?}; R={} G={}",
+            r_entry.descriptor.id,
+            g_entry.descriptor.id,
             output
                 .native_availability()
                 .issued_row(r_entry.descriptor.id)
