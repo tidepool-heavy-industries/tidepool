@@ -3,11 +3,11 @@
 module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
-  , SegmentDemandScope, newSegmentDemandScope
+  , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (forM)
+import Control.Monad (forM, foldM)
 import qualified Data.ByteString as BS
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
@@ -34,7 +34,7 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
-import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (mkVarOcc, occNameString, delFromOccEnv)
 import GHC.Types.Name.Reader
   ( RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
   , GlobalRdrEnv, mkGlobalRdrEnv, mkLocalVanillaGRE, Parent(NoParent)
@@ -93,6 +93,25 @@ newSegmentDemandScope environment bindings = do
   pure (SegmentDemandScope
     (mkGlobalRdrEnv [mkLocalVanillaGRE NoParent name | (name,_) <- entries])
     (Map.fromList entries))
+
+-- The successor receiver supplies only authenticated changed aliases. The
+-- alias-only GRE and exact reverse associations share every untouched branch;
+-- stable NameCache names avoid a namespace per logical world.
+updateSegmentDemandScope :: HscEnv -> [(String,Maybe binding)] -> SegmentDemandScope binding
+  -> IO (SegmentDemandScope binding)
+updateSegmentDemandScope environment changes initial = foldM update initial changes
+  where
+    update (SegmentDemandScope aliases bindings) (alias,replacement) = do
+      let occurrence = mkVarOcc alias
+      name <- allocateGlobalBinder (hsc_NC environment)
+        (mkModule interactiveUnit (mkModuleName ":TidepoolDemand")) occurrence noSrcSpan
+      let removed = delFromOccEnv aliases occurrence
+          remaining = Map.delete name bindings
+      pure $ case replacement of
+        Nothing -> SegmentDemandScope removed remaining
+        Just binding -> SegmentDemandScope
+          (plusGlobalRdrEnv (mkGlobalRdrEnv [mkLocalVanillaGRE NoParent name]) removed)
+          (Map.insert name (alias,binding) remaining)
 
 -- GHC owns the complete module and local lexical scopes, including class
 -- defaults, instance methods, constructors and record fields. All imports
