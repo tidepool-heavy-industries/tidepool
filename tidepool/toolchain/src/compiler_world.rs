@@ -1863,6 +1863,82 @@ fn materialize_primary_association<BS: fvm_ipld_blockstore::Blockstore>(
         .map_err(|error| source_failure(error.to_string()))
 }
 
+fn materialize_primary_type_row<BS: fvm_ipld_blockstore::Blockstore>(
+    owner: &crate::declaration_join::ExactModuleIdentity,
+    interface_binding: &ArtifactBinding,
+    original_binding: Option<&ArtifactBinding>,
+    entry: &Arc<crate::artifact_inventory::ArtifactEntry>,
+    producer: &[u8; 32],
+    directory: &Path,
+    ordinal: usize,
+    rows: &mut WorldColdRows,
+    materializer: &mut Materializer<'_, BS>,
+    remaining_raw: &mut u64,
+) -> Result<(ciborium::value::Value, cid::Cid), CompileError> {
+    use crate::declaration_context::original_inputs::{OriginalInputKind as K, OriginalInputPart};
+    if owner != &entry.descriptor.owner {
+        return Err(source_failure("primary acquired row has another owner"));
+    }
+    crate::host_work::checkpoint()?;
+    let estimate = primary_association_metadata_bound(
+        &entry.descriptor.owner.unit,
+        &entry.descriptor.owner.module,
+        &entry.requirements,
+    )?;
+    *remaining_raw = remaining_raw
+        .checked_sub(estimate)
+        .ok_or_else(|| binding_capture_refusal(estimate, *remaining_raw))?;
+    let root = directory.join(format!("primary-{ordinal}"));
+    let mut builder =
+        crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
+            .map_err(|e| source_failure(e.to_string()))?;
+    let mut pending = Vec::new();
+    for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry) {
+        if matches!(kind, K::Native | K::Census | K::Graph) {
+            continue;
+        }
+        if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
+            return Err(source_failure("world type input exceeds its format bound"));
+        }
+        *remaining_raw = remaining_raw
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(source_size_failure)?;
+        pending.push((
+            kind,
+            builder
+                .append(bytes)
+                .map_err(|e| source_failure(e.to_string()))?,
+        ));
+    }
+    let arena = builder
+        .finish()
+        .map_err(|e| source_failure(e.to_string()))?;
+    let parts = pending
+        .into_iter()
+        .map(|(kind, pending)| {
+            let transport = arena
+                .issue_slice(pending)
+                .map_err(|e| source_failure(e.to_string()))?;
+            Ok(OriginalInputPart {
+                kind,
+                path: root.join(kind.wire_tag()),
+                sha256: world_hex(transport.sha256()),
+                bytes: transport.len(),
+                transport,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let row = rows.row(entry, parts)?.0;
+    let semantic = world_semantic_row(&row, producer)?;
+    let fact = materialize_primary_association(
+        materializer,
+        interface_binding,
+        original_binding,
+        &semantic,
+    )?;
+    Ok((row, fact))
+}
+
 fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
     context: &ExactDeclarationContext,
     producer: &[u8; 32],
@@ -1877,7 +1953,6 @@ fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
     ),
     CompileError,
 > {
-    use crate::declaration_context::original_inputs::{OriginalInputKind as K, OriginalInputPart};
     let mut primary_facts = imbl::OrdMap::new();
     let mut base = Vec::new();
     for (ordinal, selected) in context
@@ -1885,66 +1960,9 @@ fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
         .world_primary_type_rows()
         .enumerate()
     {
-        let entry = selected.entry;
-        if selected.owner != &entry.descriptor.owner {
-            return Err(source_failure("primary acquired row has another owner"));
-        }
-        crate::host_work::checkpoint()?;
-        let estimate = primary_association_metadata_bound(
-            &entry.descriptor.owner.unit,
-            &entry.descriptor.owner.module,
-            &entry.requirements,
-        )?;
-        *remaining_raw = remaining_raw
-            .checked_sub(estimate)
-            .ok_or_else(|| binding_capture_refusal(estimate, *remaining_raw))?;
-        let root = directory.join(format!("primary-{ordinal}"));
-        let mut builder =
-            crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
-                .map_err(|e| source_failure(e.to_string()))?;
-        let mut pending = Vec::new();
-        for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry) {
-            if matches!(kind, K::Native | K::Census | K::Graph) {
-                continue;
-            }
-            if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
-                return Err(source_failure("world type input exceeds its format bound"));
-            }
-            *remaining_raw = remaining_raw
-                .checked_sub(bytes.len() as u64)
-                .ok_or_else(source_size_failure)?;
-            pending.push((
-                kind,
-                builder
-                    .append(bytes)
-                    .map_err(|e| source_failure(e.to_string()))?,
-            ));
-        }
-        let arena = builder
-            .finish()
-            .map_err(|e| source_failure(e.to_string()))?;
-        let parts = pending
-            .into_iter()
-            .map(|(kind, pending)| {
-                let transport = arena
-                    .issue_slice(pending)
-                    .map_err(|e| source_failure(e.to_string()))?;
-                Ok(OriginalInputPart {
-                    kind,
-                    path: root.join(kind.wire_tag()),
-                    sha256: world_hex(transport.sha256()),
-                    bytes: transport.len(),
-                    transport,
-                })
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?;
-        let row = rows.row(entry, parts)?.0;
-        let semantic = world_semantic_row(&row, producer)?;
-        let fact = materialize_primary_association(
-            materializer,
-            selected.interface_binding,
-            selected.original_binding,
-            &semantic,
+        let (row, fact) = materialize_primary_type_row(
+            selected.owner, selected.interface_binding, selected.original_binding,
+            selected.entry, producer, directory, ordinal, rows, materializer, remaining_raw,
         )?;
         if primary_facts
             .insert(*selected.transport_binding, fact)
