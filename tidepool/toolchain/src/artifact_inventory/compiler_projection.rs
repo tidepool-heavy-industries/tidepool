@@ -2336,59 +2336,63 @@ impl CompilerSourceSupport {
         let original = role
             .original()
             .ok_or_else(|| failure("published root lacks an original"))?;
-        if let CompilerInputRole::PublishedSourceOriginal {
-            native_authority, ..
-        } = role
-        {
-            let saved = native_authority.acquired()?;
-            if roots
-                .iter()
-                .any(|id| !saved.artifacts.contains_namespace_artifact(*id))
-            {
-                return Err(failure(
-                    "publication root is outside its native owner's namespace",
-                ));
-            }
+        if role.is_published_source_original() {
             let prior = self.publication_birth_support(root)?;
             let endorsement =
                 crate::declaration_context::PublishedOriginalEndorsement::from_acquired_support(
                     self, root,
                 )?;
-            return prior.publish_original(&endorsement);
-        }
-        let artifacts = match role {
-            CompilerInputRole::PublishedSourceOriginal { selection, .. } => {
-                self.artifacts.select_issued(roots, selection)?
+            // Validate the immutable issuer independently. Its roles and demand
+            // are historical evidence, not the receiving compiler projection.
+            prior.validate_publication_endorsement(&endorsement)?;
+            if roots
+                .iter()
+                .any(|id| !self.artifacts.contains_namespace_artifact(*id))
+            {
+                return Err(failure(
+                    "publication root is outside the current compiler namespace",
+                ));
             }
-            _ => self.artifacts.select_publication_roots(original, roots)?,
-        };
-        let ids = artifacts
-            .artifact_ids()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let projection = self.projection.project_roles(|owner, role| {
-            (owners.contains(owner) && ids.contains(&role.interface())).then(|| {
-                if owner == root && role.is_published_source_original() {
-                    role.clone()
-                } else if let Some(original) = role.original().filter(|id| ids.contains(id)) {
-                    CompilerInputRole::ReusableOriginal {
-                        interface: role.interface(),
-                        original,
+            return self
+                .source_support(owners)?
+                .retain_custody(prior.artifacts());
+        }
+        let artifacts = self.artifacts.select_publication_roots(original, roots)?;
+        let projection = self.projection.project_roles(|_, role| {
+            artifacts
+                .contains_namespace_artifact(role.interface())
+                .then(|| {
+                    if let Some(original) = role
+                        .original()
+                        .filter(|id| artifacts.contains_namespace_artifact(*id))
+                    {
+                        CompilerInputRole::ReusableOriginal {
+                            interface: role.interface(),
+                            original,
+                        }
+                    } else {
+                        CompilerInputRole::InterfaceOnly {
+                            interface: role.interface(),
+                        }
                     }
-                } else {
-                    CompilerInputRole::InterfaceOnly {
-                        interface: role.interface(),
-                    }
-                }
-            })
+                })
         });
-        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
+        let offers = self
+            .native_offers
+            .iter()
+            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
+                Ok(true) => Some(Ok(offer.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.rebuild_narrowed(projection, artifacts, offers)
     }
 
-    pub(crate) fn publish_original(
+    fn validate_publication_endorsement(
         &self,
         endorsement: &crate::declaration_context::PublishedOriginalEndorsement,
-    ) -> Result<Self, CompileError> {
+    ) -> Result<&CompilerInputRole, CompileError> {
         let role = endorsement.role();
         let previous = self
             .projection
@@ -2437,6 +2441,15 @@ impl CompilerSourceSupport {
                 "publication endorsement differs from its exact issuer",
             ));
         }
+        Ok(previous)
+    }
+
+    pub(crate) fn publish_original(
+        &self,
+        endorsement: &crate::declaration_context::PublishedOriginalEndorsement,
+    ) -> Result<Self, CompileError> {
+        let previous = self.validate_publication_endorsement(endorsement)?;
+        let role = endorsement.role();
         let carried = self
             .input_decisions
             .facts
@@ -4108,42 +4121,19 @@ mod tests {
                 assert_eq!(interface.interface_bytes(), bytes.as_slice());
                 assert!(row.original.is_none());
             }
-            // This independently validates the constructor, not the old
-            // selection topology: both routes use select_owners. The legacy
-            // route also gets an already-warm parent, explicitly reported below.
-            let baseline_view = interfaces
-                .select_owners(narrowed.projection.roles.keys().cloned().collect())
-                .unwrap();
-            let baseline = CompilerSourceSupport::new(
-                narrowed.projection.clone(),
-                baseline_view,
-                [],
-                Default::default(),
-            )
-            .unwrap();
-            let after = inventory.metrics();
-            assert_eq!(narrowed.projection, baseline.projection);
-            assert_eq!(narrowed.selected, baseline.selected);
-            assert_eq!(
-                narrowed.artifacts.selection_snapshot(),
-                baseline.artifacts.selection_snapshot()
-            );
-            assert_eq!(narrowed.input_decisions, baseline.input_decisions);
-            assert!(
-                baseline
-                    .artifacts
-                    .reads
-                    .read_projection
-                    .get()
-                    .is_some_and(|projection| projection.metadata.get().is_some()),
-                "legacy constructor must sensitize the output metadata observation"
-            );
+            // Explicit metadata observation initializes the cache only after
+            // the measured narrowing has preserved its untouched state.
+            narrowed.artifacts.metadata_snapshot();
+            assert!(narrowed
+                .artifacts
+                .reads
+                .read_projection
+                .get()
+                .is_some_and(|projection| projection.metadata.get().is_some()));
             eprintln!(
-                "closed-role-work unrelated={unrelated} candidate_graph={} candidate_handles={} legacy_warm_parent_graph={} legacy_warm_parent_handles={}",
+                "closed-role-work unrelated={unrelated} graph={} handles={}",
                 candidate.graph_visits - before.graph_visits,
                 candidate.entry_handle_copies - before.entry_handle_copies,
-                after.graph_visits - candidate.graph_visits,
-                after.entry_handle_copies - candidate.entry_handle_copies
             );
             assert!(interfaces
                 .support_for_owners(vec![ExactModuleIdentity {
@@ -4153,24 +4143,23 @@ mod tests {
                 .is_err());
             let owners = BTreeSet::from([owner]);
             let source = support.source_support(&owners).unwrap();
-            let legacy = support
+            let recomputed = support
                 .projection
                 .source_support(&support.artifacts, &owners)
                 .unwrap();
-            let legacy = support
-                .rebuild_narrowed(legacy.projection, legacy.artifacts, [])
+            let recomputed = support
+                .rebuild_narrowed(recomputed.projection, recomputed.artifacts, [])
                 .unwrap();
-            assert_eq!(source.projection, legacy.projection);
-            assert_eq!(source.selected, legacy.selected);
+            assert_eq!(source.projection, recomputed.projection);
+            assert_eq!(source.selected, recomputed.selected);
             assert_eq!(
                 source.artifacts.selection_snapshot(),
-                legacy.artifacts.selection_snapshot()
+                recomputed.artifacts.selection_snapshot()
             );
-            assert_eq!(source.input_decisions, legacy.input_decisions);
+            assert_eq!(source.input_decisions, recomputed.input_decisions);
             drop(interfaces);
             drop(support);
-            drop(baseline);
-            drop(legacy);
+            drop(recomputed);
             // This checks retained semantic facts, not physical materialization
             // release: the fixture still holds its original entry handle.
             assert_eq!(

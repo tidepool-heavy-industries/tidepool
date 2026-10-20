@@ -658,6 +658,41 @@ impl GenerationDependency {
             fence: self.0.admission.fence()?,
         })
     }
+
+    pub(super) fn fence_selected_with(
+        &self,
+        compare: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceFenceTransition<'a>,
+        ) -> Result<(), super::PublicationSettlementError>,
+    ) -> super::ActorGenerationRetirementCutoff {
+        let retain = |fence| {
+            GenerationRetirementFence::new(GenerationFence {
+                dependency: self.clone(),
+                fence,
+            })
+        };
+        match self
+            .runtime_admission()
+            .fence_with(self.runtime_lease(), compare)
+        {
+            Ok(Ok(fence)) => super::ActorGenerationRetirementCutoff::Fenced(retain(fence)),
+            Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Refused(error))) => {
+                super::ActorGenerationRetirementCutoff::Refused(
+                    super::ActorPublicationGuard::cutoff_error(error),
+                )
+            }
+            Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Unconfirmed {
+                fence,
+                error,
+            })) => super::ActorGenerationRetirementCutoff::Unconfirmed {
+                fence: retain(fence),
+                error: super::ActorPublicationGuard::cutoff_error(error),
+            },
+            Err(error) => super::ActorGenerationRetirementCutoff::Refused(
+                super::ActorPublicationGuard::cutoff_error(error.into()),
+            ),
+        }
+    }
 }
 
 #[must_use]
@@ -1021,12 +1056,36 @@ mod tests {
         }
     }
 
+    fn capture_original(
+        owner: &mut super::super::ActorPublicationGuard,
+    ) -> GenerationRetirementFence {
+        match owner.fence_original() {
+            super::super::ActorGenerationRetirementCutoff::Fenced(fence) => fence,
+            _ => panic!("the selected publication owner must issue its original cutoff"),
+        }
+    }
+
+    #[test]
+    fn retirement_cutoff_selection_loss_leaves_original_gate_unchanged() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        drop(fixture.state.drain_retired());
+        assert!(matches!(
+            owner.fence_original(),
+            super::super::ActorGenerationRetirementCutoff::Refused(_)
+        ));
+        assert!(expected.scope.admit_source().is_ok());
+        drop(owner);
+        assert!(fixture.state.is_retired());
+    }
+
     #[test]
     fn retirement_refusal_settles_candidate_before_exact_original_reopen() {
         let fixture = PublicationFixture::replacement(true);
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         let expected = fixture.expected.generation().unwrap().clone();
-        let mut original = GenerationRetirementFence::new(expected.dependency().fence().unwrap());
+        let mut original = capture_original(&mut owner);
         owner.refuse_retirement(&mut original).unwrap();
         assert!(Arc::ptr_eq(
             &fixture.state.current_generation().unwrap(),
@@ -1051,7 +1110,7 @@ mod tests {
         let mut fixture = PublicationFixture::replacement(true);
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         let expected = fixture.expected.generation().unwrap().clone();
-        let mut original = GenerationRetirementFence::new(expected.dependency().fence().unwrap());
+        let mut original = capture_original(&mut owner);
         drop(fixture.preparation.take());
         let error = owner.refuse_retirement(&mut original).unwrap_err();
         assert!(
@@ -1076,6 +1135,10 @@ mod tests {
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         let expected = fixture.expected.generation().unwrap().clone();
         let held_elsewhere = expected.dependency().fence().unwrap();
+        assert!(matches!(
+            owner.fence_original(),
+            super::super::ActorGenerationRetirementCutoff::Refused(_)
+        ));
         owner.refuse_unstarted().unwrap();
         assert!(Arc::ptr_eq(
             &fixture.state.current_generation().unwrap(),
@@ -1092,7 +1155,7 @@ mod tests {
         let mut fixture = PublicationFixture::replacement(true);
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         let expected = fixture.expected.generation().unwrap().clone();
-        let mut original = GenerationRetirementFence::new(expected.dependency().fence().unwrap());
+        let mut original = capture_original(&mut owner);
         let (entered, started) = std::sync::mpsc::sync_channel(0);
         let (release, finish) = std::sync::mpsc::sync_channel(0);
         owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
@@ -1144,7 +1207,7 @@ mod tests {
         let fixture = PublicationFixture::replacement(true);
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         let expected = fixture.expected.generation().unwrap().clone();
-        let mut original = GenerationRetirementFence::new(expected.dependency().fence().unwrap());
+        let mut original = capture_original(&mut owner);
         let (entered, started) = std::sync::mpsc::sync_channel(0);
         let (release, finish) = std::sync::mpsc::sync_channel(0);
         owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
@@ -1185,7 +1248,7 @@ mod tests {
         let fixture = PublicationFixture::replacement(true);
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         let expected = fixture.expected.generation().unwrap().clone();
-        let mut original = GenerationRetirementFence::new(expected.dependency().fence().unwrap());
+        let mut original = capture_original(&mut owner);
         let (entered, started) = std::sync::mpsc::sync_channel(0);
         let (release, finish) = std::sync::mpsc::sync_channel(0);
         owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {

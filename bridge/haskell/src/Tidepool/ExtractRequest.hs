@@ -44,13 +44,18 @@ data CompileWorkload = Foreground | Preparation deriving (Eq, Show)
 data ExactInputsRequest = ExactInputsRequest String ExactInputsAcquisition
   deriving (Eq, Show)
 
-data ExactInputsAcquisition = ResidentExactInputs String | CompleteExactInputs FilePath
+data ExactInputsAcquisition
+  = ResidentExactInputs String
+  | CompleteExactInputs FilePath
+  | SuccessorExactInputs String String FilePath
   deriving (Eq, Show)
 
 validExactInputsRequest :: ExactInputsRequest -> Bool
 validExactInputsRequest (ExactInputsRequest root acquisition) = valid root && case acquisition of
   ResidentExactInputs reference -> validReference reference
   CompleteExactInputs manifest -> validReference manifest
+  SuccessorExactInputs predecessor reference manifest ->
+    valid predecessor && validReference reference && validReference manifest
   where valid = validWorldIdentity
 
 validWorldIdentity :: String -> Bool
@@ -104,7 +109,6 @@ validWorldCellRecipe recipe = all (utf8Within (2 * 1024 * 1024))
     (worldCellSource recipe : worldCellTemplate recipe : map snd templates)
   && length templates <= 256
   && all (\(kind,_) -> validReference kind && utf8Within 65536 kind) templates
-  && Set.size (Set.fromList (map fst templates)) == length templates
   where templates = worldCellTurnTemplates recipe
 
 validWorldCellPath :: FilePath -> Bool
@@ -599,7 +603,15 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       WorldCellPrepare query -> request { requestWorldCellPrepare = Just query }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v24"
+workerRequestFlag = "--worker-request-v" ++ show workerRequestVersion
+
+-- The launcher flag and byte framing describe the same grammar version.
+workerRequestVersion :: Int
+workerRequestVersion = 25
+
+workerRequestMagic :: BS.ByteString
+workerRequestMagic = TE.encodeUtf8 (T.pack ("TPREQ" ++ replicate (3 - length version) '0' ++ version))
+  where version = show workerRequestVersion
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -658,7 +670,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ024"
+  if magic /= workerRequestMagic
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -678,7 +690,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ024" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = workerRequestMagic <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -728,6 +740,8 @@ encodeField field = case field of
     BS.singleton 57 <> textFrame root <> case acquisition of
       ResidentExactInputs reference -> BS.singleton 0 <> textFrame reference
       CompleteExactInputs manifest -> BS.singleton 1 <> textFrame manifest
+      SuccessorExactInputs predecessor reference manifest ->
+        BS.singleton 2 <> textFrame predecessor <> textFrame reference <> textFrame manifest
   WorldCellPlan request -> BS.singleton 59
     <> textFrame (worldCellPlanIdentity request) <> textFrame (worldCellPlanRealization request)
     <> encodeWorldCellRecipe (worldCellPlanRecipe request) <> textFrame (worldCellPlanOutput request)
@@ -875,10 +889,14 @@ pField bytes = do
     57 -> do
       (root, afterRoot) <- pText rest
       (kind, afterKind) <- pWord8 afterRoot
-      (value, afterValue) <- pText afterKind
-      acquisition <- case kind of
-        0 -> Right (ResidentExactInputs value)
-        1 -> Right (CompleteExactInputs value)
+      (acquisition, afterValue) <- case kind of
+        0 -> mapParser ResidentExactInputs pText afterKind
+        1 -> mapParser CompleteExactInputs pText afterKind
+        2 -> do
+          (predecessor, afterPredecessor) <- pText afterKind
+          (reference, afterReference) <- pText afterPredecessor
+          (manifest, remaining) <- pText afterReference
+          Right (SuccessorExactInputs predecessor reference manifest, remaining)
         _ -> Left "worker request: invalid exact input acquisition tag"
       let request = ExactInputsRequest root acquisition
       if validExactInputsRequest request then Right (EnsureExactInputs request, afterValue)

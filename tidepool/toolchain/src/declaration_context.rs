@@ -1095,6 +1095,16 @@ impl<'a> ContinuationNativeInputs<'a> {
         })
     }
 
+    pub(crate) fn current_product<'b>(
+        &'b self,
+        key: NativeGroupKey,
+        entry: &'b Arc<ArtifactEntry>,
+    ) -> Result<Option<crate::certified_products::CurrentProductRef<'b>>, CompileError> {
+        self.selection
+            .current_product(key, entry)
+            .map_err(compiler_evidence_failure)
+    }
+
     pub(crate) fn projection(&self) -> &CompilerInputProjection {
         &self.projection
     }
@@ -2393,9 +2403,7 @@ impl DemandNativeInputs {
             }
         }
         if certified_keys.len() != bindings.len()
-            || bindings
-                .keys()
-                .any(|key| !certified_keys.contains(key))
+            || bindings.keys().any(|key| !certified_keys.contains(key))
         {
             return Err(failure(
                 "certified receipt groups and executable bindings disagree",
@@ -6624,18 +6632,31 @@ impl PartialEq for WorldSourceCompilationBinding {
 /// with the checked program that issued the binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorldCompilationIdentity {
+    base_world_identity: [u8; 32],
+    captured_source_domain: [u8; 32],
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
     segment_digest: String,
 }
 
 impl WorldCompilationIdentity {
-    fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
+    pub(crate) fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
         Self {
+            base_world_identity: *binding.reservation.plan().world().logical_id(),
+            captured_source_domain: *binding
+                .reservation
+                .plan()
+                .world()
+                .restoration()
+                .captured_source_domain(),
             plan_receipt_sha256: binding.plan_receipt_sha256,
             product_context_sha256: binding.product_context_sha256,
             segment_digest: binding.segment.digest().to_owned(),
         }
+    }
+
+    pub(crate) fn matches_source_recipe(&self, base: &[u8; 32], domain: &[u8; 32]) -> bool {
+        self.base_world_identity == *base && self.captured_source_domain == *domain
     }
 
     #[cfg(test)]
@@ -6645,6 +6666,8 @@ impl WorldCompilationIdentity {
         segment_digest: impl Into<String>,
     ) -> Self {
         Self {
+            base_world_identity: plan_receipt_sha256,
+            captured_source_domain: product_context_sha256,
             plan_receipt_sha256,
             product_context_sha256,
             segment_digest: segment_digest.into(),
@@ -6973,12 +6996,8 @@ impl<'a> ProductInputFacts<'a> {
     }
 }
 
-/// Toolchain-local World input owner produced by the demand chain
-/// (`demand_primary_inputs` -> `certify_receipt_groups` ->
-/// `semantic_source_support` -> `select_acquired_compiler_bindings`).
-///
-/// Constructed, unadopted: the Host admission that supplies a certified
-/// receipt and consumes the resulting product is not yet in this tree.
+/// Projected World input facts retained by the actual segment source issuer.
+/// Certification and item native selection borrow this same demanded owner.
 pub(crate) struct DemandedWorldCompilerInputs<'a> {
     demand: DemandNativeInputs,
     groups: DemandCertifiedGroups,
@@ -7368,6 +7387,10 @@ impl ExactSourceAdmission {
 }
 
 impl<'a> ExactProductAdmission<'a> {
+    pub(crate) fn compilation_binding(&self) -> ProductCompilationBinding<'a> {
+        self.compilation_binding
+    }
+
     pub(crate) fn program_source_lexical(&self) -> &'a [ExactLexicalNode] {
         self.facts.source_lexical
     }
@@ -8505,6 +8528,7 @@ impl<'a> ExactReceiptAdmission<'a> {
                 decoded,
                 planned,
                 context,
+                None,
                 validation,
             )
     }
@@ -8517,6 +8541,7 @@ impl ProductInputFacts<'_> {
         decoded: DecodedExactCompilationReceipt,
         planned: Option<&ExactModuleIdentity>,
         context: &ExactDeclarationContext,
+        world_sources: Option<&crate::compiler_world::WorldSourcePathDomain<'_>>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ExactSourceAdmission, CompileError> {
         let DecodedExactCompilationReceipt {
@@ -8631,9 +8656,12 @@ impl ProductInputFacts<'_> {
         let selected_originals = if claims.is_empty() {
             BTreeMap::new()
         } else {
-            let include = self.source_search_include.ok_or_else(|| {
-                failure("source-selected originals lack trusted current import roots")
-            })?;
+            let include = match world_sources {
+                Some(domain) => domain.aliases(),
+                None => self.source_search_include.ok_or_else(|| {
+                    failure("source-selected originals lack trusted current import roots")
+                })?,
+            };
             let selection_evidence = selection_evidence
                 .as_ref()
                 .ok_or_else(|| failure("selected originals lack source evidence"))?;
@@ -8710,21 +8738,24 @@ impl ProductInputFacts<'_> {
                 })
                 .map(|entry| entry.descriptor.owner.clone())
                 .collect();
-            crate::execution_source::validate_source_selected_originals_with_validation(
-                claims,
-                selection_evidence,
-                crate::execution_source::SourceSelectionContext {
-                    producer: self.producer,
-                    interfaces: &canonical,
-                    exact_interfaces: &exact_interfaces,
-                    include,
-                    fresh: &evidence,
-                    roots: &source_selection_roots,
-                    independent: &independent,
-                    source_less: &source_less,
-                },
-                validation,
-            )?
+            let selection_context = crate::execution_source::SourceSelectionContext {
+                producer: self.producer,
+                interfaces: &canonical,
+                exact_interfaces: &exact_interfaces,
+                include,
+                fresh: &evidence,
+                roots: &source_selection_roots,
+                independent: &independent,
+                source_less: &source_less,
+            };
+            match world_sources {
+                Some(domain) => crate::execution_source::validate_world_source_selected_originals_with_validation(
+                    claims, selection_evidence, selection_context, domain, validation,
+                ),
+                None => crate::execution_source::validate_source_selected_originals_with_validation(
+                    claims, selection_evidence, selection_context, validation,
+                ),
+            }?
         };
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();
@@ -8869,6 +8900,67 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
     package_imports: Arc<[u8]>,
 }
 
+/// One actual World segment's admitted source and original products. Its
+/// prefix state reuses the same source-support owner as finite compilation.
+pub(crate) struct WorldProgramSegment<'a> {
+    pub(crate) originals: crate::certified_products::CertifiedSegmentOriginals,
+    inputs: DemandedWorldCompilerInputs<'a>,
+    binding: WorldCompilationIdentity,
+    source: ExactSourceAdmission,
+    source_text: String,
+    aliases: Vec<PathBuf>,
+    program: ProgramSourceSupportState,
+}
+
+impl WorldProgramSegment<'_> {
+    pub(crate) fn source(&self) -> &ExactSourceAdmission {
+        &self.source
+    }
+    pub(crate) fn source_text(&self) -> &str {
+        &self.source_text
+    }
+    pub(crate) fn aliases(&self) -> &[PathBuf] {
+        &self.aliases
+    }
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        self.inputs.support.artifacts()
+    }
+    pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
+        self.inputs.groups.groups()
+    }
+    pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
+        &self.program.program_source_lexical
+    }
+    pub(crate) fn original_execution_context(
+        &self,
+        inputs: &OriginalCompilerInputs,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        ExactProductAdmission {
+            compilation_binding: ProductCompilationBinding::World(&self.binding),
+            source: &self.source,
+            facts: self.inputs.facts(),
+        }
+        .original_execution_context(inputs)
+    }
+    pub(crate) fn admit_program_support(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.program.admit_program_support_inner(
+            self.inputs.facts().producer,
+            context,
+            support,
+            std::slice::from_ref(&self.source),
+            Some(produced),
+            Some(self.inputs.context),
+            selection,
+        )
+    }
+}
+
 impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
@@ -8973,7 +9065,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
-    ) -> Result<crate::certified_products::CertifiedSegmentOriginals, CompileError> {
+    ) -> Result<WorldProgramSegment<'a>, CompileError> {
         let program = self.program;
         let operation = program.validation().inventory.as_ref();
         let demand = self.demand_primary_inputs()?;
@@ -8997,11 +9089,13 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         let source_path = self.source.source_path.clone();
         let target_source = self.source.source.clone();
         let evidence_bytes = self.source.evidence_bytes.clone();
+        let source_domain = program.source_path_domain(&self.aliases)?;
         let source = facts.admit_source_facts(
             SourceCompilationBinding::World(self.binding.clone()),
             self.source,
             None,
             context,
+            Some(&source_domain),
             validation,
         )?;
         let admission = MatchedExactProductAdmission::world(
@@ -9013,7 +9107,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &target_source,
             operation,
         );
-        crate::certified_products::CertifiedSegmentOriginals::issue(
+        let originals = crate::certified_products::CertifiedSegmentOriginals::issue(
             raw,
             receipt,
             admission,
@@ -9025,42 +9119,16 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             produced,
             validation,
         )
-        .map_err(compiler_evidence_failure)
-    }
-
-    pub(crate) fn source_path_domain(
-        &self,
-    ) -> Result<crate::compiler_world::WorldSourcePathDomain<'_>, CompileError> {
-        self.program.source_path_domain(&self.aliases)
-    }
-
-    /// Run the demanded-input chain for this world source and retain the
-    /// toolchain-local product inputs. Cold custody is never bound as
-    /// semantic support: roles, native rows, home census and artifacts come
-    /// from the projected demand owner.
-    ///
-    /// Constructed, unadopted: the Host admission that supplies the certified
-    /// receipt and consumes the product is not yet in this tree.
-    pub(crate) fn demanded_product_inputs(
-        &'a self,
-        receipt: &crate::certified_products::CertifiedReceipt,
-        validation: &mut PackageInterfaceValidation,
-    ) -> Result<DemandedWorldCompilerInputs<'a>, CompileError> {
-        let operation = self.program.validation().inventory.as_ref();
-        let demand = self.demand_primary_inputs()?;
-        let groups = demand.certify_receipt_groups(receipt, validation)?;
-        let support = demand.semantic_source_support(&groups, operation)?;
-        let checked_values =
-            crate::checked_cell::CheckedValueImportAuthority::from_world_output(self.program)?;
-        let context = self.program.primary_context();
-        Ok(DemandedWorldCompilerInputs::from_demand(
-            demand,
-            groups,
-            support,
-            WorldCompilationIdentity::from_binding(&self.binding),
-            context,
-            checked_values,
-        ))
+        .map_err(compiler_evidence_failure)?;
+        Ok(WorldProgramSegment {
+            originals,
+            inputs,
+            binding,
+            source,
+            source_text: target_source,
+            aliases: self.aliases,
+            program: ProgramSourceSupportState::default(),
+        })
     }
 
     pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
@@ -17893,11 +17961,44 @@ mod tests {
             "the later current context really has the stronger Full row"
         );
         let selected = later.published_source_original_selections().unwrap();
-        assert_eq!(selected.as_slice(), std::slice::from_ref(&partial));
+        assert_eq!(selected.len(), 1);
         assert_eq!(
-            mode(&selected[0]),
+            selected[0]
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root],
+            partial
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+        );
+        let birth = selected[0]
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        let expected_birth = partial
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        assert_eq!(
+            birth.artifacts().capture_graph_selection(),
+            expected_birth.artifacts().capture_graph_selection()
+        );
+        assert_eq!(
+            birth.native_availability().persistent_facts(),
+            expected_birth.native_availability().persistent_facts()
+        );
+        assert_eq!(
+            birth.native_availability().persistent_facts()[&original].mode,
             NativeTransportMode::IssuedGroups,
             "current Full cannot upgrade the recorded Partial birth"
+        );
+        assert_eq!(
+            mode(&selected[0]),
+            NativeTransportMode::Full,
+            "reopening preserves the actual current projection"
         );
     }
 
@@ -18092,7 +18193,37 @@ mod tests {
             .unwrap()
             .permits(7));
         let selected = later.published_source_original_selections().unwrap();
-        assert_eq!(selected.as_slice(), std::slice::from_ref(&published));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0]
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root],
+            published
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+        );
+        let selected_birth = selected[0]
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        assert_eq!(
+            selected_birth.artifacts().capture_graph_selection(),
+            born.artifacts().capture_graph_selection()
+        );
+        assert_eq!(
+            selected_birth.native_availability().persistent_facts(),
+            born.native_availability().persistent_facts()
+        );
+        let born_beta = selected_birth
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap();
+        assert_eq!(born_beta.mode, NativeTransportMode::IssuedGroups);
+        assert!(born_beta.issued_ordinals().is_empty());
         let selected_beta = selected[0]
             .context()
             .compiler_source_support()
@@ -18100,8 +18231,8 @@ mod tests {
             .rows()
             .find(|row| row.original.descriptor.id == beta_original)
             .unwrap();
-        assert_eq!(selected_beta.mode, NativeTransportMode::IssuedGroups);
-        assert!(selected_beta.issued_ordinals().is_empty());
+        assert_eq!(selected_beta.mode, NativeTransportMode::Full);
+        assert!(selected_beta.permits(7));
         let store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&store);
         let receipt = writer.materialize_context(None, &later.snapshot()).unwrap();
@@ -18127,10 +18258,31 @@ mod tests {
             .context_for_expected_snapshot(receipt.root(), &decoded)
             .unwrap();
         let restored_birth = restored.published_source_original_selections().unwrap();
-        assert_eq!(restored_birth.as_slice(), std::slice::from_ref(&published));
-        assert!(restored_birth[0]
+        assert_eq!(restored_birth.len(), 1);
+        assert_eq!(
+            restored_birth[0]
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root],
+            published
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+        );
+        let restored_support = restored_birth[0]
             .context()
             .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        assert_eq!(
+            restored_support.artifacts().capture_graph_selection(),
+            born.artifacts().capture_graph_selection()
+        );
+        assert_eq!(
+            restored_support.native_availability().persistent_facts(),
+            born.native_availability().persistent_facts()
+        );
+        assert!(restored_support
             .native_offers()
             .iter()
             .filter(|offer| offer.original() == beta_original)
@@ -18139,8 +18291,13 @@ mod tests {
                 NativeOfferSnapshotBody::Empty(_)
             )));
         assert_eq!(
-            restored_birth[0].context().semantic_sha256(),
-            published.context().semantic_sha256()
+            restored_birth[0]
+                .context()
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&beta_original]
+                .mode,
+            NativeTransportMode::Full
         );
     }
 
@@ -19021,9 +19178,7 @@ mod tests {
             WorkerExecutionSource,
         };
         use tidepool_repr::execution_schema::RuntimeRep;
-        let id = cold.projection().snapshot_roles()[root]
-            .original()
-            .unwrap();
+        let id = cold.projection().snapshot_roles()[root].original().unwrap();
         let row = &cold.native_selection.availability.0[&id];
         let ArtifactPayload::Original(product) = &row.original.payload else {
             unreachable!()
