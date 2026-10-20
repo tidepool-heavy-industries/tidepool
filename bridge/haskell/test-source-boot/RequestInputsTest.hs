@@ -92,7 +92,9 @@ import Tidepool.ExtractRequest
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
-  , scopedEnsureWorld, scopedCompileWorldCell, heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
+  , scopedEnsureWorld, scopedCompileWorldCell, scopedPrepareWorldCellStage
+  , heldWorldCellStagePath, heldWorldCellStageTypedSource
+  , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
@@ -1700,6 +1702,34 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             validated <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
               validation <- boundWorldCellPreparation request
               forM_ validation $ \admitted -> do
+                unissued <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment Set.empty))
+                  :: IO (Either InputRejection ())
+                unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                    (const False) unissued)
+                  (fail "World compiled before its owner issued the current stage")
+                stage <- scopedPrepareWorldCellStage compiler admitted >>= maybe
+                  (fail "admitted World lost its first rendered stage") pure
+                again <- scopedPrepareWorldCellStage compiler admitted >>= maybe
+                  (fail "repeated World stage lookup consumed the current stage") pure
+                issued <- maybe (fail "executable World stage omitted its typed source") pure
+                  (heldWorldCellStageTypedSource stage)
+                repeated <- maybe (fail "repeated World stage lost its typed source") pure
+                  (heldWorldCellStageTypedSource again)
+                unless (heldWorldCellStagePath stage == heldWorldCellStagePath again
+                    && preparedTypedSegmentSource issued == preparedTypedSegmentSource repeated
+                    && preparedTypedSegmentPlan issued == preparedTypedSegmentPlan repeated)
+                  (fail "repeated World stage lookup changed its issued rendering")
+                let stagePath = heldWorldCellStagePath stage
+                issuedBytes <- BS.readFile stagePath
+                changed <- (do
+                    BS.writeFile stagePath (issuedBytes <> "\nunauthorizedStageValue = ()\n")
+                    try (void (scopedCompileWorldCell compiler admitted
+                      (PreparedSegmentProducts (preparedTypedSegmentPlan issued) Nothing) Set.empty)))
+                  `finally` BS.writeFile stagePath issuedBytes
+                  :: IO (Either WorldCellRefusal ())
+                unless (either (\failure -> case failure of WorldCellCorrupt -> True; _ -> False)
+                    (const False) changed)
+                  (fail "World accepted a source file changed after stage issuance")
                 completions <- prepareWorldCell request >>= either
                   (fail . ("real world preparation refused: " ++) . show) pure
                 completion <- case completions of
