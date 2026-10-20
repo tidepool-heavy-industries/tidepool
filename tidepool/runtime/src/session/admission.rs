@@ -3312,9 +3312,7 @@ impl PersistentSession {
         let view =
             view.with_request_inventory(view.injected_values().to_vec(), initial_value_generation);
         let planned = plan.map(|plan| {
-            use super::planned_cell::{
-                RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot,
-            };
+            use super::planned_cell::{RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot};
             use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
             let mut declarations = reserved_generations.iter().copied();
             let mut next_value = initial_value_generation.0;
@@ -3374,11 +3372,7 @@ impl PersistentSession {
                     slot,
                 });
             }
-            Arc::new(RuntimeCellPlanReservation {
-                plan,
-                items: planned_items,
-                digest: [0; 32],
-            })
+            (plan, planned_items)
         });
         let mut digest = blake3::Hasher::new();
         let mut frame = |bytes: &[u8]| {
@@ -3418,11 +3412,11 @@ impl PersistentSession {
         for generation in &reserved_generations {
             frame(&generation.0.to_le_bytes());
         }
-        if let Some(planned) = &planned {
+        if let Some((plan, items)) = &planned {
             frame(b"TidepoolRuntimeOrderedCell1");
-            frame(&planned.plan_digest());
-            frame(&planned.producer_sha256());
-            for item in planned.items() {
+            frame(&plan.digest());
+            frame(&plan.producer_sha256());
+            for item in items {
                 frame(&(item.index() as u64).to_le_bytes());
                 frame(&[item.kind() as u8]);
                 for generation in [item.declaration_generation(), item.value_generation()] {
@@ -3461,11 +3455,12 @@ impl PersistentSession {
         purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);
         let digest = *digest.finalize().as_bytes();
-        let planned = planned.map(|mut planned| {
-            Arc::get_mut(&mut planned)
-                .expect("fresh ordered reservation has one owner")
-                .digest = digest;
-            planned
+        let planned = planned.map(|(plan, items)| {
+            Arc::new(super::planned_cell::RuntimeCellPlanReservation {
+                plan,
+                items,
+                digest,
+            })
         });
         let prepared = Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
@@ -3875,38 +3870,25 @@ impl PersistentSession {
             slots.push(slot);
         }
         self.validate_new_binding_ids(expected_bindings.iter().flatten().map(|(_, id)| *id))?;
-        let mut digest = blake3::Hasher::new();
-        let mut frame = |bytes: &[u8]| {
-            digest.update(&(bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
-        };
-        frame(b"TidepoolRuntimeWorldCellAdmission1");
-        frame(self.admission_owner().identity.as_bytes());
-        frame(&self.admission_owner().epoch().to_le_bytes());
-        frame(&execution.session().0.to_le_bytes());
-        frame(&scope.0.to_le_bytes());
-        frame(plan.world().logical_id());
-        frame(plan.producer_sha256());
-        frame(plan.digest());
-        for (slot, bindings) in slots.iter().zip(&expected_bindings) {
-            let (kind, generation) = match slot {
-                Slot::Prologue { declaration } => (0, *declaration),
-                Slot::Declaration { declaration } => (1, *declaration),
-                Slot::Bind { value } => (2, *value),
-                Slot::Expression { .. } => unreachable!("expressions refused before reservation"),
-            };
-            frame(&[kind]);
-            frame(&generation.to_le_bytes());
-            frame(&(bindings.len() as u64).to_le_bytes());
-            for (name, id) in bindings {
-                frame(name.as_bytes());
-                frame(&id.raw().to_le_bytes());
-            }
-        }
         let purpose = RuntimeCellPurpose::PrivateExecution(execution.clone());
-        purpose.frame_authorization(&mut frame);
-        let digest = *digest.finalize().as_bytes();
-        let reservation = plan.reserve(digest, slots, expected_bindings)?;
+        let mut authorization = Vec::new();
+        purpose.frame_authorization(&mut |bytes| authorization.push(bytes.to_vec()));
+        let transaction = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let subject =
+            tidepool_toolchain::cell_plan::WorldCellAdmissionSubject::for_source_transaction(
+                transaction.origin(),
+                *self.admission_owner().identity.as_bytes(),
+                self.admission_owner().epoch(),
+                execution.session().0,
+                scope.0,
+                authorization,
+            )?;
+        let token = plan.issue_admission_token(subject, slots, expected_bindings)?;
+        let reservation = plan.reserve(token)?;
+        let digest = *reservation.admission_digest();
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),

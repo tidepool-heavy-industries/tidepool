@@ -1793,15 +1793,16 @@ pub(crate) struct CheckedValueImportAuthority {
 
 impl CheckedValueImportAuthority {
     /// Borrow only the exact rows actually selected by this preparation. The
-    /// output owner has already correlated each input reference with its
-    /// current occurrence, runtime identity and original issuing row.
+    /// checked program owner has already correlated each input reference with
+    /// its current occurrence, runtime identity and original issuing row, and
+    /// a raw preparation completion cannot reach this constructor.
     pub(crate) fn from_world_output(
-        output: &crate::compiler_world::WorldCellOutputAdmission,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
     ) -> Result<Self, CompileError> {
-        let operation = &output.validation.inventory;
-        let producer = output.reservation().plan().producer_sha256();
+        let operation = program.validation().inventory.as_ref();
+        let producer = program.reservation().plan().producer_sha256();
         let mut values = BTreeMap::<String, CapturedValueInterface>::new();
-        for original in &output.demanded_rows {
+        for original in program.demanded_rows() {
             crate::host_work::checkpoint()?;
             operation
                 .charge(1)

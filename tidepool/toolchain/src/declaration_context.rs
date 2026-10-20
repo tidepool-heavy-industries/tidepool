@@ -2038,7 +2038,53 @@ pub(crate) struct DemandNativeInputs {
     cold: Arc<RequestCompilerInputs>,
     demand: crate::artifact_inventory::DemandCompilerProjection,
     native_selection: NativeInputSelection,
+    permission_delta: IssuedNativePermissionDelta,
     work: DemandNativeInputsWork,
+}
+
+/// The exact rows one demand owner narrowed from its own acquired cold
+/// availability. The basis pointer prevents pairing this delta with another
+/// compiler owner; the old/new fact identities make each entry exact.
+pub(crate) struct IssuedNativePermissionDelta {
+    basis: Arc<RequestCompilerInputs>,
+    changed: BTreeMap<
+        ArtifactId,
+        (
+            NativeAvailabilitySnapshotFacts,
+            NativeAvailabilitySnapshotFacts,
+        ),
+    >,
+}
+
+impl IssuedNativePermissionDelta {
+    fn issue(
+        basis: Arc<RequestCompilerInputs>,
+        changed: BTreeMap<
+            ArtifactId,
+            (
+                NativeAvailabilitySnapshotFacts,
+                NativeAvailabilitySnapshotFacts,
+            ),
+        >,
+    ) -> Self {
+        Self { basis, changed }
+    }
+
+    /// A delta admits only the exact row facts its owner issued, only against
+    /// the same cold source support that owner projected.
+    pub(crate) fn admits(
+        &self,
+        source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        id: ArtifactId,
+        old: &NativeAvailabilitySnapshotFacts,
+        new: &NativeAvailabilitySnapshotFacts,
+    ) -> bool {
+        Arc::ptr_eq(&self.basis.source_support, source)
+            && self
+                .changed
+                .get(&id)
+                .is_some_and(|issued| issued.0 == *old && issued.1 == *new)
+    }
 }
 
 /// Executable payload rows remain paired with the exact scoped choices that
@@ -2109,6 +2155,7 @@ impl DemandNativeInputs {
         self.cold.source_support.project_demanded_inputs(
             &self.demand,
             &self.native_selection.availability,
+            &self.permission_delta,
             groups,
             operation,
         )
@@ -2490,6 +2537,21 @@ impl RequestCompilerInputs {
             )?;
         }
         availability.validate_role_coverage(demand.projection())?;
+        let mut changed = BTreeMap::new();
+        for row in availability.rows() {
+            let id = row.original.descriptor.id;
+            let previous = self
+                .native_selection
+                .availability
+                .issued_row(id)
+                .ok_or_else(|| failure("demanded native row was never issued"))?;
+            let old_facts = RequestNativeAvailability::row_snapshot_facts(previous)?;
+            let new_facts = RequestNativeAvailability::row_snapshot_facts(row)?;
+            if old_facts != new_facts {
+                changed.insert(id, (old_facts, new_facts));
+            }
+        }
+        let permission_delta = IssuedNativePermissionDelta::issue(Arc::clone(self), changed);
         Ok(DemandNativeInputs {
             cold: Arc::clone(self),
             demand,
@@ -2497,6 +2559,7 @@ impl RequestCompilerInputs {
                 availability,
                 advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
             },
+            permission_delta,
             work,
         })
     }
@@ -6475,12 +6538,14 @@ pub(crate) struct WorldSourceCompilationBinding {
 }
 
 impl WorldSourceCompilationBinding {
+    /// Retain the exact reservation and prepared segment carried by one issued
+    /// checked program. Raw preparation completion is not accepted here.
     pub(crate) fn from_output(
-        output: &crate::compiler_world::WorldCellOutputAdmission,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
         segment_index: usize,
     ) -> Result<Self, CompileError> {
         use sha2::Digest;
-        let segment = output
+        let segment = program
             .segments()
             .get(segment_index)
             .ok_or_else(|| failure("world source binding has no actual prepared segment"))?;
@@ -6488,9 +6553,9 @@ impl WorldSourceCompilationBinding {
         if hex(&segment_sha256) != segment.digest() {
             return Err(failure("world source segment digest is not canonical"));
         }
-        let plan = output.reservation().plan();
-        output
-            .validation
+        let plan = program.reservation().plan();
+        program
+            .validation()
             .inventory
             .charge(
                 plan.receipt()
@@ -6504,11 +6569,11 @@ impl WorldSourceCompilationBinding {
         context.update(b"Tidepool world source compilation context v1\0");
         context.update(plan.world().logical_id());
         context.update(plan_receipt_sha256);
-        context.update(output.reservation().admission_digest());
+        context.update(program.reservation().admission_digest());
         context.update(segment_sha256);
         context.update(plan.producer_sha256());
         Ok(Self {
-            reservation: Arc::clone(output.reservation()),
+            reservation: Arc::clone(program.reservation()),
             segment: Arc::clone(segment),
             plan_receipt_sha256,
             product_context_sha256: context.finalize().into(),
@@ -6520,6 +6585,39 @@ impl PartialEq for WorldSourceCompilationBinding {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.reservation, &other.reservation)
             && Arc::ptr_eq(&self.segment, &other.segment)
+    }
+}
+
+/// Content identity of the world compilation a demanded product belongs to.
+/// It carries no reservation, segment or checked-output authority; those stay
+/// with the checked program that issued the binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorldCompilationIdentity {
+    plan_receipt_sha256: [u8; 32],
+    product_context_sha256: [u8; 32],
+    segment_digest: String,
+}
+
+impl WorldCompilationIdentity {
+    fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
+        Self {
+            plan_receipt_sha256: binding.plan_receipt_sha256,
+            product_context_sha256: binding.product_context_sha256,
+            segment_digest: binding.segment.digest().to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        plan_receipt_sha256: [u8; 32],
+        product_context_sha256: [u8; 32],
+        segment_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            plan_receipt_sha256,
+            product_context_sha256,
+            segment_digest: segment_digest.into(),
+        }
     }
 }
 
@@ -6854,12 +6952,33 @@ pub(crate) struct DemandedWorldCompilerInputs<'a> {
     demand: DemandNativeInputs,
     groups: DemandCertifiedGroups,
     support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
-    binding: WorldSourceCompilationBinding,
+    binding: WorldCompilationIdentity,
     context: &'a Arc<ExactDeclarationContext>,
     checked_values: crate::checked_cell::CheckedValueImportAuthority,
 }
 
 impl<'a> DemandedWorldCompilerInputs<'a> {
+    /// Assemble the world product from the exact demand owner, its certified
+    /// groups and the semantic support it projected. The binding is content
+    /// identity only; the checked program remains the source of authority.
+    pub(crate) fn from_demand(
+        demand: DemandNativeInputs,
+        groups: DemandCertifiedGroups,
+        support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        binding: WorldCompilationIdentity,
+        context: &'a Arc<ExactDeclarationContext>,
+        checked_values: crate::checked_cell::CheckedValueImportAuthority,
+    ) -> Self {
+        Self {
+            demand,
+            groups,
+            support,
+            binding,
+            context,
+            checked_values,
+        }
+    }
+
     pub(crate) fn demand(&self) -> &DemandNativeInputs {
         &self.demand
     }
@@ -6870,6 +6989,14 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
 
     pub(crate) fn compilation_binding(&self) -> ProductCompilationBinding<'_> {
         ProductCompilationBinding::World(&self.binding)
+    }
+
+    pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
+        self.context
+    }
+
+    pub(crate) fn checked_values(&self) -> &crate::checked_cell::CheckedValueImportAuthority {
+        &self.checked_values
     }
 
     pub(crate) fn is_world_compilation(&self) -> bool {
@@ -6915,7 +7042,7 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum ProductCompilationBinding<'a> {
     Exact(&'a ExactCompilationRequest),
-    World(&'a WorldSourceCompilationBinding),
+    World(&'a WorldCompilationIdentity),
 }
 
 /// A legacy exact request identity cannot describe a world preparation.
@@ -8675,7 +8802,7 @@ struct ExactReceiptImport {
 /// Source facts decoded from the actual preparation's captured output owner.
 /// Semantic admission still requires its issued input and source selections.
 pub(crate) struct DecodedWorldSourceReceipt<'a> {
-    output: &'a crate::compiler_world::WorldCellOutputAdmission,
+    program: &'a crate::compiler_world::CheckedWorldCellProgram,
     aliases: Vec<PathBuf>,
     binding: WorldSourceCompilationBinding,
     source: DecodedExactCompilationReceipt,
@@ -8687,11 +8814,11 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
     pub(crate) fn demand_primary_inputs(&self) -> Result<DemandNativeInputs, CompileError> {
-        let operation = self.output.validation.inventory.as_ref();
+        let operation = self.program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| compiler_evidence_failure(error.into()))
         };
-        let cold = self.output.primary_compiler_inputs();
+        let cold = self.program.primary_compiler_inputs();
         let roles = cold.source_support.projection().snapshot_roles();
         let mut roots = BTreeSet::new();
         let mut native_roots = BTreeSet::new();
@@ -8725,7 +8852,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 excluded.insert(owner);
             }
         }
-        for row in &self.output.demanded_rows {
+        for row in self.program.demanded_rows() {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             let interface = row.certified_interface().interface();
@@ -8775,7 +8902,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     pub(crate) fn source_path_domain(
         &self,
     ) -> Result<crate::compiler_world::WorldSourcePathDomain<'_>, CompileError> {
-        self.output.source_path_domain(&self.aliases)
+        self.program.source_path_domain(&self.aliases)
     }
 
     /// Run the demanded-input chain for this world source and retain the
@@ -8790,21 +8917,21 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         receipt: &crate::certified_products::CertifiedReceipt,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<DemandedWorldCompilerInputs<'a>, CompileError> {
-        let operation = self.output.validation.inventory.as_ref();
+        let operation = self.program.validation().inventory.as_ref();
         let demand = self.demand_primary_inputs()?;
         let groups = demand.certify_receipt_groups(receipt, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
         let checked_values =
-            crate::checked_cell::CheckedValueImportAuthority::from_world_output(self.output)?;
-        let context = self.output.primary_context();
-        Ok(DemandedWorldCompilerInputs {
+            crate::checked_cell::CheckedValueImportAuthority::from_world_output(self.program)?;
+        let context = self.program.primary_context();
+        Ok(DemandedWorldCompilerInputs::from_demand(
             demand,
             groups,
             support,
-            binding: self.binding.clone(),
+            WorldCompilationIdentity::from_binding(&self.binding),
             context,
             checked_values,
-        })
+        ))
     }
 
     pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
@@ -8813,15 +8940,15 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
 }
 
 pub(crate) fn decode_world_source_receipt<'a>(
-    output: &'a crate::compiler_world::WorldCellOutputAdmission,
+    program: &'a crate::compiler_world::CheckedWorldCellProgram,
     segment_index: usize,
     receipt_relative: &Path,
 ) -> Result<DecodedWorldSourceReceipt<'a>, CompileError> {
-    let operation = output.validation.inventory.as_ref();
-    let binding = WorldSourceCompilationBinding::from_output(output, segment_index)?;
-    let output_root = output.directory.path();
-    let common_files = &output.common_files;
-    let captured_files = &output.captured_files;
+    let operation = program.validation().inventory.as_ref();
+    let binding = WorldSourceCompilationBinding::from_output(program, segment_index)?;
+    let output_root = program.directory().path();
+    let common_files = program.common_files();
+    let captured_files = program.captured_files();
     if !output_root.is_absolute() {
         return Err(failure("world source output owner is not absolute"));
     }
@@ -8886,7 +9013,7 @@ pub(crate) fn decode_world_source_receipt<'a>(
         operation,
     )?;
     Ok(DecodedWorldSourceReceipt {
-        output,
+        program,
         aliases,
         binding,
         source,
@@ -18862,15 +18989,31 @@ mod tests {
             assert_eq!(binding.original_ordinal, key.original_ordinal);
         }
 
-        // R8: a narrowed row is refused through the typed boundary, never
-        // through string equality or a success against cold authority.
-        // `for_compiler_roots` restricts every dependency row to the demanded
-        // groups, so a toolchain-local demand narrows at least one row. The
-        // constructor therefore cannot certify until the Host supplies the
-        // bounded issuance named by this variant.
-        let refused = selected
+        // R8: `for_compiler_roots` restricts every dependency row to the
+        // demanded groups, so the demand owner itself must issue the exact
+        // changed-row facts. Its issued delta admits only those rows.
+        assert!(
+            !selected.permission_delta.changed.is_empty(),
+            "the narrowed demand must issue at least one changed native row"
+        );
+        let support = selected
             .semantic_source_support(&groups, &operation)
-            .expect_err("a narrowed demand must not certify");
+            .expect("the demand owner issues its own narrowed-row delta");
+
+        // The same narrowed rows are refused when the demand owner has issued
+        // no delta for them: echoed facts alone are not permission.
+        let demand = cold
+            .source_support
+            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .unwrap();
+        let mut unissued = cold
+            .demanded_native_inputs(demand, &roots, &operation)
+            .unwrap();
+        unissued.permission_delta =
+            IssuedNativePermissionDelta::issue(Arc::clone(&cold), BTreeMap::new());
+        let refused = unissued
+            .semantic_source_support(&groups, &operation)
+            .expect_err("an unissued narrowed row must not certify");
         match refused {
             CompileError::CompilerEvidence(error) => match *error {
                 CertificationError::ChangedNativePermissionRequiresIssuance { id, old, new } => {
@@ -18886,13 +19029,8 @@ mod tests {
         }
 
         // R8: a pointer-distinct but semantically equal native row is the same
-        // permission. A genuinely changed row is a typed refusal carrying both
-        // fact identities; it is never accepted by pointer equality alone.
-        //
-        // The demanded availability narrows rows, so the accept branch cannot
-        // be observed end to end here; the discriminators below are that a
-        // pointer-distinct equal row keeps one fact identity, while a changed
-        // row is refused with both identities named.
+        // permission. A genuinely changed row carries a different fact
+        // identity; it is never accepted by pointer equality alone.
         let parent_id = cold.projection().snapshot_roles()[&root]
             .original()
             .unwrap();
@@ -18910,17 +19048,7 @@ mod tests {
             "a pointer-distinct equal row carries the same permission facts"
         );
 
-        // Every demanded row is narrowed here (mode and/or contribution
-        // membership), so no row in this availability equals its cold facts;
-        // an equal-facts acceptance cannot be observed end to end until the
-        // Host issues the bounded delta. The predicate under test is still
-        // semantic: equal facts share one identity above, while the change
-        // below is refused with both identities named.
-
-        // A changed row must not keep the issued permission identity. This is
-        // asserted on the facts themselves because the refusal above already
-        // fires on the first narrowed dependency, before any parent-row
-        // comparison can be observed through this entry point.
+        // A changed row must not keep the issued permission identity.
         let mut changed_row = (*old).clone();
         changed_row.mode = match changed_row.mode {
             NativeTransportMode::Full => NativeTransportMode::IssuedGroups,
@@ -18938,6 +19066,29 @@ mod tests {
             "a changed row must not share the issued permission identity"
         );
         selected.native_selection.availability = original_availability;
+
+        // The accepted support produces the real World product: a World
+        // compilation binding, not an exact request identity, and its
+        // compiler inputs come from the issued delta path.
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
+        let binding = WorldCompilationIdentity::fixture([1; 32], [2; 32], "world-segment");
+        let world = DemandedWorldCompilerInputs::from_demand(
+            selected,
+            groups,
+            support,
+            binding,
+            &context,
+            crate::checked_cell::CheckedValueImportAuthority::default(),
+        );
+        assert!(world.is_world_compilation());
+        assert!(matches!(
+            world.compilation_binding(),
+            ProductCompilationBinding::World(_)
+        ));
+        assert!(Arc::ptr_eq(world.demand().cold(), &cold));
+        world
+            .certified_selection(&operation)
+            .expect("the accepted world product selects its certified inputs");
     }
 
     #[test]

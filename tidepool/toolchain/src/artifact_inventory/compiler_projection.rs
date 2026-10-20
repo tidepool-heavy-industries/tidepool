@@ -1041,6 +1041,7 @@ impl CompilerSourceSupport {
         self: &Arc<Self>,
         demand: &DemandCompilerProjection,
         availability: &crate::declaration_context::RequestNativeAvailability,
+        issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
         groups: &crate::declaration_context::DemandCertifiedGroups,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Arc<Self>, CompileError> {
@@ -1129,19 +1130,21 @@ impl CompilerSourceSupport {
                 // same permission. Only a genuinely narrowed or changed row
                 // needs its own bounded issuance; reusing the broader cold
                 // leaf would change authority.
-                let facts_id = |row: &Arc<
-                    crate::declaration_context::NativeTransportAvailability,
-                >| -> Result<[u8; 32], CompileError> {
-                    crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)?
-                        .identity()
-                };
-                let (old_facts, new_facts) = (facts_id(old)?, facts_id(row)?);
-                if old_facts != new_facts {
+                let old_facts =
+                    crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(old)?;
+                let new_facts =
+                    crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)?;
+                let (old_id, new_id) = (old_facts.identity()?, new_facts.identity()?);
+                if old_id != new_id && !issued_delta.admits(self, id, &old_facts, &new_facts) {
+                    // Rows narrowed by this demand owner are admitted only by
+                    // the exact delta it issued for them. A raw narrower row,
+                    // another owner's delta or an unissued fact identity is a
+                    // typed refusal, never a permission.
                     return Err(CompileError::CompilerEvidence(Box::new(
                         crate::certified_products::CertificationError::ChangedNativePermissionRequiresIssuance {
                             id,
-                            old: old_facts,
-                            new: new_facts,
+                            old: old_id,
+                            new: new_id,
                         },
                     )));
                 }

@@ -772,6 +772,13 @@ struct SourceCompilerHolds {
     leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceCompilerTransaction {
+    /// The unforgeable origin of the compiler transaction this owner opened.
+    /// Callers that need to frame source-admission facts present this exact
+    /// capability; a copied or foreign transaction cannot substitute it.
+    pub(super) fn origin(&self) -> &crate::CompilerTransactionOrigin {
+        &self.origin
+    }
+
     pub(super) fn admit(
         &self,
         target: Option<Arc<super::RuntimeLexicalScopeLease>>,
