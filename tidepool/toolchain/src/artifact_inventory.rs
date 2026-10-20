@@ -516,9 +516,46 @@ impl TargetNativeInputs {
                 "native group products belong to another target acquisition",
             ));
         }
+        let mut links = Vec::with_capacity(self.imports().len());
+        let mut needs_retained_owner = false;
+        for import in self.imports() {
+            crate::host_work::checkpoint()?;
+            use crate::certified_products::{PendingImportOwner, SelectedNativeImport};
+            match import {
+                PendingImportOwner::Source { owner, original_ordinal, binder } => {
+                    // These roots were chosen by this target's admission. A
+                    // historical descendant cannot supply a direct root slot.
+                    let mut matches = self.admitted.selection.roots.iter().filter_map(|binding| {
+                        let row = groups.get(*binding)?;
+                        (row.owner() == owner && binding.original_ordinal == *original_ordinal)
+                            .then_some((*binding, row))
+                    });
+                    let (binding, row) = matches.next()
+                        .ok_or_else(|| failure("target source slot lacks its exact admitted root"))?;
+                    if matches.next().is_some() {
+                        return Err(failure("target source slot has competing admitted roots"));
+                    }
+                    let value = row.group().exported_values()
+                        .find_map(|(identity, value)| (identity == binder).then_some(value))
+                        .ok_or_else(|| failure("target source slot lacks its authenticated export"))?;
+                    links.push(SelectedNativeImport::Source { binding, value });
+                }
+                PendingImportOwner::Package { binder, interface_digest, .. } => {
+                    links.push(SelectedNativeImport::Package {
+                        identity: binder.clone(), interface_digest: *interface_digest,
+                    });
+                }
+                PendingImportOwner::Retained { .. } | PendingImportOwner::RetainedPackage { .. } => {
+                    needs_retained_owner = true;
+                }
+            }
+        }
         Ok(CertifiedTargetNativeInputs {
             target: self,
             groups,
+            links: if needs_retained_owner { TargetNativeLinks::RetainedInputs } else {
+                TargetNativeLinks::Immutable(links.into())
+            },
         })
     }
 
@@ -620,6 +657,13 @@ impl TargetNativeInputs {
 pub(crate) struct CertifiedTargetNativeInputs {
     target: TargetNativeInputs,
     groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
+    links: TargetNativeLinks,
+}
+
+#[derive(Debug)]
+enum TargetNativeLinks {
+    Immutable(Arc<[crate::certified_products::SelectedNativeImport]>),
+    RetainedInputs,
 }
 
 impl std::ops::Deref for CertifiedTargetNativeInputs {
@@ -640,6 +684,7 @@ impl CertifiedTargetNativeInputs {
         Ok(ResolvedNativeSourceTarget {
             target: self.target.resolve()?,
             groups: &self.groups,
+            links: &self.links,
         })
     }
 }
@@ -648,6 +693,7 @@ impl CertifiedTargetNativeInputs {
 pub(crate) struct ResolvedNativeSourceTarget<'a> {
     target: ResolvedNativeTarget<'a>,
     groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
+    links: &'a TargetNativeLinks,
 }
 
 impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
@@ -656,6 +702,17 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn target_link_requirements(
+        &self,
+    ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
+        match self.links {
+            TargetNativeLinks::Immutable(links) => Ok(links),
+            TargetNativeLinks::RetainedInputs => Err(failure(
+                "closed target requires actual retained input ownership",
+            )),
+        }
+    }
+
     pub(crate) fn group_imports(
         &self,
         binding: NativeGroupBinding,
