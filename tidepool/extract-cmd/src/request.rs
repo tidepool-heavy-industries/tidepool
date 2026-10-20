@@ -3205,7 +3205,10 @@ mod tests {
         let mut request = ExtractRequest::default();
         request.world_cell_plan(ordered.clone()).unwrap();
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
-        assert_eq!(decoded.fields, vec![Field::WorldCellPlan(ordered)]);
+        let [Field::WorldCellPlan(actual)] = decoded.fields.as_slice() else {
+            panic!("expected exactly one decoded World cell plan");
+        };
+        assert_eq!(actual, &ordered);
     }
 
     #[test]
