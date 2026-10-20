@@ -3,6 +3,8 @@
 use tidepool_runtime::session::WorkbenchNotPublishedReason;
 
 mod reload;
+#[cfg(test)]
+pub(crate) use reload::reload_publication_result;
 
 use super::*;
 use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, WorkbenchDispatch};

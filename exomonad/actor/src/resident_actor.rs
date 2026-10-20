@@ -42,6 +42,8 @@ pub(crate) mod invocation_work;
 mod jev_form_runtime_tests;
 mod owned_workbench;
 #[cfg(test)]
+pub(crate) use owned_workbench::reload_publication_result;
+#[cfg(test)]
 mod root_preparation_tests;
 #[cfg(test)]
 mod test_forest;
