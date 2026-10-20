@@ -34,7 +34,7 @@ fn pending(
 }
 
 fn work() -> Arc<InvocationWork> {
-    InvocationWork::new(
+    InvocationWork::new_neutral(
         ActorRef {
             id: crate::ActorId(45),
             incarnation: crate::Incarnation::FIRST,

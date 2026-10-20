@@ -642,8 +642,10 @@ async fn refused_invocation_child_retains_physical_cleanup_before_run_finalizati
         .await
         .unwrap()
         .unwrap();
-    let work =
-        invocation_work::InvocationWork::new(parent.identity(), RequestReservationOwner::Scope(0));
+    let work = invocation_work::InvocationWork::new_neutral(
+        parent.identity(),
+        RequestReservationOwner::Scope(0),
+    );
     assert!(work
         .cleanup(&forest.environment, &kernel)
         .await

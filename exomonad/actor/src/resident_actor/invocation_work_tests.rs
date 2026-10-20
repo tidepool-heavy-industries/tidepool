@@ -16,11 +16,105 @@ fn reservation() -> RequestReservationOwner {
     }
 }
 
+#[tokio::test]
+async fn fenced_source_preserves_admitted_callback_cleanup_and_refuses_new_activation() {
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    use tidepool_runtime::session::PersistentSession;
+    let fixture = Fixture::start().await;
+    let actor = fixture.actor.identity();
+    let mut session = PersistentSession::new(None, 1024);
+    let scope = session.mint_notebook_scope_with_lease(None).unwrap();
+    let world = BootstrapWorld::new(None);
+    world.adopt_scope(scope.clone()).unwrap();
+    let source = SourceDependency::World(world);
+    let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+    let reservation = RequestReservationOwner::Route(crate::WatchId(1));
+    let work = WorkbenchExecutions::admit_callback_root(
+        &journal,
+        actor,
+        reservation.clone(),
+        source.clone(),
+    )
+    .unwrap();
+    let fence = scope.source_admission().fence().unwrap();
+    let borrowed = journal
+        .lock()
+        .find_callback_root(actor, &reservation, &source)
+        .unwrap();
+    assert!(Arc::ptr_eq(&borrowed, &work));
+    assert!(
+        WorkbenchExecutions::admit_callback_root(&journal, actor, reservation, source.clone())
+            .is_err()
+    );
+    assert!(WorkbenchExecutions::admit_callback_root(
+        &journal,
+        actor,
+        RequestReservationOwner::Route(crate::WatchId(2)),
+        source
+    )
+    .is_err());
+    assert_eq!(journal.lock().invocation_work().len(), 1);
+    fixture.cleanup(&work).await;
+    assert!(work.cleanup_observation().unwrap().uncertainty().is_none());
+    assert!(fixture.actor.terminal().get().is_none());
+    fence
+        .reopen_with(&scope, |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    fixture.finish().await;
+}
+
+#[test]
+fn callback_registration_racing_source_fence_is_captured_or_refused() {
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    use tidepool_runtime::session::PersistentSession;
+    for _ in 0..32 {
+        let actor = ActorRef::first(crate::ActorId(1));
+        let mut session = PersistentSession::new(None, 1024);
+        let scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let world = BootstrapWorld::new(None);
+        world.adopt_scope(scope.clone()).unwrap();
+        let source = SourceDependency::World(world);
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let start = std::sync::Barrier::new(2);
+        let (admitted, (fence, captured)) = std::thread::scope(|threads| {
+            let registration = threads.spawn(|| {
+                start.wait();
+                WorkbenchExecutions::admit_callback_root(&journal, actor, reservation(), source)
+            });
+            let capture = threads.spawn(|| {
+                start.wait();
+                let fence = scope.source_admission().fence().unwrap();
+                let captured = journal.lock().invocation_work();
+                (fence, captured)
+            });
+            (registration.join().unwrap(), capture.join().unwrap())
+        });
+        match admitted {
+            Ok(work) => {
+                assert_eq!(captured.len(), 1);
+                assert!(Arc::ptr_eq(&captured[0], &work));
+            }
+            Err(_) => assert!(captured.is_empty()),
+        }
+        fence
+            .reopen_with(&scope, |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
+    }
+}
+
 #[test]
 fn nested_scope_tokens_fence_exact_owner_and_closed_ancestry() {
     let owner = ActorRef::first(crate::ActorId(1));
-    let root = InvocationWork::new(owner, reservation());
-    let sibling_root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
+    let sibling_root = InvocationWork::new_neutral(owner, reservation());
     let child = root.new_scope().unwrap();
     let nested = child.new_scope().unwrap();
     let sibling = root.new_scope().unwrap();
@@ -57,7 +151,7 @@ fn nested_scope_tokens_fence_exact_owner_and_closed_ancestry() {
 #[test]
 fn scope_construction_provenance_is_independent_of_cleanup_transfer() {
     let owner = ActorRef::first(crate::ActorId(1));
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
     let requests = RequestRegistry::default();
     let reserve = |work: &InvocationWork| {
@@ -103,7 +197,7 @@ fn scope_construction_provenance_is_independent_of_cleanup_transfer() {
 #[test]
 fn escaped_scope_cannot_admit_after_parent_is_dropped_or_publishing() {
     let owner = ActorRef::first(crate::ActorId(1));
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
     assert!(root.begin_publication());
     assert!(scope.with_admission(|| ()).is_err());
@@ -119,7 +213,7 @@ proptest::proptest! {
         close in 0usize..32,
     ) {
         let owner = ActorRef::first(crate::ActorId(1));
-        let root = InvocationWork::new(owner, reservation());
+        let root = InvocationWork::new_neutral(owner, reservation());
         let mut nodes = vec![root.clone()];
         let mut parent_indices = vec![None];
         for selected in parents {
@@ -147,7 +241,7 @@ proptest::proptest! {
 #[test]
 fn scope_transfer_gate_locks_shared_ancestry_once_and_refuses_closed_destination() {
     let owner = ActorRef::first(crate::ActorId(1));
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let source = root.new_scope().unwrap();
     let target = root.new_scope().unwrap();
     let calls = AtomicUsize::new(0);
@@ -171,7 +265,7 @@ fn scope_transfer_gate_locks_shared_ancestry_once_and_refuses_closed_destination
 async fn nested_scope_cleanup_is_local_and_parent_cleanup_retains_confirmed_children() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
     let nested = scope.new_scope().unwrap();
     let (parent_job, parent_backend) = fixture.pending_command().await;
@@ -208,9 +302,9 @@ async fn command_retention_moves_probe_cleanup_without_changing_actor_authority(
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
-    let target = InvocationWork::new(owner, reservation());
+    let target = InvocationWork::new_neutral(owner, reservation());
     let (job, backend) = fixture.pending_command().await;
     let (probe, probe_backend) = fixture.pending_command().await;
     jobs.set_source_probe(&job, probe.clone()).unwrap();
@@ -252,10 +346,10 @@ async fn command_retention_refusal_preserves_cleanup_and_actor_retain_is_reversi
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let source = InvocationWork::new(owner, reservation());
+    let source = InvocationWork::new_neutral(owner, reservation());
     let closed = source.new_scope().unwrap();
     let target = source.new_scope().unwrap();
-    let foreign = InvocationWork::new(ActorRef::first(crate::ActorId(999)), reservation());
+    let foreign = InvocationWork::new_neutral(ActorRef::first(crate::ActorId(999)), reservation());
     let (job, backend) = fixture.pending_command().await;
     source.register_command_with_jobs(jobs, &job).unwrap();
     closed.close();
@@ -299,7 +393,7 @@ async fn competing_command_retention_has_one_cleanup_owner() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let source = InvocationWork::new(owner, reservation());
+    let source = InvocationWork::new_neutral(owner, reservation());
     let left = source.new_scope().unwrap();
     let right = source.new_scope().unwrap();
     let (job, backend) = fixture.pending_command().await;
@@ -343,7 +437,7 @@ async fn run_owned_command_and_probe_survive_actor_retirement_until_run_cleanup(
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let scope = work.new_scope().unwrap();
     let (job, backend) = fixture.pending_command().await;
     let (probe, probe_backend) = fixture.pending_command().await;
@@ -400,7 +494,7 @@ async fn run_command_can_return_to_scope_and_refused_transfer_keeps_run_attachme
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let closed = work.new_scope().unwrap();
     let target = work.new_scope().unwrap();
     let (job, backend) = fixture.pending_command().await;
@@ -447,7 +541,7 @@ async fn closed_run_refuses_command_transfer_without_detaching_actor_cleanup() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let (job, backend) = fixture.pending_command().await;
     work.register_command_with_jobs(jobs, &job).unwrap();
     fixture.directory.close_run_admission().await;
@@ -473,7 +567,7 @@ async fn closed_run_refuses_command_transfer_without_detaching_actor_cleanup() {
 async fn scope_worker_transfer_preserves_exact_identity_without_scope_retirement() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
     let (send, receive) = tokio::sync::oneshot::channel();
     let worker = fixture
@@ -518,7 +612,7 @@ async fn scope_worker_transfer_preserves_exact_identity_without_scope_retirement
 #[test]
 fn scope_request_transfer_refuses_closed_parent_and_preserves_child_rollback() {
     let owner = ActorRef::first(crate::ActorId(1));
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
     let target = root.new_scope().unwrap();
     let requests = RequestRegistry::default();
@@ -554,7 +648,7 @@ fn scope_request_transfer_refuses_closed_parent_and_preserves_child_rollback() {
 async fn scope_realm_cleanup_failure_is_retained_for_parent_retry() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let scope = root.new_scope().unwrap();
     let realm = RealmId::fresh();
     let descriptor = ActorDescriptor::new(
@@ -588,7 +682,7 @@ async fn scope_realm_cleanup_failure_is_retained_for_parent_retry() {
 fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     let owner = ActorRef::first(crate::ActorId(1));
     let reservation = reservation();
-    let work = InvocationWork::new(owner, reservation.clone());
+    let work = InvocationWork::new_neutral(owner, reservation.clone());
     assert!(work.matches(owner, &reservation));
     assert!(!work.matches(ActorRef::first(crate::ActorId(2)), &reservation));
     assert!(!work.matches(
@@ -602,7 +696,7 @@ fn invocation_membership_fences_actor_incarnation_and_reservation_attempt() {
     assert!(!work.matches(owner, &RequestReservationOwner::Route(crate::WatchId(7))));
 
     let route = RequestReservationOwner::Route(crate::WatchId(7));
-    let route_work = InvocationWork::new(owner, route.clone());
+    let route_work = InvocationWork::new_neutral(owner, route.clone());
     assert!(route_work.matches(owner, &route));
     assert!(!route_work.matches(owner, &RequestReservationOwner::Route(crate::WatchId(8))));
     assert!(!route_work.matches(owner, &reservation));
@@ -625,7 +719,7 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
     let services = crate::capabilities::WorkbenchServices::new();
     use crate::local_actor::WorkerStartupAdmission;
     let actor = ActorRef::first(crate::ActorId(1));
-    let work = InvocationWork::new(actor, reservation());
+    let work = InvocationWork::new_neutral(actor, reservation());
     let owner = compiler_owner(&services, &work);
     assert!(owner.admit_publication().is_err());
     assert!(work.begin_publication());
@@ -728,7 +822,7 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
 #[test]
 fn hosted_refusal_settles_the_invocations_partial_compiler_registration() {
     let services = crate::capabilities::WorkbenchServices::new();
-    let work = InvocationWork::new(ActorRef::first(crate::ActorId(1)), reservation());
+    let work = InvocationWork::new_neutral(ActorRef::first(crate::ActorId(1)), reservation());
     let control = crate::WorkbenchExecutionControl::untracked();
     let response = Ok(crate::KernelStep::Continue(
         tidepool_runtime::session::WorkbenchResponse {
@@ -770,7 +864,7 @@ fn hosted_refusal_settles_the_invocations_partial_compiler_registration() {
 async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_cancellation() {
     let services = crate::capabilities::WorkbenchServices::new();
     let fixture = Fixture::start().await;
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     let control = crate::WorkbenchExecutionControl::untracked();
     let owner = services
         .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
@@ -803,7 +897,7 @@ async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_canc
 async fn publication_failure_before_first_stage_closes_without_pending_obligation() {
     let services = crate::capabilities::WorkbenchServices::new();
     let fixture = Fixture::start().await;
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     let owner = compiler_owner(&services, &work);
     assert!(work.begin_publication());
     work.close();
@@ -1118,7 +1212,7 @@ impl Fixture {
 #[tokio::test]
 async fn closed_invocation_refuses_every_work_registration() {
     let fixture = Fixture::start().await;
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     work.close();
     assert!(matches!(
         work.register_command("late-command".into()),
@@ -1158,7 +1252,7 @@ async fn invocation_cleanup_releases_transient_watch_without_cancelling_target()
         )
         .unwrap();
     let subscription = requests.subscribe_watch(owner, watch).unwrap();
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_transient_watch(watch).unwrap();
 
     fixture.cleanup(&work).await;
@@ -1228,12 +1322,13 @@ async fn callback_without_snapshot_never_borrows_recipient_program_authority() {
     ));
     assert!(behavior
         .actor_effect_owner(actor)
+        .unwrap()
         .issued_snapshot()
         .is_some());
     let callback = CallbackExecution::from_context(original_context);
     behavior.actor_callback_execution = Some(callback.relocated(recipient_context));
     let fence = original_scope.source_admission().fence().unwrap();
-    let owner = behavior.actor_effect_owner(actor);
+    let owner = behavior.actor_effect_owner(actor).unwrap();
     assert!(
         owner.issued_snapshot().is_none(),
         "metadata absence cannot select recipient source"
@@ -1251,6 +1346,7 @@ async fn callback_without_snapshot_never_borrows_recipient_program_authority() {
     behavior.actor_callback_execution = None;
     assert!(behavior
         .actor_effect_owner(actor)
+        .unwrap()
         .issued_snapshot()
         .unwrap()
         .source_dependency()
@@ -1294,7 +1390,7 @@ async fn failed_actor_route_releases_transient_leases_before_next_callback() {
     {
         let provenance = RequestReservationOwner::Route(crate::WatchId(700 + ordinal as u64));
         behavior.active_route_reservation_owner = Some(provenance.clone());
-        let effects = behavior.actor_effect_owner(owner);
+        let effects = behavior.actor_effect_owner(owner).unwrap();
         assert!(
             effects.invocation_work().is_none(),
             "callback leases do not alter request defaults"
@@ -1355,8 +1451,16 @@ async fn failed_actor_route_releases_transient_leases_before_next_callback() {
         ));
     }
     behavior.active_route_reservation_owner = None;
-    let actor_root = behavior.actor_effect_owner(owner).ephemeral_work().unwrap();
-    let same_root = behavior.actor_effect_owner(owner).ephemeral_work().unwrap();
+    let actor_root = behavior
+        .actor_effect_owner(owner)
+        .unwrap()
+        .ephemeral_work()
+        .unwrap();
+    let same_root = behavior
+        .actor_effect_owner(owner)
+        .unwrap()
+        .ephemeral_work()
+        .unwrap();
     assert!(Arc::ptr_eq(&actor_root, &same_root));
     assert_eq!(behavior.retained_scope_roots().len(), 4);
     assert!(
@@ -1574,7 +1678,7 @@ async fn invocation_cleanup_keeps_cancellation_failure_beside_clean_result() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
     let refusal = CommandError::CommandUnavailable("controlled cancellation refusal".into());
@@ -1605,7 +1709,7 @@ async fn invocation_cleanup_observation_timeout_retains_admitted_cancellation_fo
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(jobs, &job).unwrap();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     *backend.cancel_gate.lock() = Some(gate.clone());
@@ -1642,7 +1746,7 @@ async fn dropped_invocation_cleanup_waiter_retains_admitted_cancellation_for_ret
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(jobs, &job).unwrap();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     *backend.cancel_gate.lock() = Some(gate.clone());
@@ -1670,7 +1774,7 @@ async fn owned_command_detach_survives_cleanup_and_borrowed_detach_is_unauthoriz
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
     let borrower = ActorRef::first(crate::ActorId(owner.id.0 + 100));
@@ -1693,7 +1797,7 @@ async fn owned_command_detach_survives_cleanup_and_borrowed_detach_is_unauthoriz
         ),
         Err(CommandError::CommandUnauthorized)
     );
-    let borrowed_work = InvocationWork::new(borrower, reservation());
+    let borrowed_work = InvocationWork::new_neutral(borrower, reservation());
     assert_eq!(
         borrowed_work.detach_command(jobs, borrower, &job),
         Err(CommandError::CommandUnauthorized)
@@ -1837,7 +1941,7 @@ async fn blocked_settlement_notice_does_not_prevent_invocation_cancellation() {
     let mut fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
 
@@ -1918,8 +2022,8 @@ async fn sibling_invocation_cannot_detach_same_actor_command() {
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
     let (job, backend) = fixture.pending_command().await;
-    let first = InvocationWork::new(owner, reservation());
-    let sibling = InvocationWork::new(owner, reservation());
+    let first = InvocationWork::new_neutral(owner, reservation());
+    let sibling = InvocationWork::new_neutral(owner, reservation());
     sibling
         .register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
@@ -1948,7 +2052,7 @@ async fn concurrent_invocation_cleanup_cancels_owned_command_once() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
@@ -1977,7 +2081,7 @@ async fn invocation_cleanup_preserves_completed_worker_terminal() {
         .await
         .unwrap();
     let _worker_context = receive.await.unwrap();
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     work.register_worker(worker.clone()).unwrap();
     let completed = ActorTerminal {
         kind: ActorExitKind::Completed,
@@ -2097,7 +2201,7 @@ async fn invocation_cleanup_cancels_owned_command_once_and_closes_detach() {
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
     let (job, backend) = fixture.pending_command().await;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
     work.register_command_with_jobs(&fixture.environment.commands, &job)
@@ -2148,7 +2252,7 @@ async fn interrupted_failed_admission_cleanup_retains_worker_for_retry() {
         .unwrap();
     let _worker_context = receive.await.unwrap();
     let child = worker.identity();
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     work.retain_aborted_children(&fixture.kernel, &[child])
         .await;
     assert!(work.owns_worker(child));
@@ -2197,7 +2301,7 @@ async fn unresolved_failed_admission_worker_remains_uncertain_across_cleanup_ret
         incarnation: crate::Incarnation(2),
     };
     assert!(fixture.kernel.resolve(missing).await.unwrap().is_none());
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     work.retain_aborted_children(&fixture.kernel, &[missing])
         .await;
     for _ in 0..2 {
@@ -2229,7 +2333,7 @@ async fn invocation_request_cleanup_retains_target_acknowledgment_without_retiri
     let _worker_context = receive.await.unwrap();
     let owner = fixture.actor.identity();
     let target = worker.identity();
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let requests = &fixture.environment.requests;
     let request = requests.reserve_for_operation(
         owner,
@@ -2287,7 +2391,7 @@ async fn invocation_request_cleanup_retains_target_acknowledgment_without_retiri
 async fn invocation_cleanup_observes_request_closure_after_owned_workers_retire() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let gate = Arc::new(ShutdownGate {
         entered: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
@@ -2375,7 +2479,7 @@ async fn detached_invocation_request_survives_scope_cleanup_until_target_replies
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let requests = &fixture.environment.requests;
     let request = requests.reserve_for_operation(
         owner,
@@ -2413,7 +2517,7 @@ async fn command_detach_preserves_linked_source_probe_after_invocation_cleanup()
     let (job, backend) = fixture.pending_command().await;
     let (probe, probe_backend) = fixture.pending_command().await;
     jobs.set_source_probe(&job, probe.clone()).unwrap();
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     work.register_command_with_jobs(&fixture.environment.commands, &job)
         .unwrap();
     work.register_command_with_jobs(&fixture.environment.commands, &probe)
@@ -2440,7 +2544,7 @@ async fn command_detach_preserves_linked_source_probe_after_invocation_cleanup()
 #[tokio::test(start_paused = true)]
 async fn dropped_scoped_worker_start_retains_exact_kernel_and_host_cleanup_uncertainty() {
     let mut fixture = Fixture::start().await;
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     let gate = Arc::new(ShutdownGate {
         entered: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
@@ -2530,7 +2634,7 @@ async fn dropped_scoped_worker_start_retains_exact_kernel_and_host_cleanup_uncer
 #[tokio::test]
 async fn closed_invocation_refuses_real_scoped_spawn_before_worker_initialization() {
     let fixture = Fixture::start().await;
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     work.close();
     let gate = Arc::new(ShutdownGate {
         entered: tokio::sync::Semaphore::new(0),
@@ -2585,7 +2689,7 @@ async fn interrupted_scope_retirement_admission_retries_original_terminal_once()
         .unwrap();
     assert!(shutdown.cleanup.is_confirmed());
     task.await.unwrap();
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     work.register_worker(worker.clone()).unwrap();
     fixture
         .environment
@@ -2676,8 +2780,8 @@ async fn invocation_cleanup_rolls_back_unsubmitted_and_detached_original_reserva
     let mut fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
-    let work = InvocationWork::new(owner, reservation());
-    let sibling = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
+    let sibling = InvocationWork::new_neutral(owner, reservation());
     let requests = &fixture.environment.requests;
     let reserve = |scope: &InvocationWork| {
         requests.reserve_for_operation(
@@ -2745,7 +2849,7 @@ async fn interrupted_unsubmitted_rollback_notice_retries_original_watch_transiti
     let mut fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let requests = &fixture.environment.requests;
     let request = requests.reserve_for_operation(
         owner,
@@ -2846,7 +2950,7 @@ async fn interrupted_unsubmitted_rollback_notice_retries_original_watch_transiti
 async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
-    let root = InvocationWork::new(owner, reservation());
+    let root = InvocationWork::new_neutral(owner, reservation());
     let source = root.new_scope().unwrap();
     let destination = root.new_scope().unwrap();
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -2986,7 +3090,7 @@ async fn abandoned_command_transfer_reservation_preserves_actor_cleanup() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let (job, backend) = fixture.pending_command().await;
     work.register_command_with_jobs(jobs, &job).unwrap();
     let transfer = jobs
@@ -3055,7 +3159,7 @@ async fn command_transfer_send_refusal_preserves_source_cleanup_before_observer_
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
-    let work = InvocationWork::new(owner, reservation());
+    let work = InvocationWork::new_neutral(owner, reservation());
     let (job, backend) = fixture.pending_command().await;
     work.register_command_with_jobs(jobs, &job).unwrap();
     let original = {
@@ -3272,7 +3376,7 @@ fn model_descriptor(operation: exomonad_tool::ModelOperation) -> crate::ActorDes
 fn ordinary_model_binding_requires_grant_and_original_active_owner() {
     let actor = ActorRef::first(crate::ActorId(17));
     let factory = InvocationModelFactory::default();
-    let work = InvocationWork::new(actor, reservation());
+    let work = InvocationWork::new_neutral(actor, reservation());
     assert!(work
         .bind_model(
             Some(&factory),
@@ -3307,7 +3411,7 @@ async fn actor_and_record_model_steps_borrow_one_invocation_binding() {
     let context = descriptor.session_context(actor);
     for tool in [false, true] {
         let factory = InvocationModelFactory::default();
-        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let work = InvocationWork::new_neutral(actor, RequestReservationOwner::Scope(0));
         let retained = work.bind_model(Some(&factory), &descriptor).unwrap();
         let base = if tool {
             CurrentEffectOwner::Tool {
@@ -3410,7 +3514,7 @@ async fn actor_and_record_model_steps_borrow_one_invocation_binding() {
 async fn invocation_model_cleanup_awaits_retained_binding_and_preserves_uncertainty() {
     let fixture = Fixture::start().await;
     let factory = InvocationModelFactory::default();
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     let retained = work
         .bind_model(
             Some(&factory),
@@ -3462,7 +3566,7 @@ async fn invocation_model_cleanup_awaits_retained_binding_and_preserves_uncertai
 async fn invocation_model_settlement_timeout_retains_its_original_owner() {
     let fixture = Fixture::start().await;
     let factory = InvocationModelFactory::default();
-    let work = InvocationWork::new(fixture.actor.identity(), reservation());
+    let work = InvocationWork::new_neutral(fixture.actor.identity(), reservation());
     let retained = work
         .bind_model(
             Some(&factory),
@@ -3660,7 +3764,7 @@ mod form_source_admission {
     #[test]
     fn form_registration_uses_original_source_before_effects_and_retains_attempts() {
         let actor = ActorRef::first(crate::ActorId(811));
-        let work = InvocationWork::new(actor, reservation());
+        let work = InvocationWork::new_neutral(actor, reservation());
         let publication = FormPublication {
             actor,
             operation: None,
@@ -3763,4 +3867,45 @@ mod form_source_admission {
         assert_eq!(work.state.lock().forms.len(), before);
         assert_eq!(host.opens.load(Ordering::SeqCst), 4);
     }
+}
+#[test]
+fn selecting_source_is_shared_with_scopes_and_cannot_change_issuer() {
+    use super::InvocationSourceObservation;
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    let actor = ActorRef::first(crate::ActorId(1));
+    let work = InvocationWork::new_selecting(actor, reservation());
+    let scope = work.new_scope().unwrap();
+    assert!(matches!(
+        scope.source_observation(),
+        InvocationSourceObservation::Unclassified
+    ));
+    let issued = SourceDependency::World(BootstrapWorld::new(None));
+    work.bind_source(issued.clone()).unwrap();
+    assert!(
+        matches!(scope.source_observation(), InvocationSourceObservation::Source(source) if source == &issued)
+    );
+    scope.bind_source(issued.clone()).unwrap();
+    assert!(matches!(
+        scope.bind_source(SourceDependency::World(BootstrapWorld::new(None))),
+        Err(super::InvocationSourceBindingError::DifferentSource)
+    ));
+    assert!(
+        matches!(work.source_observation(), InvocationSourceObservation::Source(source) if source == &issued)
+    );
+}
+
+#[test]
+fn neutral_resource_custody_cannot_be_relabelled_as_source_execution() {
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    let actor = ActorRef::first(crate::ActorId(1));
+    let work = InvocationWork::new_neutral(actor, reservation());
+    let scope = work.new_scope().unwrap();
+    assert!(matches!(
+        scope.bind_source(SourceDependency::World(BootstrapWorld::new(None))),
+        Err(super::InvocationSourceBindingError::NeutralOwner)
+    ));
+    assert!(matches!(
+        work.source_observation(),
+        super::InvocationSourceObservation::Neutral
+    ));
 }

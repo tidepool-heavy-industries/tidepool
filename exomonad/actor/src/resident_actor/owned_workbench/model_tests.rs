@@ -97,7 +97,7 @@ fn execution_with_id(
         execution: request.execution_id().unwrap().clone(),
         attempt: crate::request::WorkbenchReservationAttempt::fresh(),
     };
-    let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
+    let invocation_work = InvocationWork::new_neutral(context.actor, reservation_owner.clone());
     let control = crate::WorkbenchExecutionControl::untracked();
     let cleanup = workbench
         .continuation_cleanup_owner(

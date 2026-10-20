@@ -21,7 +21,7 @@ that draft. Existing detailed service/runtime plans remain applicable.
 | Reserve | Runtime admission owner | The same plan, purpose, source relationship, operation origin, slots and item generations |
 | Prepare/emit | Guarded Haskell compiler operation | One correlated collection of real item outputs and demanded source/native dependencies |
 | Admit physical output | Existing toolchain output/checked-item issuers | Same captured files, certificate, producer, plan/reservation, source descriptions and operation origin |
-| Settle/seal | Existing compiler transaction owner and runtime finish | Matching END/cancellation observation, then existing executable `CellProgram` and checked items |
+| Settle/seal | Existing compiler transaction owner and runtime finish | Opaque settled runtime bundle containing the same admission, program and cancellation observer |
 | Prepare native/install | Existing operation owner, then runtime machine | Coupled image/metadata/item; fresh liveness checks at install |
 | Advance private world | Item settlement and held-world successor owner | The successful item's own successor and actual runtime delta |
 | Publish public state | Existing atomic publication owner | Final private result, post-removal proof, exact expected public base and retained obligations |
@@ -33,11 +33,8 @@ wrapped in a type whose caller chooses the fields.
 
 ## 1. Cold first use and warm reuse
 
-`begin_private_execution` at the reviewed code requires an existing world.
-`begin_cold_private_execution` is uncalled and performs compiler work through
-`&mut PersistentSession`; it is not a delivered bootstrap.
-
-The actor must acquire its compiler world without requiring prior introspection:
+`begin_private_execution` requires an existing world. Its actor caller acquires
+that world without requiring prior introspection:
 
 1. Capture the exact public/source base under the existing checkout owner.
 2. Release checkout. Admit source-bound compiler work, using captured immutable
@@ -51,9 +48,47 @@ not an independent launcher or lifetime registry. A missing realization may be
 reacquired from its owned logical state. An accepted operation with uncertain
 completion must not be retried as a cold miss.
 
-Delete the synchronous cold helper and the old finite bootstrap when the actual
-caller receives this route. Do not expose private constructors to make a test
-manufacture the association.
+The engine area's caller now follows this acquisition sequence; actual hosted
+execution remains a separate gate. Delete the synchronous cold helper and the
+old finite bootstrap when receiving that caller. A component fixture may use
+the same public acquisition sequence to establish its initial World, but must
+not claim that this proves the actor's cold first-cell behavior. Do not expose
+private constructors to manufacture the association.
+
+### Association observations and operation custody
+
+An installed association is a cache of compiler facts about runtime owners. It
+must not strongly retain either its own target lease or original-source owner.
+Otherwise the cache can keep an abandoned private scope or unpublished
+reload candidate alive after its actual owner disappears.
+
+Keep exact weak observations of both owners beside the existing immutable
+base/key/epoch facts. A new admission upgrades those observations through the
+canonical owner and checks the required gates. Pointer equality can compare two
+observations of the same owner; it cannot manufacture missing ownership or
+replace semantic compiler identity.
+
+The admitted preparation then owns the actual strong pair, transferring it
+through compiler completion, END and installation. Existing generation,
+candidate and execution owners retain their actual leases independently.
+Do not weaken the runtime lease's transitive prerequisite DAG or reconstruct a
+source from an ambient scope map. A completed output waiting for installation
+must remain usable even though installed associations themselves hold no lease.
+The [source lifetime contract](SOURCE-AUTHORITY-LIFETIME.md) narrows the original
+member to a canonical source token while the target remains a real lexical lease.
+
+Fencing prevents new admission. It does not erase an already earned claim:
+accepted work may settle while its external prerequisite is fenced, provided
+that prerequisite is still the same live owner. Target publication remains tied
+to its exact attempt and gate. Retired, replaced or uncertain owners are distinct
+refusals. Retirement captures and waits for pre-fence accepted publications,
+including dependencies they establish before final stop selection.
+
+Acceptance must drop an actual successfully produced private birth before
+delivery, abandon a real unpublished B, and hold a real completed operation
+through the END/install gap. Observe subsequent scope/root retirement and
+independent generation usability; reference counts alone do not establish these
+contracts.
 
 ## 2. Source A, receiving target B and descriptive wire facts
 
@@ -105,6 +140,54 @@ and remain tied to that plan. Do not enumerate all historical names in Rust.
 Declarations, imports, expressions, mixed cells and retained source-defined
 types are required; blanket refusals are temporary WIP, not the language contract.
 Host-carrier shape restrictions apply only to their actual purpose.
+
+### Operation-owned private operands
+
+A mounted host input is a private operand of this admitted operation, not a
+public World binding. Its actual `PendingHostValueWrite` and captured interface
+own the input identity. Bind that operand to the same plan/reservation and retain
+it through END and native installation. Do not mutate the public compiler World
+or add a free-standing extra-bindings API to make the private module visible.
+
+Input references distinguish BaseWorld, actual PriorStage and CellOperand.
+PriorStage names both producer and consuming stage, allowing the receiver to
+verify that the producer precedes its consumer. References use actual captured
+row/interface identities; none may fabricate a World identity. Runtime execution
+still requires the matching opaque write, source and target admission. Descriptive
+wire fields alone grant no access.
+
+### Ordered full-language stages
+
+The existing `HeldWorldCellAdmission` owns the operation phase, executor and
+ordered stage cursor. Extend that owner with private immutable prefix facts
+and closed stage kinds. Do not introduce separate public start/advance
+capabilities, arbitrary compiler-environment callbacks or a second prefix
+registry.
+
+`CompilerRequest` folds the parser's actual inference segments in source order.
+Each completion is paired with its exact stage and global reserved ordinals.
+Only actual prior stage products can extend the next prefix; a final environment
+cannot stand in for every earlier prefix. Generated-instance retries reuse the
+same pre-stage facts and existing retry owner.
+
+The source owner captures and parses the module once, retaining byte identity,
+effective flags and quote-free evidence. A typed executable wrapper additionally
+proves its actual unique root. Declaration/prologue stages use their genuine
+planned-original proof; they do not fabricate a typed executable plan.
+
+The paired wire/receiver contract has closed executable, declaration and
+prologue variants. Shared reservation and captured-file facts remain shared;
+typed segment entry, native ordinal and executable program fields belong only
+to their actual executable variant. A source receipt identifies its exact stage
+and that stage's named dependency/package outputs, rather than assuming one
+global file pair or a typed digest for every kind.
+
+Reuse existing checked-item, original/native certificate and declaration
+adoption owners. The whole cell finishes compilation and certification before
+any authored effect executes. A later stage error discards the private prepared
+prefix; it cannot expose a partially admitted program. Tests must exercise the
+shipped template, genuine declarations/imports, later-stage failure and exact
+earlier-prefix isolation.
 
 ## 4. Same physical output through the existing executable issuer
 
@@ -169,8 +252,19 @@ into toolchain. Preserve the existing Clean/NotStarted policy with its actual
 owner evidence; raw close reporting is not a settled authority constructor.
 
 The existing `PreparedRuntimeCell` path must consume real checked World output
-and produce the existing executable program. A private toolchain method may
-assemble items, but a raw output/receipt must not bypass the outer settlement.
+and produce an opaque runtime `SettledCellProgram`. Its private issuer runs only
+after matched origin, accepted END, the original cancellation checkpoint and
+native sealing. It bundles the actual runtime admission, program and same
+cancellation observer. `begin_cell_program` consumes that bundle; it has no
+overload accepting independently supplied admission and raw program values.
+Toolchain products remain inspectable compiler evidence, not execution
+authority. Cloning the bundle preserves the existing admission's one-shot gate.
+
+Every item-consuming mutation must observe that retained cancellation state,
+including native execution, declaration adoption and checked host mounting.
+Cancellation after reservation must refuse before mutation. A refused foreign
+consumer must leave that same bundle usable by its actual owner; a test starting
+another unrelated good bundle does not establish this property.
 
 Immutable native compilation belongs outside machine checkout under that same
 operation's ownership. Reacquire and check current source, scope, hidden bindings,
@@ -189,6 +283,19 @@ Only actual item success adopts that exact item's successor with its runtime
 delta. Preparation success does not imply execution or public publication.
 Final publication consumes the existing promotion/post-removal proof and checks
 the expected public base atomically.
+
+Derive visible binding changes from the binding owner's prepared post-promotion
+projection. Deleting a local name can reveal an ancestor; a list of removed
+names is not the resulting visible state. Build all fallible World changes
+before durable commit, then install the binding projection and matching World
+association in the same publication callback.
+
+Hidden host bindings can affect descendant scopes and retained aliases.
+Do not remove global invalidation merely because the immediate caller uses a
+private scope. Any narrower transition must prove that a retained public World
+cannot observe the exact changed binding, while preserving ordinary ancestor,
+alias and orphan-cleanup invalidation. It must not bless unrelated stale keys
+or enumerate every value to reconstruct an already-issued relationship.
 
 A consuming settlement either settles or retains its unresolved obligations.
 Failure and unwind must mark exact installed/world state unavailable and retain

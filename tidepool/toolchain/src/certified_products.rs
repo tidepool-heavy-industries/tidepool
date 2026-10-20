@@ -1293,6 +1293,10 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("selected original {artifact:?} is outside retained custody")]
+    MissingRetainedCustody {
+        artifact: crate::artifact_inventory::ArtifactId,
+    },
     #[error("compiler product certificate duplicate source binder: {0:?}")]
     DuplicateSourceBinder(Box<SourceBinderConflict>),
     #[error("compiler product original group conflict: {0:?}")]
@@ -2778,9 +2782,7 @@ impl ReceiptNativeSelection {
         let retained = metadata
             .artifacts
             .get(&id)
-            .ok_or(CertificationError::Mismatch(
-                "selected original is outside retained custody",
-            ))?;
+            .ok_or(CertificationError::MissingRetainedCustody { artifact: id })?;
         let ArtifactPayload::Original(product) = &retained.payload else {
             return Err(CertificationError::Mismatch("selected original payload"));
         };
@@ -13172,6 +13174,10 @@ pub(crate) mod tests {
             (original.clone(), &interface_only),
             (product(current + 32), &view),
         ] {
+            let expected_missing = ArtifactEntry::original(producer.sha256(), missing.clone())
+                .unwrap()
+                .descriptor
+                .id;
             let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(
                 ArtifactEntry::canonical(canonical.clone()),
             )])
@@ -13209,7 +13215,8 @@ pub(crate) mod tests {
             );
             assert!(matches!(result,
                 Err(crate::CompileError::CompilerEvidence(error))
-                if matches!(*error, CertificationError::Mismatch("complete native selection payload"))));
+                if matches!(*error, CertificationError::MissingRetainedCustody { artifact }
+                    if artifact == expected_missing)));
         }
     }
 
@@ -17737,6 +17744,234 @@ pub(crate) mod tests {
             (vec![7, 9001], full)
         );
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn current_dependency_without_root_choice_refuses_two_issued_scopes() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode as InventoryNodeKey, ArtifactEntry, ArtifactInventory,
+            ArtifactInventoryFailure, ArtifactPayload, CanonicalProducerIdentity,
+            CompilerInputProjection, NativeArtifactDemand, NativeOriginalRequirement,
+        };
+        use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
+        let bytes = b"ambiguous-current-dependency";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(bytes);
+        let helper_raw = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "AmbiguousDependency",
+                vec![(7, vec![])],
+                81,
+                &BTreeMap::new(),
+                b"helper".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let helper_entry = ArtifactEntry::original(producer.sha256(), helper_raw.clone()).unwrap();
+        let requirements = BTreeMap::from([(
+            (
+                helper_raw.owner().unit.clone(),
+                helper_raw.owner().module.clone(),
+            ),
+            helper_entry.descriptor.interface_sha256,
+        )]);
+        let root_raw = ["AmbiguousLeft", "AmbiguousRight"].map(|module| {
+            fixture_finalized_product_with_requirements(
+                original_groups_fixture_with_interface(
+                    module,
+                    vec![(
+                        3,
+                        vec![PendingImportOwner::Source {
+                            owner: helper_raw.owner().clone(),
+                            original_ordinal: 7,
+                            binder: testing::identity("AmbiguousDependency", "entry"),
+                        }],
+                    )],
+                    82,
+                    &BTreeMap::new(),
+                    module.as_bytes().to_vec(),
+                ),
+                producer.sha256(),
+                Some(requirements.clone()),
+            )
+        });
+        let products =
+            recovered_witness_fixtures(&[helper_raw, root_raw[0].clone(), root_raw[1].clone()]);
+        let helper = Arc::new(
+            ArtifactEntry::original(producer.sha256(), products[0].product.clone()).unwrap(),
+        );
+        let originals = [1, 2].map(|index| {
+            Arc::new(
+                ArtifactEntry::original(producer.sha256(), products[index].product.clone())
+                    .unwrap(),
+            )
+        });
+        let sources = originals.each_ref().map(|original| {
+            let inventory = ArtifactInventory::default();
+            inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![helper.clone(), original.clone()],
+                )
+                .unwrap()
+        });
+        let interfaces = CompilerInputProjection::from_issued_entries(&[
+            helper.clone(),
+            originals[0].clone(),
+            originals[1].clone(),
+        ])
+        .unwrap()
+        .interface_only();
+        let projection = interfaces
+            .merge(&CompilerInputProjection::from_issued_entries(&originals).unwrap())
+            .unwrap();
+        let proofs =
+            std::array::from_fn::<_, 2, _>(|index| (originals[index].as_ref(), &sources[index]))
+                .map(|(original, source)| {
+                    NativeOriginalRequirement::from_selected_view(original.descriptor.id, source)
+                        .unwrap()
+                        .unwrap()
+                });
+        let joined = sources[0]
+            .merge_fixture_selected(&sources[1], &interfaces)
+            .unwrap();
+        let mut issued_selection = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &joined.metadata_snapshot(),
+            &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
+        issued_selection
+            .with_new_product_dependencies(&joined.metadata_snapshot(), &proofs)
+            .unwrap();
+        let selected = joined
+            .inventory()
+            .admit_certified_with_demand(
+                &joined,
+                originals.to_vec(),
+                NativeArtifactDemand::ScopeInterfaces,
+                &issued_selection,
+            )
+            .unwrap();
+        let support =
+            crate::declaration_context::issue_fixture_compiler_support(projection, selected)
+                .unwrap();
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .admit_producer(producer.sha256())
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap(),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(context)
+            .prepare_compilation(scratch.path(), bytes)
+            .unwrap();
+        // The real request carries two distinct, permitted exact issuances of
+        // the same payload/ordinal, and no selected execution root for either.
+        let availability = request
+            .compiler_inputs()
+            .native_availability(helper.descriptor.id)
+            .unwrap();
+        assert!(availability.permits(7));
+        let expected = availability
+            .offers()
+            .filter_map(|offer| offer.proof())
+            .flat_map(|proof| proof.selection.graph_selection().native_groups.iter())
+            .filter(|group| {
+                group.binding.artifact() == helper.descriptor.id && group.original_ordinal == 7
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected.len(), 2);
+        assert!(!request.compiler_inputs().artifacts().capture_graph_selection().roots.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact() == helper.descriptor.id)));
+        let product = fixture_finalized_product_with_requirements(
+            original_groups_fixture_with_interface(
+                "NeedsAmbiguousDependency",
+                vec![(
+                    5,
+                    vec![PendingImportOwner::Source {
+                        owner: products[0].product.owner().clone(),
+                        original_ordinal: 7,
+                        binder: testing::identity("AmbiguousDependency", "entry"),
+                    }],
+                )],
+                83,
+                &BTreeMap::new(),
+                b"new parent".to_vec(),
+            ),
+            producer.sha256(),
+            Some(requirements),
+        );
+        let product = recovered_witness_fixtures(&[product]).remove(0).product;
+        let entry = Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap());
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            unreachable!()
+        };
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut selection = CertifiedSourceSelection::from_compiler_inputs(
+            request.compiler_inputs(),
+            &validation.inventory,
+        )
+        .unwrap();
+        selection
+            .admit_current(
+                product.owner(),
+                ProductOrigin::Cached,
+                product.module_interface().unwrap(),
+                &validation.inventory,
+            )
+            .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[product.clone()]).unwrap(),
+            )
+            .unwrap();
+        let output = crate::declaration_context::certified_product_artifact_view_with_validation(
+            producer.sha256(),
+            &[product.clone()],
+            &[],
+            &[],
+            Some(request.compiler_inputs().artifacts()),
+            NativeArtifactDemand::ScopeInterfaces,
+            &mut validation,
+        )
+        .unwrap();
+        let inventory = output.inventory();
+        let mut bound = inventory.bind_segment(&output, vec![], &selection).unwrap();
+        let before_bound = bound.observed_binding_state();
+        let before = output.capture_graph_selection();
+        let imports = [PendingImportOwner::Source {
+            owner: product.owner().clone(),
+            original_ordinal: 5,
+            binder: testing::identity("NeedsAmbiguousDependency", "entry_5"),
+        }];
+        let selected_error = inventory
+            .admit_certified_with_demand(
+                &output,
+                vec![entry.clone()],
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                &selection,
+            )
+            .err()
+            .expect("two exact scopes have no dependency choice");
+        let bound_error = inventory
+            .admit_bound_target(
+                &mut bound,
+                &output,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selection,
+            )
+            .err()
+            .expect("bound planner must consume the same unresolved input choice");
+        for error in [selected_error, bound_error] {
+            assert!(
+                matches!(error, crate::CompileError::ArtifactInventory(error) if error.failure == ArtifactInventoryFailure::BindingAmbiguity { artifact: helper.descriptor.id })
+            );
+        }
+        assert_eq!(bound.observed_binding_state(), before_bound);
+        assert_eq!(output.capture_graph_selection(), before);
     }
 
     #[test]
@@ -23318,8 +23553,7 @@ None,
                         } if artifact == expected_missing)
                     && matches!(&error.native_refusal,
                         Some(crate::artifact_inventory::NativeAdmissionRefusal::InputNoCompatibleCandidate {
-                            source: crate::artifact_inventory::NativeAdmissionSource::CertifiedSelection,
-                            selected_original, canonical, selected_canonical, candidate_count: 1,
+                            selected_original, canonical, selected_canonical,
                         }) if *selected_original == raw_binding(expected_missing)
                             && selected_original.is_some()
                             && *canonical == expected_canonical

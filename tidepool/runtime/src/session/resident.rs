@@ -4651,6 +4651,26 @@ where
             .map(|view| view.hide_value_names(&hidden))
     }
 
+    /// Capture the runtime's immutable scope snapshot. A cold cache builds it;
+    /// warm captures reuse it without enumerating values. Capturing does not
+    /// force the digest. The result conveys observation, not admission authority.
+    pub fn capture_inspection_scope_in(
+        &self,
+        scope: ScopeId,
+        source_revision: &[u8],
+        selected_imports: &super::SourceImports,
+        inputs: &super::RuntimeCompileInputs,
+        label: super::NameScope,
+    ) -> Result<super::InspectionScopeSnapshot, SessionError> {
+        self.state.capture_inspection_scope_in(
+            scope,
+            source_revision,
+            selected_imports,
+            inputs,
+            label,
+        )
+    }
+
     /// Capture a logical-world observation before constructing a compile view.
     pub fn capture_inspection_world_in(
         &self,
