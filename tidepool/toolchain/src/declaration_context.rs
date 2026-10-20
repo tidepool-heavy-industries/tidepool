@@ -6650,14 +6650,9 @@ impl WorldSourceCompilationBinding {
         program
             .validation()
             .inventory
-            .charge(
-                plan.receipt()
-                    .len()
-                    .checked_add(64)
-                    .ok_or_else(|| failure("world source binding accounting overflow"))?,
-            )
+            .charge(64)
             .map_err(|error| compiler_evidence_failure(error.into()))?;
-        let plan_receipt_sha256: [u8; 32] = sha2::Sha256::digest(plan.receipt()).into();
+        let plan_receipt_sha256 = program.plan_digest();
         let mut context = sha2::Sha256::new();
         context.update(b"Tidepool world source compilation context v2\0");
         context.update(plan.world().logical_id());
@@ -7310,9 +7305,13 @@ impl ExactSourceAdmission {
         stage_index: usize,
         source: &str,
     ) -> Result<bool, CompileError> {
+        let stage = program
+            .stages()
+            .get(stage_index)
+            .ok_or_else(|| failure("world source binding has no actual prepared stage"))?;
         Ok(
             matches!(&self.compilation_binding, SourceCompilationBinding::World(binding)
-            if *binding == WorldSourceCompilationBinding::from_output(program, stage_index)?)
+            if Arc::ptr_eq(&binding.reservation, program.reservation()) && Arc::ptr_eq(&binding.stage, stage))
                 && self
                     .witness
                     .matches_source(self.witness.source_path(), source),
