@@ -14778,10 +14778,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let projection =
-            ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
-        let mut facts =
-            NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
+        let projection = ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
+        let mut facts = NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
         let alternate_entries = vec![
             Arc::new(root.clone()),
             Arc::new(child.clone()),
@@ -14810,8 +14808,7 @@ mod tests {
         .unwrap();
         let alternate = CompilerSourceSupport::close_complete_output(&alternate_output).unwrap();
         facts.extend(
-            NativeOriginalRequirement::for_projection(&projection, alternate.artifacts(), &[])
-                .unwrap(),
+            NativeOriginalRequirement::for_projection(&projection, alternate.artifacts(), &[]).unwrap(),
         );
         let joined = types
             .retain_custody(issuer)
@@ -14819,9 +14816,26 @@ mod tests {
             .retain_custody(alternate.artifacts())
             .unwrap();
         let joined = joined.artifacts();
-        let preserved =
-            NativeOriginalRequirement::for_projection(&projection, joined, &facts).unwrap();
+        let preserved = NativeOriginalRequirement::for_projection(&projection, joined, &facts).unwrap();
         assert_eq!(preserved.len(), 2);
+        let mut root_choices = BTreeSet::new();
+        for fact in &preserved {
+            let qualified = fact
+                .qualify_issued_availability(joined)
+                .unwrap()
+                .expect("each competing root proof independently supplies Full availability");
+            let choices = qualified
+                .groups()
+                .iter()
+                .copied()
+                .filter(|group| {
+                    group.binding.artifact() == root.descriptor.id && group.original_ordinal == 12
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(choices.len(), 1);
+            root_choices.extend(choices);
+        }
+        assert_eq!(root_choices.len(), 2);
         let mut ambiguous =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
@@ -14832,9 +14846,35 @@ mod tests {
         ambiguous
             .with_new_product_dependencies(&joined.metadata_snapshot(), &preserved)
             .unwrap();
-        assert!(matches!(inventory.admit_certified_with_demand(
-            &joined, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &ambiguous,
-        ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
+        let interfaces = inventory
+            .admit_certified_with_demand(
+                &joined,
+                vec![Arc::new(root.clone())],
+                NativeArtifactDemand::ScopeInterfaces,
+                &ambiguous,
+            )
+            .unwrap();
+        assert!(interfaces
+            .lease
+            .admission_roots
+            .iter()
+            .all(|root| matches!(root, InventoryNodeKey::Artifact(_))));
+        let mut fixed = inventory
+            .bind_segment(&interfaces, vec![Arc::new(root.clone())], &ambiguous)
+            .unwrap();
+        let imports = [issued_source(&root, 12)];
+        let denied = inventory.admit_bound_target(
+            &mut fixed,
+            &inventory.empty_view(),
+            NativeArtifactDemand::CertifiedTargetImports(&imports),
+            vec![],
+            &ambiguous,
+        );
+        assert!(
+            matches!(&denied, Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })),
+            "competing root proofs at executable demand returned {denied:?}"
+        );
     }
 
     #[test]
