@@ -8350,73 +8350,115 @@ pub(super) mod tests {
     fn certified_target_registration_uses_exact_persistent_scope_custody() {
         let registry = ImageRegistry::new();
         let mut session = super::super::persistent::PersistentSession::new(None, 1024 * 1024);
-        let scope = session.mint_isolated_scope();
-        let (installed, source_keys) = install_source_publication_fixture(&mut session, scope);
-        assert_eq!(
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let foreign = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = source.scope();
+        let foreign_scope = foreign.scope();
+        let settled =
             session
-                .bindings()
-                .source_instances_in(session.scope_tree(), scope)
-                .len(),
-            2
+                .with_source_compiler_transaction(
+                    source.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| {
+                        let (installed, source_keys) =
+                            install_source_publication_fixture(session, scope);
+                        assert_eq!(
+                            session
+                                .bindings()
+                                .source_instances_in(session.scope_tree(), scope)
+                                .len(),
+                            2
+                        );
+                        assert_eq!(session.residency().unwrap().programs, 3);
+                        assert_eq!(session.prepared_mut().unwrap().code_export_count(), 0);
+                        let dead_plan = super::super::persistent::ResolvedSourceDomainPlan::fixture(
+                            BTreeMap::new(),
+                            session
+                                .bindings()
+                                .source_domain_selection_in(session.scope_tree(), scope)
+                                .unwrap(),
+                            session
+                                .bindings()
+                                .scope_snapshot(session.scope_tree(), scope)
+                                .unwrap(),
+                        );
+                        let resolved = super::super::persistent::ResolvedCertifiedTurn {
+                            groups: Vec::new(),
+                            target_owners: Vec::new(),
+                            package_interfaces: Default::default(),
+                            source_evidence: BTreeMap::new(),
+                            inherited_needed: Vec::new(),
+                            source_plan: dead_plan,
+                        };
+                        let target = || {
+                            ScopedTargetImage::compile_scoped(
+                                testing::prepare(testing::wire_program()).unwrap(),
+                                &resolved,
+                                &registry,
+                            )
+                            .unwrap()
+                        };
+                        let invalid_target = target();
+                        assert!(invalid_target.demanded().is_empty());
+                        let invalid_scope = tidepool_codegen::scope::ScopeId(u64::MAX);
+                        assert!(matches!(
+                            session.install_certified_turn_in(
+                                invalid_scope,
+                                &DataConTable::new(),
+                                invalid_target,
+                                &BTreeMap::new(),
+                                &[],
+                                &|_| None,
+                            ),
+                            Err(PreparedRuntimeError::SourceAdmission(
+                                super::super::SourceAdmissionError::MissingTargetLease { scope }
+                            )) if scope == invalid_scope
+                        ));
+                        assert_ne!(
+            session.bindings().scope_snapshot(session.scope_tree(), foreign_scope).unwrap(),
+            resolved.source_plan.snapshot,
+            "the live foreign scope has a genuinely different source-instance snapshot"
         );
-        assert_eq!(session.residency().unwrap().programs, 3);
-        assert_eq!(session.prepared_mut().unwrap().code_export_count(), 0);
-        let dead_plan = super::super::persistent::ResolvedSourceDomainPlan::fixture(
-            BTreeMap::new(),
-            session
-                .bindings()
-                .source_domain_selection_in(session.scope_tree(), scope)
-                .unwrap(),
-            session
-                .bindings()
-                .scope_snapshot(session.scope_tree(), scope)
-                .unwrap(),
-        );
-        let resolved = super::super::persistent::ResolvedCertifiedTurn {
-            groups: Vec::new(),
-            target_owners: Vec::new(),
-            package_interfaces: Default::default(),
-            source_evidence: BTreeMap::new(),
-            inherited_needed: Vec::new(),
-            source_plan: dead_plan,
-        };
-        let dead_target = ScopedTargetImage::compile_scoped(
-            testing::prepare(testing::wire_program()).unwrap(),
-            &resolved,
-            &registry,
-        )
-        .unwrap();
-        assert!(dead_target.demanded().is_empty());
+                        assert!(matches!(
+                            session.install_certified_turn_in(
+                                foreign_scope,
+                                &DataConTable::new(),
+                                target(),
+                                &BTreeMap::new(),
+                                &[],
+                                &|_| None,
+                            ),
+                            Err(PreparedRuntimeError::SourceScopeAdmission)
+                        ));
+                        assert_eq!(session.residency().unwrap().programs, 3);
+                        let newly_rooted = session
+                            .bindings()
+                            .source_instances_in(session.scope_tree(), scope);
+                        assert!(session.retire_failed_turn_source_instances(scope, &source_keys));
+                        assert!(session
+                            .bindings()
+                            .source_instances_in(session.scope_tree(), scope)
+                            .is_empty());
+                        assert!(session.prepared_mut().unwrap().unpin(installed));
+                        session
+                            .prepared_mut()
+                            .unwrap()
+                            .quiesce_and_collect_now()
+                            .unwrap();
+                        assert_eq!(session.residency().unwrap().programs, 0);
+                        for lease in newly_rooted {
+                            assert!(!session.prepared_mut().unwrap().release(lease.handle()));
+                        }
+                    },
+                )
+                .unwrap();
         assert!(matches!(
-            session.install_certified_turn_in(
-                tidepool_codegen::scope::ScopeId(u64::MAX),
-                &DataConTable::new(),
-                dead_target,
-                &BTreeMap::new(),
-                &[],
-                &|_| None,
-            ),
-            Err(PreparedRuntimeError::SourceScopeAdmission)
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
         ));
-        assert_eq!(session.residency().unwrap().programs, 3);
-        let newly_rooted = session
-            .bindings()
-            .source_instances_in(session.scope_tree(), scope);
-        assert!(session.retire_failed_turn_source_instances(scope, &source_keys));
-        assert!(session
-            .bindings()
-            .source_instances_in(session.scope_tree(), scope)
-            .is_empty());
-        assert!(session.prepared_mut().unwrap().unpin(installed));
-        session
-            .prepared_mut()
-            .unwrap()
-            .quiesce_and_collect_now()
-            .unwrap();
-        assert_eq!(session.residency().unwrap().programs, 0);
-        for lease in newly_rooted {
-            assert!(!session.prepared_mut().unwrap().release(lease.handle()));
-        }
     }
 
     #[test]
