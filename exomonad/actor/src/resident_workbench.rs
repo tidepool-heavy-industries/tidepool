@@ -1981,10 +1981,6 @@ impl ReservedActorGeneration {
         ActorGenerationCandidateCustody(self.prepared.candidate.clone())
     }
 
-    pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
-        ActorPublicationAttemptObserver(self.guard.attempt.clone())
-    }
-
     pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
         self.guard.attempt.expected.generation()
     }
