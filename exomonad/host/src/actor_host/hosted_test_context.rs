@@ -1917,6 +1917,17 @@ impl HostedTestRuntime {
         // Keep that future on this executor, rather than changing its owners.
         let thread = std::thread::Builder::new()
             .name("hosted-acceptance".into())
+            // fast-dev compiles this harness at opt-level 0, where the
+            // `Box::pin(async move { .. })` temporaries in
+            // `prepare_independent_effect` do not share stack slots: that frame
+            // measures 322,016 B (269,864 B of future construction temporaries)
+            // and the poll chain under it adds `execute_workbench` ~295,816 B
+            // and `settle_fragment_effects` ~219,832 B. The 2 MiB default
+            // overflows. At `production` (O3) the same frame is 36,264 B and the
+            // scenario passes at the default stack. A 4 MiB `RUST_MIN_STACK`
+            // run passes for fast-dev, so 8 MiB leaves one doubling of margin
+            // without inflating production threads.
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let result = tokio::runtime::Builder::new_current_thread()
                     .enable_all()

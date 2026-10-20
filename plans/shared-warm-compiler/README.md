@@ -252,6 +252,39 @@ the exact bundle passed, observed speedups and remaining costs. It must include
 the [compiler work map](../../docs/compiler-work-map.md) update and all remaining
 branch dispositions.
 
+## Known follow-ups
+
+### `prepare_independent_effect` dispatch frame (M6a, 2026-10-19)
+
+`ResidentKernelBehavior::prepare_independent_effect`
+(`exomonad/actor/src/resident_actor.rs:6151`) builds every branch's
+`Box::pin(async move { .. })` future in one match frame. Under `fast-dev`,
+which compiles `exomonad-actor` at `-Copt-level=0`, each construction
+temporary keeps its own stack slot: the function's 30 `exchange_malloc` sites
+total 269,864 B and the frame measures 322,016 B (gdb disassembly of the
+`hosted-acceptance` crash binary). The same poll chain holds
+`execute_workbench` (~295,816 B) and `settle_fragment_effects` (~219,832 B),
+so the 2 MiB default thread stack overflows; a 4 MiB `RUST_MIN_STACK` run
+passes and the M6a evidence run uses an 8 MiB stack on that test-only thread
+(no production thread is changed).
+
+Measured at the shipped profile: `production` is `-Copt-level=3` for every
+package (`build/native_profile.bzl:18-19`), and the same scenario passes at
+the default 2 MiB stack there. In that binary `prepare_independent_effect`
+measures 36,264 B (gdb disassembly, artifact sha256 `395f6948…`), an 8.9x
+reduction from the opt-0 frame, so the overflow is a fast-dev/debug codegen
+artifact rather than a production stack requirement. The bundle profile is
+invocation configuration (`build/package/native_catalog.bzl:177`); a
+fast-dev-assembled bundle would still carry the opt-0 frame.
+The measurement uses the production-profile host test binary; the frozen
+release bundle itself was not rebuilt or measured in this parcel.
+
+Bounded follow-up: construct each heavy branch's future in an out-of-line
+`#[inline(never)]` helper (or split the dispatch) so the peak frame is the
+largest branch rather than the sum. Do not refactor the 750-line match
+incidentally in an unrelated parcel; merge-conflict risk is high while the
+second-cell tranche is in flight.
+
 ## Start and resume
 
 1. Read [STATUS.md](STATUS.md) and [EVIDENCE.md](EVIDENCE.md).
