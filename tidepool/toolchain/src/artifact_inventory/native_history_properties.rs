@@ -465,6 +465,41 @@ impl Rows {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        // A single already-owned qualified carrier is an expected identity,
+        // not a fresh opaque issuance to learn from the result. Its outgoing
+        // row comes from the Catalog, independently of the returned graph.
+        for (id, chosen) in &namespace {
+            let expected_edges = catalog
+                .originals
+                .iter()
+                .position(|entry| entry.descriptor.id == *id)
+                .map(|module| {
+                    BTreeSet::from([(
+                        namespace[&catalog.interfaces[module].descriptor.id],
+                        ArtifactDependency::Interface,
+                    )])
+                })
+                .unwrap_or_default();
+            let prior = parent
+                .physical
+                .iter()
+                .filter(|row| {
+                    row.fact == Fact::Carrier(*id)
+                        && parent
+                            .namespace
+                            .get(id)
+                            .is_none_or(|selected| selected == *row)
+                        && self.edges.get(*row) == Some(&expected_edges)
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if let [expected] = prior.as_slice() {
+                assert_eq!(
+                    chosen, expected,
+                    "single qualified parent carrier must be reused"
+                );
+            }
+        }
         // Observe identities only for explicitly requested/prior roots. The
         // complete returned custody census is checked later, never used to
         // decide which additional groups the reference should expect.
@@ -1726,7 +1761,47 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             &BTreeSet::new(),
             &identities,
         );
-        // Full availability is hidden custody, not an executable decision.
+        // Availability owns its Group closure through the private offer.
+        // The receiving compiler view retains only its Artifact carriers.
+        // Check both owners separately rather than flattening them together.
+        for offer in support.native_offers() {
+            let module = catalog
+                .originals
+                .iter()
+                .position(|entry| entry.descriptor.id == offer.original())
+                .unwrap();
+            let required = catalog.group_closure(
+                &ORDINALS
+                    .into_iter()
+                    .map(|ordinal| (module, ordinal))
+                    .collect(),
+            );
+            let selected = model
+                .physical
+                .iter()
+                .filter(|row| matches!(row.fact, Fact::Group(raw) if required.contains(&raw)))
+                .copied()
+                .collect();
+            let private_model = View {
+                inventory: 0,
+                physical: rows.close(selected),
+                namespace: BTreeMap::new(),
+                roots: BTreeSet::new(),
+                demand: BTreeSet::new(),
+                root_bindings: BTreeSet::new(),
+            };
+            let private = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
+            check_graph_observation(
+                &GraphObservation::expected(&catalog, &rows, &private_model),
+                &GraphObservation::actual(&private),
+                0,
+                module,
+            )
+            .unwrap();
+        }
+        model
+            .physical
+            .retain(|row| matches!(row.fact, Fact::Carrier(_)));
         model.demand.clear();
         model.root_bindings = base_model.root_bindings;
         let expected = GraphObservation::expected(&catalog, &rows, &model);
@@ -1883,6 +1958,24 @@ fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
         )
         .unwrap();
     let unrelated_graph = unrelated.capture_graph_selection();
+    let extra_carrier = unrelated_graph
+        .bindings
+        .iter()
+        .find(|binding| {
+            expected.physical.iter().any(|node| {
+                matches!(node,
+            ArtifactBindingNode::Artifact(prior) if prior.artifact == binding.artifact)
+            }) && !expected
+                .physical
+                .contains(&ArtifactBindingNode::Artifact(**binding))
+        })
+        .copied()
+        .expect("independent issued scope shares payloads without aliasing bindings");
+    let mut extra_artifact_binding = actual.clone();
+    extra_artifact_binding
+        .physical
+        .insert(ArtifactBindingNode::Artifact(extra_carrier));
+    assert!(check_graph_observation(&expected, &extra_artifact_binding, 0, 0).is_err());
     let extra = unrelated_graph
         .native_groups
         .into_iter()
@@ -1903,19 +1996,25 @@ fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
     extra_demand.demand.insert(catalog.key((0, 29)));
     assert!(check_graph_observation(&expected, &extra_demand, 0, 0).is_err());
     let mut extra_edge = actual.clone();
-    let from = *actual
-        .roots
-        .iter()
-        .find(|node| matches!(node, ArtifactBindingNode::Group(_)))
-        .unwrap();
-    extra_edge.edges.insert((
+    let from = *actual.physical.iter().find(|node| matches!(node,
+        ArtifactBindingNode::Group(group) if group.binding.artifact() == catalog.key((0, 3)).artifact
+            && group.original_ordinal == 3)).unwrap();
+    let to = *actual.physical.iter().find(|node| matches!(node,
+        ArtifactBindingNode::Group(group) if group.binding.artifact() == catalog.key((3, 3)).artifact
+            && group.original_ordinal == 3)).unwrap();
+    let edge = (
         from,
-        extra,
+        to,
         ArtifactDependency::NativeGroup {
             dependent_ordinal: 3,
-            required_ordinal: 29,
+            required_ordinal: 3,
         },
-    ));
+    );
+    assert!(
+        !extra_edge.edges.contains(&edge),
+        "the raw fixture has no direct diamond shortcut"
+    );
+    extra_edge.edges.insert(edge);
     assert!(check_graph_observation(&expected, &extra_edge, 0, 0).is_err());
     let mut missing_edge = actual.clone();
     assert!(missing_edge.edges.pop_first().is_some());
