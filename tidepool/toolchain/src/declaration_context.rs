@@ -2393,9 +2393,7 @@ impl DemandNativeInputs {
             }
         }
         if certified_keys.len() != bindings.len()
-            || bindings
-                .keys()
-                .any(|key| !certified_keys.contains(key))
+            || bindings.keys().any(|key| !certified_keys.contains(key))
         {
             return Err(failure(
                 "certified receipt groups and executable bindings disagree",
@@ -8869,6 +8867,67 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
     package_imports: Arc<[u8]>,
 }
 
+/// One actual World segment's admitted source and original products. Its
+/// prefix state reuses the same source-support owner as finite compilation.
+pub(crate) struct WorldProgramSegment<'a> {
+    pub(crate) originals: crate::certified_products::CertifiedSegmentOriginals,
+    inputs: DemandedWorldCompilerInputs<'a>,
+    binding: WorldCompilationIdentity,
+    source: ExactSourceAdmission,
+    source_text: String,
+    aliases: Vec<PathBuf>,
+    program: ProgramSourceSupportState,
+}
+
+impl WorldProgramSegment<'_> {
+    pub(crate) fn source(&self) -> &ExactSourceAdmission {
+        &self.source
+    }
+    pub(crate) fn source_text(&self) -> &str {
+        &self.source_text
+    }
+    pub(crate) fn aliases(&self) -> &[PathBuf] {
+        &self.aliases
+    }
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        self.inputs.support.artifacts()
+    }
+    pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
+        self.inputs.groups.groups()
+    }
+    pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
+        &self.program.program_source_lexical
+    }
+    pub(crate) fn original_execution_context(
+        &self,
+        inputs: &OriginalCompilerInputs,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        ExactProductAdmission {
+            compilation_binding: ProductCompilationBinding::World(&self.binding),
+            source: &self.source,
+            facts: self.inputs.facts(),
+        }
+        .original_execution_context(inputs)
+    }
+    pub(crate) fn admit_program_support(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        support: &ArtifactView,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.program.admit_program_support_inner(
+            self.inputs.facts().producer,
+            context,
+            support,
+            std::slice::from_ref(&self.source),
+            Some(produced),
+            Some(self.inputs.context),
+            selection,
+        )
+    }
+}
+
 impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
@@ -8973,7 +9032,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
-    ) -> Result<crate::certified_products::CertifiedSegmentOriginals, CompileError> {
+    ) -> Result<WorldProgramSegment<'a>, CompileError> {
         let program = self.program;
         let operation = program.validation().inventory.as_ref();
         let demand = self.demand_primary_inputs()?;
@@ -9013,7 +9072,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &target_source,
             operation,
         );
-        crate::certified_products::CertifiedSegmentOriginals::issue(
+        let originals = crate::certified_products::CertifiedSegmentOriginals::issue(
             raw,
             receipt,
             admission,
@@ -9025,7 +9084,16 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             produced,
             validation,
         )
-        .map_err(compiler_evidence_failure)
+        .map_err(compiler_evidence_failure)?;
+        Ok(WorldProgramSegment {
+            originals,
+            inputs,
+            binding,
+            source,
+            source_text: target_source,
+            aliases: self.aliases,
+            program: ProgramSourceSupportState::default(),
+        })
     }
 
     pub(crate) fn source_path_domain(
@@ -19021,9 +19089,7 @@ mod tests {
             WorkerExecutionSource,
         };
         use tidepool_repr::execution_schema::RuntimeRep;
-        let id = cold.projection().snapshot_roles()[root]
-            .original()
-            .unwrap();
+        let id = cold.projection().snapshot_roles()[root].original().unwrap();
         let row = &cold.native_selection.availability.0[&id];
         let ArtifactPayload::Original(product) = &row.original.payload else {
             unreachable!()
