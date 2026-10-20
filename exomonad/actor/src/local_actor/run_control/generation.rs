@@ -45,13 +45,14 @@ pub(crate) enum GenerationCollateralIdentity {
 pub(crate) enum GenerationLifetimeEdge {
     PhysicalSupervision,
     PendingSupervision,
+    PendingResourcePreparation,
     ResourceOwnership,
     OwnershipTransfer,
     OwnershipTransferUnconfirmed,
 }
 
-/// An actual lifetime edge leaving the proposed dependent stop population.
-/// Source independence does not authorize stopping the affected owner.
+/// An actual lifetime edge requiring exclusion or transfer settlement before
+/// stopping. Source independence does not authorize stopping the affected owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GenerationCollateral {
     pub(crate) stopping: GenerationResourceIdentity,
@@ -64,6 +65,7 @@ pub(crate) struct GenerationCollateral {
 pub(crate) struct GenerationPopulation {
     pub(crate) dependency: GenerationDependency,
     pub(crate) resources: Vec<GenerationResourceObservation>,
+    pub(crate) unclassified: Vec<GenerationResourceObservation>,
     pub(crate) collateral: Vec<GenerationCollateral>,
 }
 
@@ -73,14 +75,19 @@ impl RunState {
         dependency: GenerationDependency,
     ) -> GenerationPopulation {
         let mut resources = Vec::new();
+        let mut unclassified = Vec::new();
         for (actor, record) in &self.reservations {
-            if !record
+            let resources = if matches!(record.dependency, Some(SourceDependency::Unqualified)) {
+                &mut unclassified
+            } else if record
                 .dependency
                 .as_ref()
                 .is_some_and(|issued| issued.depends_on(&dependency))
             {
+                &mut resources
+            } else {
                 continue;
-            }
+            };
             if matches!(record.phase, ReservationPhase::NotStarted) {
                 continue;
             }
@@ -110,9 +117,18 @@ impl RunState {
                         });
                         continue;
                     }
+                    let state = if self
+                        .worker_transfers
+                        .values()
+                        .any(|transfer| transfer.child == *actor)
+                    {
+                        GenerationResourceState::Transferring
+                    } else {
+                        GenerationResourceState::Running
+                    };
                     resources.push(GenerationResourceObservation {
                         identity: GenerationResourceIdentity::Actor(*actor),
-                        state: GenerationResourceState::Running,
+                        state,
                     });
                 } else if !entry
                     .actor
@@ -150,13 +166,17 @@ impl RunState {
             }
         }
         for (id, record) in &self.resources {
-            if !record
+            let resources = if matches!(record.dependency, Some(SourceDependency::Unqualified)) {
+                &mut unclassified
+            } else if record
                 .dependency
                 .as_ref()
                 .is_some_and(|issued| issued.depends_on(&dependency))
             {
+                &mut resources
+            } else {
                 continue;
-            }
+            };
             let state = match record.owner {
                 ResourceOwner::Retired { .. } => continue,
                 ResourceOwner::Transfer { .. } => GenerationResourceState::Transferring,
@@ -171,13 +191,17 @@ impl RunState {
             });
         }
         for (id, record) in &self.preparations {
-            if !record
+            let resources = if matches!(record.dependency, Some(SourceDependency::Unqualified)) {
+                &mut unclassified
+            } else if record
                 .dependency
                 .as_ref()
                 .is_some_and(|issued| issued.depends_on(&dependency))
             {
+                &mut resources
+            } else {
                 continue;
-            }
+            };
             let state = match &record.phase {
                 PreparationPhase::Running => GenerationResourceState::Starting,
                 PreparationPhase::Accepted
@@ -198,6 +222,7 @@ impl RunState {
         GenerationPopulation {
             dependency,
             resources,
+            unclassified,
             collateral,
         }
     }
@@ -273,6 +298,20 @@ impl RunState {
             let GenerationResourceIdentity::Actor(parent) = resource.identity else {
                 continue;
             };
+            for (id, record) in &self.preparations {
+                if record.owner == RootPreparationOwner::NativeResource(parent)
+                    && matches!(record.phase, PreparationPhase::Running)
+                {
+                    let identity = GenerationResourceIdentity::Preparation(*id);
+                    if !captured.contains(&identity) {
+                        collateral.push(GenerationCollateral {
+                            stopping: resource.identity.clone(),
+                            affected: GenerationCollateralIdentity::Classified(identity),
+                            edge: GenerationLifetimeEdge::PendingResourcePreparation,
+                        });
+                    }
+                }
+            }
             for transfer in self.worker_transfers.values() {
                 if transfer.parent == parent {
                     collateral.push(GenerationCollateral {
@@ -318,7 +357,11 @@ impl RunState {
                                 transfer.destination == ResourceLifetime::Actor(parent)
                             }) =>
                     {
-                        GenerationLifetimeEdge::OwnershipTransfer
+                        if self.resource_transfers.contains_key(&id) {
+                            GenerationLifetimeEdge::OwnershipTransfer
+                        } else {
+                            GenerationLifetimeEdge::OwnershipTransferUnconfirmed
+                        }
                     }
                     _ => continue,
                 };
@@ -326,8 +369,11 @@ impl RunState {
                     issued_to: record.issued_to,
                     id: *id,
                 };
-                if edge == GenerationLifetimeEdge::OwnershipTransfer
-                    || !captured.contains(&identity)
+                if matches!(
+                    edge,
+                    GenerationLifetimeEdge::OwnershipTransfer
+                        | GenerationLifetimeEdge::OwnershipTransferUnconfirmed
+                ) || !captured.contains(&identity)
                 {
                     collateral.push(GenerationCollateral {
                         stopping: resource.identity.clone(),
@@ -484,6 +530,67 @@ mod retirement_tests {
             },
             state: GenerationResourceState::Running,
         }
+    }
+
+    #[test]
+    fn pending_neutral_resource_preparation_is_a_physical_collateral_obligation() {
+        let parent = ActorRef::first(crate::ActorId(1));
+        let mut state = RunState::default();
+        state.preparations.insert(
+            7,
+            RootPreparationRecord {
+                owner: RootPreparationOwner::NativeResource(parent),
+                phase: PreparationPhase::Running,
+                compiler: RetainedActorExit::new(),
+                placement: None,
+                dependency: None,
+            },
+        );
+        let captured = [GenerationResourceObservation {
+            identity: GenerationResourceIdentity::Actor(parent),
+            state: GenerationResourceState::Running,
+        }];
+        assert_eq!(
+            state.generation_collateral(&captured),
+            [GenerationCollateral {
+                stopping: captured[0].identity.clone(),
+                affected: GenerationCollateralIdentity::Classified(
+                    GenerationResourceIdentity::Preparation(7)
+                ),
+                edge: GenerationLifetimeEdge::PendingResourcePreparation,
+            }]
+        );
+        state.preparations.get_mut(&7).unwrap().phase =
+            PreparationPhase::Settled(crate::CleanupComponentOutcome::Confirmed);
+        assert!(state.generation_collateral(&captured).is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_transfer_observation_remains_typed_uncertainty() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let (actor, task) = Actor::spawn(None, Probe, stopped.clone()).await.unwrap();
+        let issued_to = ActorRef::first(crate::ActorId(1));
+        let mut state = RunState::default();
+        retain_native(&mut state, actor.get_cell(), issued_to);
+        state.resources.get_mut(&actor.get_id()).unwrap().owner = ResourceOwner::Transfer {
+            id: 9,
+            source: ResourceLifetime::Run,
+        };
+        let captured = [observation(&actor.get_cell(), issued_to)];
+        assert_eq!(
+            state.generation_collateral(&captured),
+            [GenerationCollateral {
+                stopping: captured[0].identity.clone(),
+                affected: GenerationCollateralIdentity::Classified(captured[0].identity.clone()),
+                edge: GenerationLifetimeEdge::OwnershipTransferUnconfirmed,
+            }]
+        );
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        actor
+            .stop_and_wait(None, Some(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
