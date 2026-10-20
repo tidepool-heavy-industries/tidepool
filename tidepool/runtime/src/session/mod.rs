@@ -221,7 +221,7 @@ mod notebook_generation;
 pub use notebook_generation::{
     ActiveNotebookGeneration, ComposedPromptSnapshot, DurableGenerationReferences,
     GenerationArtifactReference, NotebookGenerationError, NotebookGenerationId,
-    PreparedNotebookGeneration,
+    PreparedNotebookGeneration, PreparedNotebookGenerationWithWorld,
 };
 
 use std::collections::{BTreeMap, HashMap};

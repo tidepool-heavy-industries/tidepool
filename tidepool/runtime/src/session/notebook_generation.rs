@@ -160,6 +160,19 @@ pub struct PreparedNotebookGeneration {
     pub(crate) next: ActiveNotebookGeneration,
     pub(crate) expected: Option<ActiveNotebookGeneration>,
     pub(crate) source: Option<PreparedGenerationSource>,
+    pub(super) compiler_key: Option<super::persistent::CompileViewKey>,
+}
+
+/// The exact durable candidate paired with its completed compiler World.
+pub struct PreparedNotebookGenerationWithWorld {
+    pub(super) prepared: PreparedNotebookGeneration,
+    pub(super) world: std::sync::Arc<super::CompletedCompilerWorld>,
+}
+
+impl PreparedNotebookGenerationWithWorld {
+    pub fn world(&self) -> &std::sync::Arc<super::CompletedCompilerWorld> {
+        &self.world
+    }
 }
 impl PreparedNotebookGeneration {
     pub fn selection(&self) -> ActiveNotebookGeneration {
