@@ -383,7 +383,7 @@ fn type_defs() -> Vec<TypeDef> {
                 field("namesLimit", HsType::Int),
                 field("nameListProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Name entries retained from one enumeration, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
+            &["Name entries retained after dedupe, bounded by the applied limit. `namesObserved` is the retained count, so `namesObserved == namesLimit` means at least that many names matched; the true scope size is not counted. Also records the compile view the answer describes."],
         ),
         closed_sum(
             "FitAvailability",
@@ -443,7 +443,7 @@ fn type_defs() -> Vec<TypeDef> {
                 field("typeMatchesLimit", HsType::Int),
                 field("typeMatchesProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Type matches retained from one probe, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
+            &["Type matches retained after dedupe, bounded by the applied limit. `typeMatchesObserved` is the retained count, so `typeMatchesObserved == typeMatchesLimit` means at least that many matches were found; the true match count is not enumerated. Also records the compile view the answer describes."],
         ),
         record(
             "DiagnosticSpan",

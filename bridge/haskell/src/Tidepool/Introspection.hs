@@ -20,6 +20,7 @@ module Tidepool.Introspection
     InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc,
     encodeInspectionResults,
     inspectPublicModuleExports,
+    boundedDistinctNames,
   )
 where
 
@@ -919,6 +920,18 @@ boundedNames :: Maybe Int -> [a] -> [a]
 boundedNames Nothing = id
 boundedNames (Just budget) = take budget
 
+-- | Deduplicate before budgeting. An export list may name the same entity
+-- twice; taking the budget first would retain fewer than `budget` distinct
+-- entries and make a truncated answer look shorter than it is.
+boundedDistinctNames :: (Ord a) => Maybe Int -> [a] -> [a]
+boundedDistinctNames budget = boundedNames budget . distinctInOrder
+  where
+    distinctInOrder = go Set.empty
+    go _ [] = []
+    go seen (x : rest)
+      | x `Set.member` seen = go seen rest
+      | otherwise = x : go (Set.insert x seen) rest
+
 inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> Maybe Int -> m InspectionResult
 inspectModule context requested expanded budget
   | isJust (parseSessionModule requested) = pure (InspectionModuleNotFound requested [])
@@ -933,9 +946,11 @@ inspectModule context requested expanded budget
         owner <- findModule (mkModuleName requested) Nothing
         resolvedInfo <- getModuleInfo owner
         pure (owner, maybe [] modInfoExports resolvedInfo)
-    -- The budget bounds rendered entries, not the export list itself: the
-    -- first `budget` exports in `modInfoExports` order are rendered.
-    rawEntries <- browseEntries context expanded (boundedNames budget names)
+    -- A repeated export names the same entity. Deduplicate identities before
+    -- the budget so a truncated answer retains `budget` distinct entries; the
+    -- display-level dedupe below still collapses distinct entities that render
+    -- identically after rendering.
+    rawEntries <- browseEntries context expanded (boundedDistinctNames budget names)
     let entries = nubBy sameDisplay (sortOn entryKey rawEntries)
     pure (InspectionBrowse (moduleNameString (moduleName mdl)) expanded entries)
   where

@@ -16,6 +16,10 @@ use super::assemble_inspection_module;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionQuery {
     TypeOf(String),
+    /// No production query plan constructs this; the resident workbench uses
+    /// `StructuredInfo`. It stays because `inspection`'s execution test still
+    /// drives the shared-environment assembly and the worker's `InspectNameInfo`
+    /// arm, which remains wire-reachable even when the runtime does not plan it.
     Info(String),
     TypeSearch(String),
     /// Type search whose encoded match list stops at `budget`. The search

@@ -5,6 +5,9 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
 import Control.Monad (unless)
+import Control.Monad.IO.Class (liftIO)
+import Data.List (nub)
+import Data.Map.Strict qualified as Map
 import GHC
 import GHC.Tc.Types (TcGblEnv, tcg_rdr_env)
 import GHC.Types.Name (nameOccName)
@@ -13,6 +16,7 @@ import GHC.Types.Name.Reader (GlobalRdrEnv, globalRdrEnvElts, greName)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
 import System.FilePath ((</>))
 import System.Process (callProcess, readProcess)
+import Tidepool.ExtractRequest (InspectionRequest (..))
 import Tidepool.Introspection
 
 main :: IO ()
@@ -20,7 +24,9 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test"
-  [testCase "compiled introspection searches" scenario]
+  [ testCase "compiled introspection searches" scenario,
+    testCase "bounded browse dedupes before the budget" browseScenario
+  ]
 
 scenario :: IO ()
 scenario = do
@@ -148,6 +154,90 @@ scenario = do
     hasAvailability wanted availability =
       any
         (\result -> typeMatchName result == wanted && typeMatchAvailability result == availability)
+
+-- A budgeted browse reports the retained distinct entries, so a source larger
+-- than the budget reads as "at least budget". The browsed module is imported
+-- rather than the checked target, exercising `modInfoExports`; the fixture also
+-- exports one type twice (through `Wrapper(..)` and `Wrapper(Wrapped)`) so a
+-- future regression that counted export items rather than entities would
+-- under-fill the budget.
+browseScenario :: IO ()
+browseScenario = do
+  root <- (</> "tidepool-introspection-browse-test") <$> getTemporaryDirectory
+  createDirectoryIfMissing True root
+  let source = root </> "InspectionBrowseHost.hs"
+      library = root </> "InspectionBrowseLibrary.hs"
+      budget = 3
+  writeFile library browseLibrary
+  writeFile source browseHost
+  libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
+  unless (boundedDistinctNames Nothing [3 :: Int, 1, 3, 2, 1] == [3, 1, 2]) $
+    fail "names must keep first-seen order"
+  -- The budget composes after deduplication. GHC's export APIs currently
+  -- dedupe repeated items themselves, so this pure assertion is what pins the
+  -- ordering: budgeting first would return [1, 2] for a budget of three.
+  unless (boundedDistinctNames (Just 3) [1 :: Int, 1, 2, 2, 3, 3, 4] == [1, 2, 3]) $
+    fail "the budget must count distinct candidates"
+  results <- runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags
+      flags
+        { importPaths = root : importPaths flags,
+          hiDir = Just root,
+          objectDir = Just root
+        }
+    target <- guessTarget source Nothing Nothing
+    setTargets [target]
+    _ <- load LoadAllTargets
+    summary <- getModSummary (mkModuleName "InspectionBrowseHost")
+    typed <- typecheckModule =<< parseModule summary
+    let (tcEnv, _) = tm_internals_ typed
+    hscEnv <- getSession
+    liftIO $
+      runInspection hscEnv tcEnv (tcg_rdr_env tcEnv) Map.empty
+        [InspectModuleBounded "InspectionBrowseLibrary" False budget]
+  case results of
+    [InspectionBrowse moduleName False entries] -> do
+      unless (moduleName == "InspectionBrowseLibrary") $
+        fail ("browse named another module: " ++ moduleName)
+      let names = map infoName entries
+      unless (names == ["Wrapper", "alpha", "beta"]) $
+        fail ("a truncated browse must retain the first budget distinct names: " ++ show entries)
+      unless (length (nub names) == budget) $
+        fail ("retained names were not distinct: " ++ show names)
+    other -> fail ("expected one expanded browse result: " ++ show other)
+  where
+    trim = reverse . dropWhile (`elem` ['\n', '\r']) . reverse
+
+browseLibrary :: String
+browseLibrary =
+  unlines
+    [ "module InspectionBrowseLibrary",
+      "  ( Wrapper (..),",
+      "    Wrapper (Wrapped),",
+      "    alpha,",
+      "    beta",
+      "  ) where",
+      "",
+      "data Wrapper = Wrapped Int",
+      "",
+      "alpha :: Int",
+      "alpha = 1",
+      "",
+      "beta :: Bool",
+      "beta = True",
+      ""
+    ]
+
+browseHost :: String
+browseHost =
+  unlines
+    [ "module InspectionBrowseHost where",
+      "import InspectionBrowseLibrary",
+      "",
+      "hostValue :: Int",
+      "hostValue = alpha"
+    ]
 
 matchesFor :: (GhcMonad m) => HscEnv -> TcGblEnv -> GlobalRdrEnv -> String -> m [TypeMatch]
 matchesFor hscEnv tcEnv rdrEnv wanted = do
