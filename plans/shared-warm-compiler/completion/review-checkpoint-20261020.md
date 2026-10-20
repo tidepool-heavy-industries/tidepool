@@ -36,7 +36,7 @@ Logs: `/srv/swarm/evidence/inanna/compiler-demand-20261020/integration/`.
 | SOURCE/predecessor history | `15b198c2b6-source-history.log`: one selected leaf passed, eleven actual admissions, 7.80 s test duration | Compiler/component history, not Persona |
 | Finalized Core | `15b198c2b6-finalized-core.log`: one selected leaf passed, 1.41 s | Includes genuine changed-interface/Core/package refusals |
 | Compiled-C native input edges | `15b198c2b6-compiled-output-edges.log`: one executed, failed at RetainedCore role assertion | New edge assertions not yet reached |
-| Host activation cohort | `d91f6a67a6-host-binding-cohort.log`: first case reproduced FromJSON canonical mismatch; cohort still running when this checkpoint was written | Use terminal log/report for final count |
+| Host activation cohort | `d91f6a67a6-host-binding-cohort.log`: three executed, all failed at the same FromJSON canonical mismatch | None reached its intended activation assertion |
 
 The attempted one-case native label was absent on this revision. The subsequent
 ordinary libtest command lacked the named cohort's service source resources and
@@ -82,8 +82,9 @@ correct deployment/source resources and is the relevant reproduction.
 - `audit_native_selection`: typed realization/reference follow-up, bounded
   parser repair and actual ensure-World integration controls. Wire/helper
   checks alone do not qualify zero-ref acquisition or miss restoration.
-- `native_offer_scope_repair`: approved private native-availability result;
-  isolated from root until compile, unchanged compiled-C oracle and review.
+- `native_offer_scope_repair`: clean source-ready `1bd21777d3` implements the
+  approved private native-availability result. Exact review and root warm-lane
+  compile/execution remain pending; no cold output lane was provisioned.
 - `audit_reload_ownership`: clean `9db4062183` with six earlier counted controls,
   test-layout repair and two now-executed failing lifecycle controls. Source-birth
   proposal only; no new implementation wave.
