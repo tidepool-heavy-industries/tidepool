@@ -7215,6 +7215,16 @@ impl ArtifactView {
         ))
     }
 
+    /// Physical observations for an issuer that already owns exact role IDs.
+    /// These lookups do not select namespace bindings or native groups.
+    pub(crate) fn observed_payload(&self, id: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        self.lease.payloads.get(id)
+    }
+
+    pub(crate) fn has_observed_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        self.lease.has_acquired_owner(owner)
+    }
+
     pub(crate) fn contains_namespace_artifact(&self, id: ArtifactId) -> bool {
         self.lease.selection.namespace.contains_key(&id)
     }

@@ -309,3 +309,26 @@ generated issue/retention property passed 2/2, exit 0, build
 `c63abe4d-156d-4aba-88f8-d2695cd0388b`. Executed Rust SHA:
 `bd6f938783feb7eb438d91f288a26533a68765c2a3581701378768fa90a10eca`.
 Command: `swarm-build just test-lib tidepool-toolchain --exact certified_products::tests::planned_original_history_tests::selected_planned_original_survives_multiversion_custody_at_consumer_boundary --exact certified_products::tests::planned_original_history_tests::selected_planned_original_matches_generated_issue_and_retention_history --expected-count 2 --output-dir /srv/swarm/evidence/inanna/world-stage-original-refusal-oracle-20261020 --retain-artifacts`.
+
+
+## Supplied source-role projection
+
+The authenticated source selection now resolves its supplied artifact IDs via
+keyed observations of the same acquired payload owner. Generated-scaffold
+omission still requires the actual admitted generated owner and its absence
+from the existing acquired-owner index. It does not infer a namespace or native
+permission from custody. The shared role builder keeps all non-Original
+interface kinds, checks each selected descriptor's exact owner, and retains the
+same Original owner/canonical/issued-row checks and final `from_issued_entries`
+admission. Other metadata-based consumers retain their existing entry points.
+
+At parent `fedd0ae226` plus this delta, the source projector and unchanged native
+issuance control passed 2/2, exit 0, build
+`93bbc75e-f355-47e4-bc09-2be2d72a50c4`. Rust SHA:
+`b9ac32afbb1f4509e0fbb0947b7a7cd7ca1e95944d023e109211ec661822616f`.
+The projector control supplies actual canonical, ValueInterface and LexicalJoin
+rows to a cold view with 1/32/128 unrelated rows. Each run observes exactly the
+three supplied roles with zero view queries, graph visits or metadata handle
+copies, then compares against the independent metadata entry point. It also
+refuses a crossed selected owner and missing required payload.
+Command: `swarm-build just test-lib tidepool-toolchain --exact certified_products::tests::source_support_projection_uses_only_issued_keys_and_keeps_all_interface_kinds --exact certified_products::tests::physical_native_issuance_survives_item_type_projection_without_future_demand --expected-count 2 --output-dir /srv/swarm/evidence/inanna/world-stage-keyed-source-projection-20261020 --retain-artifacts`.
