@@ -3979,6 +3979,18 @@ where
             .admit_world_planned_cell_for_execution(execution, plan)
     }
 
+    /// Reserve against the exact atomic private input mount retained by its guard.
+    pub fn admit_world_planned_cell_with_input(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        input: Option<&super::PendingHostValueWrite>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .admit_world_planned_cell_with_input(execution, plan, input)
+    }
+
     pub fn admit_checked_item(
         &mut self,
         prefix: Arc<super::RuntimeCheckedPrefix>,
