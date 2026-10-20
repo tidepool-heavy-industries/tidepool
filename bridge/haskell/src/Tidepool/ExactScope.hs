@@ -2463,6 +2463,9 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
           either worldCorrupt pure (checkArtifactSeal (hexBytes expectedSHA) descriptor)
           let bytes = artifactBytes descriptor
           decodeWorldBytes (decodeWorldCellOperand (BS.length bytes)) bytes
+      case offered of
+        ((_,ParsedValueEvidence),_) -> pure ()
+        _ -> worldCorrupt "world operand requires a checked value row"
       frontier <- verifyWorldBlocks [cid] blocks
       (rows,custody,_) <- admitWorldRows state (worldInputsProducer facts) acquisition [offered]
       eligible <- worldVisibleSemantic <$> worldRowsByOwner rows
