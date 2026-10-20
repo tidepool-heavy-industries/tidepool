@@ -673,7 +673,7 @@ mod tests {
                     assert!(matches!(
                         transaction.admit_original(&original, Some(target.clone())),
                         Err(SourceAdmissionError::Closed {
-                            phase: SourceAdmissionPhase::Fenced,
+                            phase: SourceAdmissionPhase::Fenced { .. },
                             ..
                         }),
                     ));
