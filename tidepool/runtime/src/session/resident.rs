@@ -2352,6 +2352,7 @@ impl PreparedStartupEntry {
 pub struct PreparedSourceStartupEntry {
     entry: PreparedStartupEntry,
     installation_scope: Arc<super::RuntimeLexicalScopeLease>,
+    original_source: Arc<super::RuntimeOriginalSource>,
 }
 
 impl PreparedSourceStartupEntry {
@@ -8078,7 +8079,9 @@ where
                 }
             };
             let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                self.binding_provenance.get(&input.id().raw()).map(|p| p.source_custody())
+                self.binding_provenance
+                    .get(&input.id().raw())
+                    .map(|p| p.source_custody())
             };
             match checked {
                 Some(checked) => checked.install_certified_turn_in(
@@ -8097,7 +8100,8 @@ where
                     &resolved.source_evidence,
                     &resolved.inherited_needed,
                 )?,
-            }.into_parts()
+            }
+            .into_parts()
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
@@ -8189,11 +8193,12 @@ where
             code,
             identity,
             installation_scope.scope(),
-            Some(&origin),
+            Some((source_entry, &origin)),
         )?;
         Ok(PreparedSourceStartupEntry {
             entry,
             installation_scope,
+            original_source: origin.0,
         })
     }
 
@@ -8202,25 +8207,18 @@ where
         code: TurnCode<'_>,
         compile_identity: StartupCompileIdentity,
         scope: ScopeId,
-        closed_origin: Option<&CapturedSourceOrigin>,
+        closed_origin: Option<(&super::PreparedSourceEntry, &CapturedSourceOrigin)>,
     ) -> Result<PreparedStartupEntry, ResidentError> {
         self.settle_dropped_custody();
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let admission = if let Some(origin) = closed_origin {
-            // Resolve exactly once against the fresh domain. Retained live
-            // inputs refuse; only this closed-entry producer can supply the
-            // new physical definitions' execution source.
-            let certification = code
-                .certification()
-                .ok_or(ResidentError::UnsealedStartupEntry)?;
-            let resolved = self.state.resolve_closed_source_entry_in(
-                scope,
-                code.prepared(),
-                certification,
-                origin,
-            )?;
+        let admission = if let Some((entry, origin)) = closed_origin {
+            // Only the actual closed owner can select new physical definitions'
+            // execution source. Resolve once against this fresh domain.
+            let resolved = self
+                .state
+                .resolve_closed_source_entry_in(scope, entry, origin)?;
             AdmittedTurnCode {
                 code,
                 scope,
@@ -8261,6 +8259,17 @@ where
         if self.run_context.lexical_scope != entry.installation_scope.scope() {
             return Err(ResidentError::StaleStartupEntry);
         }
+        let transaction = self
+            .state
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let source = transaction.admitted_original_source()?;
+        if !Arc::ptr_eq(&source, &entry.original_source) {
+            return Err(super::SourceAdmissionError::DifferentOriginalSource.into());
+        }
+        self.state
+            .admit_source_work_in(entry.installation_scope.scope())?;
         self.state.validate_lexical_scope_lease(
             entry.installation_scope.scope(),
             &entry.installation_scope,
