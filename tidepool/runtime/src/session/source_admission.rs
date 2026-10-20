@@ -43,6 +43,8 @@ pub enum SourceAdmissionError {
     Exhausted,
     #[error("source retirement attempt no longer owns its fence")]
     StaleFence,
+    #[error("publication no longer retains its admitted prerequisite claim")]
+    PublicationPrerequisiteReleased,
     #[error("source fence settlement did not commit its scoped reopen")]
     ReopenNotCommitted,
     #[error("source cutoff did not commit its scoped fence")]
@@ -115,22 +117,7 @@ impl RuntimeSourceAdmission {
         admissions: impl IntoIterator<Item = &'a Self>,
         admit: impl FnOnce() -> T,
     ) -> Result<T, SourceAdmissionError> {
-        fn collect(admission: &RuntimeSourceAdmission, gates: &mut Vec<RuntimeSourceAdmission>) {
-            if gates.iter().any(|gate| gate.same_owner(admission)) {
-                return;
-            }
-            if let Some(parent) = admission.prerequisite() {
-                collect(parent, gates);
-            }
-            gates.push(admission.clone());
-        }
-        let mut gates = Vec::new();
-        for admission in admissions {
-            collect(admission, &mut gates);
-        }
-        // A total order also covers two unrelated source/target chains. A
-        // recursive ancestor-only lock order would invert on overlapping DAGs.
-        gates.sort_unstable_by_key(|gate| Arc::as_ptr(&gate.0) as usize);
+        let gates = Self::ordered_admissions(admissions);
         let mut guards = Vec::new();
         for gate in &gates {
             let state = gate.0.state.lock();
@@ -149,6 +136,26 @@ impl RuntimeSourceAdmission {
             guards.push(state);
         }
         Ok(admit())
+    }
+
+    fn ordered_admissions<'a>(admissions: impl IntoIterator<Item = &'a Self>) -> Vec<Self> {
+        fn collect(admission: &RuntimeSourceAdmission, gates: &mut Vec<RuntimeSourceAdmission>) {
+            if gates.iter().any(|gate| gate.same_owner(admission)) {
+                return;
+            }
+            if let Some(parent) = admission.prerequisite() {
+                collect(parent, gates);
+            }
+            gates.push(admission.clone());
+        }
+        let mut gates = Vec::new();
+        for admission in admissions {
+            collect(admission, &mut gates);
+        }
+        // A total order also covers two unrelated source/target chains. A
+        // recursive ancestor-only lock order would invert on overlapping DAGs.
+        gates.sort_unstable_by_key(|gate| Arc::as_ptr(&gate.0) as usize);
+        gates
     }
 
     /// Records one actual source action before allocation. A retained claim
@@ -197,6 +204,28 @@ impl RuntimeSourceAdmission {
         compare: impl for<'a> FnOnce(RuntimeSourceFenceTransition<'a>) -> Result<(), E>,
     ) -> Result<Result<RuntimeSourceFence, SourceFenceTransitionFailure<E>>, SourceAdmissionError>
     {
+        self.fence_compared(source, false, compare)
+    }
+
+    /// Reserve an idle publication target while comparing its actual owner.
+    /// The callback runs under canonical issuer and own-gate custody, so it
+    /// must not reacquire either. Refusal before commit leaves the gate open.
+    pub fn fence_if_idle_with<E>(
+        &self,
+        source: &Arc<super::RuntimeOriginalSource>,
+        compare: impl for<'a> FnOnce(RuntimeSourceFenceTransition<'a>) -> Result<(), E>,
+    ) -> Result<Result<RuntimeSourceFence, SourceFenceTransitionFailure<E>>, SourceAdmissionError>
+    {
+        self.fence_compared(source, true, compare)
+    }
+
+    fn fence_compared<E>(
+        &self,
+        source: &Arc<super::RuntimeOriginalSource>,
+        require_idle: bool,
+        compare: impl for<'a> FnOnce(RuntimeSourceFenceTransition<'a>) -> Result<(), E>,
+    ) -> Result<Result<RuntimeSourceFence, SourceFenceTransitionFailure<E>>, SourceAdmissionError>
+    {
         if !source.source_admission().same_owner(self) {
             return Err(SourceAdmissionError::StaleSourceLease);
         }
@@ -206,6 +235,12 @@ impl RuntimeSourceAdmission {
                 return Err(SourceAdmissionError::Closed {
                     scope: self.0.scope,
                     phase: state.phase,
+                });
+            }
+            if require_idle && (state.claims != 0 || state.unconfirmed != 0) {
+                return Err(SourceAdmissionError::BootstrapBusy {
+                    claims: state.claims,
+                    unconfirmed: state.unconfirmed,
                 });
             }
             let attempt = state.next_attempt;
@@ -361,6 +396,59 @@ impl RuntimeSourceLeaseClaim {
             claim.retain_unconfirmed();
         }
     }
+
+    /// Transfer this actual admitted action into publication custody. A
+    /// visibility view can observe this claim but cannot prolong its authority.
+    pub fn for_publication(self) -> RuntimeSourcePublicationPrerequisite {
+        let witness = Arc::new(PublicationClaimWitness {
+            active: std::sync::atomic::AtomicBool::new(true),
+            gates: self
+                .claims
+                .iter()
+                .map(|claim| claim.owner.clone())
+                .collect(),
+        });
+        RuntimeSourcePublicationPrerequisite {
+            claim: Some(self),
+            witness,
+        }
+    }
+}
+
+/// Publication retains its exact admitted prerequisite action until settlement.
+/// A weak observation of this owner cannot retain or recreate the action.
+pub struct RuntimeSourcePublicationPrerequisite {
+    claim: Option<RuntimeSourceLeaseClaim>,
+    witness: Arc<PublicationClaimWitness>,
+}
+
+struct PublicationClaimWitness {
+    active: std::sync::atomic::AtomicBool,
+    gates: Vec<RuntimeSourceAdmission>,
+}
+
+impl RuntimeSourcePublicationPrerequisite {
+    pub fn retain_unconfirmed(mut self) {
+        self.revoke();
+        if let Some(claim) = self.claim.take() {
+            claim.retain_unconfirmed();
+        }
+    }
+
+    fn revoke(&self) {
+        self.witness
+            .active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for RuntimeSourcePublicationPrerequisite {
+    fn drop(&mut self) {
+        // Revoke before the actual claim's Drop can wait for a gate. An
+        // observer that upgraded the weak witness must still check `active`
+        // while holding every gate, and cannot borrow another action's claim.
+        self.revoke();
+    }
 }
 
 /// Affine retirement attempt. Abandonment keeps admission fenced.
@@ -375,6 +463,7 @@ pub struct RuntimeSourceFence {
 pub struct RuntimeSourcePublicationView {
     owner: RuntimeSourceAdmission,
     attempt: u64,
+    prerequisite: Option<std::sync::Weak<PublicationClaimWitness>>,
 }
 
 impl RuntimeSourcePublicationView {
@@ -383,11 +472,43 @@ impl RuntimeSourcePublicationView {
         lease: &Arc<super::RuntimeLexicalScopeLease>,
         action: impl FnOnce() -> T,
     ) -> Result<T, SourceAdmissionError> {
+        self.with_current_state(lease, |_| Ok(action()))
+    }
+
+    fn with_current_state<T>(
+        &self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(&mut AdmissionState) -> Result<T, SourceAdmissionError>,
+    ) -> Result<T, SourceAdmissionError> {
         if !lease.source_admission().same_owner(&self.owner) {
             return Err(SourceAdmissionError::StaleFence);
         }
-        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
-            let state = self.owner.0.state.lock();
+        super::RuntimeOriginalSource::with_sources_and_targets([], [lease.clone()], |sources, _| {
+            let gates = RuntimeSourceAdmission::ordered_admissions(
+                sources.iter().map(|source| source.source_admission()),
+            );
+            // Keep every prerequisite stable through the actual publication
+            // transition. An earned claim may finish behind a later fence, but
+            // an independent action's uncertain cleanup must prevent publication.
+            let mut guards = gates
+                .iter()
+                .map(|gate| gate.0.state.lock())
+                .collect::<Vec<_>>();
+            let own = gates
+                .iter()
+                .position(|gate| gate.same_owner(&self.owner))
+                .ok_or(SourceAdmissionError::StaleFence)?;
+            let prerequisite = self
+                .prerequisite
+                .as_ref()
+                .map(|witness| {
+                    witness
+                        .upgrade()
+                        .filter(|held| held.active.load(std::sync::atomic::Ordering::Acquire))
+                        .ok_or(SourceAdmissionError::PublicationPrerequisiteReleased)
+                })
+                .transpose()?;
+            let state = &guards[own];
             if state.phase
                 != (SourceAdmissionPhase::Fenced {
                     attempt: self.attempt,
@@ -395,11 +516,25 @@ impl RuntimeSourcePublicationView {
             {
                 return Err(SourceAdmissionError::StaleFence);
             }
-            if state.unconfirmed != 0 {
-                return Err(SourceAdmissionError::Unconfirmed {
-                    scope: self.owner.0.scope,
-                    count: state.unconfirmed,
-                });
+            for (index, (gate, state)) in gates.iter().zip(&guards).enumerate() {
+                if state.unconfirmed != 0 {
+                    return Err(SourceAdmissionError::Unconfirmed {
+                        scope: gate.0.scope,
+                        count: state.unconfirmed,
+                    });
+                }
+                if index != own
+                    && !matches!(state.phase, SourceAdmissionPhase::Open)
+                    && !(matches!(state.phase, SourceAdmissionPhase::Fenced { .. })
+                        && prerequisite.as_ref().is_some_and(|held| {
+                            held.gates.iter().any(|claimed| claimed.same_owner(gate))
+                        }))
+                {
+                    return Err(SourceAdmissionError::Closed {
+                        scope: gate.0.scope,
+                        phase: state.phase,
+                    });
+                }
             }
             if state.claims != 0 {
                 return Err(SourceAdmissionError::BootstrapBusy {
@@ -407,7 +542,7 @@ impl RuntimeSourcePublicationView {
                     unconfirmed: 0,
                 });
             }
-            Ok(action())
+            action(&mut guards[own])
         })
     }
 }
@@ -479,6 +614,32 @@ struct ScopedReopen<'a> {
     committed: bool,
     accepted: bool,
 }
+impl ScopedReopen<'_> {
+    fn settle<E>(
+        state: &mut AdmissionState,
+        settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
+    ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
+        let original = state.phase;
+        let mut scoped = ScopedReopen {
+            state,
+            original,
+            committed: false,
+            accepted: false,
+        };
+        let result = settle(RuntimeSourceReopen {
+            state: &mut *scoped.state,
+            committed: &mut scoped.committed,
+        });
+        match result {
+            Ok(()) if scoped.committed => {
+                scoped.accepted = true;
+                Ok(Ok(OwnSourceFenceReopened { _private: () }))
+            }
+            Ok(_) => Err(SourceAdmissionError::ReopenNotCommitted),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+}
 impl Drop for ScopedReopen<'_> {
     fn drop(&mut self) {
         if !self.accepted {
@@ -487,11 +648,29 @@ impl Drop for ScopedReopen<'_> {
     }
 }
 impl RuntimeSourceFence {
-    pub fn publication_view(&self) -> RuntimeSourcePublicationView {
+    pub fn publication_view(
+        &self,
+        prerequisite: Option<&RuntimeSourcePublicationPrerequisite>,
+    ) -> RuntimeSourcePublicationView {
         RuntimeSourcePublicationView {
             owner: self.owner.clone(),
             attempt: self.attempt,
+            prerequisite: prerequisite.map(|held| Arc::downgrade(&held.witness)),
         }
+    }
+
+    /// Confirm publication under the exact target's canonical source DAG.
+    /// Prerequisite claims earned by the publication owner may finish while
+    /// fenced, but uncertain or retired prerequisites refuse confirmation.
+    /// The callback follows the same scoped-commit rules as `reopen_with`.
+    pub fn confirm_publication_with<E>(
+        self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        prerequisite: Option<&RuntimeSourcePublicationPrerequisite>,
+        settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
+    ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
+        self.publication_view(prerequisite)
+            .with_current_state(lease, |state| ScopedReopen::settle(state, settle))
     }
 
     pub fn unconfirmed_claims(&self) -> usize {
@@ -567,24 +746,7 @@ impl RuntimeSourceFence {
                     count: state.unconfirmed,
                 });
             }
-            let mut scoped = ScopedReopen {
-                state: &mut state,
-                original,
-                committed: false,
-                accepted: false,
-            };
-            let result = settle(RuntimeSourceReopen {
-                state: &mut *scoped.state,
-                committed: &mut scoped.committed,
-            });
-            match result {
-                Ok(()) if scoped.committed => {
-                    scoped.accepted = true;
-                    Ok(Ok(OwnSourceFenceReopened { _private: () }))
-                }
-                Ok(_) => Err(SourceAdmissionError::ReopenNotCommitted),
-                Err(error) => Ok(Err(error)),
-            }
+            ScopedReopen::settle(&mut state, settle)
         })
     }
     pub fn retire(self, successor: NotebookGenerationId) -> Result<(), SourceAdmissionError> {
@@ -705,7 +867,7 @@ mod tests {
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
         let other = session.mint_notebook_scope_with_lease(None).unwrap();
         let fence = lease.source_admission().fence().unwrap();
-        let view = fence.publication_view();
+        let view = fence.publication_view(None);
         let ran = std::cell::Cell::new(false);
         assert_eq!(
             view.with_current(&other, || ran.set(true)),
@@ -727,7 +889,7 @@ mod tests {
         );
         assert!(!ran.get());
         replacement
-            .publication_view()
+            .publication_view(None)
             .with_current(&lease, || ran.set(true))
             .unwrap();
         assert!(ran.get());
@@ -740,7 +902,7 @@ mod tests {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
             let claim = lease.admit_source().unwrap();
             let fence = lease.source_admission().fence().unwrap();
-            let view = fence.publication_view();
+            let view = fence.publication_view(None);
             if unconfirmed {
                 claim.retain_unconfirmed();
                 assert!(matches!(
@@ -760,6 +922,146 @@ mod tests {
                 view.with_current(&lease, || ()).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn publication_rechecks_prerequisite_uncertainty_at_visibility_and_confirmation() {
+        for visible_before_uncertainty in [false, true] {
+            let mut session = PersistentSession::new(None, 1024);
+            let parent = session.mint_notebook_scope_with_lease(None).unwrap();
+            let child = session
+                .mint_notebook_scope_with_lease(Some(parent.clone()))
+                .unwrap();
+            let held = parent.admit_source().unwrap().for_publication();
+            let independent = parent.admit_source().unwrap();
+            let fence = child.source_admission().fence_if_idle().unwrap();
+            let view = fence.publication_view(Some(&held));
+            if visible_before_uncertainty {
+                view.with_current(&child, || ()).unwrap();
+            }
+            independent.retain_unconfirmed();
+            let expected = SourceAdmissionError::Unconfirmed {
+                scope: parent.scope(),
+                count: 1,
+            };
+            assert_eq!(
+                view.with_current(&child, || panic!("uncertain prerequisite cannot publish")),
+                Err(expected.clone())
+            );
+            assert!(matches!(
+                fence.confirm_publication_with::<()>(&child, Some(&held), |_| {
+                    panic!("uncertain prerequisite cannot confirm")
+                }),
+                Err(actual) if actual == expected
+            ));
+            assert!(matches!(
+                child.source_admission().0.state.lock().phase,
+                SourceAdmissionPhase::Fenced { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn publication_requires_its_own_live_claim_for_a_fenced_prerequisite() {
+        for revoke in [false, true] {
+            let mut session = PersistentSession::new(None, 1024);
+            let parent = session.mint_notebook_scope_with_lease(None).unwrap();
+            let child = session
+                .mint_notebook_scope_with_lease(Some(parent.clone()))
+                .unwrap();
+            let held = parent.admit_source().unwrap().for_publication();
+            let unrelated = parent.admit_source().unwrap();
+            let parent_fence = parent.source_admission().fence().unwrap();
+            let fence = child.source_admission().fence_if_idle().unwrap();
+            assert!(matches!(
+                fence.publication_view(None).with_current(&child, || ()),
+                Err(SourceAdmissionError::Closed { scope, .. }) if scope == parent.scope()
+            ));
+            let view = fence.publication_view(Some(&held));
+            view.with_current(&child, || ()).unwrap();
+            if revoke {
+                // An observer may have upgraded before owner release. Keeping
+                // that observation alive must not keep the claim authorized.
+                let observation = view.prerequisite.as_ref().unwrap().upgrade().unwrap();
+                drop(held);
+                assert_eq!(
+                    view.with_current(&child, || panic!("released claim cannot publish")),
+                    Err(SourceAdmissionError::PublicationPrerequisiteReleased)
+                );
+                assert!(!observation
+                    .active
+                    .load(std::sync::atomic::Ordering::Acquire));
+            } else {
+                fence
+                    .confirm_publication_with(&child, Some(&held), |reopen| {
+                        reopen.commit();
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    child.admit_source(),
+                    Err(SourceAdmissionError::Closed { scope, .. }) if scope == parent.scope()
+                ));
+                drop(held);
+            }
+            drop(unrelated);
+            parent_fence.reopen(parent.original_source()).unwrap();
+        }
+    }
+
+    #[test]
+    fn publication_checks_source_only_ancestors_and_rollback_only_reopens_its_gate() {
+        let mut session = PersistentSession::new(None, 1024);
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let child = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.mint_notebook_scope_with_lease(None),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        assert!(child.prerequisites().is_empty());
+        let held = source.admit_source().unwrap().for_publication();
+        let independent = source.admit_source().unwrap();
+        let parent_fence = source.source_admission().fence().unwrap();
+        let fence = child.source_admission().fence_if_idle().unwrap();
+        assert!(matches!(
+            fence.publication_view(None).with_current(&child, || ()),
+            Err(SourceAdmissionError::Closed { scope, .. }) if scope == source.scope()
+        ));
+        let view = fence.publication_view(Some(&held));
+        view.with_current(&child, || ()).unwrap();
+        independent.retain_unconfirmed();
+        assert_eq!(
+            view.with_current(&child, || panic!("source-only ancestor cannot be omitted")),
+            Err(SourceAdmissionError::Unconfirmed {
+                scope: source.scope(),
+                count: 1,
+            })
+        );
+        fence
+            .reopen_with(child.original_source(), |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            child.source_admission().0.state.lock().phase,
+            SourceAdmissionPhase::Open
+        );
+        assert!(matches!(
+            child.admit_source(),
+            Err(SourceAdmissionError::Unconfirmed { scope, count: 1 }) if scope == source.scope()
+        ));
+        assert_eq!(parent_fence.unconfirmed_claims(), 1);
     }
 
     #[test]

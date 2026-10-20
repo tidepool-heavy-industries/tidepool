@@ -1,7 +1,7 @@
 # Compiler work and authority map
 
-The service-path update below covers root `25316371c1`, the `115c81ee9e` fixture
-repair, and the explicitly named area candidates on 2026-10-20. It distinguishes implemented owners from
+The service-path update below covers root `3f8b3bb54d` and the explicitly named
+area candidates on 2026-10-20. It distinguishes implemented owners from
 receiving work and does not establish release readiness. The subsequent P1–P10
 tables describe the earlier finite path at `8245fa800a`/`c10837d44d`; they remain
 a deletion and consumer-migration inventory, not the current service dataflow.
@@ -23,12 +23,13 @@ alone is neither its implementation nor evidence of a speedup.
 | Runtime admission | Runtime captures actual source A, target B, reservation and current compiler-world association. Compiler identity does not replace source or execution authority. | Ordinary syntax, original source/target separation and joined cancellation controls must all use this owner. |
 | Compiler preparation | The service retains the parsed operation and its actual world. Ordered stages carry their own checked prefixes; matching outer END is required before executable sealing. | PREP5/protocol 27 producer `b3909545ec` and scoped query consumer `e1a1af0c0b` compile separately. Joined execution is pending; earlier PREP4 results do not qualify this pair. |
 | Finalized interfaces and original products | GHC owns completed interfaces/Core; `CompilerProducts` owns original-product admission. A finalized-module inventory is broader than fresh implementation selection. | Preserve fresh source, selected canonical SOURCE, retained staged Original and TYPE-only custody distinctly. Do not make every finalized interface a newly issued original or compare relocated paths as implementation identities. |
-| Native selection and installation | The existing resolver selects exact issued bindings or positively completed current groups. `ScopedTargetImage` carries its demanded images into installation, preventing a caller from pairing another image vector with the target. | Bundled candidate `93d82210be` compiles. Its 18 controls initially passed 17; the remaining source-transaction fixture was repaired and passes separately. Current versus historical classification must follow the winning issued row, not artifact-byte identity. Causal source support remains under review. |
-| Checked runtime continuation | `CheckedTurnCompletion::install_certified_turn_in` validates the same prefix/item/world before installation and advances only the association's runtime key after successful installation. The world and captured source observations remain the same. | The `b2f02e4cc1` replay passes the formerly failing in-cell query and settlement. Its later unrelated-history setup fails source admission; `115c81ee9e` replaces that setup with real issued admission and awaits replay. No generic key refresh or stale-check bypass is authorized. |
-| Host and renderer preparation | `RuntimeHostPrototypeReceipt` retains a purpose-specific actual finite owner or World source/reservation. Cold World host preparation no longer asks for a finite-only accessor. | Joined `7ae7d2741d` compiles. Its private-input test passes the lifetime/refusal case; the positive case reaches a later Haskell finalization failure. |
-| Declaration adoption | The actual declaration origin carries immutable hidden-input custody. Prospective readers validate exact baseline, scope and origin pairing before mutation. | Frozen support has 12 focused passes at `857afe6454`; final runtime publication `3b6682bab7` and removal of the earlier World reservation refusal require joined compilation and the actual declaration-history gate. |
-| Queries | The five discovery operations use the held compiler operation; runtime owns view currency. The actor captures its actual request/row/model observation with the scaffold. | `e1a1af0c0b` compiles with five projection/refusal controls and a context mutation control passing. Semantic all-five execution and canonical-name correlation remain unqualified. The last finite consumer is missing type-text enrichment in bindings status; its replacement is assigned. |
-| Reload | Publication guard, source fences and settlement remain with their actual attempt. Only an observed unpublished body may return the same refusal guard. | The real A/B unpublished-body control passes at `8a0e1ac303`. Affine worker return, post-death recovery checkout, final physical recapture/stop and full force/recovery remain unfinished. An absent receipt establishes neither failure nor successful cleanup. |
+| Native selection and installation | The resolver selects exact issued bindings or positively completed current groups. `ScopedTargetImage` carries its demanded images. Native source causes follow the actual selected binding; byte equality cannot provide that relationship. | Area `5bc75aece0` compiles with 3 focused and 18 bundled passes. The complete-offer path must also retain the solver's exact historical source anchor; graph-only or recovered inputs remain Unwitnessed. This receiving work is not yet qualified. |
+| Checked runtime continuation | `CheckedTurnCompletion::install_certified_turn_in` validates the same prefix/item/world before installation and advances only the association's runtime key after successful installation. The world and captured source observations remain the same. | Root `774bec1929`/`3f8b3bb54d` repair the hosted query refusal oracle through actual source admission. The test compiles; its full execution remains pending. No generic key refresh or stale-check bypass is authorized. |
+| Host and renderer preparation | `RuntimeHostPrototypeReceipt` retains its actual purpose-specific owner. Cold World preparation does not require a finite owner. `RequestCompilerInputs` owns both selected support and the metadata that interprets it. | Engine `3cef3698f1` removes a cache-warmth requirement, with 4 focused passes. Actual private-input execution passes the refusal case but fails current Scientific native demand. |
+| Declaration adoption | The actual declaration origin carries immutable hidden-input custody. Prospective readers validate exact baseline, scope and origin pairing before mutation. Final runtime publication uses the issued final support. | The root joined consumers compile; frozen support has 12 focused passes at `857afe6454`. Actual declaration-history execution on the join remains required. |
+| Queries | The five discovery operations use the held compiler operation; runtime owns view currency. The actor captures its actual request/row/model observation with the scaffold. | Area `1dd53569cf` passes the actual namespace selector. `18b38632fc` adds a real hosted all-five program; `6c29b1c6f4` preserves operational errors in status. Joined execution remains pending. |
+| Reload publication | `RuntimeSourceLeaseClaim::for_publication` retains the actual prerequisite claim. Weak views cannot prolong it. All source gates are acquired in canonical order, then the world and installed state are compared under the actor owner. Confirmation rechecks the same prerequisites; ordinary refusal can restore its own source without clearing external uncertainty. | Root `3f8b3bb54d` compiles and passes 8 runtime plus 10 actor controls. The real reload workflow and durable recovery remain unqualified. |
+| Reload retirement and observation | The same affine attempt retains candidate, source fence and physical cleanup obligations. Compact diagnostic causes retain no World ownership. Real source callbacks survive refusal restoration. | Lifecycle `a8bc364ebf` passes 2 actual worker controls; compact-cause controls pass 5. The operation diagnostic handoff and terminal owner-loss notification must be completed before public/default/force recovery qualification. |
 
 The checked-install distinction matters inside a running cell: native source
 registration changes runtime revisions before an authored query runs. Treating
@@ -37,28 +38,39 @@ under the checked prefix and correctly causes later settlement to refuse.
 The repair carries the same association across its own installation; it does
 not narrow the general revision witness or rewrite old source observations.
 
-Finalization has two receiving counterexamples: a positive private-input history
-reports `MissingFinalizedSource` for `Tidepool.Aeson.Scientific`, and a mixed
-history rejects an unchanged interface repeated under another stage path.
-The failing operation's actual successor selects Scientific as a module/interface;
-the earlier empty base-world inspection was not that operation's input. The
-selected canonical proof is now carried into completion by `ae08e6e4c6`, but
-the finalization role partition and matched execution remain pending. A repair must account
-for actual compiler-issued roles and executable demand, with genuine conflicting
-originals still refused. Filtering unexplained rows away is not an admission rule.
+The positive private-input history has progressed past finalized-source and
+metadata-cache failures. At engine `3cef3698f1`, its actual output contains
+Scientific's body, but native input demand still asks for an earlier issued
+Scientific body choice. The pending repair separates compiler SOURCE claims from
+native input demand. The same decoded physical products and receipt classify
+external references once for both demand and group certification. Unversioned
+current output is certified later by the complete product owner; explicitly
+versioned references remain historical inputs. Cached origin alone does not
+answer whether a body was produced. This classification is demand data, not
+native authority, and cannot skip source, interface or product certification.
+
+The complete-offer source-lifetime gap is separate: exact native edges survive,
+but their resolver-issued Current/Historical/SelectedMissing causes were dropped
+when complete availability was issued without target demand. The receiving
+repair carries those causes at issuance, with the full historical selection
+anchor. It must retain only the exact reachable causes, preserve Unwitnessed
+recovery, and avoid reconstructing live source authority from a broader offer.
 
 Evidence is retained under
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/engine/`
 and `/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/`.
-The current actual private-input cohort executed **two cases: one pass and one
-failure**, build `c8fc8e2a-2d57-43b7-99e1-2d6f3b15d0a5`. The passing crossed/retired
+The current actual private-input cohort at engine `3cef3698f1` executed
+**two cases: one pass and one failure**, build
+`67f7bc82-b182-4dc9-a301-eeb3b52bdef1`. The passing crossed/retired
 owner control does not qualify successful input execution. No new matched
 performance comparison or frozen Persona qualification follows.
 
-The later query cohort at `b2f02e4cc1` also executed two cases, with one pass
-and one failure (build `c49c1081-216d-4c8d-b56c-5382e60cdd49`). The failure moved
-past the repaired query/settlement to a fixture lacking actual source admission.
-This narrows the defect; it does not turn the whole case into a pass.
+The hosted query regression's later source-fence assertion is repaired and
+compiled at root `3f8b3bb54d`, but has not yet executed there. Native fixture/model
+checkpoint `c021f5e4a1` executed 12 controls, with 3 passes and 9 failures.
+Corrected oracles must distinguish continuation from current-product issuance
+and the native offer's private proof from its receiving artifact view. Source
+review of those corrections is not passing execution evidence.
 
 ## Earlier finite path and deletion inventory
 

@@ -637,6 +637,31 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertFalse(root.exists())
         self.assertTrue(record['artifacts_removed_after_success'])
 
+    def test_concurrent_empty_root_observations_admit_only_one_runner(self):
+        root = Path(self.tmp.name) / 'contended-results'
+        root.mkdir()
+        observed = threading.Barrier(2)
+        iterdir = Path.iterdir
+
+        def simultaneous_empty_observation(path):
+            entries = list(iterdir(path))
+            self.assertEqual(path, root)
+            self.assertEqual(entries, [])
+            observed.wait(timeout=2)
+            return iter(entries)
+
+        def claim():
+            try:
+                runner.claim_output_directory(root)
+                return True
+            except FileExistsError:
+                return False
+
+        with patch.object(Path, 'iterdir', simultaneous_empty_observation), \
+             runner.concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(lambda _: claim(), range(2)))
+        self.assertEqual(sorted(outcomes), [False, True])
+
     def test_retain_artifacts_option_controls_passing_case_cleanup(self):
         self.binary.write_text(
             '#!' + sys.executable + '\n'
@@ -2621,7 +2646,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             with self.subTest(global_mode=global_mode):
                 arguments = ['--exact', 'suite::works', '--expected-count', '1',
                              '--case-compiler-mode', 'suite::works=owned-resident',
-                             '--output-dir', str(Path(self.tmp.name) / 'modes'),
+                             '--output-dir', str(Path(self.tmp.name) / f'modes-{global_mode}'),
                              '--resource-env', 'TIDEPOOL_EXTRACT']
                 if global_mode:
                     arguments += ['--compiler-mode', global_mode]

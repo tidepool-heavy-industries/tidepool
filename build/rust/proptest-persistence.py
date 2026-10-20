@@ -45,8 +45,17 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(execution["process_cleanup_status"], "confirmed")
         self.assertEqual(report["passed"], not expected_failure)
         self.assertTrue(all(not stream["truncated"] for stream in report["streams"].values()))
-        text = "".join((output / (key + "." + stream + ".log")).read_text()
-                       for stream in ("stdout", "stderr"))
+        streams = []
+        for label in ("stdout", "stderr"):
+            stream = report["streams"][label]
+            path = Path(stream["path"])
+            self.assertEqual(path.name, stream["path"])
+            self.assertNotIn(path.name, ("", ".", ".."))
+            data = (output / path).read_bytes()
+            self.assertEqual(len(data), stream["bytes"])
+            self.assertEqual(hashlib.sha256(data).hexdigest(), stream["sha256"])
+            streams.append(data.decode())
+        text = "".join(streams)
         histories = re.findall(r"^controlled_history=(\[[^\n]*\])$", text, re.MULTILINE)
         self.assertIn(f"configured_fresh_cases={cases}", text)
         if histories:
@@ -122,6 +131,17 @@ def main():
     temporary = options.output_dir is None
     PersistenceTests.output = (options.output_dir or Path(tempfile.mkdtemp(
         prefix="native-proptest-control-"))).absolute()
+    output = PersistenceTests.output
+    if output.is_symlink():
+        parser.error("output directory is a symlink")
+    try:
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if next(output.iterdir(), None) is not None:
+            parser.error("output directory is not empty")
+        # The permanent exclusive claim also refuses concurrent wrapper runs.
+        (output / ".proptest-persistence-run").mkdir(mode=0o700)
+    except OSError as error:
+        parser.error(f"output admission failed: {error}")
     # SourceParallel deliberately selects one source-owned regression file.
     # Concurrent invocations must not erase another control's pending replay.
     with SOURCE.open("rb") as source:

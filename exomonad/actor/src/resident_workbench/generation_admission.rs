@@ -69,6 +69,8 @@ impl BootstrapWorld {
         scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     ) -> Result<(), GenerationAdmissionError> {
         scope.validate_lexical_issuer()?;
+        // Scope adoption participates in claim's optimistic world comparison.
+        let _state = self.0.state.lock();
         if let Some(existing) = self.0.scope.get() {
             if !Arc::ptr_eq(existing, &scope) {
                 return Err(GenerationAdmissionError::StaleSourceLease);
@@ -82,63 +84,85 @@ impl BootstrapWorld {
     }
 
     fn claim(&self) -> Result<SourceClaim, GenerationAdmissionError> {
-        let mut state = self.0.state.lock();
-        match &state.phase {
-            WorldPhase::Bootstrap if state.unconfirmed == 0 => {
-                let prerequisite = self
-                    .0
-                    .scope
-                    .get()
-                    .cloned()
-                    .or_else(|| {
+        let scope = {
+            let state = self.0.state.lock();
+            match &state.phase {
+                WorldPhase::Bootstrap if state.unconfirmed == 0 => {
+                    self.0.scope.get().cloned().or_else(|| {
                         self.0
                             .prerequisite
                             .as_ref()
                             .map(|parent| parent.runtime_lease().clone())
                     })
-                    .map(|lease| lease.admit_source())
-                    .transpose()?;
-                state.claims += 1;
-                Ok(SourceClaim::Bootstrap(BootstrapClaim {
-                    world: self.clone(),
-                    settled: false,
-                    prerequisite,
-                }))
+                }
+                WorldPhase::Bound(dependency) => {
+                    let scope = dependency.runtime_lease().clone();
+                    drop(state);
+                    return Ok(SourceClaim::Runtime(scope.admit_source()?));
+                }
+                WorldPhase::Bootstrap => {
+                    return Err(GenerationAdmissionError::BootstrapBusy {
+                        claims: state.claims,
+                        unconfirmed: state.unconfirmed,
+                    })
+                }
+                WorldPhase::Publishing(_) | WorldPhase::Unavailable(_) => {
+                    return Err(GenerationAdmissionError::BootstrapUnavailable)
+                }
             }
-            WorldPhase::Bound(dependency) => {
-                let scope = dependency.runtime_lease().clone();
-                drop(state);
-                Ok(SourceClaim::Runtime(scope.admit_source()?))
-            }
-            WorldPhase::Bootstrap => Err(GenerationAdmissionError::BootstrapBusy {
+        };
+        // Source admission precedes the world compare. A competing publication
+        // may win, but cannot make this stale bootstrap observation current.
+        let prerequisite = scope
+            .as_ref()
+            .map(|lease| lease.admit_source())
+            .transpose()?;
+        let mut state = self.0.state.lock();
+        if !matches!(state.phase, WorldPhase::Bootstrap) {
+            return Err(GenerationAdmissionError::BootstrapUnavailable);
+        }
+        if state.unconfirmed != 0 {
+            return Err(GenerationAdmissionError::BootstrapBusy {
                 claims: state.claims,
                 unconfirmed: state.unconfirmed,
-            }),
-            WorldPhase::Publishing(_) | WorldPhase::Unavailable(_) => {
-                Err(GenerationAdmissionError::BootstrapUnavailable)
-            }
+            });
         }
+        let current_scope = self.0.scope.get().cloned().or_else(|| {
+            self.0
+                .prerequisite
+                .as_ref()
+                .map(|parent| parent.runtime_lease().clone())
+        });
+        if !match (&scope, &current_scope) {
+            (None, None) => true,
+            (Some(before), Some(current)) => Arc::ptr_eq(before, current),
+            _ => false,
+        } {
+            return Err(GenerationAdmissionError::StaleSourceLease);
+        }
+        state.claims += 1;
+        drop(state);
+        Ok(SourceClaim::Bootstrap(BootstrapClaim {
+            world: self.clone(),
+            settled: false,
+            prerequisite,
+        }))
     }
 
     pub(super) fn begin_publication(
         &self,
         target: &GenerationDependency,
     ) -> Result<WorldPublication, GenerationAdmissionError> {
-        let mut state = self.0.state.lock();
-        if !matches!(state.phase, WorldPhase::Bootstrap) {
-            return Err(GenerationAdmissionError::BootstrapUnavailable);
-        }
-        if state.claims != 0 || state.unconfirmed != 0 {
-            return Err(GenerationAdmissionError::BootstrapBusy {
-                claims: state.claims,
-                unconfirmed: state.unconfirmed,
-            });
-        }
         let prerequisite = self
             .0
             .prerequisite
             .as_ref()
-            .map(|parent| parent.runtime_lease().admit_source())
+            .map(|parent| {
+                parent
+                    .runtime_lease()
+                    .admit_source()
+                    .map(|claim| claim.for_publication())
+            })
             .transpose()?;
         let scope = self
             .0
@@ -149,10 +173,45 @@ impl BootstrapWorld {
         if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
-        let fence = scope.source_admission().fence_if_idle()?;
-        state.phase = WorldPhase::Publishing(target.clone());
         let attempt = Arc::new(());
-        state.publication = Some(attempt.clone());
+        let fence =
+            scope
+                .source_admission()
+                .fence_if_idle_with(scope.original_source(), |transition| {
+                    let mut state = self.0.state.lock();
+                    if !matches!(state.phase, WorldPhase::Bootstrap) {
+                        return Err(GenerationAdmissionError::BootstrapUnavailable);
+                    }
+                    if state.claims != 0 || state.unconfirmed != 0 {
+                        return Err(GenerationAdmissionError::BootstrapBusy {
+                            claims: state.claims,
+                            unconfirmed: state.unconfirmed,
+                        });
+                    }
+                    state.phase = WorldPhase::Publishing(target.clone());
+                    state.publication = Some(attempt.clone());
+                    transition.commit();
+                    Ok(())
+                })?;
+        let fence = match fence {
+            Ok(fence) => fence,
+            Err(tidepool_runtime::session::SourceFenceTransitionFailure::Refused(error)) => {
+                return Err(error)
+            }
+            Err(tidepool_runtime::session::SourceFenceTransitionFailure::Unconfirmed {
+                fence,
+                error,
+            }) => {
+                let mut state = self.0.state.lock();
+                state.phase = WorldPhase::Unavailable(target.clone());
+                state.uncertainty_fence = Some(fence);
+                drop(state);
+                if let Some(claim) = prerequisite {
+                    claim.retain_unconfirmed();
+                }
+                return Err(error);
+            }
+        };
         Ok(WorldPublication {
             world: self.clone(),
             settlement: WorldPublicationSettlement::Armed {
@@ -223,7 +282,7 @@ pub(super) struct WorldPublication {
 
 enum WorldPublicationSettlement {
     Armed {
-        prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
+        prerequisite: Option<tidepool_runtime::session::RuntimeSourcePublicationPrerequisite>,
         fence: super::PublicationFence,
     },
     Settled,
@@ -293,7 +352,10 @@ impl WorldPublication {
         super::PublicationSettlementError,
     > {
         match &self.settlement {
-            WorldPublicationSettlement::Armed { fence, .. } => fence.publication_view(),
+            WorldPublicationSettlement::Armed {
+                fence,
+                prerequisite,
+            } => fence.publication_view(prerequisite.as_ref()),
             _ => Err(super::PublicationSettlementError::ReopenAttempted),
         }
     }
@@ -351,22 +413,24 @@ impl WorldPublication {
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), super::PublicationSettlementError>,
     ) -> Result<(), super::PublicationSettlementError> {
-        let mut state = self.world.0.state.lock();
-        if !state
-            .publication
-            .as_ref()
-            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
-            || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target))
-        {
-            return Err(super::PublicationSettlementError::SelectionChanged);
-        }
-        let WorldPublicationSettlement::Armed { fence, .. } = &mut self.settlement else {
+        let WorldPublicationSettlement::Armed {
+            fence,
+            prerequisite,
+        } = &mut self.settlement
+        else {
             return Err(super::PublicationSettlementError::ReopenAttempted);
         };
-        fence.reopen(self.visibility.target.runtime_lease(), current)?;
-        state.publication = None;
-        drop(state);
-        // Last prerequisite custody must never drop under world/source locks.
+        fence.confirm(self.visibility.target.runtime_lease(), prerequisite.as_ref(), |reopen| {
+            let mut state = self.world.0.state.lock();
+            if !state.publication.as_ref().is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+                || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target)) {
+                return Err(super::PublicationSettlementError::SelectionChanged);
+            }
+            current(reopen)?;
+            state.publication = None;
+            Ok(())
+        })?;
+        // Last prerequisite custody drops only after gate/world locks release.
         self.settlement = WorldPublicationSettlement::Settled;
         Ok(())
     }
@@ -384,22 +448,24 @@ impl WorldPublication {
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), super::PublicationSettlementError>,
     ) -> Result<(), super::PublicationSettlementError> {
-        let mut state = self.world.0.state.lock();
-        if !state
-            .publication
-            .as_ref()
-            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
-            || !matches!(state.phase, WorldPhase::Publishing(_))
-        {
-            return Err(super::PublicationSettlementError::SelectionChanged);
-        }
         let WorldPublicationSettlement::Armed { fence, .. } = &mut self.settlement else {
             return Err(super::PublicationSettlementError::ReopenAttempted);
         };
-        fence.reopen(self.visibility.target.runtime_lease(), current)?;
-        state.phase = WorldPhase::Bootstrap;
-        state.publication = None;
-        drop(state);
+        fence.reopen(self.visibility.target.runtime_lease(), |reopen| {
+            let mut state = self.world.0.state.lock();
+            if !state
+                .publication
+                .as_ref()
+                .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+                || !matches!(state.phase, WorldPhase::Publishing(_))
+            {
+                return Err(super::PublicationSettlementError::SelectionChanged);
+            }
+            current(reopen)?;
+            state.phase = WorldPhase::Bootstrap;
+            state.publication = None;
+            Ok(())
+        })?;
         self.settlement = WorldPublicationSettlement::Settled;
         Ok(())
     }
@@ -905,7 +971,9 @@ mod tests {
                     .admit_work()
                     .unwrap();
                 let pending_original = scope.admit_continuation().unwrap();
-                pending_original.bind_original_source(original_a.original_source().clone()).unwrap();
+                pending_original
+                    .bind_original_source(original_a.original_source().clone())
+                    .unwrap();
                 let pending_b = scope
                     .clone()
                     .with_source_dependency(&source_b)
@@ -2012,6 +2080,108 @@ mod tests {
         assert!(owner.refused().is_err());
         assert!(fixture.source.claim().is_err());
         fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn publisher_confirmation_rejects_new_prerequisite_uncertainty() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::with_prerequisite(true)
+            } else {
+                PublicationFixture::replacement(true)
+            };
+            let parent = fixture
+                .generation
+                .dependency()
+                .prerequisite()
+                .as_ref()
+                .unwrap();
+            let independent = parent.runtime_lease().admit_source().unwrap();
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
+            independent.retain_unconfirmed();
+            assert!(matches!(
+                owner.confirmed(),
+                Err(super::super::PublicationSettlementError::Source(
+                    GenerationAdmissionError::Unconfirmed { .. }
+                ))
+            ));
+            assert!(fixture.state.current_generation().is_none());
+            assert!(fixture.generation.scope.admit_source().is_err());
+        }
+    }
+
+    #[test]
+    fn publisher_confirmation_keeps_earned_fenced_prerequisite_valid() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::with_prerequisite(true)
+            } else {
+                PublicationFixture::replacement(true)
+            };
+            let parent = fixture
+                .generation
+                .dependency()
+                .prerequisite()
+                .as_ref()
+                .unwrap();
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let parent_fence = parent.fence().unwrap();
+            assert!(parent_fence.pending_claims() > 0);
+            assert!(owner
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
+            owner.confirmed().unwrap();
+            assert!(Arc::ptr_eq(
+                &fixture.state.current_generation().unwrap(),
+                &fixture.generation
+            ));
+            assert_eq!(parent_fence.pending_claims(), 0);
+            parent_fence.reopen().unwrap();
+            assert!(fixture.generation.scope.admit_source().is_ok());
+        }
+    }
+
+    #[test]
+    fn publisher_refusal_can_restore_own_source_with_uncertain_prerequisite() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::with_prerequisite(true)
+            } else {
+                PublicationFixture::replacement(true)
+            };
+            let parent = fixture
+                .generation
+                .dependency()
+                .prerequisite()
+                .as_ref()
+                .unwrap();
+            let independent = parent.runtime_lease().admit_source().unwrap();
+            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            independent.retain_unconfirmed();
+            owner.refused().unwrap();
+            // The target was reopened, but its uncertain ancestor still blocks
+            // fresh source work. Own rollback must not clear that obligation.
+            let fence = fixture
+                .generation
+                .scope
+                .source_admission()
+                .fence_if_idle()
+                .unwrap();
+            assert!(fixture.generation.scope.admit_source().is_err());
+            fence
+                .reopen_with(fixture.generation.scope.original_source(), |reopen| {
+                    reopen.commit();
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+                .unwrap();
+            assert!(parent.runtime_lease().admit_source().is_err());
+        }
     }
 
     #[test]

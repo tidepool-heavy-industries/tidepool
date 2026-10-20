@@ -2,14 +2,17 @@
 import contextlib
 import errno
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import shutil
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -33,7 +36,7 @@ class RunnerDispositionTests(unittest.TestCase):
         self.binary = self.root / 'local-libtest'
         self.binary.write_text('#!' + sys.executable + '\n' + '''import os,pathlib,sys,time
 if '--list' in sys.argv:
-    if '--ignored' not in sys.argv:
+    if '--ignored' not in sys.argv or os.environ.get('PROPTEST_CASES'):
         print('suite::first: test\\nsuite::second: test\\nsuite::third: test')
 else:
     root=pathlib.Path(os.environ.get('TIDEPOOL_TEST_ARTIFACT_ROOT',os.environ['TIDEPOOL_COMPILE_CACHE_DIR']))
@@ -61,7 +64,15 @@ else:
         while not (pathlib.Path(SHARED)/'publication-refused').exists():
             assert time.monotonic()<deadline, 'first publication refusal missing'
             time.sleep(.005)
+    if os.environ.get('TEST_WAIT_FOR_RELEASE'):
+        shared=pathlib.Path(SHARED);(shared/'case-started').touch()
+        deadline=time.monotonic()+10
+        while not (shared/'case-release').exists():
+            assert time.monotonic()<deadline, 'case release missing'
+            time.sleep(.005)
     print('body marker: '+sys.argv[2])
+    if 'PROPTEST_CASES' in os.environ:
+        print('configured_fresh_cases='+os.environ['PROPTEST_CASES'])
     print('test result: ok. 1 passed; 0 failed; 0 ignored;')
 '''.replace('EXTERNAL', repr(str(self.external))).replace('SENTINEL', repr(str(self.sentinel)))
             .replace('SHARED', repr(str(self.root))))
@@ -79,11 +90,13 @@ else:
         self.assertEqual((self.sentinel.read_bytes(), stat.S_IMODE(self.sentinel.stat().st_mode),
                           stat.S_IMODE(self.external.stat().st_mode)), self.baseline)
 
-    def run_history(self, count=2, jobs=1, **environment):
+    def run_history(self, count=2, jobs=1, retain_artifacts=False, **environment):
         arguments = [str(self.binary), '--expected-count', str(count), '--jobs', str(jobs),
                      '--output-dir', str(self.output)]
         for name in ('first', 'second', 'third')[:count]:
             arguments.extend(['--exact', 'suite::' + name])
+        if retain_artifacts:
+            arguments.append('--retain-artifacts')
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, environment), contextlib.redirect_stdout(stdout), \
                 contextlib.redirect_stderr(stderr):
@@ -91,6 +104,136 @@ else:
         records = [json.loads(p.read_text()) for p in self.output.glob('*.json')]
         self.external_unchanged()
         return code, {r['test']: r for r in records}, stdout.getvalue(), stderr.getvalue()
+
+    def test_reused_output_refuses_without_changing_retained_evidence(self):
+        code, records, _, errors = self.run_history(count=1, retain_artifacts=True)
+        self.assertEqual(code, 0, errors)
+        self.assertTrue(records['suite::first']['passed'])
+
+        def snapshot():
+            result = {}
+            for path in [self.output, *self.output.rglob('*')]:
+                metadata = path.lstat()
+                contents = (os.readlink(path) if path.is_symlink() else
+                            path.read_bytes() if path.is_file() else None)
+                result[str(path.relative_to(self.output))] = (
+                    metadata.st_mode, metadata.st_mtime_ns, contents)
+            return result
+
+        before = snapshot()
+        with patch.object(runner, 'run_one', wraps=runner.run_one) as run_one:
+            code, _, _, errors = self.run_history(count=1, retain_artifacts=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(snapshot(), before)
+        self.assertIn('libtest output admission failed:', errors)
+        run_one.assert_not_called()
+
+    def test_explicit_empty_output_directory_is_admitted(self):
+        self.output.mkdir()
+        code, records, _, errors = self.run_history(count=1)
+        self.assertEqual(code, 0, errors)
+        self.assertTrue(records['suite::first']['passed'])
+
+    def test_concurrent_runner_refuses_claimed_root_before_first_report(self):
+        command = [sys.executable, str(Path(runner.__file__)), str(self.binary),
+                   '--exact', 'suite::first', '--expected-count', '1',
+                   '--output-dir', str(self.output)]
+        environment = {**os.environ, 'TEST_WAIT_FOR_RELEASE': '1'}
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=environment) as first:
+            try:
+                deadline = time.monotonic() + 10
+                while not (self.root / 'case-started').exists():
+                    self.assertIsNone(first.poll(), 'first runner exited before its case started')
+                    self.assertLess(time.monotonic(), deadline, 'first case did not start')
+                    time.sleep(.005)
+                self.assertFalse(list(self.output.glob('*.json')))
+                refused = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn('libtest output admission failed:', refused.stderr)
+                self.assertFalse(list(self.output.glob('*.json')))
+            finally:
+                (self.root / 'case-release').touch()
+                stdout, stderr = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, 0, stderr)
+        self.assertIn('Isolated libtest: 1 passed; 0 failed;', stdout)
+        self.assertTrue(self.record('suite::first')['passed'])
+        self.external_unchanged()
+
+    def test_persistence_wrapper_uses_receipt_streams_and_preserves_reused_root(self):
+        script = Path(runner.__file__).with_name('proptest-persistence.py')
+        spec = importlib.util.spec_from_file_location('persistence_wrapper', script)
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        source = self.root / 'property.rs'
+        source.write_text('// local wrapper control; no Rust property execution\n')
+        output = self.root / 'persistence-results'
+        command = [str(script), '--binary', str(self.binary), '--runner', str(Path(runner.__file__)),
+                   '--output-dir', str(output)]
+        phase = wrapper.PersistenceTests()
+        suite = unittest.TestSuite([unittest.FunctionTestCase(
+            lambda: phase.phase('suite::first', 'fresh', 0, False))])
+        with patch.object(sys, 'argv', command), patch.object(wrapper, 'SOURCE', source), \
+             patch.object(unittest.defaultTestLoader, 'loadTestsFromTestCase', return_value=suite), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(wrapper.main(), 0)
+
+        phase_output = output / 'suite::first' / 'fresh'
+        key = hashlib.sha256(b'suite::first').hexdigest()
+        report = json.loads((phase_output / f'{key}.json').read_text())
+        self.assertTrue(report['passed'])
+        self.assertNotEqual(report['streams']['stdout']['path'], f'{key}.stdout.log')
+        self.assertTrue((phase_output / 'observations.json').is_file())
+        invocation = phase_output / 'invocation.json'
+        before = {str(p.relative_to(output)): (p.read_bytes(), p.stat().st_mtime_ns)
+                  for p in output.rglob('*') if p.is_file() and not p.is_symlink()}
+        with patch.object(sys, 'argv', command), patch.object(wrapper, 'SOURCE', source), \
+             patch.object(unittest.defaultTestLoader, 'loadTestsFromTestCase') as load, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+            wrapper.main()
+        self.assertEqual(refused.exception.code, 2)
+        self.assertEqual({str(p.relative_to(output)): (p.read_bytes(), p.stat().st_mtime_ns)
+                          for p in output.rglob('*') if p.is_file() and not p.is_symlink()}, before)
+        self.assertEqual(json.loads(invocation.read_text())['exit_status'], 0)
+        load.assert_not_called()
+        self.external_unchanged()
+
+    def test_concurrent_persistence_wrapper_refuses_before_first_phase_report(self):
+        script = Path(runner.__file__).with_name('proptest-persistence.py')
+        spec = importlib.util.spec_from_file_location('concurrent_persistence_wrapper', script)
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        source = self.root / 'property.rs'
+        source.write_text('// local wrapper admission control\n')
+        output = self.root / 'persistence-results'
+        phase_output = output / 'suite::first' / 'fresh'
+        command = [str(script), '--binary', str(self.binary), '--runner', str(Path(runner.__file__)),
+                   '--output-dir', str(output)]
+        phase = wrapper.PersistenceTests()
+        suite = unittest.TestSuite([unittest.FunctionTestCase(
+            lambda: phase.phase('suite::first', 'fresh', 0, False))])
+        with patch.object(sys, 'argv', command), patch.object(wrapper, 'SOURCE', source), \
+             patch.object(unittest.defaultTestLoader, 'loadTestsFromTestCase', return_value=suite) as load, \
+             patch.dict(os.environ, TEST_WAIT_FOR_RELEASE='1'), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+             runner.concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(wrapper.main)
+            try:
+                deadline = time.monotonic() + 10
+                while not (self.root / 'case-started').exists():
+                    self.assertFalse(first.done(), 'first wrapper exited before its phase started')
+                    self.assertLess(time.monotonic(), deadline, 'first phase did not start')
+                    time.sleep(.005)
+                self.assertFalse(list(phase_output.glob('*.json')))
+                with self.assertRaises(SystemExit) as refused:
+                    wrapper.main()
+                self.assertEqual(refused.exception.code, 2)
+                self.assertFalse(list(phase_output.glob('*.json')))
+            finally:
+                (self.root / 'case-release').touch()
+            self.assertEqual(first.result(timeout=10), 0)
+            load.assert_called_once()
+        self.external_unchanged()
 
     def record(self, name):
         return json.loads((self.output / (hashlib.sha256(name.encode()).hexdigest() + '.json')).read_text())
