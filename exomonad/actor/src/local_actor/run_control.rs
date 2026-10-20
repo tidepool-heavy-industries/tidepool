@@ -297,7 +297,11 @@ impl RunControlNativeCleanup {
                         .attempts
                         .iter()
                         .filter(|record| {
-                            matches!(record, generation::GenerationRetirementCore::Active(_))
+                            matches!(
+                                record,
+                                generation::GenerationRetirementCore::Replacement(_)
+                                    | generation::GenerationRetirementCore::Initial { .. }
+                            )
                         })
                         .count(),
                     completed: custody
@@ -307,6 +311,8 @@ impl RunControlNativeCleanup {
                             matches!(
                                 record,
                                 generation::GenerationRetirementCore::Completed { .. }
+                                    | generation::GenerationRetirementCore::InitialCompleted { .. }
+                                    | generation::GenerationRetirementCore::InitialRefused { .. }
                             )
                         })
                         .count(),

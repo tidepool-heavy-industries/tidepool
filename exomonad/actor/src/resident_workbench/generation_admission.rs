@@ -3249,23 +3249,25 @@ mod tests {
             decision.request_cancellation(),
             tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
         );
-        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = publisher
-            .run(reserved)
+        let mut refusal = reserved.into_publication_owner();
+        let body = refusal.take_body().unwrap();
+        let result = publisher
+            .run(body)
             .await
-            .unwrap_or_else(|_| panic!("the issued publisher must accept its same reservation"))
-        else {
-            panic!("an observed cancelled body must return its actual armed guard");
-        };
-        let primary = refusal.outcome().clone();
+            .unwrap_or_else(|_| panic!("the issued publisher must accept its same body"));
+        refusal
+            .record_body(result)
+            .unwrap_or_else(|_| panic!("the retained owner must accept its exact body result"));
+        let primary = refusal.failure_outcome().unwrap().clone();
         assert!(matches!(
             primary.as_ref(),
             Ok(ActorGenerationCommit::Refused(_))
         ));
-        refusal = refusal
-            .into_settled_diagnostic()
-            .err()
-            .expect("a pre-effect body still cannot release its armed source owner");
-        assert!(Arc::ptr_eq(refusal.outcome(), &primary));
+        assert!(
+            !refusal.settled_obligations(),
+            "a pre-effect body still retains its armed source owner"
+        );
+        assert!(Arc::ptr_eq(refusal.failure_outcome().unwrap(), &primary));
         assert!(matches!(&state.0.lock().availability,
             InstalledToolsAvailability::PublicationInProgress(attempt)
                 if Arc::ptr_eq(attempt, &observer.0)));
@@ -3276,8 +3278,11 @@ mod tests {
         assert!(SourceDependency::Generation(target.clone())
             .claim()
             .is_err());
-        refusal.refuse_retirement(&mut original).unwrap();
-        assert!(Arc::ptr_eq(refusal.outcome(), &primary));
+        assert!(matches!(
+            refusal.refuse_retirement(&mut original),
+            super::super::PublicationOwnerSettlement::Restored
+        ));
+        assert!(Arc::ptr_eq(refusal.failure_outcome().unwrap(), &primary));
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), expected));
         drop(
             SourceDependency::Generation(expected.dependency().clone())
@@ -3294,13 +3299,17 @@ mod tests {
             compiler_calls,
             "observed cancellation and source settlement never replay the compiler"
         );
-        assert_eq!(
-            refusal
-                .into_settled_diagnostic()
-                .ok()
-                .expect("the actual cancelled Ephemeral body issued diagnostic-only settlement",),
-            super::super::ActorGenerationPublicationRefusalObservation::Refused,
+        assert!(
+            refusal.settled_obligations(),
+            "the actual cancelled Ephemeral body issued diagnostic-only settlement"
         );
+        assert!(matches!(
+            refusal.diagnostic_outcome(),
+            Some((
+                _,
+                super::super::ActorGenerationPublicationRefusalObservation::Refused
+            ))
+        ));
     }
 
     pub(crate) async fn assert_native_retirement_owner_control(

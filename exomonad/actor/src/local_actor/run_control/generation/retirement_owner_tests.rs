@@ -299,7 +299,6 @@ impl RunControlClient {
             terminal.get(),
             Some(preparation::PublicationTerminalObservation::Completed {
                 outcome: preparation::PublicationOutcomeObservation::Refused,
-                notification: preparation::PublicationNotificationObservation::NotRequired,
             })
         ));
         if control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody {
