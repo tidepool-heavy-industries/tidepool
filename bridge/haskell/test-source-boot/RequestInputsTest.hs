@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldRejectionDiagnosticBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -90,7 +90,7 @@ import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
   , scopedEnsureWorld, scopedCompileWorldCell, heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
-  , WorldCellRefusal(..)
+  , WorldCellRefusal(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
@@ -1853,6 +1853,20 @@ validationTimingControl = do
 -- Feed actual owner-emitted diagnostics into the declared consumer. This
 -- fixture deliberately executes two cycles in one physical request history;
 -- parser controls derive from those events rather than copied wire examples.
+worldRejectionDiagnosticBoundaries :: IO ()
+worldRejectionDiagnosticBoundaries = do
+  let first = "first actual GHC error: could not load selected module\n"
+      detail = first ++ concat (replicate 20000 "界😀\n\"\\") ++ "UNRETAINED_FINAL_SENTINEL"
+  (_,diagnostics) <- captureDiagnostics
+    (emitWorldAcquisitionRejection "world cell demand" "<sealed scaffold>" detail)
+  unless (firstLine `isInfixOf` diagnostics
+      && "[diagnostic truncated]" `isInfixOf` diagnostics
+      && not ("UNRETAINED_FINAL_SENTINEL" `isInfixOf` diagnostics)
+      && not ('\xfffd' `elem` diagnostics)
+      && BS.length (TE.encodeUtf8 (T.pack diagnostics)) < 25 * 1024)
+    (fail "bounded World diagnostics lost their first error, truncation marker or UTF-8 boundary")
+  where firstLine = "first actual GHC error: could not load selected module"
+
 compilerTimingRoundtrip :: IO ()
 compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
   forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->

@@ -141,7 +141,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Crypto.Hash.SHA256 as SHA256
-import Data.Char (digitToInt)
+import Data.Char (digitToInt, ord)
 import qualified Data.Graph as Graph
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
@@ -2085,7 +2085,9 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
         pure issued
   demand <- liftIO (typedSegmentInputOccurrences current demandScope parsedDemand)
   demanded <- either (\failure -> liftIO $ do
-    emitWorldAcquisitionRejection "world cell demand" path (show failure)
+    emitWorldAcquisitionRejection "world cell demand" path (case failure of
+      InputDemandRenameRejected diagnostic -> diagnostic
+      _ -> show failure)
     throwIO WorldCellUnsupported) pure demand
   let occurrences = map fst demanded
       selected = map snd demanded
@@ -5930,7 +5932,18 @@ emitWorldAcquisitionRejection reason manifest detail = do
   _ <- trySynchronous $ do
     let bounded value = case boundedUtf8 4096 value of
           Just bytes -> Text.unpack (TextEncoding.decodeUtf8 bytes)
-          Nothing -> "<diagnostic field exceeds 4096 UTF-8 bytes>"
+          Nothing -> prefix (4096 - length truncated) value ++ truncated
+        truncated = "\n[diagnostic truncated]"
+        prefix _ [] = []
+        prefix remaining (character:rest)
+          | width > remaining = []
+          | otherwise = character : prefix (remaining-width) rest
+          where
+            point = ord character
+            width | point <= 0x7f = 1
+                  | point <= 0x7ff = 2
+                  | point <= 0xffff = 3
+                  | otherwise = 4
         message = "world input acquisition rejected: " ++ bounded reason
           ++ "\nmanifest: " ++ bounded manifest ++ "\ndetail: " ++ bounded detail
     hPutStrLn stderr (renderDiag (Diag Nothing DiagError message))
