@@ -77,6 +77,7 @@ import Tidepool.ExactScope
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, emptyFinalizedModuleArtifacts, finalizedTypeInterfaces, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts, FinalizedArtifactFailure(..))
 import Tidepool.HomeProducts (AdmittedFinalizedOriginal, admitCompiledCanonicalOriginal, admittedOriginalProof, CandidateCoreFailure(..))
+import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), ProductAvailability(..))
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts, retainTypeInterfaceCaptures, retainedTypeInterfaceBody)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
@@ -261,6 +262,10 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     Nothing source [work] Nothing
   let env = prHscEnv (pprPipelineResult prepared)
       name = mkModuleName "FinalizedCoreFixture"
+  assert (any (\node -> dependencyModuleName node == "FinalizedCoreFixture"
+      && dependencyModuleProduct node == ProductInterfaceOnly)
+      (dependencyModules (preparedFreshDependencies prepared)))
+    "fresh SOURCE control already had native publication authority"
   finalized <- maybe (fail "compiler omitted its completed original finalization") pure
     (Map.lookup name (pprFinalizedModules prepared))
   summary <- case [item {ms_hspp_buf = Nothing}

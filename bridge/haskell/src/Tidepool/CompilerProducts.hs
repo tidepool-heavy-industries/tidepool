@@ -360,7 +360,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
         case Map.lookup key selectedCanonical of
           Just (ModuleInterfaceAdmission proof)
             | isSourceOriginal (canonicalOrigin proof)
-            , isNothing (sourceProductSha256 (preparedFreshDependencies prepared) (fst key) (snd key)) ->
+            , not (hasFreshSourceEvidence (preparedFreshDependencies prepared) key) ->
             case Map.lookup owner (preparedRetainedOriginals productContext) of
               Just retained -> do
                 unless (admittedOriginalProof retained == proof)
@@ -423,10 +423,21 @@ capturePreparedFinalization originals directory prepared = do
       fresh = Map.filter (\original ->
         let owner = mi_module (hm_iface (finalizedHomeModInfo original))
             (unit,name) = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
-        in isJust (sourceProductSha256 evidence unit name)) allFinalized
+        in hasFreshSourceEvidence evidence (unit,name)) allFinalized
   captured <- captureFinalizedModuleArtifacts originals environment fresh
     (pprPackageImports prepared) evidence directory
   captureFinalizedModuleTypeInterfaces originals environment (Map.difference allFinalized fresh) captured
+
+-- Source qualification precedes native product availability. In particular,
+-- an actual fresh module begins as ProductInterfaceOnly until this publisher
+-- admits its original groups; ProductReady cannot be a source-role premise.
+hasFreshSourceEvidence :: DependencyEvidence -> (String,String) -> Bool
+hasFreshSourceEvidence evidence key = or
+  [ not (null path) && any ((== path) . dependencySourcePath) (dependencySources evidence)
+  | node <- dependencyModules evidence
+  , (dependencyModuleUnit node,dependencyModuleName node) == key
+  , not (dependencyModuleBoot node)
+  , let path = dependencyModuleSource node ]
 
 
 -- Final emitted home imports need a native original group. A retained
