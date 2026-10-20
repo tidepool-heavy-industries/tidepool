@@ -428,7 +428,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
                     ..
                 }
                 | CompilerEvidenceFailure::Contract
-                | CompilerEvidenceFailure::MissingRetainedCustody { .. } => FailureClass::VersionSkew,
+                | CompilerEvidenceFailure::MissingRetainedCustody { .. } => {
+                    FailureClass::VersionSkew
+                }
                 _ => FailureClass::Infra,
             };
             FailureEnvelope::new(class, Phase::Compile, err.to_string())

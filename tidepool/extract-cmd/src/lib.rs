@@ -55,10 +55,9 @@ pub use endpoint::{
 use exec_check::is_readable_executable_file;
 pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
-    ExactInputsRequest, ExtractRequest, InspectionNamespace,
-    InspectionScope, PlannedCellSlot, PlannedCellSlotRef, ProtocolError, StructuredInspection,
-    SymbolIdentity, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,
-    WorldPublicModuleRequest, WorldQueryMode,
+    ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
+    PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity, WorldCellPlanRequest,
+    WorldCellPrepareRequest, WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -847,8 +846,14 @@ impl ExtractCmd {
     }
 
     /// Enumerate a module's exports, stopping the compiler at `budget` names.
-    pub fn inspect_browse_bounded(&mut self, module: &str, expanded: bool, budget: u32) -> &mut Self {
-        self.request.inspect_browse_bounded(module, expanded, budget);
+    pub fn inspect_browse_bounded(
+        &mut self,
+        module: &str,
+        expanded: bool,
+        budget: u32,
+    ) -> &mut Self {
+        self.request
+            .inspect_browse_bounded(module, expanded, budget);
         self
     }
 
