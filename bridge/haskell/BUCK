@@ -295,6 +295,14 @@ _CORPUS_LIBRARY_ROOTS = [
 ]
 
 tidepool_prepared_fixture(
+    name = "introspection_front_door_prepared",
+    source = "test-prepared-stg/IntrospectionFrontDoor.hs",
+    targets = ["result"],
+    source_roots = [("//bridge/mcp:effects_generated", "")] + _CORPUS_LIBRARY_ROOTS,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_prepared_fixture(
     name = "typed_receive_prepared",
     source = "test-prepared-stg/JsonReply.hs",
     targets = ["__prepared", "__payload"],
