@@ -518,27 +518,6 @@ impl SourceSlots {
         resume_slot(&slot);
         SourceDeliveryAdmission::Deferred(slot.identity.clone())
     }
-    /// Reopening redispatches only pre-mapper deliveries already owned here.
-    /// The retained head is removed only when its marked mailbox input admits.
-    pub(crate) fn resume_deferred(
-        &self,
-        dependency: &GenerationDependency,
-    ) -> Vec<SourceRegistrationObservation> {
-        let captures = self.capture(dependency);
-        self.resume_captures(captures)
-    }
-    fn resume_captures(
-        &self,
-        captures: Vec<CapturedSourceRegistration>,
-    ) -> Vec<SourceRegistrationObservation> {
-        for capture in &captures {
-            capture.resume_deferred();
-        }
-        captures
-            .iter()
-            .map(CapturedSourceRegistration::observation)
-            .collect()
-    }
     pub(super) async fn handoff(
         &self,
         grant: crate::local_actor::run_control::ReplacementIngressGrant,

@@ -20,24 +20,6 @@ pub(crate) struct GenerationWorkObservations {
 }
 
 impl ResidentGenerationInventory {
-    /// Called only after the exact A fence reopened, with no source/slot guard.
-    /// Failed enqueue keeps the same pre-mapper delivery in its actual slot.
-    pub(crate) fn resume_deferred(
-        &self,
-        dependency: &GenerationDependency,
-    ) -> Vec<source_slots::SourceRegistrationObservation> {
-        let owners: Vec<_> = self
-            .actors
-            .lock()
-            .values()
-            .map(|record| record.source_slots.clone())
-            .collect();
-        owners
-            .into_iter()
-            .flat_map(|owner| owner.resume_deferred(dependency))
-            .collect()
-    }
-
     /// Called by the serial retirement owner after closing the issued source.
     /// This projects existing membership without granting stop authority.
     pub(crate) fn observe(&self, dependency: &GenerationDependency) -> GenerationWorkObservations {
