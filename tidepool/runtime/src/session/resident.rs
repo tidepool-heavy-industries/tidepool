@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, DemandedImage, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
+    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
     PreparedOuter, PreparedResult, ProgramId, SourceBinder,
 };
 use tidepool_repr::execution_schema::{
