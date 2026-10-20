@@ -2157,6 +2157,69 @@ pub(crate) enum DemandNativeInputsError {
     Compiler(#[from] CompileError),
 }
 
+/// External source references from the same decoded physical output. This is
+/// demand data only: the complete product certifier still authenticates every
+/// current body, source proof and interface before issuing native authority.
+struct ReceiptNativeInputDemand<'a> {
+    globals: Vec<&'a crate::certified_products::AcceptedGlobal>,
+}
+
+impl<'a> ReceiptNativeInputDemand<'a> {
+    fn from_products(
+        receipt: &'a crate::certified_products::CertifiedReceipt,
+        products: &crate::certified_products::ParsedModuleProducts,
+    ) -> Result<Self, CompileError> {
+        use crate::certified_products::ReceiptImportOwner;
+        let budget = NativeDemandBudget(Some(products.operation()));
+        let mut current = BTreeSet::new();
+        for product in products.products() {
+            budget.checkpoint()?;
+            budget.reserve::<((&str, &str), [usize; 4])>(1)?;
+            if !current.insert((product.unit.as_str(), product.module.as_str())) {
+                return Err(failure("duplicate current native output owner"));
+            }
+        }
+        let mut observed = BTreeSet::new();
+        for module in &receipt.modules {
+            budget.checkpoint()?;
+            budget.reserve::<((&str, &str), [usize; 4])>(1)?;
+            if !observed.insert((module.unit.as_str(), module.module.as_str())) {
+                return Err(failure("duplicate native receipt owner"));
+            }
+        }
+        if !current.is_subset(&observed) {
+            return Err(failure("current native output lacks its receipt owner"));
+        }
+        let mut globals = Vec::new();
+        for global in receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+        {
+            budget.checkpoint()?;
+            let ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                ..
+            } = &global.owner
+            else {
+                continue;
+            };
+            // Even when this output also defines the same module, an explicit
+            // version names a historical input and retains its issued choice.
+            if module_version.is_none() && current.contains(&(unit.as_str(), module.as_str())) {
+                continue;
+            }
+            budget.reserve::<&crate::certified_products::AcceptedGlobal>(1)?;
+            globals.push(global);
+        }
+        Ok(Self { globals })
+    }
+}
+
 impl DemandNativeInputs {
     pub(crate) fn cold(&self) -> &Arc<RequestCompilerInputs> {
         &self.cold
@@ -2195,33 +2258,17 @@ impl DemandNativeInputs {
     /// Authenticate only the input groups named by this completion, through
     /// their existing scoped offers. Receipt names restrict issued permission;
     /// they do not issue an original or choose a historical carrier by name.
-    pub(crate) fn certify_receipt_groups(
+    fn certify_receipt_groups(
         &self,
-        receipt: &crate::certified_products::CertifiedReceipt,
+        inputs: &ReceiptNativeInputDemand<'_>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<DemandCertifiedGroups, CompileError> {
-        use crate::certified_products::{ProductOrigin, ReceiptImportOwner};
+        use crate::certified_products::ReceiptImportOwner;
         let operation = validation.inventory.clone();
         let budget = NativeDemandBudget(Some(&operation));
-        let mut produced = BTreeSet::new();
-        for module in &receipt.modules {
-            budget.checkpoint()?;
-            if module.origin != ProductOrigin::Cached
-                && !produced.contains(&(&module.unit, &module.module))
-            {
-                budget.reserve::<((&String, &String), [usize; 4])>(1)?;
-                produced.insert((&module.unit, &module.module));
-            }
-        }
         let mut roots = BTreeMap::new();
         let mut proofs = BTreeMap::new();
-        for global in receipt
-            .modules
-            .iter()
-            .flat_map(|module| &module.groups)
-            .flat_map(|group| &group.globals)
-            .chain(receipt.targets.values().flatten())
-        {
+        for global in &inputs.globals {
             budget.checkpoint()?;
             let ReceiptImportOwner::Source {
                 unit,
@@ -2231,13 +2278,8 @@ impl DemandNativeInputs {
                 ..
             } = &global.owner
             else {
-                continue;
+                unreachable!("receipt input projection retains only source globals")
             };
-            // Newly produced modules receive their group authority from the
-            // same complete product certifier, after source admission.
-            if module_version.is_none() && produced.contains(&(unit, module)) {
-                continue;
-            }
             // The shared choice owner also constructs one temporary owner key.
             budget.strings(unit.len().saturating_add(module.len()).saturating_mul(2))?;
             let owner = identity(unit, module);
@@ -9471,7 +9513,11 @@ pub(crate) struct WorldStageSourceAdmission {
 impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
-    fn demand_inputs(&self, cold: &Arc<RequestCompilerInputs>) -> Result<DemandNativeInputs, CompileError> {
+    fn demand_inputs(
+        &self,
+        cold: &Arc<RequestCompilerInputs>,
+        inputs: &ReceiptNativeInputDemand<'_>,
+    ) -> Result<DemandNativeInputs, CompileError> {
         let operation = self.program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| compiler_evidence_failure(error.into()))
@@ -9497,7 +9543,16 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 ));
             }
             insert(&mut roots, &claim.owner)?;
-            insert(&mut native_roots, &claim.owner)?;
+        }
+        for global in &inputs.globals {
+            let crate::certified_products::ReceiptImportOwner::Source { unit, module, .. } =
+                &global.owner
+            else {
+                unreachable!("receipt input projection retains only source globals")
+            };
+            let owner = identity(unit, module);
+            insert(&mut roots, &owner)?;
+            insert(&mut native_roots, &owner)?;
         }
         let mut excluded = BTreeSet::new();
         for module in &self.source.evidence.modules {
@@ -9596,8 +9651,9 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         .map_err(compiler_evidence_failure)?;
 
         let operation = program.validation().inventory.as_ref();
-        let demand = self.demand_inputs(&continuation.inputs)?;
-        let groups = demand.certify_receipt_groups(&receipt, validation)?;
+        let native_inputs = ReceiptNativeInputDemand::from_products(&receipt, &raw)?;
+        let demand = self.demand_inputs(&continuation.inputs, &native_inputs)?;
+        let groups = demand.certify_receipt_groups(&native_inputs, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
         let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
             program,
@@ -19937,7 +19993,8 @@ mod tests {
                 },
                 source_recipe: WorkerExecutionSource::Ordinary,
             };
-            let result = selected.certify_receipt_groups(&receipt, &mut validation);
+            let result = selected
+                .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation);
             if matches!(mode, NativeArtifactDemand::ScopeInterfaces) {
                 assert!(
                     result.is_err(),
@@ -19964,9 +20021,24 @@ mod tests {
             };
             module_version.as_mut().unwrap().0[0] ^= 1;
             assert!(selected
-                .certify_receipt_groups(&receipt, &mut validation)
+                .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation)
                 .is_err());
         }
+    }
+
+    fn receipt_input_demand_fixture(
+        receipt: &crate::certified_products::CertifiedReceipt,
+    ) -> ReceiptNativeInputDemand<'_> {
+        let value = Value::Array(vec![
+            text("TPMOD"),
+            Value::Integer(1.into()),
+            Value::Array(vec![]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        let products =
+            crate::certified_products::ParsedModuleProducts::decode(&bytes, b"").unwrap();
+        ReceiptNativeInputDemand::from_products(receipt, &products).unwrap()
     }
 
     /// Untrusted group-demand DATA for the `DemandParent`/`DemandChild`
@@ -20020,6 +20092,157 @@ mod tests {
     }
 
     #[test]
+    fn receipt_native_inputs_keep_current_outputs_separate_from_historical_choices() {
+        use crate::certified_products::{
+            AcceptedGlobal, CertifiedModuleReceipt, CertifiedReceipt, FinalizationEnvelope,
+            ParsedModuleProducts, ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
+        };
+        use tidepool_repr::execution_schema::{InventoryOperation, RuntimeRep};
+        let (context, _) = metadata_fixture();
+        let cold = Arc::new(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        );
+        let owner = identity("fixture", "Joined");
+        let roots = BTreeSet::from([owner.clone()]);
+        // Untrusted decoded physical-output DATA. No source or native product
+        // authority is issued here; the real Some-input history supplies that
+        // producer/consumer gate through the complete product certifier.
+        let output = Value::Array(vec![
+            text("TPMOD"),
+            Value::Integer(1.into()),
+            Value::Array(vec![Value::Array(vec![
+                text("fixture"),
+                text("Joined"),
+                Value::Bytes(vec![1]),
+                Value::Array(vec![]),
+            ])]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&output, &mut bytes).unwrap();
+        let current = ParsedModuleProducts::decode(&bytes, b"").unwrap();
+        let global = AcceptedGlobal {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                namespace: "value".into(),
+                occurrence: "current".into(),
+                record_parent: None,
+            },
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                module_version: None,
+                original_ordinal: 0,
+                binder: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    namespace: "value".into(),
+                    occurrence: "current".into(),
+                    record_parent: None,
+                },
+            },
+        };
+        for origin in [
+            ProductOrigin::Fresh,
+            ProductOrigin::RetainedCore,
+            ProductOrigin::Cached,
+        ] {
+            let mut receipt = CertifiedReceipt {
+                modules: vec![CertifiedModuleReceipt {
+                    origin,
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    module_version: None,
+                    skinny_iface_sha256: [0; 32],
+                    product_sha256: [0; 32],
+                    source_sha256: [0; 32],
+                    dependency_witness_sha256: [0; 32],
+                    groups: vec![],
+                    interface_requirements: BTreeMap::new(),
+                }],
+                targets: BTreeMap::from([("target".into(), vec![global.clone()])]),
+                packages: BTreeMap::new(),
+                finalization: FinalizationEnvelope {
+                    profile: "native-input-demand-data".into(),
+                    home_units: BTreeSet::new(),
+                    modules: BTreeMap::new(),
+                    value_interfaces: BTreeMap::new(),
+                },
+                source_recipe: WorkerExecutionSource::Ordinary,
+            };
+            let inputs = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
+            assert!(
+                inputs.globals.is_empty(),
+                "actual current output is independent of origin label"
+            );
+            let operation = InventoryOperation::new(Default::default());
+            let demand = cold
+                .demanded_compiler_projection(&roots, &operation)
+                .unwrap();
+            let selected = cold
+                .demanded_native_inputs(demand, &BTreeSet::new(), &operation)
+                .unwrap();
+            assert!(selected.native_availability().0.is_empty());
+            assert!(
+                selected
+                    .certify_receipt_groups(&inputs, &mut PackageInterfaceValidation::default())
+                    .unwrap()
+                    .groups()
+                    .is_empty(),
+                "no prior native group was manufactured"
+            );
+            let external = receipt_input_demand_fixture(&receipt);
+            assert_eq!(
+                external.globals.len(),
+                1,
+                "a receipt row without current physical output remains external"
+            );
+            let demand = cold
+                .demanded_compiler_projection(&roots, &operation)
+                .unwrap();
+            assert!(matches!(
+                cold.demanded_native_inputs(demand, &roots, &operation),
+                Err(DemandNativeInputsError::UnadvertisedOwner { .. })
+            ));
+
+            let mut historical = global.clone();
+            let ReceiptImportOwner::Source { module_version, .. } = &mut historical.owner else {
+                unreachable!()
+            };
+            *module_version = Some(tidepool_repr::execution_schema::ModuleVersion([37; 32]));
+            receipt.targets.get_mut("target").unwrap().push(historical);
+            let mixed = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
+            assert_eq!(
+                mixed.globals.len(),
+                1,
+                "same-module historical choice survives a current output"
+            );
+            assert!(matches!(
+                &mixed.globals[0].owner,
+                ReceiptImportOwner::Source {
+                    module_version: Some(_),
+                    ..
+                }
+            ));
+            assert!(selected
+                .certify_receipt_groups(&mixed, &mut PackageInterfaceValidation::default())
+                .is_err());
+            let demand = cold
+                .demanded_compiler_projection(&roots, &operation)
+                .unwrap();
+            assert!(matches!(
+                cold.demanded_native_inputs(demand, &roots, &operation),
+                Err(DemandNativeInputsError::UnadvertisedOwner { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn demanded_world_facts_bind_certified_groups_and_refuse_narrowed_rows() {
         use crate::artifact_inventory::NativeArtifactDemand;
         use crate::certified_products::CertificationError;
@@ -20037,7 +20260,7 @@ mod tests {
             .unwrap();
         let receipt = demand_group_receipt_fixture(&cold, &root);
         let groups = selected
-            .certify_receipt_groups(&receipt, &mut validation)
+            .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation)
             .unwrap();
 
         // R4: certified rows, not the closure map, are the executable binding
