@@ -1846,6 +1846,15 @@ pub(crate) enum ActorGenerationReservation {
     Refused(String),
 }
 
+pub(crate) enum ActorGenerationRetirementCutoff {
+    Fenced(generation_admission::GenerationRetirementFence),
+    Refused(ResidentActorWorkbenchError),
+    Unconfirmed {
+        fence: generation_admission::GenerationRetirementFence,
+        error: ResidentActorWorkbenchError,
+    },
+}
+
 impl ReservedActorGeneration {
     pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
         self.guard.attempt.expected.generation()
@@ -1853,6 +1862,10 @@ impl ReservedActorGeneration {
 
     pub(crate) fn reload_report(&self) -> Option<&PreparedReloadReport> {
         self.prepared.reload_report()
+    }
+
+    pub(crate) fn fence_original(&mut self) -> ActorGenerationRetirementCutoff {
+        self.guard.fence_original()
     }
 
     pub(crate) fn refuse_unstarted(
@@ -2218,6 +2231,43 @@ impl ActorPublicationGuard {
                 | ActorPublicationState::Settled => None,
             },
         }
+    }
+
+    fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
+        ResidentActorWorkbenchError::PublicationSettlement {
+            failure: Box::new(ActorPublicationSettlementFailure {
+                outcome: Ok(ActorGenerationCommit::Refused(
+                    "generation cutoff was refused".into(),
+                )),
+                settlement: PublicationSettlementError::Retirement {
+                    stage: RetirementSettlementStage::Original,
+                    source: Box::new(error),
+                },
+            }),
+        }
+    }
+
+    fn fence_original(&mut self) -> ActorGenerationRetirementCutoff {
+        let Some(expected) = self.attempt.expected.generation() else {
+            return ActorGenerationRetirementCutoff::Refused(Self::cutoff_error(
+                PublicationSettlementError::SelectionChanged,
+            ));
+        };
+        if !matches!(&self.settlement, ActorPublicationState::Armed(_)) {
+            return ActorGenerationRetirementCutoff::Refused(Self::cutoff_error(
+                PublicationSettlementError::SelectionChanged,
+            ));
+        }
+        expected.dependency().fence_selected_with(|transition| {
+            self.owner.with_live_source_settlement(|| {
+                let record = self.state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &self.attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                transition.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        })
     }
 
     fn refuse_retirement(

@@ -208,12 +208,17 @@ impl RuntimeSourceAdmission {
             let next_attempt = attempt
                 .checked_add(1)
                 .ok_or(SourceAdmissionError::Exhausted)?;
-            let outcome = compare(RuntimeSourceFenceTransition {
+            let mut cutoff = ScopedSourceFence {
                 state: &mut state,
                 attempt,
                 next_attempt,
+            };
+            let outcome = compare(RuntimeSourceFenceTransition {
+                state: &mut *cutoff.state,
+                attempt,
+                next_attempt,
             });
-            let committed = state.phase == SourceAdmissionPhase::Fenced { attempt };
+            let committed = cutoff.state.phase == SourceAdmissionPhase::Fenced { attempt };
             match (outcome, committed) {
                 (Ok(()), true) => Ok(Ok(RuntimeSourceFence {
                     owner: self.clone(),
@@ -376,6 +381,23 @@ impl RuntimeSourceFenceTransition<'_> {
         self.state.phase = SourceAdmissionPhase::Fenced {
             attempt: self.attempt,
         };
+    }
+}
+
+struct ScopedSourceFence<'a> {
+    state: &'a mut AdmissionState,
+    attempt: u64,
+    next_attempt: u64,
+}
+
+impl Drop for ScopedSourceFence<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.state.next_attempt = self.next_attempt;
+            self.state.phase = SourceAdmissionPhase::Fenced {
+                attempt: self.attempt,
+            };
+        }
     }
 }
 
@@ -606,23 +628,27 @@ mod tests {
     }
 
     #[test]
-    fn scoped_cutoff_unwind_after_commit_never_reopens_admission() {
-        let mut session = PersistentSession::new(None, 0);
-        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
-        let gate = lease.source_admission();
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = gate.fence_with::<()>(&lease, |transition| {
-                transition.commit();
-                panic!("cutoff owner unwound");
-            });
-        }))
-        .is_err());
-        assert!(matches!(
-            gate.0.state.lock().phase,
-            SourceAdmissionPhase::Fenced { attempt: 0 }
-        ));
-        assert_eq!(gate.0.state.lock().next_attempt, 1);
-        assert!(lease.admit_source().is_err());
+    fn scoped_cutoff_unwind_before_or_after_commit_never_reopens_admission() {
+        for commit in [false, true] {
+            let mut session = PersistentSession::new(None, 0);
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let gate = lease.source_admission();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = gate.fence_with::<()>(&lease, |transition| {
+                    if commit {
+                        transition.commit();
+                    }
+                    panic!("cutoff owner unwound");
+                });
+            }))
+            .is_err());
+            assert!(matches!(
+                gate.0.state.lock().phase,
+                SourceAdmissionPhase::Fenced { attempt: 0 }
+            ));
+            assert_eq!(gate.0.state.lock().next_attempt, 1);
+            assert!(lease.admit_source().is_err());
+        }
     }
 
     #[test]
