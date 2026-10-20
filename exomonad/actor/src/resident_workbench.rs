@@ -17787,7 +17787,7 @@ pub(crate) mod request_tests {
             assert_eq!(home_module.module, "GHC.Internal.Maybe");
             assert!(matches!(&home_module.origin, WorldModuleOrigin::Home { root: 0, path, source_sha256 }
                 if path == "GHC/Internal/Maybe.hs" && source_sha256 == expected_home.sha256()));
-            assert_eq!(direct.defining_module(), Some(home_module));
+            assert_eq!(direct.defining_module(), Some(&home_module));
             assert_ne!(defining.unit, home_module.unit);
             assert!(matches!(direct.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
                 if info.identifier.name == "Just"));
