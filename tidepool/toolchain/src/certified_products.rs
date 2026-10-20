@@ -18199,7 +18199,11 @@ pub(crate) mod tests {
                 NativeArtifactDemand::AllGroups,
             )
             .unwrap();
-        let projection = CompilerInputProjection::from_issued_entries(&[r_entry.clone()]).unwrap();
+        let g_interface = Arc::new(ArtifactEntry::canonical(
+            g.module_interface().unwrap().clone(),
+        ));
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[r_entry.clone(), g_interface]).unwrap();
         let validation = PackageInterfaceValidation::default();
         let requirements =
             NativeOriginalRequirement::for_projection(&projection, &physical, &[]).unwrap();
