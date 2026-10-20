@@ -2532,6 +2532,7 @@ impl PublicationBodyCompletion {
 
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(ActorGenerationReservationDriver: Clone, Copy);
+#[cfg(test)]
 static_assertions::assert_not_impl_any!(ActorGenerationPublicationDriver: Clone, Copy);
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(ActorGenerationRetirementPreparation: Clone, Copy);
