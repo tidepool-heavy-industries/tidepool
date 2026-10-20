@@ -1397,6 +1397,14 @@ pub fn render_module_with_vals(
     let mut out = String::new();
     out.push_str(&merged_pragmas);
     out.push('\n');
+    // Retraction and import guards can emit pattern namespace syntax after the
+    // defining turn's authored pragma has left the current source prologue.
+    if all_session_heads
+        .iter()
+        .any(|item| matches!(item, ExportItem::Pattern { .. }))
+    {
+        out.push_str("{-# LANGUAGE PatternSynonyms #-}\n");
+    }
     out.push_str(
         "-- GENERATED (Lane A) — accumulated session declarations. Do not edit;\n\
          -- regenerated as a pure function of the declaration log each turn.\n",
@@ -1860,6 +1868,10 @@ mod tests {
         certified.head.record_parent = None;
         certified.head.namespace = ExportNamespace::Type;
         assert!(ExportItem::try_from(&certified).is_err());
+        certified.head.namespace = ExportNamespace::Field;
+        certified.head.occurrence = "publishedField".into();
+        certified.head.record_parent = Some("PublishedPattern".into());
+        assert!(ExportItem::try_from(&certified).is_err());
     }
 
     #[test]
@@ -1890,6 +1902,34 @@ mod tests {
             hide_session_heads("import Original", &[&pattern]),
             "import Original hiding (pattern PublishedPattern)"
         );
+    }
+
+    #[test]
+    fn pattern_retraction_keeps_generated_namespace_syntax_enabled() {
+        use tidepool_toolchain::declaration_join::ExportNamespace;
+        let mut log = DeclLog::new();
+        push_chained(
+            &mut log,
+            header_turn(
+                "pattern PublishedPattern = 7",
+                vec![ExportItem::Pattern {
+                    name: "PublishedPattern".into(),
+                }],
+                &["{-# LANGUAGE PatternSynonyms #-}"],
+                &[],
+            ),
+        );
+        let mut retraction = turn("", vec![]);
+        retraction.retracts = vec![DeclarationRetraction::Head {
+            namespace: ExportNamespace::Constructor,
+            occurrence: "PublishedPattern".into(),
+        }];
+        let generation = push_chained(&mut log, retraction);
+        let rendered = render_module(&log, generation, &ModuleEnv::standalone_default());
+        assert!(rendered.source.contains("{-# LANGUAGE PatternSynonyms #-}"));
+        assert!(rendered
+            .source
+            .contains("import Tidepool.Session.Lib.G1 hiding (pattern PublishedPattern)"));
     }
 
     #[test]
