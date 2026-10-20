@@ -295,6 +295,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs',
         'tidepool/toolchain/tests/fixtures/owned-declaration/G3.hs',
         'tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs',
+        'tidepool/toolchain/tests/fixtures/world-native/CellTemplate.hs',
     })),
 ))
 

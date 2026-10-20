@@ -1698,7 +1698,7 @@ where
         );
     }
     let prefix = resident
-        .begin_cell_program(admission, program)
+        .begin_cell_program(program)
         .unwrap()
         .expect("nonempty compiled cell has an ordered prefix");
     if matches!(

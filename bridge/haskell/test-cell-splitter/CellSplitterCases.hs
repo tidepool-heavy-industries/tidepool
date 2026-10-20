@@ -989,9 +989,11 @@ checkingSourceRequestRoundTrip = do
       resident = ExactInputsRequest world (ResidentExactInputs "realized")
       exactFields = [EnsureExactInputs resident]
   [exactFlag, exactPayload] <- pure (workerArgv exactFields)
+  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v25" exactFlag
   assertEqual "source-free request matches independent Rust fixture"
-    "54505245513032340001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
-  forM_ [resident, ExactInputsRequest world (CompleteExactInputs "/scope.cbor")] $ \inputs ->
+    "54505245513032350001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
+  forM_ [resident, ExactInputsRequest world (CompleteExactInputs "/scope.cbor")
+    , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "predecessor-realization" "/successor.cbor")] $ \inputs ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
       Right (Just request) -> do
         assertEqual "exact acquisition is its own operation" (Right (EnsureExactInputsOperation inputs))
@@ -1010,7 +1012,10 @@ checkingSourceRequestRoundTrip = do
   forM_ [ExactInputsRequest "" (ResidentExactInputs "realized")
         , ExactInputsRequest "root\0other" (ResidentExactInputs "realized")
         , ExactInputsRequest "root" (ResidentExactInputs "")
-        , ExactInputsRequest "root" (CompleteExactInputs "")] $ \invalid ->
+        , ExactInputsRequest "root" (CompleteExactInputs "")
+        , ExactInputsRequest world (SuccessorExactInputs "bad-root" "reference" "/successor.cbor")
+        , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "" "/successor.cbor")
+        , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "reference" "")] $ \invalid ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs invalid]) of
       Left _ -> pure ()
       other -> fail ("invalid opaque transport reference accepted: " ++ show other)
@@ -1049,7 +1054,7 @@ checkingSourceRequestRoundTrip = do
           (InspectionProvenance 1 "display-only")) "answer.bin"
   [_, queryPayload] <- pure (workerArgv [WorldPublicModule query])
   assertEqual "world public query matches the frozen field 58 byte layout"
-    "5450524551303234000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
+    "5450524551303235000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
   forM_ [WorldStructuredInfo, WorldStructuredType] $ \mode -> do
     let selected = query { worldQueryMode = mode }
     case workerRequestFromArgv (workerArgv [WorldPublicModule selected]) of
@@ -1073,8 +1078,8 @@ checkingSourceRequestRoundTrip = do
       cellPlan = WorldCellPlanRequest world "held" cellRecipe "plan.cbor"
       cellPrepare = WorldCellPrepareRequest world "held" cellRecipe "plan-receipt" (BS.replicate 32 98)
         [(0,PlannedBind 7),(1,PlannedExpression 8 "it")] "operation" "prepared.cbor"
-      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72")
-              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
+      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303235000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72")
+              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303235000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
   forM_ cases $ \(field,operation,expected) -> do
     [flag,payload] <- pure (workerArgv [field])
     assertEqual "held cell operation matches independent Rust framing" expected payload
@@ -1088,12 +1093,23 @@ checkingSourceRequestRoundTrip = do
       forM_ [[field,extra],[extra,field]] $ \mixed -> case workerRequestFromArgv (workerArgv mixed) of
         Left _ -> pure ()
         _ -> fail "mixed held cell request accepted"
+  let orderedVariants = [("decl","declaration"),("bind","binding"),("binddiscard","discard")
+        ,("expr","effectful-expression"),("expr","pure-expression")]
+      repeatedRecipe = cellRecipe {worldCellTurnTemplates=orderedVariants}
+      repeatedPlan = cellPlan {worldCellPlanRecipe=repeatedRecipe}
+      repeatedPrepare = cellPrepare {worldCellPrepareRecipe=repeatedRecipe}
+  forM_ [(WorldCellPlan repeatedPlan,WorldCellPlanOperation repeatedPlan)
+        ,(WorldCellPrepare repeatedPrepare,WorldCellPrepareOperation repeatedPrepare)] $ \(field,operation) ->
+    case workerRequestFromArgv (workerArgv [field]) of
+      Right (Just request) -> assertEqual "ordered expression variants survive held recipe admission"
+        (Right operation) (admitRequestOperation request)
+      other -> fail ("held cell rejected the ordinary ordered expression alternatives: " ++ show other)
   forM_ [cellPlan {worldCellPlanRecipe=cellRecipe {worldCellSource=replicate (1024*1024+1) 'λ'}}
-        ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("bind","one"),("bind","two")]}}
+        ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("","body")]}}
         ,cellPlan {worldCellPlanOutput=replicate 65537 'x'}] $ \invalid ->
     case workerRequestFromArgv (workerArgv [WorldCellPlan invalid]) of
       Left _ -> pure ()
-      _ -> fail "over-budget or duplicate held cell recipe accepted"
+      _ -> fail "over-budget or malformed held cell recipe accepted"
   forM_ [cellPrepare {worldCellPrepareSlots=[(0,PlannedBind 7),(0,PlannedExpression 8 "it")]}
         ,cellPrepare {worldCellPrepareSlots=reverse (worldCellPrepareSlots cellPrepare)}
         ,cellPrepare {worldCellPrepareAdmission=BS.replicate 31 98}] $ \invalid ->

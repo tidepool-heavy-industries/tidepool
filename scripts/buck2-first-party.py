@@ -1753,6 +1753,30 @@ tidepool_buildscript_run(
                 ]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
+            world_case = "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"
+            world_env, world_resources, world_worker = test_runtime_inputs(
+                package_name, "toolchain_world_native_seal_test", unit=True
+            )
+            world_env.pop("LD_LIBRARY_PATH", None)
+            world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
+            deployment = "//build/package:compiler_service_deployment"
+            world_env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
+            world_env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
+            world_resources = [resource for resource in world_resources
+                               if resource not in {"//build/package:compiler_deployment",
+                                                   "//build/package:tidepool_extract_runtime_libraries"}]
+            world_resources.append(deployment)
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_world_native_seal_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [" + json.dumps(world_case) + "],",
+                "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                "    case_compiler_modes = {" + json.dumps(world_case) + ': "owned-resident"},',
+                runtime_arguments(world_env, world_resources, world_worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",

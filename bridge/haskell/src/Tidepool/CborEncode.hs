@@ -3,6 +3,7 @@ module Tidepool.CborEncode
   , encodeTurnOut
   , encodeCellOut
   , encodeBoundBinder
+  , encodeTypedSegmentPlan
   ) where
 
 import Codec.CBOR.Encoding
@@ -21,6 +22,8 @@ import Tidepool.Binders
   , LocatedPragma(..), LocatedImport(..), PragmaKind(..), DeclarationSource(..)
   , StmtBinders(..), turnKindWireName )
 import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures, encodeCellExpressionPlan)
+import Tidepool.TypedSegment (TypedSegmentPlan, typedSegmentPlanDigest, typedSegmentReservationDigest
+  , typedSegmentPlanRoot, typedSegmentPlanItems, TypedItemPlan(..), TypedItemBody(..))
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 6.0.
@@ -295,3 +298,20 @@ encodeHeads heads = encodeListLen (fromIntegral (length heads)) <> foldMap encod
   where
     encodeHead (NominalHead unit modul name) =
       encodeListLen 3 <> encodeString unit <> encodeString modul <> encodeString name
+
+encodeTypedSegmentPlan :: TypedSegmentPlan -> Encoding
+encodeTypedSegmentPlan plan =
+  encodeListLen 4 <> text (typedSegmentPlanDigest plan) <> text (typedSegmentReservationDigest plan)
+    <> text (typedSegmentPlanRoot plan)
+    <> encodeListLen (fromIntegral (length (typedSegmentPlanItems plan)))
+    <> foldMap encodeItem (typedSegmentPlanItems plan)
+  where
+    text = encodeString . T.pack
+    encodeItem item = encodeListLen 8 <> encodeWord64 (fromIntegral (plannedItemOrdinal item))
+      <> text (plannedItemEntry item) <> encodeWord64 (plannedItemGeneration item)
+      <> case plannedItemBody item of
+        ActionItem step probe marker captures ->
+          text "action" <> text step <> text probe <> text marker <> names captures
+        LetItem marker captures -> text "let" <> text "" <> text "" <> text marker <> names captures
+        ObservationItem probe observation -> text "observation" <> text "" <> text probe <> text observation <> names []
+    names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
