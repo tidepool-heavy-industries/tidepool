@@ -518,9 +518,13 @@ impl GenerationPublicationCustody {
                 observation,
             }) => {
                 let (recorded, refusals) = diagnostic.record_refusal(refusal)?;
-                if observation.requires_recovery() {
-                    // A successful diagnostic write cannot settle an independent
-                    // recovery obligation or release its full primary/candidate.
+                if matches!(
+                    observation,
+                    ActorGenerationPublicationRefusalObservation::Failed { .. }
+                ) {
+                    // Diagnostic acknowledgement is not proof that every other
+                    // owner settled. Keep any full primary/candidate until the
+                    // actual body owner attests its remaining obligations.
                     return None;
                 }
                 Some(GenerationRetirementCompletion::AReopened {
@@ -1031,7 +1035,7 @@ impl RunState {
         let attempts = std::mem::take(&mut self.lost_retirements);
         let worker_transfers = std::mem::take(&mut self.worker_transfers);
         let resource_transfers = std::mem::take(&mut self.resource_transfers);
-        let _ = self
+        let installed = self
             .native_cleanup
             .terminal
             .set(RunControlNativeExit::OwnerLost {
@@ -1040,7 +1044,13 @@ impl RunState {
                     worker_transfers,
                     resource_transfers,
                 })),
-            });
+            })
+            .is_ok();
+        if installed {
+            // The actual affine products are installed before any waiter is
+            // notified, including a waiter whose queued reply was lost.
+            self.native_cleanup.ready.notify_waiters();
+        }
         // Publisher closures can lead back to this client. Release them only
         // after the actual affine products are visible in the terminal owner.
         drop(std::mem::take(&mut self.retirement_discards));

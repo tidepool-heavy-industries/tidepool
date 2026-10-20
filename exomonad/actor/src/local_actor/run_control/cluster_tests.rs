@@ -176,6 +176,43 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
         control.native_cleanup.take_recovery(),
         Err(NativeRecoveryUnavailable::Finalized)
     ));
+    assert!(matches!(
+        control.native_cleanup.wait_for_terminal().await,
+        RunControlNativeExit::Finalized
+    ));
+}
+
+#[tokio::test]
+async fn native_terminal_wait_observes_actual_loss_before_and_after_publication() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let cleanup = control.native_cleanup.clone();
+    let terminal = cleanup.wait_for_terminal();
+    tokio::pin!(terminal);
+    assert!(futures_util::poll!(terminal.as_mut()).is_pending());
+    control.owner.get_cell().kill();
+    task.await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), terminal)
+            .await
+            .unwrap(),
+        RunControlNativeExit::OwnerLost { .. }
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), cleanup.wait_for_terminal())
+            .await
+            .unwrap(),
+        RunControlNativeExit::OwnerLost { .. }
+    ));
+    assert_eq!(
+        cleanup.observation(),
+        NativeRecoveryObservation::Retained {
+            attempts: 0,
+            completed: 0,
+            sources_settled: 0,
+            worker_transfers: 0,
+            resource_transfers: 0
+        }
+    );
 }
 
 #[tokio::test]

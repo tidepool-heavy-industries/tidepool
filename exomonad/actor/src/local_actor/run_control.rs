@@ -224,6 +224,7 @@ impl RunState {
 #[derive(Default)]
 pub(super) struct RunControlNativeCleanup {
     terminal: std::sync::OnceLock<RunControlNativeExit>,
+    ready: tokio::sync::Notify,
 }
 
 enum RunControlNativeExit {
@@ -268,6 +269,20 @@ struct RunControlNativeRecovery<'a> {
 }
 
 impl RunControlNativeCleanup {
+    async fn wait_for_terminal(&self) -> &RunControlNativeExit {
+        loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            // Register before observing the monotonic terminal slot. This also
+            // covers publication between registration and the following read.
+            notified.as_mut().enable();
+            if let Some(terminal) = self.terminal.get() {
+                return terminal;
+            }
+            notified.await;
+        }
+    }
+
     fn observation(&self) -> NativeRecoveryObservation {
         match self.terminal.get() {
             None => NativeRecoveryObservation::OwnerNotObserved,
@@ -1416,10 +1431,9 @@ impl Actor for RunControl {
                                 .is_none_or(|lifecycle| lifecycle.run_finalized())
                     })
                 {
-                    let _ = state
-                        .native_cleanup
-                        .terminal
-                        .set(RunControlNativeExit::Finalized);
+                    if state.native_cleanup.terminal.set(RunControlNativeExit::Finalized).is_ok() {
+                        state.native_cleanup.ready.notify_waiters();
+                    }
                     let supervisor = state.preparation_supervisor.take().map(|supervisor| {
                         let cell = supervisor.get_cell();
                         supervisor.stop(None);
