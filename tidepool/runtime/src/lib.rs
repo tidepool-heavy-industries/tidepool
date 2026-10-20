@@ -438,7 +438,7 @@ fn install_compiled_target(
     target: &str,
     scope: tidepool_codegen::scope::ScopeId,
 ) -> Result<tidepool_codegen::prepared_program::ProgramId, RuntimeError> {
-    use session::prepared::CertifiedTargetImage;
+    use session::prepared::ScopedTargetImage;
 
     if artifacts.warnings.has_io {
         return Err(CompileError::IOTypeDetected.into());
@@ -455,7 +455,7 @@ fn install_compiled_target(
     let resolved =
         state.resolve_certification_in(scope, target.prepared.prepared(), &certification)?;
     let registry = state.certified_image_registry();
-    let (target, demanded) = CertifiedTargetImage::compile_scoped(
+    let (target, demanded) = ScopedTargetImage::compile_scoped(
         target.prepared.prepared().clone(),
         &resolved,
         &registry,
@@ -464,7 +464,6 @@ fn install_compiled_target(
         scope,
         &artifacts.table,
         target,
-        &resolved.target_owners,
         &resolved.source_evidence,
         demanded,
         &resolved.inherited_needed,
