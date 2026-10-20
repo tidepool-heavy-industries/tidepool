@@ -13385,7 +13385,7 @@ mod source_origin_tests {
                 ).unwrap();
                 let pending = resident.provenance_for(&own).unwrap();
                 let installed = resident.install_admitted_turn(
-                    own, TurnImageAcquisition::Compile, pending,
+                    own, TurnImageAcquisition::Compile, pending, None,
                 ).expect("the same code owner reaches actual native installation");
                 assert!(matches!(
                     installed.provenance.original_sources.require_unique(17),
