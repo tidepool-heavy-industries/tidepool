@@ -49,8 +49,8 @@ pub use endpoint::{
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
     CompilerTransactionOrigin, CompilerTransactionOutcome, CompilerTransactionPublicationError,
-    CompilerTransactionRetirement, CompilerTransactionSettled, CompilerWorkerRetirement,
-    DirectCompilerRetirement, HostAdmissionCancellation,
+    CompilerTransactionRetirement, CompilerTransactionSettled, CompilerWorkerLocation,
+    CompilerWorkerRetirement, DirectCompilerRetirement, HostAdmissionCancellation,
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
@@ -493,6 +493,9 @@ impl std::error::Error for SpawnError {
 /// One finished `tidepool-extract` process.
 #[derive(Debug)]
 pub struct ExtractRun {
+    /// Actual daemon worker that began this transaction. Direct and ordinary
+    /// one-shot transports make no cross-process residency promise.
+    pub worker_location: Option<CompilerWorkerLocation>,
     /// Logical request correlation issued by the physical transport owner.
     /// This diagnostic identity grants no compiler or runtime authority.
     pub request_correlation: String,
@@ -534,6 +537,7 @@ pub struct ExtractCmd {
     program: OsString,
     bin_source: BinSource,
     request: ExtractRequest,
+    worker_affinity_hint: Option<CompilerWorkerLocation>,
 }
 
 impl ExtractCmd {
@@ -544,6 +548,7 @@ impl ExtractCmd {
             program: resolved.path.into_os_string(),
             bin_source: resolved.source,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         })
     }
 
@@ -560,12 +565,19 @@ impl ExtractCmd {
             program: bin.into_os_string(),
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         }
     }
 
     /// Where this command's binary name came from.
     pub fn bin_source(&self) -> BinSource {
         self.bin_source
+    }
+
+    /// Prefer this currently idle daemon instance before lazy BEGIN. Busy or
+    /// stale placement falls back to ordinary admission; active scopes stay pinned.
+    pub fn set_worker_affinity_hint(&mut self, hint: Option<CompilerWorkerLocation>) {
+        self.worker_affinity_hint = hint;
     }
 
     /// Resolve and bind the exact producer that will execute this request.

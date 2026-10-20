@@ -26,6 +26,33 @@ pub(crate) const BOUND_ENDPOINT_FLAG: &str = "--compiler-endpoint-v1";
 pub(crate) const IDENTITY_MAGIC: &[u8; 8] = b"TPCID002";
 const DIRECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// Actual daemon worker placement observed after worker BEGIN. This optional
+/// accelerator grants no compiler-input or runtime authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerWorkerLocation {
+    epoch: [u8; 32],
+    slot: u32,
+    instance: [u8; 32],
+}
+impl CompilerWorkerLocation {
+    pub(crate) fn started(epoch: [u8; 32], slot: u32, instance: [u8; 32]) -> Self {
+        Self {
+            epoch,
+            slot,
+            instance,
+        }
+    }
+    pub fn epoch(&self) -> &[u8; 32] {
+        &self.epoch
+    }
+    pub fn slot(&self) -> u32 {
+        self.slot
+    }
+    pub fn instance(&self) -> &[u8; 32] {
+        &self.instance
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerIdentity {
     producer: [u8; 32],
@@ -1526,6 +1553,16 @@ impl CompilerEndpoint {
         cancellation: Option<CompilerTransactionCancellation>,
         timeout: Duration,
     ) -> Result<CompilerTransaction, SpawnError> {
+        self.transaction_with_cancellation_timeout_hint(workload, cancellation, timeout, None)
+    }
+
+    fn transaction_with_cancellation_timeout_hint(
+        self,
+        workload: CompileWorkload,
+        cancellation: Option<CompilerTransactionCancellation>,
+        timeout: Duration,
+        hint: Option<&CompilerWorkerLocation>,
+    ) -> Result<CompilerTransaction, SpawnError> {
         let identity = self.identity.clone();
         let transport_name = self.transport.name();
         let admission_started = Instant::now();
@@ -1565,11 +1602,12 @@ impl CompilerEndpoint {
                 TransactionTransport::Direct(endpoint)
             }
             Transport::Daemon { socket, epoch } => {
-                let transaction = daemon::begin_transaction_for_workload(
+                let transaction = daemon::begin_transaction_for_workload_with_hint(
                     &socket,
                     &epoch,
                     workload,
                     cancellation.as_ref(),
+                    hint,
                 )
                 .map_err(|error| {
                     if matches!(error, daemon::DaemonError::Busy) {
@@ -1801,6 +1839,7 @@ impl CompilerEndpoint {
         );
         let _entered = span.enter();
         let start = Instant::now();
+        let mut worker_location = None;
         let output = match &mut self.transport {
             Transport::Direct(endpoint) => {
                 let request = daemon::encode_request(&cwd, &cmd.request.worker_argv());
@@ -1865,12 +1904,14 @@ impl CompilerEndpoint {
                     };
                     transaction.execute(cmd).map(|run| {
                         request_correlation = run.request_correlation;
+                        worker_location = run.worker_location;
                         run.output
                     })
                 })?
             }
         };
         Ok(ExtractRun {
+            worker_location,
             request_correlation,
             output,
             elapsed: start.elapsed(),
@@ -2178,7 +2219,12 @@ fn ensure_scoped_transaction(
             epoch: bound.epoch,
         },
     };
-    match endpoint.transaction_with_cancellation(workload, cancellation) {
+    match endpoint.transaction_with_cancellation_timeout_hint(
+        workload,
+        cancellation,
+        DIRECT_HANDSHAKE_TIMEOUT,
+        cmd.worker_affinity_hint.as_ref(),
+    ) {
         Ok(transaction) => TRANSACTION_SCOPE.with(|scope| {
             scope.borrow_mut().as_mut().expect("owning scope").compiler = ScopedCompiler::Active {
                 transaction,
@@ -2453,6 +2499,7 @@ impl CompilerTransaction {
             endpoint = %self.identity,
         );
         let _entered = span.enter();
+        let mut worker_location = None;
         let output = match transport {
             TransactionTransport::Direct(endpoint) => {
                 let request = daemon::encode_request(&cwd, &cmd.request.worker_argv());
@@ -2476,11 +2523,17 @@ impl CompilerTransaction {
             TransactionTransport::Daemon {
                 transaction,
                 socket,
-            } => daemon::execute_transaction_request(transaction, &cwd, &cmd.request).map_err(
-                |error| SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error)),
-            )?,
+            } => {
+                let output = daemon::execute_transaction_request(transaction, &cwd, &cmd.request)
+                    .map_err(|error| {
+                    SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error))
+                })?;
+                worker_location = transaction.worker_location().cloned();
+                output
+            }
         };
         Ok(ExtractRun {
+            worker_location,
             request_correlation,
             output,
             elapsed: start.elapsed(),
@@ -3207,6 +3260,7 @@ mod tests {
             program: "fixture".into(),
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         };
         for expected in [b"1", b"2"] {
             let response = transaction.execute(&command).unwrap();
@@ -3436,6 +3490,7 @@ mod tests {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
                 request: ExtractRequest::default(),
+                worker_affinity_hint: None,
             };
             let response = CompilerEndpoint {
                 identity,
@@ -4163,6 +4218,7 @@ mod tests {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
                 request: ExtractRequest::default(),
+                worker_affinity_hint: None,
             };
             CompilerEndpoint {
                 identity,
@@ -4607,6 +4663,7 @@ mod tests {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
                 request: ExtractRequest::default(),
+                worker_affinity_hint: None,
             }
         }
 
@@ -5501,6 +5558,7 @@ mod tests {
             program: launch.program,
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         };
         let retained = RefCell::new(None);
         let outcome = with_compiler_transaction_for_workload(
@@ -5567,6 +5625,7 @@ mod tests {
             program: "unused".into(),
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         };
 
         assert!(transaction.execute(&command).is_err());
