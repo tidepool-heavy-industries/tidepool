@@ -1678,6 +1678,7 @@ impl RequestNativeAvailability {
     /// Select direct availability roots from effective compiler roles, then keep
     /// their exact dependencies. The demanded path supplies its already issued
     /// direct choices to the same closure/intersection policy below.
+    #[track_caller]
     pub(crate) fn for_compiler_roles(
         &self,
         roles: &CompilerInputProjection,
