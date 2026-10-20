@@ -1170,26 +1170,43 @@ pub(crate) fn validate_consumed_native_namespace(
     Ok(())
 }
 
+/// Durable offers retain only the exact reachable causes frozen at issuance.
+/// Keep the operation's persistent map outside this recursive acquisition DAG.
+#[derive(Clone, Debug)]
+struct FrozenNativeSourceReceipts {
+    entries: Box<[(NativeSourceUse, Arc<[NativeSourceCause]>)]>,
+}
+
+#[derive(Clone, Debug)]
+enum NativeOfferSourceReceipt {
+    Solved(Arc<FrozenNativeSourceReceipts>),
+    Unwitnessed,
+}
+
+#[derive(Clone)]
 /// Exact lifetime custody, without a derived artifact-view projection.
 /// Only the inventory's checked issuance or an already authenticated view can
 /// construct this owner; immutable proof bytes alone are insufficient.
-#[derive(Clone)]
 struct NativeOfferCustody {
     lease: Arc<ViewLease>,
     reachable: imbl::OrdSet<ArtifactBindingNode>,
     native_originals: BTreeSet<ArtifactId>,
     artifact_carriers: BTreeSet<ArtifactBinding>,
     required_scopes: BTreeSet<ArtifactSelectionId>,
+    source_receipt: NativeOfferSourceReceipt,
 }
 
 impl NativeOfferCustody {
     fn from_checked_nodes(
         lease: Arc<ViewLease>,
         reachable: imbl::OrdSet<ArtifactBindingNode>,
+        source_receipt: &IssuedNativeSourceReceipt,
+        source_roots: &BTreeMap<u32, NativeGroupBinding>,
     ) -> Result<Self, CompileError> {
         let mut native_originals = BTreeSet::new();
         let mut artifact_carriers = BTreeSet::new();
         let mut required_scopes = BTreeSet::new();
+        let mut retained_sources = BTreeMap::new();
         let state = lease.inventory.0.lock().expect("inventory lock");
         for node in &reachable {
             let group = match node {
@@ -1201,6 +1218,37 @@ impl NativeOfferCustody {
                 ArtifactBindingNode::Group(group) => group,
             };
             required_scopes.insert(group.binding.selection());
+            if let IssuedNativeSourceReceipt::Solved(sources) = source_receipt {
+                let root = NativeSourceUse::Root(*group);
+                if let Some(causes) = sources
+                    .0
+                    .get(&root)
+                    .filter(|_| source_roots.get(&group.original_ordinal) == Some(group))
+                {
+                    retained_sources.insert(root, Arc::clone(causes));
+                }
+                let first = NativeSourceUse::Edge {
+                    parent: *group,
+                    child: NativeGroupBinding {
+                        binding: NativeGroupIssuer {
+                            artifact: ArtifactId([0; 32]),
+                            selection: ArtifactSelectionId([0; 32]),
+                        },
+                        original_ordinal: 0,
+                    },
+                };
+                for (key, causes) in sources.0.range(first..) {
+                    let NativeSourceUse::Edge { parent, child } = key else {
+                        break;
+                    };
+                    if parent != group {
+                        break;
+                    }
+                    if reachable.contains(&ArtifactBindingNode::Group(*child)) {
+                        retained_sources.insert(*key, Arc::clone(causes));
+                    }
+                }
+            }
             let mut carriers = state
                 .outgoing(*node)
                 .filter_map(|(target, edge)| match target {
@@ -1271,6 +1319,14 @@ impl NativeOfferCustody {
             native_originals,
             artifact_carriers,
             required_scopes,
+            source_receipt: match source_receipt {
+                IssuedNativeSourceReceipt::Solved(_) => {
+                    NativeOfferSourceReceipt::Solved(Arc::new(FrozenNativeSourceReceipts {
+                        entries: retained_sources.into_iter().collect(),
+                    }))
+                }
+                IssuedNativeSourceReceipt::Unwitnessed => NativeOfferSourceReceipt::Unwitnessed,
+            },
         })
     }
 }
@@ -1719,6 +1775,7 @@ impl IssuedNativeOffer {
         admitted: IssuedArtifactCustody,
         originals: &[ArtifactId],
     ) -> Result<Vec<Self>, CompileError> {
+        let source_receipt = admitted.source_receipt;
         let source = admitted.lease;
         let mut offers = Vec::new();
         let state = source.inventory.0.lock().expect("inventory lock");
@@ -1866,18 +1923,24 @@ impl IssuedNativeOffer {
                 body,
                 lease,
                 nodes,
+                roots,
             ));
         }
         drop(state);
         offers
             .into_iter()
-            .map(|(original, interface, owner, body, lease, nodes)| {
+            .map(|(original, interface, owner, body, lease, nodes, roots)| {
                 Ok(Self(Arc::new(NativeOfferFacts {
                     original,
                     interface,
                     owner,
                     body,
-                    custody: NativeOfferCustody::from_checked_nodes(lease, nodes)?,
+                    custody: NativeOfferCustody::from_checked_nodes(
+                        lease,
+                        nodes,
+                        &source_receipt,
+                        &roots,
+                    )?,
                     snapshot: OnceLock::new(),
                     identity: OnceLock::new(),
                 })))
@@ -2029,8 +2092,12 @@ impl IssuedNativeOffer {
             let state = custody.lease.inventory.0.lock().expect("inventory lock");
             custody.read_projection(&state).nodes.clone()
         };
-        let custody =
-            NativeOfferCustody::from_checked_nodes(Arc::clone(&custody.lease), reachable)?;
+        let custody = NativeOfferCustody::from_checked_nodes(
+            Arc::clone(&custody.lease),
+            reachable,
+            &IssuedNativeSourceReceipt::Unwitnessed,
+            &BTreeMap::new(),
+        )?;
         Ok(Self(Arc::new(NativeOfferFacts {
             original,
             interface,
@@ -2240,7 +2307,12 @@ impl IssuedNativeOffer {
             },
             BTreeSet::new(),
         );
-        let custody = NativeOfferCustody::from_checked_nodes(lease, nodes.into_iter().collect())?;
+        let custody = NativeOfferCustody::from_checked_nodes(
+            lease,
+            nodes.into_iter().collect(),
+            &IssuedNativeSourceReceipt::Unwitnessed,
+            &BTreeMap::new(),
+        )?;
         Ok(Self(Arc::new(NativeOfferFacts {
             original: facts.original,
             interface,
@@ -2689,6 +2761,91 @@ mod normalized_dependency_tests {
     use crate::declaration_context::{
         ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
     };
+
+    #[test]
+    fn complete_availability_preserves_only_its_own_solver_source_receipt() {
+        let producer = CanonicalProducerIdentity::from_producer_bytes(b"private-source-receipt");
+        let entries = [("ReceiptLeft", 7, 23), ("ReceiptRight", 11, 31)]
+            .into_iter()
+            .map(|(module, ordinal, seed)| {
+                let product = fixture_finalized_product(
+                    original_groups_fixture_with_interface(
+                        module,
+                        vec![(ordinal, vec![])],
+                        seed,
+                        &BTreeMap::new(),
+                        format!("{module} interface").into_bytes(),
+                    ),
+                    producer.sha256(),
+                );
+                Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &physical,
+            entries,
+        )
+        .unwrap();
+        let inputs = OriginalCompilerInputs::from_selection(&selection, &completed).unwrap();
+        assert_eq!(inputs.issued_offers().len(), 2);
+        for offer in inputs.issued_offers() {
+            let NativeOfferSourceReceipt::Solved(sources) = &offer.0.custody.source_receipt else {
+                panic!("actual complete availability lost its solver issuer");
+            };
+            assert_eq!(
+                sources.entries.len(),
+                1,
+                "an unrelated sibling receipt is not retained"
+            );
+            let (NativeSourceUse::Root(group), causes) = sources.entries.iter().next().unwrap()
+            else {
+                panic!("the leaf product has exactly its own root receipt");
+            };
+            assert_eq!(group.binding.artifact(), offer.original());
+            assert!(matches!(causes.as_ref(), [NativeSourceCause::Current]));
+            let contribution = Arc::new(
+                offer
+                    .contribution_for(&BTreeSet::from([offer.original()]))
+                    .unwrap()
+                    .unwrap(),
+            );
+            let narrowed = contribution.for_groups(&BTreeSet::from([*group])).unwrap();
+            let NativeOfferSourceReceipt::Solved(retained) =
+                &narrowed.offer().0.custody.source_receipt
+            else {
+                panic!("narrowing cannot discard an actual issuer");
+            };
+            assert!(Arc::ptr_eq(sources, retained));
+
+            let graph_only =
+                IssuedNativeOffer::issue(offer.original(), &completed, offer.proof().cloned())
+                    .unwrap();
+            assert!(
+                matches!(
+                    graph_only.0.custody.source_receipt,
+                    NativeOfferSourceReceipt::Unwitnessed
+                ),
+                "authenticated graph facts cannot recreate an actual source issuer"
+            );
+        }
+    }
 
     #[test]
     fn contribution_restriction_shares_only_unchanged_closed_membership() {
