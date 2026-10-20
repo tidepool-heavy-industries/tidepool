@@ -20,11 +20,13 @@ pub(crate) struct RetirementDiagnosticEvidence {
     detail: String,
     diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
     observation: crate::resident_workbench::ActorGenerationPublicationRefusalObservation,
-    retirement: Option<tidepool_bridge_effects::RlRetirementReceipt>,
+    retirement: Option<Arc<tidepool_bridge_effects::RlRetirementReceipt>>,
 }
 
 impl RetirementDiagnosticEvidence {
-    pub(crate) fn default_refusal(receipt: &tidepool_bridge_effects::RlRetirementReceipt) -> Self {
+    pub(crate) fn default_refusal(
+        receipt: &Arc<tidepool_bridge_effects::RlRetirementReceipt>,
+    ) -> Self {
         Self {
             detail: "generation retirement refused because admitted dependent work remains".into(),
             diagnostic: None,
