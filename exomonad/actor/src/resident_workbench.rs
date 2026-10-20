@@ -2004,7 +2004,7 @@ impl ReservedActorGeneration {
         self.guard.refuse_unstarted().map_err(|settlement| {
             ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                    outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned()))),
                     settlement,
                 }),
             }
@@ -2021,7 +2021,7 @@ impl ReservedActorGeneration {
             .map_err(
                 |settlement| ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned()))),
                         settlement,
                     }),
                 },
@@ -2119,10 +2119,9 @@ impl Drop for PublicationDisposalProbe {
 type GenerationPublicationAction = Box<
     dyn FnOnce(
             ReservedActorGeneration,
-        ) -> futures_util::future::BoxFuture<
-            'static,
-            Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
-        > + Send,
+        )
+            -> futures_util::future::BoxFuture<'static, ActorGenerationPublicationSettlement>
+        + Send,
 >;
 
 type GenerationReservationAction = Box<
@@ -2230,9 +2229,88 @@ impl ActorGenerationPublicationOperation {
         )
     }
 
-    pub(crate) async fn run(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+    pub(crate) async fn run(self) -> ActorGenerationPublicationSettlement {
         let Self { reserved, publish } = self;
         publish(reserved).await
+    }
+}
+
+/// The observed outcome carries no settlement authority. Only `Unpublished`
+/// retains the original armed guard needed to restore a held retirement fence.
+pub(crate) enum ActorGenerationPublicationSettlement {
+    Unpublished(ActorGenerationPublicationRefusal),
+    Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
+}
+
+pub(crate) struct ActorGenerationPublicationRefusal {
+    guard: ActorPublicationGuard,
+    outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
+}
+
+impl ActorGenerationPublicationRefusal {
+    pub(crate) fn outcome(
+        &self,
+    ) -> &Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>> {
+        &self.outcome
+    }
+
+    pub(crate) fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.guard
+            .refuse_retirement(original)
+            .map_err(
+                |settlement| ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: self.outcome.clone(),
+                        settlement,
+                    }),
+                },
+            )
+    }
+}
+
+/// Checkout completion and source settlement are distinct observations. An
+/// unobserved body never grants the right to reopen either source.
+enum PublicationBodyCompletion {
+    Observed {
+        guard: ActorPublicationGuard,
+        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    },
+    Unobserved {
+        guard: ActorPublicationGuard,
+        primary: ResidentActorWorkbenchError,
+    },
+    Terminal(Result<ActorGenerationCommit, ResidentActorWorkbenchError>),
+}
+
+impl PublicationBodyCompletion {
+    fn complete(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        match self {
+            Self::Observed { guard, outcome } => guard.complete(outcome),
+            Self::Unobserved { guard, primary } => Err(guard.unobserved(primary)),
+            Self::Terminal(outcome) => outcome,
+        }
+    }
+
+    fn for_retirement(self) -> ActorGenerationPublicationSettlement {
+        match self {
+            Self::Observed { guard, outcome }
+                if matches!(&guard.settlement, ActorPublicationState::Armed(_))
+                    && guard.known_unpublished(&outcome) =>
+            {
+                ActorGenerationPublicationSettlement::Unpublished(
+                    ActorGenerationPublicationRefusal {
+                        guard,
+                        outcome: Arc::new(outcome),
+                    },
+                )
+            }
+            completion => {
+                ActorGenerationPublicationSettlement::Settled(Arc::new(completion.complete()))
+            }
+        }
     }
 }
 
@@ -2460,21 +2538,28 @@ impl ActorPublicationGuard {
         }))
     }
 
-    fn complete(
-        self,
-        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
-    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+    fn known_unpublished(
+        &self,
+        outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    ) -> bool {
         let no_commit_claim = matches!(
             self.decision.phase(),
             tidepool_runtime::session::PublicationPhase::Running
                 | tidepool_runtime::session::PublicationPhase::CancellationRequested
                 | tidepool_runtime::session::PublicationPhase::Terminated
         );
-        let known_unpublished = no_commit_claim
+        no_commit_claim
             && !matches!(
-                &outcome,
+                outcome,
                 Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
-            );
+            )
+    }
+
+    fn complete(
+        self,
+        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let known_unpublished = self.known_unpublished(&outcome);
         let settlement = if known_unpublished {
             self.refused()
         } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
@@ -2484,7 +2569,7 @@ impl ActorPublicationGuard {
         } else {
             return Err(ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome,
+                    outcome: Arc::new(outcome),
                     settlement: PublicationSettlementError::PublicationUnconfirmed,
                 }),
             });
@@ -2492,7 +2577,7 @@ impl ActorPublicationGuard {
         if let Err(settlement) = settlement {
             return Err(ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome,
+                    outcome: Arc::new(outcome),
                     settlement,
                 }),
             });
@@ -2503,7 +2588,7 @@ impl ActorPublicationGuard {
     fn unobserved(self, primary: ResidentActorWorkbenchError) -> ResidentActorWorkbenchError {
         ResidentActorWorkbenchError::PublicationSettlement {
             failure: Box::new(ActorPublicationSettlementFailure {
-                outcome: Err(primary),
+                outcome: Arc::new(Err(primary)),
                 settlement: PublicationSettlementError::BodyUnobserved,
             }),
         }
@@ -2536,9 +2621,9 @@ impl ActorPublicationGuard {
     fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
         ResidentActorWorkbenchError::PublicationSettlement {
             failure: Box::new(ActorPublicationSettlementFailure {
-                outcome: Ok(ActorGenerationCommit::Refused(
+                outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
                     "generation cutoff was refused".into(),
-                )),
+                ))),
                 settlement: PublicationSettlementError::Retirement {
                     stage: RetirementSettlementStage::Original,
                     source: Box::new(error),
@@ -2895,7 +2980,11 @@ where
         ActorGenerationPublicationOperation {
             reserved,
             publish: Box::new(move |reserved| {
-                Box::pin(async move { compiler.scope(self.publish_reserved(reserved)).await })
+                Box::pin(async move {
+                    compiler
+                        .scope(async { self.run_publication_body(reserved).await.for_retirement() })
+                        .await
+                })
             }),
         }
     }
@@ -2966,15 +3055,22 @@ where
         &self,
         reserved: ReservedActorGeneration,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        self.run_publication_body(reserved).await.complete()
+    }
+
+    async fn run_publication_body(
+        &self,
+        reserved: ReservedActorGeneration,
+    ) -> PublicationBodyCompletion {
         let ReservedActorGeneration {
             prepared,
             guard: owner,
             publication_kind,
         } = reserved;
         if !matches!(&owner.settlement, ActorPublicationState::Armed(_)) {
-            return Ok(ActorGenerationCommit::Refused(
+            return PublicationBodyCompletion::Terminal(Ok(ActorGenerationCommit::Refused(
                 "publication reservation already settled".into(),
-            ));
+            )));
         }
         let machine_owner = {
             let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
@@ -2982,22 +3078,27 @@ where
         };
         if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner)
         {
-            return owner.complete(Ok(ActorGenerationCommit::Refused(
-                "publication reservation belongs to another publisher".into(),
-            )));
+            return PublicationBodyCompletion::Observed {
+                guard: owner,
+                outcome: Ok(ActorGenerationCommit::Refused(
+                    "publication reservation belongs to another publisher".into(),
+                )),
+            };
         }
         let publication = owner.decision.clone();
         let visibility = match owner.visibility() {
             Ok(visibility) => visibility,
             Err(settlement) => {
-                return Err(ResidentActorWorkbenchError::PublicationSettlement {
-                    failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Ok(ActorGenerationCommit::Refused(
-                            "publication has no armed source fence".into(),
-                        )),
-                        settlement,
-                    }),
-                });
+                return PublicationBodyCompletion::Terminal(Err(
+                    ResidentActorWorkbenchError::PublicationSettlement {
+                        failure: Box::new(ActorPublicationSettlementFailure {
+                            outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
+                                "publication has no armed source fence".into(),
+                            ))),
+                            settlement,
+                        }),
+                    },
+                ));
             }
         };
         // The affine phase/fence owner is outside checkout, including cancellation
@@ -3104,13 +3205,21 @@ where
         }).await;
         let outcome = match completed {
             Ok(outcome) => outcome,
-            Err(error) => return Err(owner.unobserved(error)),
+            Err(primary) => {
+                return PublicationBodyCompletion::Unobserved {
+                    guard: owner,
+                    primary,
+                };
+            }
         };
         #[cfg(test)]
         if let Some(probe) = &self.settlement_probe {
             probe.wait();
         }
-        owner.complete(outcome)
+        PublicationBodyCompletion::Observed {
+            guard: owner,
+            outcome,
+        }
     }
 }
 
@@ -3138,7 +3247,7 @@ impl ActorGenerationCommit {
             outcome @ Self::Unconfirmed(_) => {
                 Err(ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Ok(outcome),
+                        outcome: Arc::new(Ok(outcome)),
                         settlement: PublicationSettlementError::PublicationUnconfirmed,
                     }),
                 })
@@ -3150,7 +3259,7 @@ impl ActorGenerationCommit {
 /// A primary publication outcome and its independent failed source settlement.
 /// The outcome stays typed until the actor's final diagnostic boundary.
 pub struct ActorPublicationSettlementFailure {
-    outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
     settlement: PublicationSettlementError,
 }
 
@@ -3166,7 +3275,7 @@ impl std::fmt::Debug for ActorPublicationSettlementFailure {
 
 impl std::fmt::Display for ActorPublicationSettlementFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.outcome {
+        match self.outcome.as_ref() {
             Ok(ActorGenerationCommit::Published { generation, .. }) => {
                 write!(formatter, "generation {:?} became visible", generation.id())?;
             }
@@ -7429,6 +7538,7 @@ impl ResidentActorWorkbenchError {
             }
             Self::PublicationSettlement { failure } => failure
                 .outcome
+                .as_ref()
                 .as_ref()
                 .err()
                 .and_then(|primary| primary.execution_failure_kind()),
@@ -21708,7 +21818,7 @@ pub(crate) mod request_tests {
             panic!("startup must retain its typed publication obligation");
         };
         assert!(matches!(
-            failure.outcome,
+            failure.outcome.as_ref(),
             Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed == detail
         ));
         assert!(matches!(
@@ -21925,7 +22035,7 @@ pub(crate) mod request_tests {
         assert!(error.requires_recovery());
         assert!(
             matches!(&error, ResidentActorWorkbenchError::PublicationSettlement { failure }
-            if matches!(failure.outcome, Err(ResidentActorWorkbenchError::Checkout(_)))
+            if matches!(failure.outcome.as_ref(), Err(ResidentActorWorkbenchError::Checkout(_)))
                 && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
         );
         let diagnostic = error.to_string();
@@ -22155,7 +22265,7 @@ pub(crate) mod request_tests {
             unreachable!()
         };
         assert!(matches!(
-            failure.outcome,
+            failure.outcome.as_ref(),
             Ok(ActorGenerationCommit::Published { .. })
         ));
         assert!(matches!(
