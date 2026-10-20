@@ -9737,6 +9737,25 @@ where
                 })
                 .collect(),
         });
+        let (cell_operand, leased_input) = if let Some(input) = leased_input {
+            let execution = purpose.execution().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "a cell input requires its private execution owner".into(),
+                )
+            })?.admission.clone();
+            self.access.with_compiler_machine(context.clone(), move |session, _, _, _| {
+                let write = input.write.as_ref().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "the mounted cell input lost its pending write".into(),
+                    )
+                })?;
+                let operand = session.world_cell_operand_for_input(execution, write)
+                    .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+                Ok((Some(operand), Some(input)))
+            }).await?
+        } else {
+            (None, None)
+        };
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
         let parser_recipe = specification.clone();
         let parser_source = context.source_dependency().clone();
@@ -9757,6 +9776,7 @@ where
                             owner,
                             &world,
                             parser_recipe,
+                            cell_operand,
                         )
                     },
                 )
