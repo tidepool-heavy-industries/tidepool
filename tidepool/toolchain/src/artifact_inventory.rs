@@ -3075,7 +3075,7 @@ impl SelectedOwners {
     fn planned_edges(
         &self,
         state: &InventoryState,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
         groups: &BTreeSet<NativeGroupKey>,
         stage: NativeClosureStage,
     ) -> Result<
@@ -3086,7 +3086,7 @@ impl SelectedOwners {
         CompileError,
     > {
         let mut planned = BTreeMap::new();
-        for (id, entry) in entries {
+        for (id, entry) in entries.iter() {
             planned.insert(
                 LogicalNodeKey::Artifact(*id),
                 self.dependencies(state, entry, entries)?
@@ -3180,7 +3180,7 @@ impl SelectedOwners {
         &self,
         state: &InventoryState,
         entry: &ArtifactEntry,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
     ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
         let canonical = match &entry.payload {
             ArtifactPayload::Canonical(interface) => Some(interface),
@@ -3238,7 +3238,7 @@ impl SelectedOwners {
         };
         for owner in entry.interface_seals.keys() {
             let id = resolve(owner, &ArtifactDependency::Interface)?;
-            entry.validate_interface_seal(owner, &entries[&id])?;
+            entry.validate_interface_seal(owner, entries.get(&id).expect("selected owner has its admitted row"))?;
         }
         let mut edges = BTreeSet::new();
         for owner in &entry.requirements {
@@ -3263,7 +3263,7 @@ impl SelectedOwners {
                     diagnostic_artifacts: None,
                     native_refusal: None,
                     owner_conflict: Some(ArtifactOwnerConflictEvidence::NativeCanonicalCarrier {
-                        selected: Arc::clone(&entries[&id]),
+                        selected: Arc::clone(entries.get(&id).expect("selected owner has its admitted row")),
                         incoming: Arc::new(carrier),
                     }),
                 }
@@ -3319,12 +3319,16 @@ fn validate_existing_rows(
 
 /// Private physical-segment custody. It never becomes an item view wholesale.
 /// Namespace and native owner choice are fixed by the compiler's certified roles.
+#[derive(Clone)]
 pub(crate) struct BoundArtifactSelection {
     view: ArtifactView,
-    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    owners: SelectedOwners,
-    captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
-    materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    compiler_prefix: CompilerSourceSupport,
+    produced_prefix: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    entries: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owners: Arc<SelectedOwners>,
+    captured_facts: Arc<BTreeMap<ArtifactId, ArtifactFactsHandle>>,
+    materializations: Arc<[Arc<crate::declaration_context::RetainedArtifactMaterialization>]>,
     groups: BTreeMap<NativeGroupKey, NativeGroupBinding>,
     native_source: crate::certified_products::CertifiedSourceSelection,
     source_receipts: NativeSourceReceipts,
@@ -3378,6 +3382,60 @@ impl From<native_availability::NativeGroupTarget> for PlannedTarget {
 }
 
 impl BoundArtifactSelection {
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        &self.physical_inputs
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        &self.native_source
+    }
+
+    pub(crate) fn advance_compiler_prefix(
+        &mut self,
+        physical: &Arc<crate::declaration_context::OriginalCompilerInputs>,
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+        if !Arc::ptr_eq(physical, &self.physical_inputs) {
+            return Err(failure(
+                "item compiler cursor belongs to another physical segment",
+            ));
+        }
+        match (&self.produced_prefix, produced) {
+            (None, None) => {}
+            (Some(previous), Some(item)) if item.follows(previous) => {}
+            _ => {
+                return Err(failure(
+                    "item compiler prefix is not the next checked output",
+                ))
+            }
+        }
+        let next = match produced {
+            Some(item) => {
+                operation
+                    .reserve::<Arc<crate::recovery_artifacts::CertifiedValueInterface>>(
+                        item.required().count(),
+                    )
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                let mut values = Vec::new();
+                for value in item.required() {
+                    crate::host_work::checkpoint()?;
+                    values.push(Arc::clone(value));
+                }
+                self.compiler_prefix.admit_value_interfaces(&values)?
+            }
+            None => self.compiler_prefix.clone(),
+        };
+        let inputs = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::from_issued_support(&next),
+        );
+        self.compiler_prefix = next;
+        self.produced_prefix = produced.cloned();
+        Ok(inputs)
+    }
+
     #[cfg(test)]
     pub(crate) fn observed_binding_state(
         &self,
@@ -3605,21 +3663,37 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<BoundArtifactSelection, CompileError> {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("physical segment belongs to another inventory"));
+        }
         let captured_facts = entries
             .iter()
             .map(|entry| (entry.descriptor.id, entry.facts.clone()))
             .collect();
-        let view = self.admit_certified_with_demand(
-            parent,
-            entries,
-            NativeArtifactDemand::ScopeInterfaces,
-            selection,
-        )?;
+        let mut selection = selection.clone();
+        let physical = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                parent,
+                entries,
+            )?,
+        );
+        self.index_admitted_segment(parent, physical, captured_facts, &selection)
+    }
+
+    fn index_admitted_segment(
+        &self,
+        parent: &ArtifactView,
+        physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<BoundArtifactSelection, CompileError> {
+        let view = physical_inputs.issued_artifacts().clone();
         let entries = view
             .entries()
             .into_iter()
             .map(|entry| (entry.descriptor.id, entry))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<imbl::OrdMap<_, _>>();
         let state = self.0.lock().expect("inventory lock");
         let namespace_entries = view
             .namespace()
@@ -3639,12 +3713,26 @@ impl ArtifactInventory {
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        let produced_prefix = selection
+            .produced_types()
+            .map(|outputs| outputs.before_segment());
+        let excluded = selection
+            .produced_types()
+            .into_iter()
+            .flat_map(|outputs| outputs.required())
+            .map(|output| output.artifact_id())
+            .collect();
+        let compiler_prefix = CompilerSourceSupport::close_complete_output(&physical_inputs)?
+            .segment_value_prefix(&excluded)?;
         Ok(BoundArtifactSelection {
             view,
+            physical_inputs,
+            compiler_prefix,
+            produced_prefix,
             entries,
-            owners,
-            captured_facts,
-            materializations,
+            owners: Arc::new(owners),
+            captured_facts: Arc::new(captured_facts),
+            materializations: materializations.into(),
             groups: BTreeMap::new(),
             native_source: selection.clone(),
             source_receipts: NativeSourceReceipts::default(),
@@ -3731,7 +3819,7 @@ impl ArtifactInventory {
                 &allowed_values,
             )
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let mut materialization_parents = fixed.materializations.clone();
+        let mut materialization_parents = fixed.materializations.to_vec();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
         let mut state = self.0.lock().expect("inventory lock");
         let unbound = demanded
@@ -11120,7 +11208,9 @@ mod tests {
                 &physical,
                 entries,
             )
-            .unwrap();
+            .unwrap()
+            .issued_artifacts()
+            .clone();
             let closure = current.selected_original_closure(&issued).unwrap();
             let expected = closure
                 .native_closure()

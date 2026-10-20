@@ -27,7 +27,7 @@ import qualified Data.Text.Encoding as TE
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, makeRelative, takeExtension)
 import System.IO (hClose, hFlush, hGetLine, hPutStrLn, openTempFile, Handle, stderr, stdout, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Foreign.C.String (CString, withCString)
@@ -1658,6 +1658,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
     worldDirectory <- canonicalizePath work
+    ifaceTrace <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
     withRootedCompilerEnvironment worldDirectory $ do
       (outcome,diagnostics) <- withQuietStdout $ captureDiagnostics $
         withResidentCompilerScopes [] $ \runScope -> do
@@ -1671,6 +1672,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             -- lexical base under the shipped NoImplicitPrelude dialect.
             let template = unlines
                   ["{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
+                  ,if ifaceTrace == Just "1" then "{-# OPTIONS_GHC -ddump-if-trace #-}" else ""
                   ,"{{CELL_PRAGMAS}}","module CellCheck where"
                   ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
                   ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
@@ -1835,9 +1837,9 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readMixedStage :: MixedStage -> Int"
                           ,"readMixedStage (MixedStage value) = value + baseStage"
                           ,"let answerStage = MixedStage baseStage"
-                          ,"readMixedStage answerStage"]
+                          ,"let resultStage = readMixedStage answerStage"]
                         ,[(0,PlannedBind 31),(1,PlannedDeclaration 32),(2,PlannedBind 33)
-                          ,(3,PlannedExpression 34 "ownedStageObservation")]
+                          ,(3,PlannedBind 34)]
                         ,["exec","declaration","exec"])
                       ,("publication",unlines ["let publishedBaseStage = (7 :: Int)"
                           ,"readPublishedStage :: Int -> Int"
@@ -1858,7 +1860,14 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readLaterStage value = readFirstStage value"]
                         ,[(0,PlannedBind 61),(1,PlannedDeclaration 62)
                           ,(2,PlannedBind 63),(3,PlannedDeclaration 64)]
-                        ,["exec","declaration","exec","declaration"])] $ \(label,source,caseSlots,kinds) -> do
+                        ,["exec","declaration","exec","declaration"])
+                      ,("source-family",unlines ["import qualified CacheEntry"
+                          ,"import qualified CacheEven"
+                          ,"readBootStage :: CacheEven.Payload Bool -> Bool"
+                          ,"readBootStage value = value && CacheEntry.result"
+                          ,"let bootAnswerStage = readBootStage True"]
+                        ,[(0,PlannedPrologue 71),(1,PlannedDeclaration 72),(2,PlannedBind 73)]
+                        ,["prologue","declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
                       let ownRecipe = recipe {worldCellSource=source}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
@@ -1944,7 +1953,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 7 1)
+      unless (admissionParses == replicate 8 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
@@ -1967,7 +1976,17 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
       _ -> fail "empty Materializer context omitted its empty map"
     _ -> fail "empty Materializer Context descriptor changed"
   pairs <- reachable [primary,association,emptyBinding,lexical] (contextBlocks ++ emptyBlocks)
-  let sources = "TPCSRC01" <> BS.replicate 8 0
+  captured <- forM ["CacheEven.hs","CacheEven.hs-boot","CacheOdd.hs","CacheEntry.hs"] $ \name -> do
+    body <- BS.readFile ("test-source-boot/fixtures" </> name)
+    pure (BS8.pack name,body)
+  libraryRoot <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe
+    (fail "missing declared renderer source resource") pure
+  library <- captureSourceFiles libraryRoot libraryRoot
+  let capturedFiles = sortOn fst (captured ++ library)
+      word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
+      frame bytes = word32 (BS.length bytes) <> bytes
+      sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length capturedFiles)
+        <> foldMap (\(name,body) -> frame name <> frame body) capturedFiles
       sourcePath = work </> "world-admission-sources.bin"
       text = TString . T.pack
       blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]
@@ -1982,6 +2001,16 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
   BS.writeFile path (encode packet)
   pure (path,primary)
   where
+    captureSourceFiles root directory = do
+      children <- listDirectory directory
+      fmap concat $ forM children $ \name -> do
+        let path = directory </> name
+        nested <- doesDirectoryExist path
+        if nested then captureSourceFiles root path
+        else if takeExtension path == ".hs" then do
+          bytes <- BS.readFile path
+          pure [(BS8.pack (makeRelative root path),bytes)]
+        else pure []
     fixture operation arguments = do
       path <- issueCodecFixturePacket work (operation ++ ".cbor") (encode
         (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments]))

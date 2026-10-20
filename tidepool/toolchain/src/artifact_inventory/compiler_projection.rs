@@ -2694,8 +2694,7 @@ impl CompilerSourceSupport {
         stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
         source: &crate::declaration_context::ExactSourceAdmission,
         source_text: &str,
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        artifacts: &ArtifactView,
+        output: &crate::declaration_context::IssuedOriginalOutput,
     ) -> Result<Self, CompileError> {
         if !source.matches_world_stage(program, stage.index(), source_text)? {
             return Err(failure("program source fragment belongs to another World stage"));
@@ -2703,8 +2702,9 @@ impl CompilerSourceSupport {
         let generated = source.generated_source_owner()?;
         let mut owners = source.home_imports()?.into_keys().collect::<BTreeSet<_>>();
         let executable = matches!(stage.identity(), crate::compiler_world::WorldCellStageIdentity::Executable { .. });
-        let mut projection = selection.compiler_support_projection(artifacts, std::slice::from_ref(source))
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let inputs = output.compiler_inputs();
+        let artifacts = inputs.issued_artifacts();
+        let mut projection = inputs.role_projection().clone();
         if executable {
             owners.remove(&generated);
             projection = projection.project_roles(|owner, role| {
@@ -2718,10 +2718,10 @@ impl CompilerSourceSupport {
                 .chain(row.original.iter()).map(|(_, entry)| entry.as_ref())),
             |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
         )?;
-        let input_decisions = IssuedInputNativeDecisions::from_certified_continuation(selection, &projection)?;
-        let native_availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
-            selection.issued_native_availability().cloned(),
-        )?.for_compiler_roles(&projection, artifacts)?;
+        let input_decisions = inputs.issued_input_decisions().cloned().unwrap_or_default()
+            .for_exact_roles(&projection);
+        let native_availability = inputs.native_availability()
+            .for_compiler_roles(&projection, artifacts)?;
         if executable && native_availability.rows().any(|row| {
             row.original_owner().unit == generated.unit && row.original_owner().module == generated.module
         }) {
@@ -2737,7 +2737,7 @@ impl CompilerSourceSupport {
             }
         }
         Self {
-            projection, artifacts: artifacts.clone(), native_fact_owner: None,
+            projection, artifacts: artifacts.clone(), native_fact_owner: inputs.native_fact_base().cloned(),
             native_offers: offers.into(), native_offer_facts, native_availability,
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)), input_decisions,
         }.refreshed_native_facts()
@@ -3079,6 +3079,22 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let artifacts = self.artifacts.without_value_interface_roots(excluded)?;
         let projection = self.projection.within_view(&artifacts);
+        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
+    /// Initialize one stage's compiler prefix. Future value rows can remain
+    /// private exact dependencies, but cannot remain public compiler roles.
+    pub(super) fn segment_value_prefix(
+        &self,
+        excluded: &BTreeSet<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let artifacts = self.artifacts.without_value_interface_roots(excluded)?;
+        let projection = self
+            .projection
+            .project_roles(|_, role| (!excluded.contains(&role.interface())).then(|| role.clone()));
+        let artifacts = artifacts
+            .with_compiler_projection(&projection)?
+            .into_owned();
         self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
     }
 

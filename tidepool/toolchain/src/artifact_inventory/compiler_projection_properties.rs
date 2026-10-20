@@ -1434,7 +1434,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         let private =
                             crate::declaration_context::OriginalCompilerInputs::from_selection(
                                 &physical_selection,
-                                &issued,
+                                issued.issued_artifacts(),
                             )
                             .unwrap();
                         let root_id = catalog.original(module, version).descriptor.id;
@@ -1452,6 +1452,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             .clone();
                         let expected_carriers = offer.issued_group_carriers().unwrap();
                         let expected_canonical = issued
+                            .issued_artifacts()
                             .binding_dependencies()
                             .into_iter()
                             .filter(|(source, _, edge)| {
@@ -1467,7 +1468,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         );
                         let selected = physical_selection
                             .selected_authored_original_closure(
-                                &issued,
+                                issued.issued_artifacts(),
                                 &owner(module).unit,
                                 &owner(module).module,
                             )

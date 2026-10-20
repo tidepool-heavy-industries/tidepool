@@ -801,6 +801,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         SEGMENT_ORIGINAL_RECEIPT_DECODES.with(std::cell::Cell::get) - receipt_decodes_before,
         1
     );
+    let mut cursor = shared.bound_artifacts().unwrap();
     let immutable_counts = (
         MODULE_PRODUCT_INVENTORY_DECODES.with(std::cell::Cell::get),
         ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
@@ -816,6 +817,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     for item in 0..item_count {
         let (selected, globals, additions) = shared
             .select_item(
+                &mut cursor,
                 decode_segment_item_with_operation(&empty_delta, &validation.inventory).unwrap(),
                 &prepared,
                 None,
@@ -907,7 +909,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
         };
         let (selected, globals, packages) = shared
-            .select_item(addition(), &target, None, &mut validation)
+            .select_item(&mut cursor, addition(), &target, None, &mut validation)
             .unwrap();
         assert_eq!(packages.len(), 1);
         assert!(packages.contains_key(&owner));
@@ -923,6 +925,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .unwrap();
         let (_, _, next_packages) = shared
             .select_item(
+                &mut cursor,
                 SegmentItemReceipt {
                     globals: vec![],
                     packages: BTreeMap::new(),
@@ -936,7 +939,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let mut unused = addition();
         unused.globals.clear();
         assert!(matches!(
-            shared.select_item(unused, &prepared, None, &mut validation),
+            shared.select_item(&mut cursor, unused, &prepared, None, &mut validation),
             Err(CertificationError::Mismatch(
                 "item package has no target demand"
             ))
@@ -944,13 +947,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
         std::fs::write(&path, [0xFF]).unwrap();
         let mut recapture = PackageInterfaceValidation::with_inventory(shared.operation().clone());
         assert!(matches!(
-            shared.select_item(addition(), &target, None, &mut recapture),
+            shared.select_item(&mut cursor, addition(), &target, None, &mut recapture),
             Err(CertificationError::StaleEvidence)
         ));
     }
     let mut other_validation = PackageInterfaceValidation::default();
     assert!(matches!(
         shared.select_item(
+            &mut cursor,
             SegmentItemReceipt {
                 globals: vec![],
                 packages: BTreeMap::new()

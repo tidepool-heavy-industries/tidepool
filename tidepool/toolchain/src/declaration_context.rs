@@ -526,6 +526,35 @@ impl IssuedOriginalOutput {
         })
     }
 
+    pub(crate) fn from_segment_item(
+        products: &crate::certified_products::CertifiedProducts,
+    ) -> Result<Self, CompileError> {
+        let inputs = products
+            .original_inputs
+            .as_ref()
+            .ok_or_else(|| failure("item lacks its physical compiler prefix owner"))?;
+        Ok(Self {
+            selection: products.source_selection.clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs: Arc::clone(inputs),
+        })
+    }
+
+    pub(crate) fn from_segment_originals(
+        originals: &crate::certified_products::CertifiedSegmentOriginals,
+    ) -> Result<Self, CompileError> {
+        // The closed authored-stage accessor rejects executable stages.
+        originals
+            .authored_artifacts()
+            .map_err(compiler_evidence_failure)?;
+        let inputs = Arc::clone(originals.physical_inputs());
+        Ok(Self {
+            selection: originals.source_selection().clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs,
+        })
+    }
+
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
         &self.selection
     }
@@ -577,7 +606,7 @@ impl OriginalCompilerInputs {
         selection: &mut crate::certified_products::CertifiedSourceSelection,
         baseline: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-    ) -> Result<ArtifactView, CompileError> {
+    ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "products.segment_native_availability",
             "initial_admission",
@@ -589,7 +618,7 @@ impl OriginalCompilerInputs {
             selection,
         )?;
         timing.advance("resolve_continuation");
-        let issued = Self::from_selection(selection, &physical)?;
+        let mut issued = Self::from_selection(selection, &physical)?;
         timing.advance("receive_and_project_completed_availability");
         let metadata = issued
             .projection
@@ -606,9 +635,11 @@ impl OriginalCompilerInputs {
             .finish_new_product_availability(&metadata.retained, &native.availability)
             .map_err(compiler_evidence_failure)?;
         timing.finish(true);
-        // Return only physical custody. Continuation decisions belong to a
-        // later input admission against the completed selection.
-        Ok(issued.artifacts)
+        // Keep the exact normalization used to complete this selection. The
+        // physical owner, its input choices and contribution scopes travel
+        // together; item admission must not recreate them from a target view.
+        issued.native_availability = native.availability;
+        Ok(issued)
     }
 
     /// Reuse exact authored availability already carried by the context.
@@ -786,7 +817,7 @@ impl OriginalCompilerInputs {
             "products.native_selection",
             "projection",
         );
-        let projection = selection
+        let mut projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
         timing.advance("continuation_rows");
@@ -825,6 +856,7 @@ impl OriginalCompilerInputs {
                 .merge(&issued.native_availability)?
                 .into_rows();
             native_offers.extend(issued.native_offers);
+            projection = issued.projection;
             issued.artifacts
         } else {
             artifacts.clone()
@@ -850,7 +882,11 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_fact_base: selection.native_fact_base().cloned(),
             native_availability,
-            demand: OriginalInputDemand::Issued(continuation.decisions),
+            demand: OriginalInputDemand::Issued(
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    selection, &projection,
+                )?,
+            ),
             projection,
             artifacts,
             native_offers,
@@ -946,8 +982,12 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_fact_base: completed.continuation.selection.native_fact_base().cloned(),
             native_availability,
-            demand: OriginalInputDemand::RolePolicy,
-            projection,
+            demand: OriginalInputDemand::Issued(
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    completed.continuation.selection, &effective,
+                )?,
+            ),
+            projection: effective,
             artifacts,
             native_offers,
         })
@@ -9295,7 +9335,7 @@ impl WorldProgramSegment {
         let originals = selection
             .selected_authored_original_closure(view, &owner.unit, &owner.module)
             .map_err(compiler_evidence_failure)?;
-        let output = IssuedOriginalOutput::issue(selection.clone(), view.clone())?;
+        let output = IssuedOriginalOutput::from_segment_originals(&self.originals)?;
         let certificate = crate::declaration_join::certify_world_stage_planned_declaration(
             program,
             stage,
@@ -9348,17 +9388,15 @@ impl WorldProgramSegment {
     pub(crate) fn admit_program_support(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
-        support: &ArtifactView,
+        output: &IssuedOriginalOutput,
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
-        selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
             program,
             &self.stage,
             &self.source,
             &self.source_text,
-            selection,
-            support,
+            output,
         )?;
         let context = &self.continuation.context;
         let imports = self.source.home_imports()?;
@@ -13339,34 +13377,12 @@ pub(crate) fn certified_product_artifact_view_inner(
 /// compiler-selected native resolver once. No executable group is demanded.
 pub(crate) fn bind_certified_segment_artifacts_with_validation(
     originals: &crate::certified_products::CertifiedSegmentOriginals,
-    baseline: &ArtifactView,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<crate::artifact_inventory::BoundArtifactSelection, CompileError> {
     if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
         return Err(failure("segment artifacts have another accounting owner"));
     }
-    validation
-        .inventory
-        .reserve::<Arc<ArtifactEntry>>(
-            originals.artifact_entries().len() + originals.value_entries().len(),
-        )
-        .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let entries = originals
-        .artifact_entries()
-        .iter()
-        .chain(originals.value_entries())
-        .cloned()
-        .collect();
-    let offers = originals
-        .source_selection()
-        .issued_native_availability()
-        .flat_map(|availability| availability.offers())
-        .cloned()
-        .collect::<Vec<_>>();
-    let baseline = retain_native_offers(baseline, &offers)?;
-    baseline
-        .inventory()
-        .bind_segment(&baseline, entries, originals.source_selection())
+    originals.bound_artifacts().map_err(compiler_evidence_failure)
 }
 
 /// Each item adds only ordinal-visible values to its admitted prefix, then

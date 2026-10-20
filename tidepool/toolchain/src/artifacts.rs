@@ -40,6 +40,8 @@ mod failure_sources;
 pub(crate) mod invocation_output;
 mod production_entry;
 mod selected_session_values;
+#[cfg(test)]
+mod world_value_selection_tests;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 pub use production_entry::{
@@ -901,14 +903,10 @@ pub fn prepare_world_cell_program(
         )?;
         if original {
             let planned = segment.planned_declaration(&program, stage)?;
-            let view = segment
-                .originals
-                .authored_artifacts()
-                .map_err(compiler_evidence_failure)?
-                .clone();
-            let selection = segment.originals.source_selection().clone();
-            let context =
-                segment.admit_program_support(&program, &view, &stage_produced, &selection)?;
+            let output = crate::declaration_context::IssuedOriginalOutput::from_segment_originals(
+                &segment.originals,
+            )?;
+            let context = segment.admit_program_support(&program, &output, &stage_produced)?;
             item_contexts.insert(
                 first,
                 crate::checked_cell::CellProgramItemContext {
@@ -921,7 +919,6 @@ pub fn prepare_world_cell_program(
             let mut artifacts =
                 crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                     &segment.originals,
-                    segment.artifacts(),
                     &mut validation,
                 )?;
             let mut native_prefix: Option<Arc<SealedTurnProducts>> = None;
@@ -989,7 +986,13 @@ pub fn prepare_world_cell_program(
                 .map_err(compiler_evidence_failure)?;
                 let (certified, globals, packages) = segment
                     .originals
-                    .select_item(item_receipt, &target, Some(&produced), &mut validation)
+                    .select_item(
+                        &mut artifacts,
+                        item_receipt,
+                        &target,
+                        Some(&produced),
+                        &mut validation,
+                    )
                     .map_err(compiler_evidence_failure)?;
                 let generated = segment.source().generated_source_owner()?;
                 let entry = checked_cell::CheckedTypedEntry::issue_world_item(
@@ -1023,9 +1026,8 @@ pub fn prepare_world_cell_program(
                     }),
                     &mut validation,
                 )?;
-                let output = crate::declaration_context::IssuedOriginalOutput::issue(
-                    certified.source_selection.clone(),
-                    admitted.target.artifacts().clone(),
+                let output = crate::declaration_context::IssuedOriginalOutput::from_segment_item(
+                    &certified,
                 )?;
                 let execution = segment.original_execution_context(output.compiler_inputs())?;
                 segment.retain_private_output(&output);
@@ -1055,9 +1057,8 @@ pub fn prepare_world_cell_program(
                 };
                 let mut context = segment.admit_program_support(
                     &program,
-                    products.artifact_view(),
+                    products.planned_original_output()?,
                     &produced,
-                    products.source_selection(),
                 )?;
                 if !item.binders().is_empty() {
                     context = segment
@@ -2743,7 +2744,6 @@ impl SelectedModuleCandidateOffer {
                 let artifacts =
                     crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                         source_segment.original_products(physical, &validation.inventory)?,
-                        segment_input.compiler_inputs().artifacts(),
                         &mut validation,
                     )?;
                 segment_timing.advance("initialize_segment_cursor");
@@ -4007,6 +4007,14 @@ fn seal_turn_outputs_with_validation(
             .map_err(compiler_evidence_failure)?;
             let (products, globals, packages) = originals
                 .select_item(
+                    segment_cursor
+                        .as_mut()
+                        .ok_or_else(|| {
+                            CompileError::ExtractFailed(
+                                "segment item lacks its compiler prefix cursor".into(),
+                            )
+                        })?
+                        .selection,
                     item,
                     prepared,
                     Some(produced_types.ok_or_else(|| {
@@ -4169,10 +4177,14 @@ fn seal_turn_outputs_with_validation(
                 inclusive = true,
             )
             .in_scope(|| {
-                crate::declaration_context::IssuedOriginalOutput::issue(
-                    certified.source_selection.clone(),
-                    artifact_view.clone(),
-                )
+                if segment_originals.is_some() {
+                    crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)
+                } else {
+                    crate::declaration_context::IssuedOriginalOutput::issue(
+                        certified.source_selection.clone(),
+                        artifact_view.clone(),
+                    )
+                }
             })?;
             let execution = admission.original_execution_context(output.compiler_inputs())?;
             SealedOriginalEvidence::Exact { output, execution }
@@ -6028,6 +6040,7 @@ fn compile_invocation_inner(
                 ));
             }
             certified_products::CertifiedProducts {
+                original_inputs: None,
                 groups: certified_products::IssuedGroupCandidates::empty(),
                 recovery_products: Arc::from([]),
                 module_interfaces: Arc::from([]),
