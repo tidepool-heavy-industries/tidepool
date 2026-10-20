@@ -543,13 +543,80 @@ impl From<CompileError> for WorldInspectionError {
     }
 }
 
+/// The one typed admission of a public-module world answer.
+///
+/// The envelope decoder in `tidepool-toolchain` authenticates the world,
+/// question echo, resolution and payload shape. This sum is the runtime's
+/// single control-flow representation of the admitted answer: a resolved
+/// structured value, a resolved structured refusal, a proved module absence or
+/// a service rejection. The raw payload is retained beside it only as
+/// evidence.
+pub(super) enum InspectionWorldAnswer {
+    /// The service resolved the module and produced a structured value.
+    Resolved {
+        result: InspectionResult,
+        receipt: tidepool_toolchain::compiler_world::WorldModuleReceipt,
+        defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
+    },
+    /// The service resolved the module and refused the question with a typed
+    /// structured error (`Unknown`, `Ambiguous` or `Unsupported`).
+    StructuredError {
+        result: InspectionResult,
+        receipt: tidepool_toolchain::compiler_world::WorldModuleReceipt,
+    },
+    /// The service proved the module is absent from the admitted source
+    /// domain. The paired structured payload is the proved `UnknownModule`
+    /// answer; an `Unsupported` payload must not reach this variant.
+    Absent {
+        result: InspectionResult,
+        absence: tidepool_toolchain::compiler_world::ClosedModuleAbsence,
+    },
+    /// The service refused the question without a module answer.
+    Rejected(tidepool_toolchain::compiler_world::WorldQueryRejection),
+}
+
+impl InspectionWorldAnswer {
+    fn result(
+        &self,
+    ) -> Result<&InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection> {
+        match self {
+            Self::Resolved { result, .. }
+            | Self::StructuredError { result, .. }
+            | Self::Absent { result, .. } => Ok(result),
+            Self::Rejected(reason) => Err(*reason),
+        }
+    }
+
+    fn resolution(&self) -> tidepool_toolchain::compiler_world::WorldModuleResolution {
+        use tidepool_toolchain::compiler_world::WorldModuleResolution;
+        match self {
+            Self::Resolved { receipt, .. } | Self::StructuredError { receipt, .. } => {
+                WorldModuleResolution::Resolved(receipt.clone())
+            }
+            Self::Absent { absence, .. } => WorldModuleResolution::Absent(absence.clone()),
+            Self::Rejected(reason) => WorldModuleResolution::Rejected(*reason),
+        }
+    }
+
+    fn defining_module(
+        &self,
+    ) -> Option<&tidepool_toolchain::compiler_world::WorldModuleReceipt> {
+        match self {
+            Self::Resolved { defining, .. } => defining.as_ref(),
+            Self::StructuredError { .. } | Self::Absent { .. } | Self::Rejected(_) => None,
+        }
+    }
+}
+
 /// Only the admitted runner constructs this pairing of a runtime base and a
 /// compiler-issued world. Callers cannot attach an unrelated service result.
 pub struct PreparedInspectionWorld {
     pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
     origin: crate::CompilerTransactionOrigin,
-    receipt: tidepool_toolchain::compiler_world::WorldQueryResult,
-    result: Result<InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection>,
+    answer: InspectionWorldAnswer,
+    /// The exact admitted payload, retained for diagnosis. It is never read to
+    /// decide control flow after this point.
+    evidence: Vec<u8>,
     provenance: ScopeProvenance,
 }
 
@@ -659,20 +726,26 @@ impl CompletedInspectionWorld {
     pub fn result(
         &self,
     ) -> Result<&InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection> {
-        self.prepared.result.as_ref().map_err(|reason| *reason)
+        self.prepared.answer.result()
     }
-    pub fn resolution(&self) -> &tidepool_toolchain::compiler_world::WorldModuleResolution {
-        self.prepared.receipt.resolution()
+
+    pub fn resolution(&self) -> tidepool_toolchain::compiler_world::WorldModuleResolution {
+        self.prepared.answer.resolution()
     }
 
     pub fn defining_module(
         &self,
     ) -> Option<&tidepool_toolchain::compiler_world::WorldModuleReceipt> {
-        self.prepared.receipt.defining_module()
+        self.prepared.answer.defining_module()
     }
 
     pub fn provenance(&self) -> &ScopeProvenance {
         &self.prepared.provenance
+    }
+
+    /// The admitted payload bytes, kept as evidence for diagnostics.
+    pub fn evidence(&self) -> &[u8] {
+        &self.prepared.evidence
     }
 }
 
@@ -816,69 +889,145 @@ fn run_admitted_world_inspection_inner(
             observation
         },
     };
-    if let compiler_world::WorldModuleResolution::Rejected(reason) = result.resolution() {
-        let reason = *reason;
-        return Ok(PreparedInspectionWorld {
-            association: Arc::new(InspectionWorldAssociation {
-                base: admitted.base,
-                world: Arc::clone(result.world()),
-            }),
-            origin,
-            result: Err(reason),
-            receipt: result,
-            provenance,
-        });
-    }
-    let mut decoded = decode_inspections(result.inspection_payload())?;
-    if decoded.len() != 1 {
-        return Err(invalid("world inspection must return exactly one result").into());
-    }
-    let mut decoded = decoded.remove(0);
-    let error = match (&mut decoded, kind) {
-        (InspectionResult::StructuredInfo(Ok(info)), PublicModuleQuestionKind::StructuredInfo) => {
-            verify_world_provenance(&info.provenance, &query)?;
-            info.provenance = provenance.clone();
-            None
+    let evidence = result.inspection_payload().to_vec();
+    let answer = match result.resolution() {
+        compiler_world::WorldModuleResolution::Rejected(reason) => {
+            if !evidence.is_empty() {
+                return Err(invalid("rejected world question retained a payload").into());
+            }
+            InspectionWorldAnswer::Rejected(*reason)
         }
-        (InspectionResult::StructuredType(Ok(info)), PublicModuleQuestionKind::StructuredType) => {
-            verify_world_provenance(&info.provenance, &query)?;
-            info.provenance = provenance.clone();
-            None
+        resolution => {
+            let mut decoded = decode_inspections(&evidence)?;
+            if decoded.len() != 1 {
+                return Err(invalid("world inspection must return exactly one result").into());
+            }
+            admit_world_answer(
+                decoded.remove(0),
+                resolution.clone(),
+                result.defining_module().cloned(),
+                &query,
+                question.module(),
+                kind,
+                &provenance,
+            )?
         }
-        (
-            InspectionResult::StructuredInfo(Err(error)),
-            PublicModuleQuestionKind::StructuredInfo,
-        )
-        | (
-            InspectionResult::StructuredType(Err(error)),
-            PublicModuleQuestionKind::StructuredType,
-        ) => Some(error),
-        _ => return Err(invalid("world payload has the wrong inspection kind").into()),
     };
-    match (result.resolution(), error) {
-        (
-            compiler_world::WorldModuleResolution::Absent(absence),
-            Some(QueryError::UnknownModule(module)),
-        ) if module == &absence.module && module == question.module() => {}
-        (compiler_world::WorldModuleResolution::Resolved(receipt), error)
-            if receipt.module == question.module()
-                && !matches!(error, Some(QueryError::UnknownModule(_))) => {}
-        _ => {
-            return Err(
-                invalid("world module resolution differs from its structured payload").into(),
-            )
-        }
-    }
     Ok(PreparedInspectionWorld {
         association: Arc::new(InspectionWorldAssociation {
             base: admitted.base,
             world: Arc::clone(result.world()),
         }),
         origin,
-        result: Ok(decoded),
-        receipt: result,
+        answer,
+        evidence,
         provenance,
     })
+}
+
+/// The runtime's one typed admission of an already envelope-authenticated
+/// world payload, and the single place the resolution/payload agreement is
+/// decided.
+///
+/// `Absent + Unsupported` is refused. The producing service proves absence
+/// only together with `UnknownModule`; `Unsupported` says the question itself
+/// was not evaluated, so pairing it with a proof of absence would claim a
+/// fact the service never issued. `Unknown`/`Ambiguous` likewise require a
+/// resolved module.
+fn admit_world_answer(
+    mut decoded: InspectionResult,
+    resolution: tidepool_toolchain::compiler_world::WorldModuleResolution,
+    defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
+    query: &NameQuery,
+    module: &str,
+    kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
+    provenance: &ScopeProvenance,
+) -> Result<InspectionWorldAnswer, CompileError> {
+    use tidepool_toolchain::compiler_world::PublicModuleQuestionKind;
+    match kind {
+        PublicModuleQuestionKind::StructuredInfo => match &mut decoded {
+            InspectionResult::StructuredInfo(Ok(info)) => {
+                verify_world_provenance(&info.provenance, query)?;
+                info.provenance = provenance.clone();
+                admit_resolved(decoded, resolution, defining, module)
+            }
+            InspectionResult::StructuredInfo(Err(error)) => {
+                let error = error.clone();
+                admit_structured_error(decoded, &error, resolution, defining, module)
+            }
+            _ => Err(invalid("world payload has the wrong inspection kind").into()),
+        },
+        PublicModuleQuestionKind::StructuredType => match &mut decoded {
+            InspectionResult::StructuredType(Ok(info)) => {
+                verify_world_provenance(&info.provenance, query)?;
+                info.provenance = provenance.clone();
+                admit_resolved(decoded, resolution, defining, module)
+            }
+            InspectionResult::StructuredType(Err(error)) => {
+                let error = error.clone();
+                admit_structured_error(decoded, &error, resolution, defining, module)
+            }
+            _ => Err(invalid("world payload has the wrong inspection kind").into()),
+        },
+    }
+}
+
+fn admit_resolved(
+    result: InspectionResult,
+    resolution: tidepool_toolchain::compiler_world::WorldModuleResolution,
+    defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
+    module: &str,
+) -> Result<InspectionWorldAnswer, CompileError> {
+    use tidepool_toolchain::compiler_world::WorldModuleResolution;
+    let WorldModuleResolution::Resolved(receipt) = resolution else {
+        return Err(invalid("resolved payload lacks a resolved module").into());
+    };
+    if receipt.module != module {
+        return Err(invalid("resolved payload names a different module").into());
+    }
+    let Some(defining) = defining else {
+        return Err(invalid("resolved payload lacks its defining module").into());
+    };
+    Ok(InspectionWorldAnswer::Resolved {
+        result,
+        receipt,
+        defining: Some(defining),
+    })
+}
+
+fn admit_structured_error(
+    result: InspectionResult,
+    error: &QueryError,
+    resolution: tidepool_toolchain::compiler_world::WorldModuleResolution,
+    defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
+    module: &str,
+) -> Result<InspectionWorldAnswer, CompileError> {
+    use tidepool_toolchain::compiler_world::WorldModuleResolution;
+    if defining.is_some() {
+        return Err(invalid("structured error retained a defining module").into());
+    }
+    match (&resolution, error) {
+        (WorldModuleResolution::Absent(absence), QueryError::UnknownModule(unknown))
+            if unknown == &absence.module && unknown == module =>
+        {
+            Ok(InspectionWorldAnswer::Absent {
+                result,
+                absence: absence.clone(),
+            })
+        }
+        (
+            WorldModuleResolution::Resolved(receipt),
+            QueryError::Unknown(_) | QueryError::Ambiguous(_, _) | QueryError::Unsupported(_),
+        ) if receipt.module == module => Ok(InspectionWorldAnswer::StructuredError {
+            result,
+            receipt: receipt.clone(),
+        }),
+        (WorldModuleResolution::Absent(_), QueryError::Unsupported(_)) => Err(invalid(
+            "module absence cannot be paired with an unsupported question",
+        )
+        .into()),
+        _ => Err(invalid("world module resolution differs from its structured payload").into()),
+    }
 }
 
 fn verify_world_provenance(
@@ -2859,4 +3008,138 @@ mod tests {
             } if expression == "id" && display.contains("->")
         )));
     }
+    fn structured_info(provenance: ScopeProvenance) -> InspectionResult {
+        InspectionResult::StructuredInfo(Ok(Box::new(IdentifierInfo {
+            identifier: IdentifierRef {
+                module: "M".into(),
+                name: "x".into(),
+                namespace: IdentifierNamespace::Value,
+            },
+            declaration: DeclarationInfo::Value(TypeExpression {
+                canonical: "Int".into(),
+                variables: Vec::new(),
+                constraints: Vec::new(),
+            }),
+            parent: None,
+            provenance,
+        })))
+    }
+
+    fn question() -> tidepool_toolchain::compiler_world::PublicModuleQuestion {
+        tidepool_toolchain::compiler_world::PublicModuleQuestion::structured_info(
+            "M".into(),
+            tidepool_extract_cmd::InspectionNamespace::Value,
+            "x".into(),
+        )
+    }
+
+    fn query() -> NameQuery {
+        NameQuery {
+            scope: NameScope::PublicModule("M".into()),
+            namespace: NameNamespace::Value,
+            name: "x".into(),
+        }
+    }
+
+    fn receipt() -> tidepool_toolchain::compiler_world::WorldModuleReceipt {
+        tidepool_toolchain::compiler_world::WorldModuleReceipt {
+            unit: "main".into(),
+            module: "M".into(),
+            origin: tidepool_toolchain::compiler_world::WorldModuleOrigin::Package {
+                profile: [0; 32],
+            },
+        }
+    }
+
+    fn absence() -> tidepool_toolchain::compiler_world::ClosedModuleAbsence {
+        tidepool_toolchain::compiler_world::ClosedModuleAbsence {
+            module: "M".into(),
+            source_domain: [1; 32],
+            package_profile: [2; 32],
+        }
+    }
+
+    #[test]
+    fn world_answer_admission_distinguishes_answer_error_absence_and_rejection() {
+        use tidepool_toolchain::compiler_world::{WorldModuleResolution, WorldQueryRejection};
+        let wire_provenance = ScopeProvenance {
+            scope: NameScope::PublicModule("M".into()),
+            generation: 0,
+            fingerprint: String::new(),
+        };
+        let runtime_provenance = ScopeProvenance {
+            scope: NameScope::PublicModule("M".into()),
+            generation: 7,
+            fingerprint: "compiler-world:aa".into(),
+        };
+        let resolved = admit_world_answer(
+            structured_info(wire_provenance.clone()),
+            WorldModuleResolution::Resolved(receipt()),
+            Some(receipt()),
+            &query(),
+            "M",
+            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
+            &runtime_provenance,
+        )
+        .expect("resolved answer admits");
+        assert!(matches!(
+            resolved,
+            InspectionWorldAnswer::Resolved { .. }
+        ));
+        assert!(matches!(resolved.result(), Ok(InspectionResult::StructuredInfo(Ok(_)))));
+        assert!(matches!(
+            resolved.resolution(),
+            WorldModuleResolution::Resolved(_)
+        ));
+
+        let error = admit_world_answer(
+            InspectionResult::StructuredInfo(Err(QueryError::Unsupported("no".into()))),
+            WorldModuleResolution::Resolved(receipt()),
+            None,
+            &query(),
+            "M",
+            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
+            &runtime_provenance,
+        )
+        .expect("resolved structured error admits");
+        assert!(matches!(
+            error,
+            InspectionWorldAnswer::StructuredError { .. }
+        ));
+
+        let absent = admit_world_answer(
+            InspectionResult::StructuredInfo(Err(QueryError::UnknownModule("M".into()))),
+            WorldModuleResolution::Absent(absence()),
+            None,
+            &query(),
+            "M",
+            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
+            &runtime_provenance,
+        )
+        .expect("proved absence admits with its UnknownModule payload");
+        assert!(matches!(absent, InspectionWorldAnswer::Absent { .. }));
+        assert!(matches!(
+            absent.resolution(),
+            WorldModuleResolution::Absent(_)
+        ));
+
+        // The producing service proves absence only with `UnknownModule`.
+        // `Unsupported` says the question was never evaluated, so the pair is
+        // refused rather than allowed to claim an absence proof.
+        assert!(admit_world_answer(
+            InspectionResult::StructuredInfo(Err(QueryError::Unsupported("no".into()))),
+            WorldModuleResolution::Absent(absence()),
+            None,
+            &query(),
+            "M",
+            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
+            &runtime_provenance,
+        )
+        .is_err());
+        assert!(matches!(
+            InspectionWorldAnswer::Rejected(WorldQueryRejection::Unavailable).result(),
+            Err(WorldQueryRejection::Unavailable)
+        ));
+    }
+
 }
