@@ -711,16 +711,23 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
     prop_assert_eq!(&view.selected_native_groups(), &expected_groups);
     prop_assert_eq!(&view.interface_owners(), &expected_owners);
     prop_assert_eq!(
-        &metadata.dependencies(),
+        &metadata.dependencies().iter().cloned().collect::<Vec<_>>(),
         &exhaustive_oracle(view).dependencies
     );
-    prop_assert_eq!(&metadata.selected_native_groups, &expected_groups);
+    prop_assert_eq!(metadata.selected_native_groups.as_ref(), &expected_groups);
     prop_assert!(metadata.ambiguous_native_owners.is_empty());
     prop_assert_eq!(
         &metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
         &expected_id_set
     );
-    prop_assert_eq!(&metadata.entries, &expected_metadata_entries);
+    prop_assert_eq!(
+        &metadata
+            .entries
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect::<BTreeMap<_, _>>(),
+        &expected_metadata_entries
+    );
     prop_assert!(root_ids.len() <= expected.closure.len());
     Ok(())
 }

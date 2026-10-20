@@ -3324,14 +3324,13 @@ impl CertifiedSourceSelection {
     /// broader native product custody retained in an output packet.
     pub(crate) fn artifact_ids_from_entries(
         &self,
-        entries: &BTreeMap<
+        entries: &impl crate::artifact_inventory::ArtifactEntryMap<
             crate::artifact_inventory::ArtifactId,
-            Arc<crate::artifact_inventory::ArtifactEntry>,
         >,
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
         let mut native = BTreeMap::new();
         let mut ambiguous = BTreeSet::new();
-        for (id, entry) in entries {
+        for (id, entry) in entries.iter() {
             if let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload {
                 let key = crate::artifact_inventory::NativeOwnerKey::from_owner(product.owner());
                 if native.insert(key.clone(), *id).is_some() {
@@ -3353,9 +3352,8 @@ impl CertifiedSourceSelection {
 
     pub(crate) fn artifact_ids_from_bound_entries(
         &self,
-        entries: &BTreeMap<
+        entries: &impl crate::artifact_inventory::ArtifactEntryMap<
             crate::artifact_inventory::ArtifactId,
-            Arc<crate::artifact_inventory::ArtifactEntry>,
         >,
         native: &BTreeMap<
             crate::artifact_inventory::NativeOwnerKey,
@@ -3369,9 +3367,8 @@ impl CertifiedSourceSelection {
 
     fn artifact_ids_with_owners(
         &self,
-        entries: &BTreeMap<
+        entries: &impl crate::artifact_inventory::ArtifactEntryMap<
             crate::artifact_inventory::ArtifactId,
-            Arc<crate::artifact_inventory::ArtifactEntry>,
         >,
         native: &BTreeMap<
             crate::artifact_inventory::NativeOwnerKey,

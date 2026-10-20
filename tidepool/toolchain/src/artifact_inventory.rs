@@ -5694,7 +5694,7 @@ impl RetainedArtifactPayloads<'_> {
 struct ViewReadProjection {
     nodes: imbl::OrdSet<InventoryNodeKey>,
     entries: imbl::Vector<Arc<ArtifactEntry>>,
-    dependencies: OnceLock<Arc<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>>,
+    dependencies: OnceLock<imbl::OrdSet<(ArtifactId, ArtifactId, ArtifactDependency)>>,
     native_selection: OnceLock<NativeSelectionIndex>,
     metadata: OnceLock<Arc<RetainedArtifactMetadata>>,
 }
@@ -6371,11 +6371,11 @@ pub struct ArtifactView {
 /// by exact owner; dependency tuples keep their canonical wire order.
 #[derive(Clone, Debug)]
 pub(crate) struct RetainedArtifactMetadata {
-    pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-    pub artifacts: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    pub ambiguous_native_owners: BTreeSet<ExactModuleIdentity>,
-    dependencies: Arc<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
-    pub(crate) selected_native_groups: BTreeSet<NativeGroupKey>,
+    pub entries: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    pub artifacts: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    pub ambiguous_native_owners: Arc<BTreeSet<ExactModuleIdentity>>,
+    dependencies: imbl::OrdSet<(ArtifactId, ArtifactId, ArtifactDependency)>,
+    pub(crate) selected_native_groups: Arc<BTreeSet<NativeGroupKey>>,
 }
 
 impl RetainedArtifactMetadata {
@@ -6400,13 +6400,40 @@ impl RetainedArtifactMetadata {
         descriptors.sort_by_key(|descriptor| (&descriptor.owner, descriptor.id));
         descriptors
     }
-    pub fn dependencies(&self) -> &[(ArtifactId, ArtifactId, ArtifactDependency)] {
-        self.dependencies.as_slice()
+    pub fn dependencies(&self) -> &imbl::OrdSet<(ArtifactId, ArtifactId, ArtifactDependency)> {
+        &self.dependencies
+    }
+}
+/// Borrowed payload reads are independent of the metadata map representation.
+pub(crate) trait ArtifactEntryMap<K: 'static> {
+    fn get(&self, key: &K) -> Option<&Arc<ArtifactEntry>>;
+    fn iter(&self) -> impl Iterator<Item = (&K, &Arc<ArtifactEntry>)>;
+    fn values(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
+        self.iter().map(|(_, entry)| entry)
+    }
+    fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+}
+impl<K: Ord + 'static> ArtifactEntryMap<K> for BTreeMap<K, Arc<ArtifactEntry>> {
+    fn get(&self, key: &K) -> Option<&Arc<ArtifactEntry>> {
+        BTreeMap::get(self, key)
+    }
+    fn iter(&self) -> impl Iterator<Item = (&K, &Arc<ArtifactEntry>)> {
+        BTreeMap::iter(self)
+    }
+}
+impl<K: Ord + Clone + 'static> ArtifactEntryMap<K> for imbl::OrdMap<K, Arc<ArtifactEntry>> {
+    fn get(&self, key: &K) -> Option<&Arc<ArtifactEntry>> {
+        imbl::OrdMap::get(self, key)
+    }
+    fn iter(&self) -> impl Iterator<Item = (&K, &Arc<ArtifactEntry>)> {
+        imbl::OrdMap::iter(self)
     }
 }
 /// A role-selected compiler namespace over immutable retained custody.
 pub(crate) struct CompilerArtifactMetadata {
-    pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    pub entries: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     pub(crate) retained: Arc<RetainedArtifactMetadata>,
 }
 
@@ -6558,11 +6585,13 @@ impl ArtifactView {
     fn read_dependencies(
         &self,
         state: &InventoryState,
-    ) -> &Arc<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>> {
+    ) -> &imbl::OrdSet<(ArtifactId, ArtifactId, ArtifactDependency)> {
         let projection = self.read_projection(state);
-        projection
-            .dependencies
-            .get_or_init(|| Arc::new(projected_dependencies(state, &projection.nodes)))
+        projection.dependencies.get_or_init(|| {
+            projected_dependencies(state, &projection.nodes)
+                .into_iter()
+                .collect()
+        })
     }
 
     /// Retain one certified checked-value leaf under its exact scoped binding.
@@ -6801,11 +6830,11 @@ impl ArtifactView {
                 .entry_handle_copies
                 .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
             Arc::new(RetainedArtifactMetadata {
-                entries,
-                artifacts,
+                entries: entries.into_iter().collect(),
+                artifacts: artifacts.into_iter().collect(),
                 dependencies,
-                ambiguous_native_owners,
-                selected_native_groups,
+                ambiguous_native_owners: Arc::new(ambiguous_native_owners),
+                selected_native_groups: Arc::new(selected_native_groups),
             })
         }))
     }
@@ -6894,7 +6923,7 @@ impl ArtifactView {
 
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        self.read_dependencies(&state).as_ref().clone()
+        self.read_dependencies(&state).iter().cloned().collect()
     }
     pub fn selected_native_groups(&self) -> BTreeSet<NativeGroupKey> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
@@ -16282,7 +16311,7 @@ mod tests {
                 }).collect::<BTreeSet<_>>();
                 proptest::prop_assert_eq!(view.roots().iter().copied().collect::<BTreeSet<_>>(), selected_roots.clone());
                 proptest::prop_assert_eq!(view.selected_native_groups(), expected_groups.clone());
-                proptest::prop_assert_eq!(&view.metadata_snapshot().selected_native_groups, &expected_groups);
+                proptest::prop_assert_eq!(view.metadata_snapshot().selected_native_groups.as_ref().clone(), expected_groups);
                 if selected_roots.is_empty() {
                     proptest::prop_assert!(view.namespace().is_empty());
                     for original in &fixture.originals {
@@ -18112,7 +18141,7 @@ mod tests {
         let metadata = view.metadata_snapshot();
         assert_eq!(
             metadata.ambiguous_native_owners,
-            BTreeSet::from([original_owner.clone()])
+            BTreeSet::from([original_owner.clone()]).into()
         );
         assert!(view
             .entries_for_owners(std::iter::once(original_owner.clone()))
@@ -19413,7 +19442,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected_descriptors,
         );
-        assert_eq!(metadata.dependencies(), expected_dependencies);
+        assert_eq!(
+            metadata.dependencies().iter().cloned().collect::<Vec<_>>(),
+            expected_dependencies
+        );
         let after = inventory.metrics();
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
