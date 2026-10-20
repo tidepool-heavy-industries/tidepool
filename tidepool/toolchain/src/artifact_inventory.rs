@@ -14437,24 +14437,16 @@ mod tests {
             receipt
                 .with_new_product_dependencies(&retained.artifacts().metadata_snapshot(), &facts)
                 .unwrap();
-            let ArtifactPayload::Original(root_product) = &root.payload else {
-                unreachable!()
+            let root_key = NativeGroupKey {
+                artifact: root.descriptor.id,
+                original_ordinal: 12,
             };
-            let ArtifactPayload::Original(child_product) = &child.payload else {
-                unreachable!()
-            };
-            assert_eq!(
-                receipt
-                    .physical_current_original(root_product.owner())
-                    .unwrap(),
-                Some(root.descriptor.id)
-            );
-            assert_eq!(
-                receipt
-                    .physical_current_original(child_product.owner())
-                    .unwrap(),
-                child_reusable.then_some(child.descriptor.id)
-            );
+            let root_entry = Arc::new(root.clone());
+            let current_root = receipt
+                .current_product(root_key, &root_entry)
+                .unwrap()
+                .unwrap();
+            assert_eq!(current_root.key(), root_key);
             let child_entry = Arc::new(child.clone());
             let current_child = receipt
                 .current_product(
