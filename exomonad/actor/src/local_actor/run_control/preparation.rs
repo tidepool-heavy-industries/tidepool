@@ -11,6 +11,7 @@ pub(super) enum PublicationNonStartKind {
     SupervisorSendFailed,
     SpawnFailed,
     WorkerSendFailed,
+    AttemptChanged,
     TransferOwnerLostBeforeExecute,
 }
 
@@ -18,6 +19,7 @@ pub(super) enum PublicationNonStart {
     SupervisorSendFailed,
     SpawnFailed(ractor::SpawnErr),
     WorkerSendFailed,
+    AttemptChanged,
     TransferOwnerLostBeforeExecute,
 }
 
@@ -27,6 +29,7 @@ impl PublicationNonStart {
             Self::SupervisorSendFailed => PublicationNonStartKind::SupervisorSendFailed,
             Self::SpawnFailed(_) => PublicationNonStartKind::SpawnFailed,
             Self::WorkerSendFailed => PublicationNonStartKind::WorkerSendFailed,
+            Self::AttemptChanged => PublicationNonStartKind::AttemptChanged,
             Self::TransferOwnerLostBeforeExecute => {
                 PublicationNonStartKind::TransferOwnerLostBeforeExecute
             }
@@ -223,7 +226,7 @@ impl Actor for PublicationWorker {
         if transfer.writer.actor != identity.actor
             || !transfer.writer.observer.same_attempt(&identity.observer)
         {
-            transfer.return_unstarted(PublicationNonStart::WorkerSendFailed);
+            transfer.return_unstarted(PublicationNonStart::AttemptChanged);
         } else {
             transfer.run().await;
         }
