@@ -1663,6 +1663,7 @@ impl Actor for RunControl {
                 reply,
             } => {
                 let identity = child.identity();
+                let link_parents = [parent, identity];
                 let result = if state.phase != RunPhase::Running {
                     Err(DirectoryError::Closed)
                 } else if let Some(actor) = state.retirement_blocks_link(
@@ -1671,9 +1672,9 @@ impl Actor for RunControl {
                             matches!(entry.spawn_ownership, SpawnOwnership::Supervised(_))
                         })
                     {
-                        &[parent, identity]
+                        &link_parents
                     } else {
-                        std::slice::from_ref(&identity)
+                        &link_parents[1..]
                     },
                     &[child.address().get_id()],
                 ) {
