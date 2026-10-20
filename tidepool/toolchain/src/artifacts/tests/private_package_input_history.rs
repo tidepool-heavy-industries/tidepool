@@ -205,6 +205,7 @@ fn issue_original_with_extra_group(
         &parsed,
     );
     let packet = CertifiedReceipt {
+        package_products: Vec::new(),
         modules,
         targets: BTreeMap::new(),
         packages: packages.clone(),

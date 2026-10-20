@@ -3518,6 +3518,7 @@ pub struct ResolvedNativeSourceProduct<'a> {
     group: &'a certified_products::PendingCertifiedGroup,
     binding: crate::artifact_inventory::NativeGroupBinding,
     physical_current: bool,
+    imports: &'a [certified_products::SelectedNativeImport],
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
@@ -3528,6 +3529,10 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
     pub fn group(&self) -> &'a certified_products::PendingCertifiedGroup {
         self.group
     }
+    pub fn imports(&self) -> &'a [certified_products::SelectedNativeImport] {
+        self.imports
+    }
+
     pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
         self.binding
     }
@@ -3538,6 +3543,15 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
+    /// Ordered links selected by this target issuer. Package entries remain
+    /// obligations until an executable completion supplies actual code bindings.
+    /// Closed preparation cannot substitute a live retained binding.
+    pub fn target_link_requirements(
+        &self,
+    ) -> Result<&'a [certified_products::SelectedNativeImport], CompileError> {
+        self._resolved.target_link_requirements()
+    }
+
     pub fn target(&self) -> PhysicalCurrentNativeTarget<'a> {
         PhysicalCurrentNativeTarget {
             prepared: self.prepared,
@@ -3555,11 +3569,13 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         let mut rows = Vec::with_capacity(resolved.groups().len());
         for binding in resolved.groups().iter().copied() {
             let group = resolved.group(binding)?;
+            let imports = resolved.group_imports(binding)?;
             let physical_current = resolved.has_only_current_source(binding);
             rows.push(ResolvedNativeSourceProduct {
                 group,
                 binding,
                 physical_current,
+                imports,
             });
         }
         Ok(Self {

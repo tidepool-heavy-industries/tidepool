@@ -431,6 +431,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert_eq!(parsed.products().len(), 2);
     let accepted = ordinary_receipts(&initial_bytes, &parsed, &initial_worker);
     let packet = CertifiedReceipt {
+        package_products: Vec::new(),
         source_recipe: WorkerExecutionSource::Ordinary,
         finalization: fixture_finalization_from_products(Some(root.path()), &accepted, &parsed),
         modules: accepted,
@@ -598,6 +599,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         })
         .collect::<Vec<_>>();
     let promoted_packet = CertifiedReceipt {
+        package_products: Vec::new(),
         source_recipe: WorkerExecutionSource::ExactUnavailable(
             SourceRecipeUnavailable::NoFreshOriginals,
         ),
@@ -809,7 +811,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     );
     let empty_delta = receipt_bytes(&value_array([
         value_text("TPCERT"),
-        Value::Integer(10.into()),
+        Value::Integer(11.into()),
         value_array([value_text("segment-item"), value_array([]), value_array([])]),
     ]));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
@@ -905,6 +907,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             sha256: sha(&payload),
         };
         let addition = || SegmentItemReceipt {
+                package_products: Vec::new(),
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
         };
@@ -927,6 +930,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .select_item(
                 &mut cursor,
                 SegmentItemReceipt {
+                package_products: Vec::new(),
                     globals: vec![],
                     packages: BTreeMap::new(),
                 },
@@ -956,6 +960,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         shared.select_item(
             &mut cursor,
             SegmentItemReceipt {
+                package_products: Vec::new(),
                 globals: vec![],
                 packages: BTreeMap::new()
             },

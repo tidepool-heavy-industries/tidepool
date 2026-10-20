@@ -1730,6 +1730,7 @@ fn admit_borrowed_catalog_receipt(
         })
         .collect::<Vec<_>>();
     let mut receipt = CertifiedReceipt {
+        package_products: Vec::new(),
         finalization: crate::certified_products::tests::fixture_finalization_from_products(
             None, &modules, &parsed,
         ),
@@ -1966,6 +1967,7 @@ fn package_native_catalog_fixture(
         }],
     }];
     let receipt = CertifiedReceipt {
+        package_products: Vec::new(),
         finalization: crate::certified_products::tests::fixture_finalization_from_products(
             Some(&fixture.output),
             &modules,

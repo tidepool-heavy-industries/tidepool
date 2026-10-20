@@ -3356,10 +3356,11 @@ impl PersistentSession {
             let retained = prior._retained_scope.clone();
             let owner = self.admission_owner().clone();
             let epoch = owner.epoch();
+            // Direct stage observations are checked independently. Lifetime
+            // roots come from the accepted join's full native body closure.
             let selected = item
                 .world_selected_runtime_inputs()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            let mut retained_ids = std::collections::HashSet::new();
             for input in selected.inputs() {
                 let entry = self
                     .bindings()
@@ -3379,14 +3380,10 @@ impl PersistentSession {
                 {
                     return Err(SessionError::StaleStagedDeclaration);
                 }
-                retained_ids.insert(entry.id);
             }
-            let mut retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
-            retained_ids.sort_by_key(|id| id.raw());
             return self.adopt_staged_declaration_with_world_activation(
                 staged,
                 &prior.visibility,
-                &retained_ids,
                 |key, visibility, delta| {
                     let successor = prefix.program.declaration_item_successor(
                         &predecessor,
