@@ -22872,9 +22872,21 @@ pub(crate) mod request_tests {
         BootstrapCheckoutRetired,
         ReplacementCheckoutRetired,
         ReplacementFrozenSource,
+        UnstartedSourceSettlements,
         RetirementNativeOwnerLoss(
             crate::local_actor::run_control::GenerationRetirementNativeControl,
         ),
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::UnstartedSourceSettlements),
+            ).await;
+        }).await;
     }
 
     impl PublicationFailureControl {
@@ -23187,6 +23199,109 @@ pub(crate) mod request_tests {
         drop(held_session);
     }
 
+    async fn assert_unstarted_source_settlements(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        preparations: Vec<PreparedActorGeneration>,
+    ) {
+        assert_eq!(preparations.len(), 3);
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let preparation = crate::CompilerPreparationOwner::new();
+        let publisher = workbench.generation_publisher(
+            state.clone(),
+            ActorPublicationOwner::Preparation(preparation.client()),
+        );
+        let mut preparations = preparations.into_iter();
+        let reserve = |prepared| match publisher
+            .reserve(
+                prepared,
+                tidepool_runtime::session::PublicationDecision::new(),
+                ActorGenerationPublication::Terminal,
+            )
+            .unwrap()
+        {
+            ActorGenerationReservation::Reserved(reserved) => reserved,
+            ActorGenerationReservation::Refused(detail) => panic!("{detail}"),
+        };
+        let capture = |reserved: &mut ReservedActorGeneration| match reserved.fence_original() {
+            ActorGenerationRetirementCutoff::Fenced(fence) => fence,
+            _ => panic!("the actual reservation must fence its selected source A"),
+        };
+        let mut first = reserve(preparations.next().unwrap());
+        let first_candidate = first.candidate_custody();
+        let first_identity = first_candidate.identity_observer();
+        assert!(first_identity.same_candidate(&first_candidate));
+        assert!(first_identity.same_observer(&first_identity.clone()));
+        let mut first_original = capture(&mut first);
+        let first_settlement = first
+            .refuse_retirement(&mut first_original, "first actual refusal")
+            .unwrap();
+        let mut second = reserve(preparations.next().unwrap());
+        let second_candidate = second.candidate_custody();
+        assert!(!first_identity.same_candidate(&second_candidate));
+        let mut second_original = capture(&mut second);
+        let second_settlement = second
+            .refuse_retirement(&mut second_original, "second actual refusal")
+            .unwrap();
+        let (first, second_settlement) = first
+            .into_settled_unstarted(second_settlement)
+            .err()
+            .expect("another actual attempt cannot settle the first reservation");
+        assert!(first.candidate_custody().same_candidate(&first_candidate));
+        let (second, first_settlement) = second
+            .into_settled_unstarted(first_settlement)
+            .err()
+            .expect("the reverse crossed receipt also refuses without losing either owner");
+        assert!(second.candidate_custody().same_candidate(&second_candidate));
+
+        let mut third = reserve(preparations.next().unwrap());
+        let expected = third.expected_generation().unwrap().clone();
+        let target = third.prepared.candidate.scope.clone();
+        let mut third_original = capture(&mut third);
+        let (entered, started) = std::sync::mpsc::sync_channel(0);
+        let (release, finish) = std::sync::mpsc::sync_channel(0);
+        third.guard.settlement_probe = Some(Arc::new(PublicationSettlementProbe {
+            entered,
+            release: parking_lot::Mutex::new(finish),
+            unwind: false,
+        }));
+        let closer = std::thread::spawn(move || {
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert!(
+                target.admit_source().is_ok(),
+                "B actually settled before A failed"
+            );
+            drop(preparation);
+            release.send(()).unwrap();
+        });
+        let error = third
+            .refuse_retirement(&mut third_original, "actual partial source settlement")
+            .err()
+            .unwrap();
+        closer.join().unwrap();
+        assert!(
+            matches!(error, ResidentActorWorkbenchError::PublicationSettlement { failure }
+            if matches!(failure.settlement, PublicationSettlementError::Retirement { stage: RetirementSettlementStage::Original, .. }))
+        );
+        assert!(expected.scope.admit_source().is_err());
+        let (third, first_settlement) = third
+            .into_settled_unstarted(first_settlement)
+            .err()
+            .expect("partial A failure cannot consume a foreign successful receipt");
+        assert!(first.into_settled_unstarted(first_settlement).is_ok());
+        assert!(second.into_settled_unstarted(second_settlement).is_ok());
+        drop(third);
+        assert!(state.current_generation().is_none());
+        assert!(expected.scope.admit_source().is_err());
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            compiler_calls,
+            "source settlement never replays compilation or executes a publication body"
+        );
+    }
+
     async fn assert_real_publisher_failure(
         workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<InstalledToolsState>,
@@ -23194,6 +23309,9 @@ pub(crate) mod request_tests {
         control: PublicationFailureControl,
     ) {
         match control {
+            PublicationFailureControl::UnstartedSourceSettlements => {
+                unreachable!("source settlement controls retain their three actual preparations")
+            }
             PublicationFailureControl::RetirementNativeOwnerLoss(_) => {
                 unreachable!("native controls use their actual directory owner")
             }
@@ -24256,6 +24374,16 @@ pub(crate) mod request_tests {
                             control,
                         )
                         .await;
+                    } else if matches!(control, PublicationFailureControl::UnstartedSourceSettlements) {
+                        let mut preparations = vec![prepared];
+                        for _ in 0..2 {
+                            preparations.push(workbench.prepare_actor_generation(
+                                context.clone(), descriptor.clone(),
+                                ActorRequestSnapshot::Generation(initial.clone()),
+                                next_installation.clone(), prompts.clone(),
+                            ).await.unwrap());
+                        }
+                        assert_unstarted_source_settlements(&workbench, state, preparations).await;
                     } else {
                         assert_real_publisher_failure(&workbench, state, prepared, control).await;
                     }

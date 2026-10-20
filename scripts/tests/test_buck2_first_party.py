@@ -1081,8 +1081,9 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             'resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard',
             'resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body',
             'resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result',
+            'resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen',
         ])
-        self.assertEqual(retirement['expected_count'], 10)
+        self.assertEqual(retirement['expected_count'], 11)
         self.assertTrue(retirement['ignored'])
         self.assertEqual(retirement['case_compiler_modes'], {
             name: 'owned-resident' for name in retirement['exact_tests']
@@ -1102,6 +1103,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         })
         self.assertEqual(refusal['resource_env'], rooted['resource_env'])
         self.assertEqual(refusal['resources'], rooted['resources'])
+        unstarted = self.rule('exomonad/actor', 'actor_generation_unstarted_publication_tests',
+                              'tidepool_rust_test_cases')
+        self.assertEqual(unstarted['binary'], retirement['binary'])
+        self.assertEqual(unstarted['exact_tests'], [
+            'resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen',
+        ])
+        self.assertEqual(unstarted['expected_count'], 1)
+        self.assertTrue(unstarted['ignored'])
+        self.assertEqual(unstarted['case_compiler_modes'], {
+            name: 'owned-resident' for name in unstarted['exact_tests']
+        })
+        self.assertEqual(unstarted['resource_env'], rooted['resource_env'])
+        self.assertEqual(unstarted['resources'], rooted['resources'])
         capture = self.rule('exomonad/actor', 'actor_generation_retirement_capture_tests',
                             'tidepool_rust_test_cases')
         self.assertEqual(capture['binary'], retirement['binary'])
