@@ -1303,12 +1303,7 @@ impl Actor for RunControl {
                     state
                         .reservations
                         .get(&actor)
-                        .and_then(|record| match &record.retirement.core {
-                            generation::GenerationRetirementCore::Completed { completion, .. } => {
-                                Some(completion.clone())
-                            }
-                            _ => None,
-                        });
+                        .and_then(|record| record.retirement.completed().cloned());
                 let _ = reply.send(outcome);
             }
             RunControlMessage::GenerationPublicationReady { actor, observer } => {

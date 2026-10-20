@@ -221,6 +221,13 @@ impl GenerationRetirementRecord {
         }
     }
 
+    pub(super) fn completed(&self) -> Option<&GenerationRetirementCompletion> {
+        match &self.core {
+            GenerationRetirementCore::Completed { completion, .. } => Some(completion),
+            _ => None,
+        }
+    }
+
     pub(super) fn is_active(&self) -> bool {
         matches!(
             self.core,
