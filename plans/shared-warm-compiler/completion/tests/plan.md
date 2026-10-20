@@ -339,6 +339,19 @@ explicit refusal-before-submission control instead proves no request was issued.
    Persona histories on one exact final bundle. Hand timing/work measurements
    to qualification; local component passes do not qualify that bundle.
 
+### Warm-install guarantees (stale-surfaces B-03..B-05)
+
+The split-route deletion retires legacy mechanisms, not these risks. Keep each
+replacement assertion on the surviving service path. See
+[the residency contract](../service-cells/residency-contract.md) for the exact
+owner symbols, fixture and honesty limits.
+
+| id | retired path | replacement test | owner/parcel | preserved oracle |
+|---|---|---|---|---|
+| B-03 | Split smoke `certified_resident_turn_compiles_off_checkout_then_installs` (`tidepool/runtime/tests/prepared_residency.rs:836`). The ledger's `:836-877` citation is this smoke, not the residency test. | `prepared_residency::prepared_session_residency_stays_bounded_across_many_turns` (`:605`), retained unchanged on `run_with_sites`/`run_bind_with_sites`. | `PreparedEngine::quiesce_and_collect` (`tidepool/runtime/src/session/prepared.rs:6755`) called by `ResidentSession::complete_prepared` (`tidepool/runtime/src/session/resident.rs:7808`); deletion tranche must not delete the test. | Every turn `programs <= live_bindings + 1 + N`; complete `ResidencyCounts` and `old_bytes` equal at every fourth-install boundary, with at least two boundaries per phase. |
+| B-04 | Per-unit-request assumption: each unit is a separate compiler request. Delete only if S1 emits one pre-linked whole-cell program; the reuse assertion itself never references the split route. | `prepared_unit_codegen_cost::a_later_unit_reuses_an_earlier_unit_s_generated_code` (`tidepool/runtime/tests/prepared_unit_codegen_cost.rs:276`), plus a second-cell assertion in `ordinary_demand_history_tests::prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work` (`exomonad/host/src/actor_host/ordinary_demand_history_tests.rs:507`). | `PreparedEngine::install` (`prepared.rs:4251`), `codegen_totals` (`:6690`), `code_export_count` (`:4207`), `prepared_retained` (`persistent.rs:1536`); tests leaf for the joined assertion and service-cells S1 for the world `CellProgram` issuer. | `first.functions > 0`, `second.imports > 0`, `second.functions < first.functions`, and rendered `[1,2,5,8,12]` from the independent semantic oracle. S3 arm B is GHC dependency reuse and does not satisfy this row. |
+| B-05 | `PendingPreparedInstall` compile-pass/compile-fail controls (`prepared_install_crossed_image`, `prepared_install_consumes_pending`, `compile_fail/prepared_install_*`) and their test-only callers at `resident_workbench.rs:22584,23122`; also the split fixture `lazy_binding_install` (`:22535`). | `prepared_install_is_consumed_once_by_its_owner`, `prepared_install_refuses_a_stale_image`, `prepared_install_refuses_a_crossed_item`, `joined_source_hook_refusal_precedes_item_settlement` (port of `resident_workbench.rs:23088`). | `RuntimeCheckedPrefix::start` (`tidepool/runtime/src/session/admission.rs:1403`), `CheckedTurnCompletion::settle` (`:1530`), `PersistentSession::admit_checked_item` (`:2126`), `PreparedRuntimeCell::seal` (`tidepool/runtime/src/session/turn.rs:3167`); runtime-publication R2 + service-cells S1/S3, with A-06/A-07 supplying the world issuer. | Typed `SessionError::StaleStagedDeclaration`; `Arc::ptr_eq` item identity; admission digest, reserved public visibility snapshot and compile-view digest equality; binding, code-export and program counts unchanged by a refusal. |
+
 ## Commands and evidence
 
 Run as `inanna`, verify the checkout's `buck-out` bind mount and resource
