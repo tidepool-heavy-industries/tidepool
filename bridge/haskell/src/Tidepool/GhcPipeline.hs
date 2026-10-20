@@ -110,8 +110,9 @@ import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
-  ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences, prepareSegmentDemand
-  , ParsedSegmentDemand, segmentDemandMatchesSource, SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope )
+  ( rewriteParsedSegmentRoot, moduleInputOccurrences, prepareSegmentDemand
+  , ParsedModuleDemand, segmentModuleDemand, moduleDemandMatchesSource
+  , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -1218,7 +1219,7 @@ data PipelineVariant = PipelineVariant
 -- explicit selected-source receipt leaves the compile; no callback owns a world.
 data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFacts
   (IORef (Maybe (Maybe SourceSelectedOriginals,[((String,String,Bool),[(DependencyQualifier,String,Bool,String)])])))
-  ParsedSegmentDemand
+  ParsedModuleDemand
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
@@ -2105,7 +2106,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
                   pure issued
             emitCount timing "world.cell.demand_resolutions" 1
             (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts path
-              sourceOwners environment demandScope parsedDemand
+              sourceOwners environment demandScope (segmentModuleDemand parsedDemand)
             writeIORef resolvedRef (Just resolved)
             pure (ready,resolved)
       policyFor resolved = retainedContext
@@ -2121,7 +2122,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   let cycle = worldDependencyCycle dependencies universe attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
-        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand)
+        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef (segmentModuleDemand parsedDemand))
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- pvTransformParsed variant target environment summary parsed
             if ms_mod_name summary /= target then pure annotated else do
@@ -2192,9 +2193,9 @@ hydrateWorldCellResolvedInputs environment (WorldCellResolvedInputs inputs types
           >> throwIO WorldCellCorrupt
 
 resolveWorldCellInputs :: ExactInputOwner -> WorldInputFacts -> FilePath -> Set.Set (String,String)
-  -> HscEnv -> SegmentDemandScope WorldBinding -> ParsedSegmentDemand -> IO (HscEnv,WorldCellResolvedInputs)
+  -> HscEnv -> SegmentDemandScope WorldBinding -> ParsedModuleDemand -> IO (HscEnv,WorldCellResolvedInputs)
 resolveWorldCellInputs owner facts path sourceOwners environment scope parsedDemand = do
-  demand <- typedSegmentInputOccurrences environment scope parsedDemand
+  demand <- moduleInputOccurrences environment scope parsedDemand
   demanded <- either (\failure -> do
     emitWorldAcquisitionRejection "world cell demand" path (case failure of
       InputDemandRenameRejected diagnostic -> diagnostic
@@ -3025,7 +3026,7 @@ elideUnusedQuasiQuoteCodegen timing graph
 -- cannot execute. The generated target borrows the same sealed parser proof
 -- used by demand; other demanded modules are parsed from downsweep buffers.
 -- Each source is proved before its renaming or code-generation phase.
-admitWorldQuoteFreeModuleGraph :: Bool -> Maybe (Module,ParsedSegmentDemand) -> ModuleGraph -> Ghc ModuleGraph
+admitWorldQuoteFreeModuleGraph :: Bool -> Maybe (Module,ParsedModuleDemand) -> ModuleGraph -> Ghc ModuleGraph
 admitWorldQuoteFreeModuleGraph timing targetProof graph = do
   forM_ summaries $ \summary -> do
     let flags = ms_hspp_opts summary
@@ -3332,7 +3333,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       else pure Nothing
     targetQuoteProof <- case (pvWorldSources variant,capturedTarget,policyTarget) of
       (Just (WorldSourceInputBasis _ _ _ proof),Just bytes,Just owner)
-        | segmentDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
+        | moduleDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
         | otherwise -> liftIO (throwIO WorldCellCorrupt)
       (Nothing,_,_) -> pure Nothing
       _ -> liftIO (throwIO WorldCellCorrupt)
