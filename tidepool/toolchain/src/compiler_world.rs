@@ -747,6 +747,117 @@ impl fmt::Debug for CompilerWorldRestoration {
 }
 
 impl CompilerWorldRestoration {
+    /// Rebuild only from this product's current immutable facts. The receiving
+    /// compiler still decides whether a complete acquisition is needed.
+    fn prepare_cold(&self) -> Result<Arc<Self>, CompileError> {
+        let cold = self
+            .inputs
+            .clone()
+            .prepare_for(self.producer, self.profile)?;
+        if cold.logical_id != self.logical_id {
+            return Err(source_failure(
+                "successor cold restoration changed logical product",
+            ));
+        }
+        Ok(cold)
+    }
+
+    #[cfg(test)]
+    /// Diagnostic DATA only; this does not issue a World or admission.
+    pub(crate) fn export_cold_observation_for_test(
+        &self,
+        destination: &Path,
+    ) -> Result<(), CompileError> {
+        self.prepare_cold()?
+            .export_transport_observation_for_test(destination)
+    }
+
+    #[cfg(test)]
+    /// Preserve the actual writer envelope and sealed arena bytes before their
+    /// physical aliases retire. Reader controls may replace transport aliases.
+    pub(crate) fn export_transport_observation_for_test(
+        &self,
+        destination: &Path,
+    ) -> Result<(), CompileError> {
+        use ciborium::value::Value;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::FileExt;
+        std::fs::create_dir_all(destination)?;
+        let bytes = std::fs::read(&self.descriptor)?;
+        let value: Value = ciborium::de::from_reader(bytes.as_slice())
+            .map_err(|error| source_failure(error.to_string()))?;
+        let fields = value
+            .as_array()
+            .ok_or_else(|| source_failure("observation descriptor is not an array"))?;
+        let (kind, product, acquisition) = match fields.first().and_then(Value::as_text) {
+            Some("TPCWORLD") if fields.len() == 11 => ("cold", &fields[2], &fields[7]),
+            Some("TPCWSUCC4") if fields.len() == 6 => ("successor", &fields[1], &fields[5]),
+            _ => return Err(source_failure("observation descriptor format")),
+        };
+        let product = product
+            .as_bytes()
+            .ok_or_else(|| source_failure("observation product bytes"))?;
+        let acquisition = acquisition
+            .as_array()
+            .ok_or_else(|| source_failure("observation acquisition"))?;
+        let arenas = acquisition
+            .get(1)
+            .and_then(Value::as_array)
+            .ok_or_else(|| source_failure("observation acquisition arenas"))?;
+        let mut remaining = capture_allowance()?;
+        let mut exported = Vec::new();
+        for (index, arena) in arenas.iter().enumerate() {
+            let fields = arena
+                .as_array()
+                .ok_or_else(|| source_failure("observation arena"))?;
+            let endpoint = fields
+                .first()
+                .and_then(Value::as_text)
+                .ok_or_else(|| source_failure("observation arena endpoint"))?;
+            let extent = fields
+                .get(1)
+                .and_then(Value::as_integer)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| source_failure("observation arena extent"))?;
+            remaining = remaining
+                .checked_sub(extent)
+                .ok_or_else(source_size_failure)?;
+            let file = self
+                .input_files
+                .iter()
+                .find(|file| {
+                    endpoint == format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
+                })
+                .ok_or_else(|| {
+                    source_failure("observation arena has no actual retained file owner")
+                })?;
+            if file.metadata()?.len() != extent {
+                return Err(source_failure("observation arena extent changed"));
+            }
+            let mut body = vec![0; usize::try_from(extent).map_err(|_| source_size_failure())?];
+            file.read_exact_at(&mut body, 0)?;
+            let name = format!("arena-{index}.bin");
+            std::fs::write(destination.join(&name), &body)?;
+            exported.push(
+                serde_json::json!({"index":index,"original_endpoint":endpoint,
+                "file":name,"extent":extent,"sha256":world_hex(&world_digest(&body))}),
+            );
+        }
+        std::fs::write(destination.join("descriptor.cbor"), &bytes)?;
+        if kind == "cold" {
+            std::fs::write(
+                destination.join("sources.bin"),
+                self.inputs.sources.encoded(),
+            )?;
+        }
+        std::fs::write(destination.join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "schema":1,"kind":kind,"authority":false,"logical_id":world_hex(&self.logical_id),
+            "product_sha256":world_hex(&world_digest(product)),
+            "descriptor_file":"descriptor.cbor","descriptor_sha256":world_hex(&world_digest(&bytes)),
+            "sources_file":(kind == "cold").then_some("sources.bin"),"arenas":exported,
+        })).map_err(|error| source_failure(error.to_string()))?)?;
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn input_directory_for_test(&self) -> &Arc<tempfile::TempDir> {
         &self.inputs.directory
@@ -2308,11 +2419,7 @@ fn ensure_world(
                     let mut cached = successor.cold.lock()
                         .map_err(|_| source_failure("successor recovery lock poisoned"))?;
                     if cached.is_none() {
-                        let cold = restoration.inputs.clone().prepare_for(restoration.producer, restoration.profile)?;
-                        if cold.logical_id != restoration.logical_id {
-                            return Err(source_failure("successor cold restoration changed logical product"));
-                        }
-                        *cached = Some(cold);
+                        *cached = Some(restoration.prepare_cold()?);
                     }
                     let cold = cached.as_ref().expect("checked successor cold restoration");
                     let (mut cmd, endpoint) = world_command(identity)?;

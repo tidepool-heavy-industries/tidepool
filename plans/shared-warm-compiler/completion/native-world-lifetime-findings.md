@@ -94,3 +94,31 @@ The control's small cfg(test) directory getter lends an existing owner for weak
 observation and issues no compiler or runtime authority. Successful cold
 restoration remains an explicit pending requirement, not a passing or skipped
 test.
+
+## Actual writer DATA for the independent reader
+
+The existing cold-fallback expression is now a private `prepare_cold` helper,
+used by the same production `ensure_world` branch with its unchanged exact
+logical-product check. A cfg(test) observer exports actual descriptors and sealed
+arena bytes, not a World/admission constructor. The real lifetime control records
+the initial cold envelope, each ordered tuple6 successor, and a same-product full
+cold envelope generated from current facts after all predecessor owners drop.
+The raw writer row/image/root bytes stay unchanged. Independent readers may
+reseal the raw DATA through their existing input owner and replace physical
+transport aliases only.
+
+Build `d9846af6-eb61-4d0e-b52e-b2c6677bd9c9` compiled and executed the control;
+all fourteen writer observations and both same-product cold-writer checks were
+produced. The physical metrics stayed unchanged. The final Haskell acquisition
+still refused Unsupported with Clean END, so the overall exact one-test result
+remains failed, exit 1. Log:
+`/srv/swarm/evidence/inanna/native-world-writer-export-20261020.log`.
+
+The immutable DATA bundle is:
+`/srv/swarm/evidence/inanna/native-world-writer-export-20261020/2718c8eb371b4b0fe2883b287da7ec15e2c94645fa75c52c94aa46f3dac22feb/artifacts/world-writer-observations/bundle.json`.
+Its SHA-256 is
+`c3c2ccbc0967bbd5626b14ccf179977a15f3df47e8869b2e49bc792270c2715f`.
+Every arena extent and descriptor/arena SHA-256 was independently checked against
+the copied bytes (6492 arena bytes total). Both final cold envelopes carry exactly
+their final successor's product hash and logical identity. This verifies the
+actual writer's reconstruction, not acceptance by the Haskell reader.

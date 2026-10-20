@@ -8498,6 +8498,12 @@ mod module_product_tests {
         };
         let mut latest = None;
         let mut constant_frontier = None;
+        let observations = PathBuf::from(
+            std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+                .expect("retained case observation root"),
+        )
+        .join("world-writer-observations");
+        std::fs::create_dir_all(&observations).unwrap();
         for item_count in [2, 8] {
             drop(latest.take());
             let settled = settle_compiler_transaction_cancellable(
@@ -8623,6 +8629,11 @@ mod module_product_tests {
             };
             let checked = checked.clone();
             let mut current = Arc::new(checked.reservation().plan().world().clone());
+            let history_observations = observations.join(format!("history-{item_count}"));
+            current
+                .restoration()
+                .export_transport_observation_for_test(&history_observations.join("initial"))
+                .expect("observe actual initial cold writer");
             let mut predecessor_worlds = Vec::new();
             let mut predecessor_directories = Vec::new();
             let mut value_rows = Vec::new();
@@ -8678,6 +8689,12 @@ mod module_product_tests {
                         )],
                     )
                     .expect("same checked item's compiler successor");
+                current
+                    .restoration()
+                    .export_transport_observation_for_test(
+                        &history_observations.join(format!("delta-{:02}", ordinal + 1)),
+                    )
+                    .expect("observe actual tuple6 successor writer");
             }
             drop(checked);
             drop(program);
@@ -8753,8 +8770,18 @@ mod module_product_tests {
                 );
             }
             constant_frontier = Some(frontier);
+            current
+                .restoration()
+                .export_cold_observation_for_test(&history_observations.join("cold-final"))
+                .expect("observe same-product cold writer after predecessor owners drop");
             latest = Some((endpoint, current));
         }
+        std::fs::write(observations.join("bundle.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "schema":1,"authority":false,"histories":[
+                {"directory":"history-2","initial":"initial","successors":["delta-01","delta-02"],"same_product_cold":"cold-final"},
+                {"directory":"history-8","initial":"initial","successors":(1..=8).map(|n|format!("delta-{n:02}")).collect::<Vec<_>>(),"same_product_cold":"cold-final"},
+            ]
+        })).unwrap()).unwrap();
         let (endpoint, world) = latest.unwrap();
         let restoration = world.restoration().clone();
         let logical = *world.logical_id();
