@@ -273,6 +273,10 @@ fn assert_physical_selection(
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
+    let mut cursor = segment
+        .originals
+        .bound_artifacts()
+        .map_err(compiler_evidence_failure)?;
     let foreign = recaptured.for_item(0)?;
     let empty = physical.for_segment(0..0)?;
     for selected in [None, Some(&foreign), Some(&physical), Some(&empty)] {
@@ -284,9 +288,10 @@ fn assert_physical_selection(
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let result = segment
-            .originals
-            .select_item(receipt, &target, selected, &mut validation);
+        let result =
+            segment
+                .originals
+                .select_item(&mut cursor, receipt, &target, selected, &mut validation);
         assert!(matches!(
             result,
             Err(certified_products::CertificationError::Mismatch(
@@ -294,6 +299,26 @@ fn assert_physical_selection(
             ))
         ));
     }
+    // A valid but later selector cannot skip the current checked item.
+    let later_selector = physical.for_item(1)?;
+    let receipt = certified_products::decode_segment_item_with_operation(
+        crate::checked_cell::world_output_bytes(
+            checked,
+            &relative.join("certified-products.cbor"),
+        )?,
+        &validation.inventory,
+    )
+    .map_err(compiler_evidence_failure)?;
+    assert!(matches!(
+        segment.originals.select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            Some(&later_selector),
+            &mut validation,
+        ),
+        Err(certified_products::CertificationError::OriginalClosure(_))
+    ));
     let first: ProducedValueTypeInterfaces = physical.for_item(0)?;
     let receipt = certified_products::decode_segment_item_with_operation(
         crate::checked_cell::world_output_bytes(
@@ -305,8 +330,22 @@ fn assert_physical_selection(
     .map_err(compiler_evidence_failure)?;
     let (certified, _, _) = segment
         .originals
-        .select_item(receipt, &target, Some(&first), &mut validation)
+        .select_item(&mut cursor, receipt, &target, Some(&first), &mut validation)
         .map_err(compiler_evidence_failure)?;
+    let receipt = certified_products::decode_segment_item_with_operation(
+        crate::checked_cell::world_output_bytes(
+            checked,
+            &relative.join("certified-products.cbor"),
+        )?,
+        &validation.inventory,
+    )
+    .map_err(compiler_evidence_failure)?;
+    assert!(matches!(
+        segment
+            .originals
+            .select_item(&mut cursor, receipt, &target, Some(&first), &mut validation,),
+        Err(certified_products::CertificationError::OriginalClosure(_))
+    ));
     let current = physical.current_interface(51)?.artifact_id();
     let later = physical.current_interface(52)?.artifact_id();
     assert!(certified
@@ -332,5 +371,63 @@ fn assert_physical_selection(
             expected
         );
     }
+    let relative = PathBuf::from("item-1");
+    let path = checked
+        .item(1)
+        .expect("second checked item")
+        .executable()
+        .expect("executable")
+        .manifest()
+        .keys()
+        .find(|path| {
+            path.to_str()
+                .is_some_and(|path| path.ends_with(".prepared.cbor"))
+        })
+        .expect("actual second prepared bytes");
+    let target = tidepool_repr::execution_schema::parse_program(
+        crate::checked_cell::world_output_bytes(checked, &relative.join(path))?,
+        &crate::prepared_artifact::production_requirements()?,
+        DecodeLimits::default(),
+    )?;
+    let receipt = certified_products::decode_segment_item_with_operation(
+        crate::checked_cell::world_output_bytes(
+            checked,
+            &relative.join("certified-products.cbor"),
+        )?,
+        &validation.inventory,
+    )
+    .map_err(compiler_evidence_failure)?;
+    let (second, _, _) = segment
+        .originals
+        .select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            Some(&later_selector),
+            &mut validation,
+        )
+        .map_err(compiler_evidence_failure)?;
+    let owner = crate::declaration_join::ExactModuleIdentity {
+        unit: "main".into(),
+        module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(52)).module_name(),
+    };
+    assert!(!certified
+        .original_inputs
+        .as_ref()
+        .expect("first compiler owner")
+        .role_projection()
+        .snapshot_roles()
+        .contains_key(&owner));
+    assert_eq!(
+        second
+            .original_inputs
+            .as_ref()
+            .expect("second compiler owner")
+            .role_projection()
+            .snapshot_roles()
+            .get(&owner)
+            .map(|role| role.interface()),
+        Some(later)
+    );
     Ok(())
 }

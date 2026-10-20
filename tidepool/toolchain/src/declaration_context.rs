@@ -526,6 +526,35 @@ impl IssuedOriginalOutput {
         })
     }
 
+    pub(crate) fn from_segment_item(
+        products: &crate::certified_products::CertifiedProducts,
+    ) -> Result<Self, CompileError> {
+        let inputs = products
+            .original_inputs
+            .as_ref()
+            .ok_or_else(|| failure("item lacks its physical compiler prefix owner"))?;
+        Ok(Self {
+            selection: products.source_selection.clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs: Arc::clone(inputs),
+        })
+    }
+
+    pub(crate) fn from_segment_originals(
+        originals: &crate::certified_products::CertifiedSegmentOriginals,
+    ) -> Result<Self, CompileError> {
+        // The closed authored-stage accessor rejects executable stages.
+        originals
+            .authored_artifacts()
+            .map_err(compiler_evidence_failure)?;
+        let inputs = Arc::clone(originals.physical_inputs());
+        Ok(Self {
+            selection: originals.source_selection().clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs,
+        })
+    }
+
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
         &self.selection
     }
@@ -9294,7 +9323,7 @@ impl WorldProgramSegment {
         let originals = selection
             .selected_authored_original_closure(view, &owner.unit, &owner.module)
             .map_err(compiler_evidence_failure)?;
-        let output = IssuedOriginalOutput::issue(selection.clone(), view.clone())?;
+        let output = IssuedOriginalOutput::from_segment_originals(&self.originals)?;
         let certificate = crate::declaration_join::certify_world_stage_planned_declaration(
             program,
             stage,

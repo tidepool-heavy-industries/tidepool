@@ -3082,6 +3082,22 @@ impl CompilerSourceSupport {
         self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
     }
 
+    /// Initialize one stage's compiler prefix. Future value rows can remain
+    /// private exact dependencies, but cannot remain public compiler roles.
+    pub(super) fn segment_value_prefix(
+        &self,
+        excluded: &BTreeSet<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let artifacts = self.artifacts.without_value_interface_roots(excluded)?;
+        let projection = self
+            .projection
+            .project_roles(|_, role| (!excluded.contains(&role.interface())).then(|| role.clone()));
+        let artifacts = artifacts
+            .with_compiler_projection(&projection)?
+            .into_owned();
+        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
     /// The freshly checked value certificate selects its exact canonical role;
     /// retained artifact IDs are not an input to this boundary.
     pub(crate) fn select_value_interface(
