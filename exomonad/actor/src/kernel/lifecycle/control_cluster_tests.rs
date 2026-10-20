@@ -598,6 +598,7 @@ async fn startup_source_snapshot_keeps_fifo_and_releases_on_failed_readiness() {
                 .await
                 .unwrap();
         let closed = || SourceDelivery {
+            slot_delivery: None,
             slot: 9,
             target: SourceTarget::Request(request, RequestSourceKind::Progress),
             event: SourceEvent::ProgressClosed,
@@ -639,6 +640,7 @@ async fn startup_source_snapshot_keeps_fifo_and_releases_on_failed_readiness() {
             source_receipt(
                 &lifecycle,
                 SourceDelivery {
+                    slot_delivery: None,
                     slot: 0,
                     target: SourceTarget::Request(request, RequestSourceKind::Settlement),
                     event: SourceEvent::Settled(Ok(snapshot)),
@@ -699,6 +701,7 @@ async fn startup_source_snapshot_keeps_fifo_and_releases_on_failed_readiness() {
             ] {
                 lifecycle
                     .dispatch_source(SourceDelivery {
+                        slot_delivery: None,
                         slot,
                         target: match slot {
                             1 => SourceTarget::Lifecycle(actor(100)),

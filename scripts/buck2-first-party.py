@@ -1889,6 +1889,18 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                source_registration_control = "resident_actor::replacement::tests::source_registration_slots_preserve_independent_callbacks_and_deferred_input"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_source_registration_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([source_registration_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = False,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(source_registration_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 publication_workers = [
                     "resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body",
                     "resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result",

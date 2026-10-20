@@ -2991,6 +2991,7 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
             lifecycle: child_context.lifecycle().clone(),
             fresh_context_seed: None,
             workbench_executions: Arc::default(),
+            source_slots: source_slots::SourceSlots::default(),
             interactive_policy_installed: false,
             descriptor: ActorDescriptor::new(
                 "retention worker",

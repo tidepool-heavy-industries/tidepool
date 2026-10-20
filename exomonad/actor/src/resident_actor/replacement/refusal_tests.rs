@@ -963,6 +963,7 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
     });
     let target = SourceTarget::Lifecycle(actor);
     let execution = CallbackExecution::from_context(behavior.descriptor.session_context(actor));
+    behavior.sources.bind_owner(actor);
     behavior.sources.push(SourceBinding {
         target,
         execution,
@@ -976,6 +977,7 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         ),
     });
     let delivery = crate::SourceDelivery {
+        slot_delivery: None,
         slot: 0,
         target,
         event: SourceEvent::Lifecycle(crate::ActorLifecycle::Paused(
@@ -1133,5 +1135,498 @@ async fn cancellation_cleanup_refusal_rolls_back_claim_and_retirement_keeps_unce
     );
     drop(checkout);
     drop(behavior);
+    owner.finish().await;
+}
+
+#[tokio::test]
+async fn source_registration_slots_preserve_independent_callbacks_and_deferred_input() {
+    use crate::request::sources::tests::{receive, DirectoryFixture};
+    use crate::request::sources::{CallbackExecution, SourceBinding, SourceEvent};
+    use crate::resident_actor::source_slots::{
+        SourceDeliveryAdmission, SourceRegistrationFailure, SourceRegistrationState, SourceSlots,
+    };
+
+    // Both executable mappings come from this one actual compiled fixture;
+    // each installation retains its independently issued source scope.
+    let fixture = Fixture::compile_mode(true);
+    let (behavior, owner) = fixture.behavior().await;
+    let recipient_fixture = DirectoryFixture::start().await;
+    let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (recipient, address, task) = recipient_fixture.spawn(send, None).await;
+    let actor = recipient.identity();
+    let context_a = behavior.context(actor);
+    let session_b = SessionId(0xE211);
+    let (machine_b, source_b) = behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(async { fixture.machine(session_b) })
+        .await;
+    let context_b = ActorDescriptor::new(
+        "independent source callback",
+        crate::ActorPlacement {
+            session: session_b,
+            resource_scope: RealmId::ROOT,
+            lexical_scope: source_b.source_lease().unwrap().scope(),
+        },
+    )
+    .with_source_dependency(source_b)
+    .session_context(actor);
+    behavior
+        .environment
+        .runner
+        .machines_for_test()
+        .insert_idle(session_b, Box::new(machine_b));
+    let source_a = context_a.source_dependency().source_lease().unwrap();
+    let source_b = context_b.source_dependency().source_lease().unwrap();
+    let entry_a = Arc::new(
+        retain(
+            &behavior.environment.runner,
+            context_a.placement.session,
+            "replacementLifecycleMapper",
+        )
+        .await,
+    );
+    let entry_b = Arc::new(
+        retain(
+            &behavior.environment.runner,
+            session_b,
+            "replacementLifecycleMapper",
+        )
+        .await,
+    );
+    let weak_a = Arc::downgrade(&entry_a);
+    let weak_b = Arc::downgrade(&entry_b);
+    let target = crate::request::sources::SourceTarget::Lifecycle(actor);
+    let slots = SourceSlots::default();
+    slots.bind_owner(actor);
+    slots.install_connections(
+        behavior
+            .environment
+            .requests
+            .attach_sources(actor, recipient.clone(), &[])
+            .unwrap(),
+    );
+    for (entry, context) in [(entry_a, context_a.clone()), (entry_b, context_b.clone())] {
+        slots
+            .attach(
+                SourceBinding {
+                    target,
+                    entry,
+                    execution: CallbackExecution::from_context(context),
+                },
+                |connections, slot| {
+                    connections.attach_lifecycle(slot, &recipient);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    let initial_a = receive(&mut events).await;
+    let initial_b = receive(&mut events).await;
+    assert_eq!((initial_a.slot, initial_b.slot), (0, 1));
+    // Another real recipient owns a registration of the same B executable.
+    // Capturing its slot cannot keep it executable after its namespace drops.
+    let (drop_send, mut drop_events) = tokio::sync::mpsc::unbounded_channel();
+    let (drop_recipient, drop_address, drop_task) = recipient_fixture.spawn(drop_send, None).await;
+    let drop_slots = SourceSlots::default();
+    drop_slots.bind_owner(drop_recipient.identity());
+    drop_slots.install_connections(
+        behavior
+            .environment
+            .requests
+            .attach_sources(drop_recipient.identity(), drop_recipient.clone(), &[])
+            .unwrap(),
+    );
+    let attach_claim = context_b.source_dependency().claim().unwrap();
+    drop_slots
+        .attach(slots.binding(1).unwrap(), |connections, slot| {
+            connections.attach_lifecycle(slot, &recipient);
+            Ok(())
+        })
+        .unwrap();
+    drop(attach_claim);
+    let drop_initial = receive(&mut drop_events).await;
+    assert!(matches!(
+        drop_slots.admit_delivery(drop_initial),
+        SourceDeliveryAdmission::Admitted(_)
+    ));
+    let dropped_capture = drop_slots.capture_source(source_b.source_admission());
+    drop(drop_slots);
+    assert!(matches!(
+        dropped_capture[0].observation().state,
+        SourceRegistrationState::Closed { rejected: 0 }
+    ));
+    // A driver observation may straddle an already-admitted native replacement.
+    // It must not publish B's old fenced result into the independent A binding.
+    let (race_send, mut race_events) = tokio::sync::mpsc::unbounded_channel();
+    let (race_old, race_old_address, race_old_task) =
+        recipient_fixture.spawn(race_send, None).await;
+    let (race_new_send, mut race_new_events) = tokio::sync::mpsc::unbounded_channel();
+    let (race_new, race_new_address, race_new_task) = recipient_fixture
+        .spawn(race_new_send, Some(race_old.identity()))
+        .await;
+    let race_slots = SourceSlots::default();
+    race_slots.bind_owner(race_old.identity());
+    race_slots.install_connections(
+        behavior
+            .environment
+            .requests
+            .attach_sources(race_old.identity(), race_old.clone(), &[])
+            .unwrap(),
+    );
+    let attach_claim = context_b.source_dependency().claim().unwrap();
+    race_slots
+        .attach(slots.binding(1).unwrap(), |connections, slot| {
+            connections.attach_lifecycle(slot, &recipient);
+            Ok(())
+        })
+        .unwrap();
+    drop(attach_claim);
+    let race_initial = receive(&mut race_events).await;
+    let race_capture = race_slots.capture_source(source_b.source_admission());
+    let transfer_claims = race_slots.claim_sources().unwrap();
+    let new_claim = context_a.source_dependency().claim().unwrap();
+    let mut replacement_binding = slots.binding(0).unwrap();
+    let mut replacement_context = context_a.clone();
+    replacement_context.actor = race_new.identity();
+    replacement_binding.execution = replacement_binding
+        .execution
+        .transferred(replacement_context)
+        .unwrap();
+    let grant = recipient_fixture
+        .directory
+        .replacement_ingress_grant(race_old.identity(), race_new.identity())
+        .await
+        .unwrap();
+    race_old
+        .lifecycle()
+        .begin_replacement(grant.clone())
+        .await
+        .unwrap();
+    race_slots.handoff(grant).await.unwrap();
+    let replacement_slots = SourceSlots::default();
+    replacement_slots.bind_owner(race_new.identity());
+    let race_fence = source_b.source_admission().fence().unwrap();
+    assert!(matches!(
+        race_slots.admit_delivery(race_initial),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    let observation = race_capture[0].resume_deferred_after_source_observation(|| {
+        replacement_slots
+            .adopt_replacement(&race_slots, vec![Some(replacement_binding)])
+            .unwrap();
+    });
+    assert_eq!(
+        observation.dependency,
+        crate::resident_actor::source_slots::SourceRegistrationDependency::Independent
+    );
+    assert!(
+        matches!(
+            observation.state,
+            SourceRegistrationState::Open {
+                deferred: 1,
+                resume_failure: None
+            }
+        ),
+        "old fenced admission cannot overwrite the new binding's successful dispatch"
+    );
+    assert!(
+        matches!(
+            race_capture[0].close().state,
+            SourceRegistrationState::Open { .. }
+        ),
+        "the old B capture cannot close independent replacement A"
+    );
+    let raced = receive(&mut race_new_events).await;
+    let admitted = match replacement_slots.admit_delivery(raced) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("the original queued input follows the same slot to its admitted successor"),
+    };
+    behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.environment.runner.map_source(
+            admitted.binding.execution.activation_context(),
+            admitted.binding.entry.clone(),
+            admitted.delivery.event.clone(),
+        ))
+        .await
+        .unwrap();
+    drop(admitted);
+    assert!(race_new_events.try_recv().is_err());
+    assert!(race_events.try_recv().is_err());
+    drop(transfer_claims);
+    drop(new_claim);
+    assert_eq!(race_fence.pending_claims(), 0);
+    race_fence
+        .reopen_with(source_b.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    replacement_slots.clear();
+    let first = match slots.admit_delivery(initial_a.clone()) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("A admits before fence"),
+    };
+    let fence = source_a.source_admission().fence().unwrap();
+    assert_eq!(
+        fence.pending_claims(),
+        1,
+        "the real callback admission keeps its source claim through the body"
+    );
+    let captured_a = slots.capture_source(source_a.source_admission());
+    assert_eq!(captured_a.len(), 1);
+    assert_eq!(captured_a[0].observation().identity.actor, actor);
+    assert_eq!(captured_a[0].observation().identity.slot, 0);
+    drop(first);
+    assert_eq!(fence.pending_claims(), 0);
+    let independent = match slots.admit_delivery(initial_b) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("independent B stays admitted"),
+    };
+    drop(independent);
+    assert!(matches!(
+        slots.admit_delivery(initial_a.clone()),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    assert!(matches!(
+        captured_a[0].resume_deferred().state,
+        SourceRegistrationState::Open { deferred: 1, .. }
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "fenced input never reaches the mapper"
+    );
+    fence
+        .reopen_with(source_a.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    captured_a[0].resume_deferred();
+    let marked_first = receive(&mut events).await;
+    assert!(marked_first.slot_delivery.is_some());
+    let mut wrong_slot = marked_first.clone();
+    wrong_slot.slot = 1;
+    assert!(
+        matches!(
+            slots.admit_delivery(wrong_slot),
+            SourceDeliveryAdmission::Rejected(_)
+        ),
+        "the ordinal is authenticated to the actual issuing slot, not just a number"
+    );
+    // New mailbox input may arrive before the marked old head. It queues
+    // behind the exact old event instead of overtaking it.
+    let mut next = initial_a.clone();
+    next.event = SourceEvent::Lifecycle(crate::ActorLifecycle::Paused("newer input".into()));
+    assert!(matches!(
+        slots.admit_delivery(next),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    captured_a[0].resume_deferred();
+    assert!(
+        events.try_recv().is_err(),
+        "repeated resume does not resend the marked head"
+    );
+    let mut mapped = 0;
+    for delivery in [Some(marked_first.clone()), None] {
+        let delivery = match delivery {
+            Some(delivery) => delivery,
+            None => receive(&mut events).await,
+        };
+        let admitted = match slots.admit_delivery(delivery) {
+            SourceDeliveryAdmission::Admitted(delivery) => delivery,
+            _ => panic!("marked head admits once"),
+        };
+        behavior
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(behavior.environment.runner.map_source(
+                admitted.binding.execution.activation_context(),
+                admitted.binding.entry.clone(),
+                admitted.delivery.event.clone(),
+            ))
+            .await
+            .unwrap();
+        mapped += 1;
+        drop(admitted);
+    }
+    assert_eq!(mapped, 2, "each accepted original is mapped exactly once");
+    assert!(matches!(
+        slots.admit_delivery(marked_first),
+        SourceDeliveryAdmission::Rejected(_)
+    ));
+    assert!(events.try_recv().is_err());
+    assert!(matches!(
+        captured_a[0].observation().state,
+        SourceRegistrationState::Open {
+            deferred: 0,
+            resume_failure: None
+        }
+    ));
+    let race_fence = source_a.source_admission().fence().unwrap();
+    assert!(matches!(
+        slots.admit_delivery_after_source_observation(initial_a.clone(), || {
+            race_fence
+                .reopen_with(source_a.original_source(), |reopen| {
+                    reopen.commit();
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+                .unwrap();
+        }),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    // No driver resume runs after queue insertion in this interleaving. The
+    // owning post-store gate check must redispatch the same original itself.
+    let race_marked = receive(&mut events).await;
+    let admitted = match slots.admit_delivery(race_marked) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("reopen race retains its original input"),
+    };
+    behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.environment.runner.map_source(
+            admitted.binding.execution.activation_context(),
+            admitted.binding.entry.clone(),
+            admitted.delivery.event.clone(),
+        ))
+        .await
+        .unwrap();
+    mapped += 1;
+    drop(admitted);
+    assert_eq!(mapped, 3);
+
+    let fence = source_a.source_admission().fence().unwrap();
+    assert!(matches!(
+        slots.admit_delivery(initial_a.clone()),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    fence
+        .reopen_with(source_a.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    captured_a[0].resume_deferred();
+    let closing_marked = receive(&mut events).await;
+    let fence = source_a.source_admission().fence().unwrap();
+    let closing = slots.capture_source(source_a.source_admission());
+    assert!(matches!(
+        closing[0].close().state,
+        SourceRegistrationState::Closed { rejected: 1 }
+    ));
+    assert!(matches!(
+        slots.admit_delivery(closing_marked),
+        SourceDeliveryAdmission::Closed(_)
+    ));
+    assert!(
+        matches!(
+            closing[0].observation().state,
+            SourceRegistrationState::Closed { rejected: 1 }
+        ),
+        "late marked input was already settled by close and is not counted twice"
+    );
+    assert!(
+        weak_a.upgrade().is_none(),
+        "closing the actual slot releases A executable custody"
+    );
+    assert!(
+        weak_b.upgrade().is_some(),
+        "B executable custody remains with B's slot"
+    );
+    assert!(matches!(
+        slots.admit_delivery(initial_a),
+        SourceDeliveryAdmission::Closed(_)
+    ));
+    assert!(matches!(
+        captured_a[0].observation().state,
+        SourceRegistrationState::Closed { rejected: 2 }
+    ));
+    assert_eq!(slots.len(), 2, "closed ordinal remains a tombstone");
+    assert!(slots.capture_source(source_a.source_admission()).is_empty());
+    assert_eq!(slots.capture_source(source_b.source_admission()).len(), 1);
+    recipient
+        .terminal()
+        .publish_paused("independent callback still connected".into());
+    let independent = receive(&mut events).await;
+    assert_eq!(
+        independent.slot, 1,
+        "only A's native subscription was detached"
+    );
+    assert!(events.try_recv().is_err());
+    assert!(recipient.terminal().requested_shutdown().is_none());
+    // Retirement is a permanent producer refusal, distinct from temporary
+    // fencing. The same real owner retains the original without retrying it.
+    source_b
+        .source_admission()
+        .fence()
+        .unwrap()
+        .retire(tidepool_runtime::session::NotebookGenerationId::INITIAL)
+        .unwrap();
+    let refused_b = slots.capture_source(source_b.source_admission());
+    assert!(matches!(
+        slots.admit_delivery(independent.clone()),
+        SourceDeliveryAdmission::Refused(
+            _,
+            crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                phase: tidepool_runtime::session::SourceAdmissionPhase::Retired { .. },
+                ..
+            }
+        )
+    ));
+    for _ in 0..2 {
+        assert!(matches!(refused_b[0].resume_deferred().state,
+            SourceRegistrationState::Open { deferred: 1, resume_failure: Some(SourceRegistrationFailure::Admission(
+                crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Retired { .. }, ..
+                }
+            )) }));
+        assert!(
+            events.try_recv().is_err(),
+            "retired source input is not automatically retried"
+        );
+    }
+    assert!(matches!(
+        slots.admit_delivery(independent),
+        SourceDeliveryAdmission::Refused(_, _)
+    ));
+    assert!(matches!(
+        refused_b[0].observation().state,
+        SourceRegistrationState::Open { deferred: 2, .. }
+    ));
+    slots.clear();
+    assert!(matches!(
+        refused_b[0].observation().state,
+        SourceRegistrationState::Closed { rejected: 2 }
+    ));
+    assert!(
+        weak_b.upgrade().is_none(),
+        "terminal clear releases B even while its capture is retained"
+    );
+    assert!(recipient.terminal().requested_shutdown().is_none());
+    fence
+        .reopen_with(source_a.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    drop(slots);
+    drop(captured_a);
+    drop(behavior);
+    address.stop(None);
+    drop_address.stop(None);
+    race_old_address.stop(None);
+    race_new_address.stop(None);
+    task.await.unwrap();
+    drop_task.await.unwrap();
+    race_old_task.await.unwrap();
+    race_new_task.await.unwrap();
     owner.finish().await;
 }

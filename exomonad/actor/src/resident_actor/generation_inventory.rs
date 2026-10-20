@@ -16,6 +16,7 @@ pub(crate) struct GenerationWorkObservations {
     pub(crate) actors: Vec<ActorRef>,
     pub(crate) invocations: Vec<invocation_work::GenerationInvocationObservation>,
     pub(crate) routes: Vec<GenerationRouteObservation>,
+    pub(crate) source_registrations: Vec<source_slots::CapturedSourceRegistration>,
 }
 
 impl ResidentGenerationInventory {
@@ -26,13 +27,21 @@ impl ResidentGenerationInventory {
             .actors
             .lock()
             .iter()
-            .map(|(actor, record)| (*actor, record.workbench_executions.clone()))
+            .map(|(actor, record)| {
+                (
+                    *actor,
+                    record.workbench_executions.clone(),
+                    record.source_slots.clone(),
+                )
+            })
             .collect();
         // Retention publication locks work state before actor records. Release
         // the record guard before entering any ledger or invocation owner.
-        let actors = ledgers.iter().map(|(actor, _)| *actor).collect();
+        let actors = ledgers.iter().map(|(actor, _, _)| *actor).collect();
         let mut invocations = Vec::new();
-        for (_, ledger) in ledgers {
+        let mut source_registrations = Vec::new();
+        for (_, ledger, source_slots) in ledgers {
+            source_registrations.extend(source_slots.capture(dependency));
             invocations.extend(
                 ledger
                     .lock()
@@ -44,6 +53,7 @@ impl ResidentGenerationInventory {
             actors,
             invocations,
             routes,
+            source_registrations,
         }
     }
 }
@@ -77,6 +87,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
             lifecycle: fixture.kernel.lifecycle().clone(),
             fresh_context_seed: None,
             workbench_executions: journal.clone(),
+            source_slots: source_slots::SourceSlots::default(),
             interactive_policy_installed: false,
             descriptor: crate::ActorDescriptor::new(
                 "inventory owner",
