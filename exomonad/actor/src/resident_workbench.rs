@@ -20937,6 +20937,7 @@ pub(crate) mod request_tests {
         ReplacementOwnerLoss,
         BootstrapCheckoutRetired,
         ReplacementCheckoutRetired,
+        ReplacementFrozenSource,
     }
 
     impl PublicationFailureControl {
@@ -21040,7 +21041,44 @@ pub(crate) mod request_tests {
             | PublicationFailureControl::ReplacementCheckoutRetired => {
                 assert_real_publisher_checkout_loss(workbench, state, prepared).await;
             }
+            PublicationFailureControl::ReplacementFrozenSource => {
+                let source = prepared.candidate.installation.source();
+                let captured = source.capture_compiler_sources().unwrap().unwrap();
+                let candidate = ActorGenerationCandidateCustody(prepared.candidate.clone());
+                let world = prepared.candidate.compiler_world.clone();
+                let logical = *world.world().logical_id();
+                let draft = source
+                    .include_paths()
+                    .last()
+                    .unwrap()
+                    .join("QuotedAgentSpec.hs");
+                let frozen_body = std::fs::read(&draft).unwrap();
+                assert!(!frozen_body.is_empty());
+                let mut newer_body = frozen_body.clone();
+                newer_body.extend_from_slice(b"\n-- later editable draft C\n");
+                std::fs::write(&draft, &newer_body).unwrap();
+                assert_ne!(std::fs::read(&draft).unwrap(), frozen_body);
+                assert!(Arc::ptr_eq(
+                    &captured,
+                    &source.capture_compiler_sources().unwrap().unwrap()
+                ));
+                assert!(candidate
+                    .same_candidate(&ActorGenerationCandidateCustody(prepared.candidate.clone())));
+                assert!(Arc::ptr_eq(&world, &prepared.candidate.compiler_world));
+                assert_eq!(world.world().logical_id(), &logical);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_candidate_world_retains_captured_source_after_later_draft() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client,
+                Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::ReplacementFrozenSource),
+            ).await;
+        }).await;
     }
 
     #[tokio::test]
@@ -21192,6 +21230,7 @@ pub(crate) mod request_tests {
             identities: Vec<String>,
             evidence: crate::SourceGenerationEvidence,
             entries: crate::SourceEntryStorage,
+            compiler_sources: Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
         }
         impl crate::RetainedSourceLayer for GenerationSource {
             fn identities(&self) -> &[String] {
@@ -21209,12 +21248,40 @@ pub(crate) mod request_tests {
             fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
                 Some(&self.evidence)
             }
+            fn capture_compiler_sources(
+                &self,
+            ) -> Result<
+                Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+                crate::SourceInspectionError,
+            > {
+                Ok(Some(self.compiler_sources.clone()))
+            }
         }
         let source_reference = tidepool_runtime::session::GenerationArtifactReference::capture(
             std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
         );
         let entry_storage = Arc::new(tempfile::tempdir().unwrap());
         let source_issuer = crate::SourceLayerIssuer::default();
+        let (_, compiler_source_owner) = world_query_test_source_files_with_support(&[], &roots);
+        assert_eq!(compiler_source_owner.roots.len(), roots.len());
+        let quoted_root = compiler_source_owner.roots.last().unwrap();
+        assert_eq!(
+            quoted_root
+                .bodies
+                .get(std::path::Path::new("QuotedAgentSpec.hs"))
+                .unwrap()
+                .as_ref(),
+            std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
+            "the actual quoted module body contributes to the captured source domain"
+        );
+        let compiler_sources = Arc::new(
+            tidepool_toolchain::compiler_world::CapturedCompilerSources::from_captured_roots(
+                compiler_source_owner.roots.clone(),
+                Arc::from(source_reference.bytes()),
+                compiler_source_owner,
+            )
+            .unwrap(),
+        );
         let generation_source = source_issuer.issue(Arc::new(GenerationSource {
             _owner: authored.clone(),
             _entries: entry_storage.clone(),
@@ -21228,6 +21295,7 @@ pub(crate) mod request_tests {
                 reference: source_reference.clone(),
                 configuration_digest: [0; 32],
             },
+            compiler_sources,
         }));
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
