@@ -1753,6 +1753,7 @@ tidepool_buildscript_run(
                 ]))
                 retirement_tests = [
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
                 ]
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
@@ -1760,7 +1761,7 @@ tidepool_buildscript_run(
                     f"    binary = {json.dumps(':' + unit_target['name'])},",
                     "    exact_tests = [", render_strings(retirement_tests, 8), "    ],",
                     f"    expected_count = {len(retirement_tests)},", "    ignored = True,",
-                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    "    jobs = 1,", "    timeout = 600,", f"    test_rule_timeout_ms = {(len(retirement_tests) * 600 + 60) * 1000},",
                     '    case_compiler_modes = {' + ", ".join(
                         json.dumps(test) + ': "owned-resident"' for test in retirement_tests
                     ) + "},",

@@ -25,6 +25,7 @@ impl RunControlClient {
         expected: Arc<ActorGeneration>,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
         control: GenerationRetirementNativeControl,
+        disposed: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) {
         let actor = preparation.actor();
         let candidate = preparation.candidate_custody();
@@ -70,6 +71,7 @@ impl RunControlClient {
             } else if matches!(
                 control,
                 GenerationRetirementNativeControl::KillAfterReserve
+                    | GenerationRetirementNativeControl::KillAfterReserveDisposalPanic
                     | GenerationRetirementNativeControl::LostWaiterAfterReserve
             ) {
                 let (entered, paused) = oneshot::channel();
@@ -118,13 +120,33 @@ impl RunControlClient {
         if control != GenerationRetirementNativeControl::PanicAfterReserve {
             self.owner.get_cell().kill();
         }
-        tokio::time::timeout(Duration::from_secs(10), owner_task)
+        if let Some(disposed) = &disposed {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !disposed.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .unwrap()
             .unwrap();
+            let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get()
+            else {
+                panic!("actual products must be retained before publisher disposal");
+            };
+            assert_eq!(attempts.len(), 1);
+            assert!(candidate.same_candidate(&attempts[0].candidate));
+            assert!(Arc::ptr_eq(&attempts[0].expected, &expected));
+        }
+        let joined = tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap();
+        if control == GenerationRetirementNativeControl::KillAfterReserveDisposalPanic {
+            assert!(joined.unwrap_err().is_panic());
+        } else {
+            joined.unwrap();
+        }
         drop(pause_release);
         drop(waiter);
-        let Some(RunControlNativeExit::OwnerLost { attempts }) = retained.terminal.get() else {
+        let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get() else {
             panic!("lost native owner must retain its terminal product")
         };
         if before_reserve {

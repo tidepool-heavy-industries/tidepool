@@ -2489,19 +2489,24 @@ mod tests {
         assert!(Arc::ptr_eq(&observed, expected.public_owner()));
         assert_eq!(kernel.lifecycle().identity(), identity);
         let publication = tidepool_runtime::session::PublicationDecision::new();
-        let preparation = workbench
-            .generation_publisher(
-                state.clone(),
-                super::super::ActorPublicationOwner::Actor(kernel.lifecycle().clone()),
-            )
-            .into_retirement_preparation(
-                prepared,
-                publication.clone(),
-                super::super::ActorGenerationPublication::Terminal,
-                runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
-                    kernel.retained_exit(),
-                )),
-            );
+        let mut publisher = workbench.generation_publisher(
+            state.clone(),
+            super::super::ActorPublicationOwner::Actor(kernel.lifecycle().clone()),
+        );
+        let disposed = (control
+            == crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserveDisposalPanic)
+            .then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        if let Some(disposed) = &disposed {
+            publisher = publisher.with_disposal_probe(disposed.clone());
+        }
+        let preparation = publisher.into_retirement_preparation(
+            prepared,
+            publication.clone(),
+            super::super::ActorGenerationPublication::Terminal,
+            runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
+                kernel.retained_exit(),
+            )),
+        );
         assert_eq!(preparation.actor(), actor.identity());
         assert!(Arc::ptr_eq(
             preparation.expected_generation().unwrap(),
@@ -2516,6 +2521,7 @@ mod tests {
                 expected,
                 publication,
                 control,
+                disposed,
             )
             .await;
         assert!(actor.terminal().get().is_none());
@@ -2537,6 +2543,13 @@ mod tests {
             Err(error @ ractor::SpawnErr::StartupFailed(_)) => error,
             _ => panic!("startup cannot attach its lifecycle after the real run owner is lost"),
         };
+        let ractor::SpawnErr::StartupFailed(ref failure) = error else {
+            unreachable!()
+        };
+        assert!(matches!(
+            failure.source().and_then(|cause| cause.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+            Some(crate::local_actor::StartupFailureCause::Lifecycle(crate::KernelCallFailure::TargetUnavailable(actor))) if *actor == identity
+        ));
         let cleanup = crate::local_actor::startup_cleanup(&error)
             .expect("the real refused startup retains its cleanup observation");
         assert_eq!(cleanup.actor, identity);

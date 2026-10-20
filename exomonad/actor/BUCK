@@ -686,13 +686,14 @@ tidepool_rust_test_cases(
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [
         "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
+        "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
     ],
-    expected_count = 1,
+    expected_count = 2,
     ignored = True,
     jobs = 1,
     timeout = 600,
-    test_rule_timeout_ms = 660000,
-    case_compiler_modes = {"resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate": "owned-resident"},
+    test_rule_timeout_ms = 1260000,
+    case_compiler_modes = {"resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate": "owned-resident", "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },

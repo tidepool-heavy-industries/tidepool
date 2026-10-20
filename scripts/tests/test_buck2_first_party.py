@@ -1059,8 +1059,9 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(retirement['binary'], group['binary'])
         self.assertEqual(retirement['exact_tests'], [
             'resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate',
+            'resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic',
         ])
-        self.assertEqual(retirement['expected_count'], 1)
+        self.assertEqual(retirement['expected_count'], 2)
         self.assertTrue(retirement['ignored'])
         self.assertEqual(retirement['case_compiler_modes'], {
             name: 'owned-resident' for name in retirement['exact_tests']

@@ -2050,6 +2050,22 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     owner: ActorPublicationOwner,
     #[cfg(test)]
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
+    #[cfg(test)]
+    disposal_probe: Option<PublicationDisposalProbe>,
+}
+
+#[cfg(test)]
+struct PublicationDisposalProbe {
+    disposed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl Drop for PublicationDisposalProbe {
+    fn drop(&mut self) {
+        self.disposed
+            .store(true, std::sync::atomic::Ordering::Release);
+        panic!("controlled publication disposer panic");
+    }
 }
 
 type GenerationPublicationAction = Box<
@@ -2792,6 +2808,13 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    #[cfg(test)]
+    fn with_disposal_probe(mut self, disposed: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        assert!(self.disposal_probe.is_none());
+        self.disposal_probe = Some(PublicationDisposalProbe { disposed });
+        self
+    }
+
     pub(crate) fn into_retirement_preparation(
         self,
         prepared: PreparedActorGeneration,
@@ -3849,6 +3872,8 @@ where
             owner,
             #[cfg(test)]
             settlement_probe: None,
+            #[cfg(test)]
+            disposal_probe: None,
         }
     }
 }
@@ -21322,6 +21347,19 @@ pub(crate) mod request_tests {
                 client, Some(crate::ActorPersistencePolicy::Ephemeral),
                 Some(PublicationFailureControl::RetirementNativeOwnerLoss(
                     crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserve,
+                )),
+            ).await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserveDisposalPanic,
                 )),
             ).await;
         }).await;

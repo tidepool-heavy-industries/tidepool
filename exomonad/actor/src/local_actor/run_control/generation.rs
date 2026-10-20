@@ -1317,6 +1317,7 @@ pub(crate) enum GenerationRetirementNativeControl {
     BeforeSend,
     QueuedBeforeReceive,
     KillAfterReserve,
+    KillAfterReserveDisposalPanic,
     PanicAfterReserve,
     LostWaiterAfterReserve,
     AfterCapture,
