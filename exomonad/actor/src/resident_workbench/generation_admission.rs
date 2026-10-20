@@ -653,7 +653,15 @@ impl GenerationFence {
     }
     #[cfg(test)]
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
-        self.fence.reopen()
+        let lease = self.dependency.runtime_lease();
+        self.fence
+            .reopen_with(lease, |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .map(|settled| {
+                settled.expect("an unconditional commit settles the fence");
+            })
     }
     pub(crate) fn retire(
         self,

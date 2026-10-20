@@ -366,8 +366,22 @@ impl RuntimeSourceFence {
             settled.await;
         }
     }
-    pub fn reopen(self) -> Result<(), SourceAdmissionError> {
-        self.settle(SourceAdmissionPhase::Open)
+    /// Test-only convenience for an unconditional reopen under the issuing
+    /// lease. Production reopening must present its publication compare through
+    /// [`Self::reopen_with`]; this wrapper exists so tests can settle without a
+    /// compare while still running the canonical custody checks.
+    #[cfg(test)]
+    pub fn reopen(
+        self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<(), SourceAdmissionError> {
+        self.reopen_with(lease, |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .map(|settled| {
+            settled.expect("an unconditional commit settles the fence");
+        })
     }
     /// Validate exact canonical custody before taking this own gate. The
     /// callback may hold its actual publication compare guard through commit.
@@ -477,7 +491,7 @@ mod tests {
             child.admit_source(),
             Err(SourceAdmissionError::Closed { .. })
         ));
-        parent_fence.reopen().unwrap();
+        parent_fence.reopen(&parent).unwrap();
         child.admit_source().unwrap();
     }
 
@@ -541,6 +555,26 @@ mod tests {
             Err(SourceAdmissionError::StaleSourceLease)
         ));
         assert!(!called.get());
+    }
+
+    #[test]
+    fn unconditional_reopen_requires_same_owner_and_live_issuer() {
+        let mut session = PersistentSession::new(None, 1024);
+        let first = session.mint_notebook_scope_with_lease(None).unwrap();
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        let fence = first.source_admission().fence().unwrap();
+        assert!(matches!(
+            fence.reopen(&other),
+            Err(SourceAdmissionError::StaleFence)
+        ));
+        assert!(first.source_admission().admit().is_err());
+        let fence = other.source_admission().fence().unwrap();
+        drop(session);
+        assert!(matches!(
+            fence.reopen(&other),
+            Err(SourceAdmissionError::StaleSourceLease)
+        ));
+        assert!(other.source_admission().admit().is_err());
     }
 
     #[test]
@@ -641,7 +675,7 @@ mod tests {
         assert!(session.resolve_in(scope.scope(), "late").is_none());
         assert_eq!(session.value_handle_count() + 1, before_handles);
         assert!(session.scope_tree().is_live(scope.scope()));
-        fence.reopen().unwrap();
+        fence.reopen(&scope).unwrap();
         scope.source_admission().admit().unwrap();
     }
 
@@ -659,7 +693,7 @@ mod tests {
             Err(SourceAdmissionError::Unconfirmed { count: 1, .. })
         ));
         assert!(matches!(
-            fence.reopen(),
+            fence.reopen(&scope),
             Err(SourceAdmissionError::Unconfirmed { .. })
         ));
         assert!(scope.source_admission().with_open_admission(|| ()).is_err());
@@ -696,6 +730,7 @@ mod tests {
             let parent = session.mint_isolated_scope_with_lease().unwrap();
             let child = session.mint_notebook_scope_with_lease(Some(parent.clone())).unwrap();
             let gates = [parent.source_admission(), child.source_admission()];
+            let leases = [&parent, &child];
             let mut phases = [0_u8; 2]; // independent model: open/fenced/retired
             let mut fences: [Option<RuntimeSourceFence>; 2] = [None, None];
             let mut claims: Vec<Option<(usize, RuntimeSourceClaim)>> = (0..8).map(|_| None).collect();
@@ -720,7 +755,7 @@ mod tests {
                         if let Ok(fence) = result { phases[gate] = 1; fences[gate] = Some(fence); }
                     }
                     2 => if let Some(fence) = fences[gate].take() {
-                        let result = fence.reopen();
+                        let result = fence.reopen(leases[gate]);
                         prop_assert_eq!(result.is_ok(), uncertainty[gate] == 0);
                         if result.is_ok() { phases[gate] = 0; }
                     },
