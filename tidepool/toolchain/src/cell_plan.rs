@@ -1103,6 +1103,19 @@ mod tests {
     }
 
     #[test]
+    fn world_parser_receipt_binds_the_exact_optional_operand_descriptor() {
+        let (recipe, world, producer, mut receipt) = world_plan_fixture();
+        let expected = [37; 32];
+        receipt.as_array_mut().unwrap()[8] = Value::Bytes(expected.to_vec());
+        let bytes = encoded(&receipt);
+        assert!(admit_world_parser_receipt(&world, &recipe, producer, Some(expected), &bytes).is_ok());
+        assert!(admit_world_parser_receipt(&world, &recipe, producer, None, &bytes).is_err());
+        assert!(admit_world_parser_receipt(&world, &recipe, producer, Some([38;32]), &bytes).is_err());
+        receipt.as_array_mut().unwrap()[8] = Value::Null;
+        assert!(admit_world_parser_receipt(&world, &recipe, producer, Some(expected), &encoded(&receipt)).is_err());
+    }
+
+    #[test]
     fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
         let (recipe, world, producer, receipt) = world_plan_fixture();
         let (_, _, legacy) = fixture();
