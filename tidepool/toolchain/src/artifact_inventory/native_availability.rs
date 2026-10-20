@@ -38,6 +38,21 @@ impl<'a> NativeDependencyCatalog<'a> {
         }
     }
 
+    pub(super) fn original_namespace_pair(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<Option<(ArtifactBinding, ArtifactBinding)>, CompileError> {
+        match &self.0 {
+            DependencyGrantSource::Request(inputs) => inputs.original_namespace_pair(owner),
+            DependencyGrantSource::Source(source) => {
+                Ok(source.world_primary_type_row(owner).and_then(|row| {
+                    row.original_binding
+                        .map(|original| (*original, *row.interface_binding))
+                }))
+            }
+        }
+    }
+
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
         let projection = match &self.0 {
             DependencyGrantSource::Source(source) => source.projection(),
@@ -1061,7 +1076,6 @@ pub(super) fn bind_fresh_product_dependencies(
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     fresh: &BTreeSet<NativeGroupKey>,
     catalog: &NativeDependencyCatalog<'_>,
-    required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     let mut acquisition = CertifiedNativeDemandAcquisition {
         entries: BTreeMap::new(),
@@ -1118,16 +1132,15 @@ pub(super) fn bind_fresh_product_dependencies(
         };
         acquisition.bindings.insert(group, resolved);
     }
-    acquisition.retain_dependency_groups(entries, consumed_namespace, required)?;
+    acquisition.validate_dependency_namespace(entries, consumed_namespace)?;
     Ok(acquisition)
 }
 
 impl CertifiedNativeDemandAcquisition {
-    fn retain_dependency_groups(
+    fn validate_dependency_namespace(
         &self,
         entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-        required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
     ) -> Result<(), CompileError> {
         for binding in self.bindings.values() {
             let closures = match binding {
@@ -1152,13 +1165,6 @@ impl CertifiedNativeDemandAcquisition {
                     .or_else(|| entries.get(&group.binding.artifact()))
                     .ok_or_else(|| failure("acquired native dependency payload missing"))?;
                 validate_consumed_native_namespace(entry, consumed_namespace)?;
-                required
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(*group);
             }
         }
         Ok(())
@@ -3736,17 +3742,9 @@ mod normalized_dependency_tests {
             let before_consume = state.graph_visits.load(Ordering::Relaxed);
             let namespace = BTreeMap::new();
             for _ in 0..4 {
-                let mut required = BTreeMap::new();
                 acquired
-                    .retain_dependency_groups(&entries, &namespace, &mut required)
+                    .validate_dependency_namespace(&entries, &namespace)
                     .unwrap();
-                assert_eq!(
-                    required[&NativeGroupKey {
-                        artifact: hidden_id,
-                        original_ordinal: 7
-                    }],
-                    [expected_hidden].into_iter().collect::<imbl::OrdSet<_>>()
-                );
             }
             assert_eq!(state.graph_visits.load(Ordering::Relaxed), before_consume);
             drop(state);
