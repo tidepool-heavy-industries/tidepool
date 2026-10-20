@@ -322,9 +322,76 @@ thread_local! {
     };
 }
 
+/// A source cause follows the selected root or exact parent edge. It is not
+/// graph identity, and available alternatives cannot contribute to this owner.
+#[derive(Clone, Debug)]
+enum NativeSourceCause {
+    Current,
+    Historical(compiler_projection::SelectedNativeSupport),
+}
+
+impl NativeSourceCause {
+    fn missing() -> Self {
+        Self::Historical(compiler_projection::SelectedNativeSupport::missing())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum NativeSourceUse {
+    Root(NativeGroupBinding),
+    Edge {
+        parent: NativeGroupBinding,
+        child: NativeGroupBinding,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct NativeSourceReceipts(imbl::OrdMap<NativeSourceUse, Arc<[NativeSourceCause]>>);
+
+impl NativeSourceReceipts {
+    fn insert(&mut self, key: NativeSourceUse, cause: NativeSourceCause) -> bool {
+        let Some(held) = self.0.get(&key) else {
+            self.0.insert(key, Arc::from([cause]));
+            return true;
+        };
+        let mut held = held.to_vec();
+        match cause {
+            NativeSourceCause::Current => {
+                if held
+                    .iter()
+                    .any(|cause| matches!(cause, NativeSourceCause::Current))
+                {
+                    return false;
+                }
+                held.push(NativeSourceCause::Current);
+            }
+            NativeSourceCause::Historical(incoming) => {
+                if let Some(NativeSourceCause::Historical(prior)) = held
+                    .iter_mut()
+                    .find(|cause| matches!(cause, NativeSourceCause::Historical(_)))
+                {
+                    if !prior.merge(&incoming) {
+                        return false;
+                    }
+                } else {
+                    held.push(NativeSourceCause::Historical(incoming));
+                }
+            }
+        }
+        self.0.insert(key, held.into());
+        true
+    }
+}
+
+struct NativeSourceTraversal<'a> {
+    issued: &'a NativeSourceReceipts,
+    selected: NativeSourceReceipts,
+}
+
 /// Exact executable roots remain private to their solver-issued view.
 #[derive(Clone, Debug)]
 struct IssuedTargetNativeSelection {
+    sources: NativeSourceReceipts,
     roots: Arc<[NativeGroupBinding]>,
 }
 
@@ -345,19 +412,31 @@ impl AdmittedTargetArtifacts {
         &self,
         imports: Vec<crate::certified_products::PendingImportOwner>,
     ) -> Result<TargetNativeInputs, CompileError> {
-        let ids = self.selection.roots.iter().map(|group| group.binding.artifact())
+        let ids = self
+            .selection
+            .roots
+            .iter()
+            .map(|group| group.binding.artifact())
             .collect::<BTreeSet<_>>();
-        let entries = ids.iter()
+        let entries = ids
+            .iter()
             .map(|id| Arc::clone(&self.artifacts.lease.payloads[id]))
             .collect::<Vec<_>>();
         let expected = certified_target_source_groups(&entries, &imports)?;
         let mut admitted = self.clone();
-        admitted.selection.roots = self.selection.roots.iter().copied()
-            .filter(|group| expected.contains(&NativeGroupKey {
-                artifact: group.binding.artifact(),
-                original_ordinal: group.original_ordinal,
-            }))
-            .collect::<Vec<_>>().into();
+        admitted.selection.roots = self
+            .selection
+            .roots
+            .iter()
+            .copied()
+            .filter(|group| {
+                expected.contains(&NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into();
         if admitted.selection.roots.len() != expected.len() {
             return Err(failure("ordinary target exceeds its admitted native roots"));
         }
@@ -467,12 +546,17 @@ impl TargetNativeInputs {
                 })
                 .expect("validated target contains its one typed entry")
         });
+        let mut source_traversal = NativeSourceTraversal {
+            issued: &self.admitted.selection.sources,
+            selected: NativeSourceReceipts::default(),
+        };
         let groups = native_groups_in_custody(
             &state,
             &view.lease.payloads,
             owned,
             self.admitted.selection.roots.to_vec(),
             None,
+            Some(&mut source_traversal),
         )?;
         #[cfg(test)]
         NATIVE_TARGET_RESOLUTION_WORK.with(|work| {
@@ -481,6 +565,7 @@ impl TargetNativeInputs {
         });
         Ok(ResolvedNativeTarget {
             owner: self,
+            sources: source_traversal.selected,
             groups,
             entry_binding,
         })
@@ -490,11 +575,23 @@ impl TargetNativeInputs {
 /// Operation-local resolution borrows the one final target owner.
 pub(crate) struct ResolvedNativeTarget<'a> {
     owner: &'a TargetNativeInputs,
+    sources: NativeSourceReceipts,
     groups: BTreeSet<NativeGroupBinding>,
     entry_binding: Option<NativeGroupBinding>,
 }
 
 impl ResolvedNativeTarget<'_> {
+    pub(crate) fn has_only_current_source(&self, group: NativeGroupBinding) -> bool {
+        self.sources
+            .0
+            .get(&NativeSourceUse::Root(group))
+            .is_some_and(|causes| {
+                !causes.is_empty()
+                    && causes
+                        .iter()
+                        .all(|cause| matches!(cause, NativeSourceCause::Current))
+            })
+    }
     pub(crate) fn groups(&self) -> &BTreeSet<NativeGroupBinding> {
         &self.groups
     }
@@ -878,7 +975,7 @@ impl NativeOriginalRequirement {
             .iter()
             .map(|ordinal| index.resolve(carrier, *ordinal))
             .collect::<Result<Vec<_>, _>>()?;
-        let groups = native_groups_in_custody(state, &lease.payloads, &nodes, roots, None)?;
+        let groups = native_groups_in_custody(state, &lease.payloads, &nodes, roots, None, None)?;
         Ok(Some(QualifiedNativeAvailability {
             original: self.original,
             carrier,
@@ -3156,6 +3253,7 @@ pub(crate) struct BoundArtifactSelection {
     materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     groups: BTreeMap<NativeGroupKey, NativeGroupBinding>,
     native_source: crate::certified_products::CertifiedSourceSelection,
+    source_receipts: NativeSourceReceipts,
 }
 
 /// Both native planners preserve an already-issued exact target separately
@@ -3196,7 +3294,8 @@ impl From<LogicalNodeKey> for PlannedTarget {
 impl From<native_availability::NativeGroupTarget> for PlannedTarget {
     fn from(target: native_availability::NativeGroupTarget) -> Self {
         match target {
-            native_availability::NativeGroupTarget::ExactGroup(issued) => {
+            native_availability::NativeGroupTarget::ExactGroup(issued)
+            | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
                 Self::ExactGroup(issued.binding())
             }
             native_availability::NativeGroupTarget::NewGroup(group) => Self::NewGroup(group),
@@ -3474,6 +3573,7 @@ impl ArtifactInventory {
             materializations,
             groups: BTreeMap::new(),
             native_source: selection.clone(),
+            source_receipts: NativeSourceReceipts::default(),
         })
     }
 
@@ -3611,6 +3711,9 @@ impl ArtifactInventory {
         }
         let cursor_projection = cursor.read_projection(&state);
         let cursor_nodes = &cursor_projection.nodes;
+        let mut source_receipts = fixed.source_receipts.clone();
+        let mut root_causes = BTreeMap::new();
+        let mut edge_causes = Vec::new();
         let mut planned =
             BTreeMap::<NativeGroupKey, BTreeSet<(PlannedTarget, ArtifactDependency)>>::new();
         let mut pending = demanded.iter().copied().collect::<Vec<_>>();
@@ -3655,6 +3758,14 @@ impl ArtifactInventory {
                     .get(&group)
                     .and_then(|verified| verified.binding())
             }) {
+                if let Some(verified) = bound_inputs.get(&group) {
+                    root_causes.insert(group, verified.source_cause());
+                } else if !source_receipts
+                    .0
+                    .contains_key(&NativeSourceUse::Root(binding))
+                {
+                    root_causes.insert(group, NativeSourceCause::missing());
+                }
                 resolved_groups.insert(group, binding);
                 reused.insert(group);
                 continue;
@@ -3670,6 +3781,7 @@ impl ArtifactInventory {
                     },
                 ));
             };
+            root_causes.insert(group, NativeSourceCause::Current);
             let mut by_edge = dependencies
                 .iter()
                 .map(|dependency| (dependency.key(), dependency.target().clone()))
@@ -3697,8 +3809,14 @@ impl ArtifactInventory {
                             },
                         )
                     })?;
+                    edge_causes.push((
+                        group,
+                        PlannedTarget::from(target.clone()),
+                        target.source_cause(),
+                    ));
                     let (id, ordinal) = match target {
-                        native_availability::NativeGroupTarget::ExactGroup(ref issued) => {
+                        native_availability::NativeGroupTarget::ExactGroup(ref issued)
+                        | native_availability::NativeGroupTarget::CurrentIssued(ref issued) => {
                             let child = issued.binding();
                             (child.binding.artifact(), child.original_ordinal)
                         }
@@ -3722,7 +3840,8 @@ impl ArtifactInventory {
                         ));
                     }
                     match target {
-                        native_availability::NativeGroupTarget::ExactGroup(issued) => {
+                        native_availability::NativeGroupTarget::ExactGroup(issued)
+                        | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
                             PlannedTarget::ExactGroup(issued.binding())
                         }
                         native_availability::NativeGroupTarget::NewGroup(child) => {
@@ -3793,10 +3912,28 @@ impl ArtifactInventory {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        for (group, cause) in root_causes {
+            let InventoryNodeKey::Group(binding) = resolve(PlannedTarget::NewGroup(group), scope)?
+            else {
+                unreachable!("source root is group");
+            };
+            source_receipts.insert(NativeSourceUse::Root(binding), cause);
+        }
+        for (parent, child, cause) in edge_causes {
+            let InventoryNodeKey::Group(parent) = resolve(PlannedTarget::NewGroup(parent), scope)?
+            else {
+                unreachable!("source parent is group");
+            };
+            let InventoryNodeKey::Group(child) = resolve(child, scope)? else {
+                unreachable!("source child is group");
+            };
+            source_receipts.insert(NativeSourceUse::Edge { parent, child }, cause);
+        }
         let target_native_selection = match demand {
             NativeArtifactDemand::VerifiedTarget { .. }
             | NativeArtifactDemand::CertifiedTargetImports(_) => {
                 Some(IssuedTargetNativeSelection {
+                    sources: source_receipts.clone(),
                     roots: demanded
                         .iter()
                         .map(|group| {
@@ -3961,6 +4098,7 @@ impl ArtifactInventory {
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
+        fixed.source_receipts = source_receipts;
         fixed.entries.extend(incoming);
         fixed.groups.extend(
             bound_inputs
@@ -4617,6 +4755,8 @@ impl ArtifactInventory {
                 }
             }
         }
+        let mut source_receipts = NativeSourceReceipts::default();
+        let mut issued_causes = BTreeMap::new();
         let mut demanded_offers = Vec::new();
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut issued_pairs = BTreeMap::new();
@@ -4656,6 +4796,9 @@ impl ArtifactInventory {
             selected.extend(entries);
             demanded_offers = offers;
             for (key, verified) in bindings {
+                if let Some(binding) = verified.binding() {
+                    issued_causes.insert(key, (binding, verified.source_cause()));
+                }
                 if let Some(pair) = verified.carrier_pair() {
                     issued_pairs.insert(key, pair);
                 }
@@ -4796,7 +4939,8 @@ impl ArtifactInventory {
             edges
                 .iter()
                 .filter_map(move |dependency| match dependency.target() {
-                    native_availability::NativeGroupTarget::ExactGroup(binding) => {
+                    native_availability::NativeGroupTarget::ExactGroup(binding)
+                    | native_availability::NativeGroupTarget::CurrentIssued(binding) => {
                         Some((InventoryNodeKey::Group(binding.binding()), *parent))
                     }
                     native_availability::NativeGroupTarget::NewGroup(_) => None,
@@ -5180,7 +5324,61 @@ impl ArtifactInventory {
                 (*id, binding)
             })
             .collect::<BTreeMap<_, _>>();
+        for (key, (binding, cause)) in issued_causes {
+            if resolve(LogicalNodeKey::Group(key)) == InventoryNodeKey::Group(binding) {
+                source_receipts.insert(NativeSourceUse::Root(binding), cause);
+            }
+        }
+        for (parent, dependencies) in &current_dependencies {
+            // A retained exact root wins before any proposed current row.
+            if prebound.contains_key(parent) {
+                continue;
+            }
+            let InventoryNodeKey::Group(parent_binding) = resolve(LogicalNodeKey::Group(*parent))
+            else {
+                unreachable!("source parent is group");
+            };
+            source_receipts.insert(
+                NativeSourceUse::Root(parent_binding),
+                NativeSourceCause::Current,
+            );
+            for dependency in dependencies {
+                let InventoryNodeKey::Group(child) = resolve_target(
+                    PlannedTarget::from(dependency.target().clone()),
+                    selection.unwrap_or(provisional),
+                ) else {
+                    unreachable!("source child is group");
+                };
+                source_receipts.insert(
+                    NativeSourceUse::Edge {
+                        parent: parent_binding,
+                        child,
+                    },
+                    dependency.target().source_cause(),
+                );
+            }
+        }
+        if let Some((_, catalog)) = root_intent.input_constraints() {
+            for binding in prebound.values() {
+                let key = NativeSourceUse::Root(*binding);
+                if !source_receipts.0.contains_key(&key) {
+                    source_receipts.insert(
+                        key,
+                        NativeSourceCause::Historical(
+                            catalog
+                                .input_decisions()
+                                .selected_support(*binding)
+                                .cloned()
+                                .unwrap_or_else(
+                                    compiler_projection::SelectedNativeSupport::missing,
+                                ),
+                        ),
+                    );
+                }
+            }
+        }
         let target_native_selection = target_groups.map(|groups| IssuedTargetNativeSelection {
+            sources: source_receipts,
             roots: groups
                 .into_iter()
                 .map(|group| {
@@ -5475,8 +5673,14 @@ fn native_requirements_for_exact_groups_in_custody(
     pending: Vec<NativeGroupBinding>,
 ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
     let mut requirements = NativeRequirementCollector::default();
-    let groups =
-        native_groups_in_custody(state, payloads, owned, pending, Some(&mut requirements))?;
+    let groups = native_groups_in_custody(
+        state,
+        payloads,
+        owned,
+        pending,
+        Some(&mut requirements),
+        None,
+    )?;
     Ok((
         NativeRequirements {
             bindings: requirements.bindings.into_iter().collect(),
@@ -5496,12 +5700,39 @@ fn native_groups_in_custody(
     state: &InventoryState,
     payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     owned: &imbl::OrdSet<InventoryNodeKey>,
-    mut pending: Vec<NativeGroupBinding>,
+    pending: Vec<NativeGroupBinding>,
     mut requirements: Option<&mut NativeRequirementCollector>,
+    mut sources: Option<&mut NativeSourceTraversal<'_>>,
 ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+    let mut pending = pending
+        .into_iter()
+        .map(|group| {
+            let causes = sources
+                .as_ref()
+                .map(|sources| {
+                    sources
+                        .issued
+                        .0
+                        .get(&NativeSourceUse::Root(group))
+                        .cloned()
+                        .unwrap_or_else(|| Arc::from([NativeSourceCause::missing()]))
+                })
+                .unwrap_or_else(|| Arc::from([]));
+            (group, causes)
+        })
+        .collect::<Vec<_>>();
     let mut seen = BTreeSet::new();
-    while let Some(key) = pending.pop() {
-        if !seen.insert(key) {
+    while let Some((key, causes)) = pending.pop() {
+        let first = seen.insert(key);
+        let mut source_changed = false;
+        if let Some(sources) = sources.as_deref_mut() {
+            for cause in causes.iter() {
+                source_changed |= sources
+                    .selected
+                    .insert(NativeSourceUse::Root(key), cause.clone());
+            }
+        }
+        if !first && !source_changed {
             continue;
         }
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
@@ -5529,7 +5760,29 @@ fn native_groups_in_custody(
                     if !owned.contains(&target) {
                         return Err(failure("native dependency outside selected view"));
                     }
-                    pending.push(required);
+                    let mut child_causes = Vec::new();
+                    if let Some(sources) = sources.as_ref() {
+                        for cause in causes.iter() {
+                            match cause {
+                                NativeSourceCause::Current => {
+                                    if let Some(edge) =
+                                        sources.issued.0.get(&NativeSourceUse::Edge {
+                                            parent: key,
+                                            child: required,
+                                        })
+                                    {
+                                        child_causes.extend(edge.iter().cloned());
+                                    } else {
+                                        child_causes.push(NativeSourceCause::missing());
+                                    }
+                                }
+                                NativeSourceCause::Historical(_) => {
+                                    child_causes.push(cause.clone())
+                                }
+                            }
+                        }
+                    }
+                    pending.push((required, Arc::from(child_causes)));
                 }
                 ArtifactDependency::NativeBinding {
                     generation,

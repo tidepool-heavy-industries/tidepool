@@ -109,6 +109,23 @@ impl<'a> NativeDependencyCatalog<'a> {
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
     ) -> Vec<(NativeGroupBinding, &IssuedNativeOffer)> {
         let mut supports = BTreeMap::new();
+        if let InputNativeDecision::IssuedChoices(choices) = self.decision(&module_identity(owner))
+        {
+            if let Some(group) = choices
+                .get(&key.original_ordinal)
+                .filter(|group| group.binding.artifact() == key.artifact)
+            {
+                if let Some(selected) = self.input_decisions().selected_support(*group) {
+                    if let Some(offer) = selected
+                        .acquisitions()
+                        .iter()
+                        .find(|offer| offer.contains_checked_group(*group))
+                    {
+                        supports.insert(*group, offer);
+                    }
+                }
+            }
+        }
         let source = match &self.0 {
             DependencyGrantSource::Source(source) => {
                 source.native_availability().dependency_support(key, owner)
@@ -158,18 +175,20 @@ pub(super) struct CertifiedNativeDemandAcquisition {
 /// Only physical current output can request a not-yet-issued group.
 pub(super) enum VerifiedNativeBinding {
     Issued(IssuedNativeBinding),
+    CurrentIssued(IssuedNativeBinding),
     NewCurrent {
         dependencies: Vec<ResolvedNativeDependency>,
     },
 }
 
 /// Constructed only with the matching acquisition owner below.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug)]
 pub(super) struct IssuedNativeBinding {
     binding: NativeGroupBinding,
     carrier: ArtifactBinding,
     canonical: ArtifactBinding,
     closure: BTreeSet<InventoryNodeKey>,
+    acquisition: compiler_projection::SelectedNativeSupport,
 }
 
 impl IssuedNativeBinding {
@@ -179,16 +198,24 @@ impl IssuedNativeBinding {
 }
 
 impl VerifiedNativeBinding {
+    pub(super) fn source_cause(&self) -> NativeSourceCause {
+        match self {
+            Self::Issued(issued) => NativeSourceCause::Historical(issued.acquisition.clone()),
+            Self::CurrentIssued(_) | Self::NewCurrent { .. } => NativeSourceCause::Current,
+        }
+    }
     pub(super) fn binding(&self) -> Option<NativeGroupBinding> {
         match self {
-            Self::Issued(issued) => Some(issued.binding),
+            Self::Issued(issued) | Self::CurrentIssued(issued) => Some(issued.binding),
             Self::NewCurrent { .. } => None,
         }
     }
 
     pub(super) fn carrier_pair(&self) -> Option<(ArtifactBinding, ArtifactBinding)> {
         match self {
-            Self::Issued(issued) => Some((issued.carrier, issued.canonical)),
+            Self::Issued(issued) | Self::CurrentIssued(issued) => {
+                Some((issued.carrier, issued.canonical))
+            }
             Self::NewCurrent { .. } => None,
         }
     }
@@ -196,17 +223,27 @@ impl VerifiedNativeBinding {
     #[cfg(test)]
     fn closure(&self) -> &BTreeSet<InventoryNodeKey> {
         match self {
-            Self::Issued(issued) => &issued.closure,
+            Self::Issued(issued) | Self::CurrentIssued(issued) => &issued.closure,
             Self::NewCurrent { .. } => panic!("new current group has no issued closure"),
         }
     }
 }
 
 /// An already issued dependency or a physical product in this output cohort.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug)]
 pub(super) enum NativeGroupTarget {
     ExactGroup(Arc<IssuedNativeBinding>),
+    CurrentIssued(Arc<IssuedNativeBinding>),
     NewGroup(NativeGroupKey),
+}
+
+impl NativeGroupTarget {
+    pub(super) fn source_cause(&self) -> NativeSourceCause {
+        match self {
+            Self::ExactGroup(issued) => NativeSourceCause::Historical(issued.acquisition.clone()),
+            Self::CurrentIssued(_) | Self::NewGroup(_) => NativeSourceCause::Current,
+        }
+    }
 }
 
 /// A native obligation includes its required owner: ordinal labels alone
@@ -489,7 +526,7 @@ fn current_product_dependencies(
                 dependencies.push(ResolvedNativeDependency {
                     required_owner: required_owner.clone(),
                     edge,
-                    target: NativeGroupTarget::ExactGroup(Arc::new(issued)),
+                    target: NativeGroupTarget::CurrentIssued(Arc::new(issued)),
                 });
             } else {
                 dependencies.push(ResolvedNativeDependency {
@@ -559,7 +596,10 @@ fn current_product_dependencies(
             binding,
             crate::certified_products::CertifiedNativeGroupSupport::Issued(offer),
         )?;
-        let issued = support.describe(binding)?;
+        let mut issued = support.describe(binding)?;
+        if let Some(selected) = catalog.input_decisions().selected_support(binding) {
+            issued.acquisition = selected.clone();
+        }
         support.acquire(state, entries, incoming, &issued)?;
         offers.push(offer.clone());
         dependencies.push(ResolvedNativeDependency {
@@ -711,6 +751,13 @@ impl<'a> NativeSupportRef<'a> {
             carrier,
             canonical,
             closure: self.closure(group)?,
+            acquisition: self
+                .offer
+                .cloned()
+                .map(|offer| {
+                    compiler_projection::SelectedNativeSupport::Acquired(Arc::from([offer]))
+                })
+                .unwrap_or_else(compiler_projection::SelectedNativeSupport::missing),
         })
     }
 
@@ -803,6 +850,10 @@ pub(super) fn bind_certified_input_demand(
     demanded: &BTreeSet<NativeGroupKey>,
     selection: &crate::certified_products::CertifiedSourceSelection,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
+    enum RootIssuer {
+        Historical(compiler_projection::SelectedNativeSupport),
+        Current,
+    }
     let namespace = parent.namespace();
     let mut retained_offers = Vec::new();
     let mut prebound = BTreeMap::new();
@@ -825,7 +876,7 @@ pub(super) fn bind_certified_input_demand(
             return Err(failure("native demand lacks original payload"));
         };
         let owner = product.owner();
-        let (chosen, support) = {
+        let (chosen, support, issuer) = {
             if !selection.permits_native_group(key.artifact, owner, key.original_ordinal) {
                 tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         stage = "input_demand_permission", ?key, ?owner,
@@ -843,17 +894,30 @@ pub(super) fn bind_certified_input_demand(
             let carried = selection
                 .continuation_input(&module_identity(owner))
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-            if carried.is_some() {
+            if let Some((source, _)) = carried {
                 let chosen = verified_root_choice(selection, *key, owner, &entry)?;
-                let support = selection
-                    .native_group_support(*key, owner, chosen)
+                let selected = source.input_decisions().selected_support(chosen);
+                let support = selected
+                    .into_iter()
+                    .flat_map(|selected| selected.acquisitions())
+                    .find(|offer| offer.contains_checked_group(chosen))
+                    .map(crate::certified_products::CertifiedNativeGroupSupport::Issued)
+                    .or_else(|| selection.native_group_support(*key, owner, chosen))
                     .ok_or_else(|| {
                         native_admission_failure(
                             *key,
                             NativeAdmissionRefusal::InputIssuedSupportMissing { candidate: chosen },
                         )
                     })?;
-                (chosen, support)
+                (
+                    chosen,
+                    support,
+                    RootIssuer::Historical(
+                        selected
+                            .cloned()
+                            .unwrap_or_else(compiler_projection::SelectedNativeSupport::missing),
+                    ),
+                )
             } else {
                 let current = selection
                     .current_product(*key, &entry)
@@ -879,7 +943,8 @@ pub(super) fn bind_certified_input_demand(
                     pending.extend(dependencies.iter().filter_map(|dependency| {
                         match dependency.target() {
                             NativeGroupTarget::NewGroup(group) => Some(*group),
-                            NativeGroupTarget::ExactGroup(_) => None,
+                            NativeGroupTarget::ExactGroup(_)
+                            | NativeGroupTarget::CurrentIssued(_) => None,
                         }
                     }));
                     prebound.insert(*key, VerifiedNativeBinding::NewCurrent { dependencies });
@@ -891,7 +956,7 @@ pub(super) fn bind_certified_input_demand(
                         NativeAdmissionRefusal::InputIssuedSupportMissing { candidate: chosen },
                     )
                 })?;
-                (chosen, support)
+                (chosen, support, RootIssuer::Current)
             }
         };
         let canonical = ArtifactEntry::canonical_artifact_id(
@@ -900,7 +965,10 @@ pub(super) fn bind_certified_input_demand(
                 .ok_or_else(|| failure("native canonical carrier missing"))?,
         );
         let support = NativeSupportRef::checked(state, parent, chosen, support)?;
-        let issued = support.describe(chosen)?;
+        let mut issued = support.describe(chosen)?;
+        if let RootIssuer::Historical(selected) = &issuer {
+            issued.acquisition = selected.clone();
+        }
         let carrier = issued.carrier;
         let canonical_binding = issued.canonical;
         // An interface-only receiving role may retain the issued body's
@@ -933,7 +1001,13 @@ pub(super) fn bind_certified_input_demand(
         if let Some(offer) = support.offer {
             retained_offers.push(offer.clone());
         }
-        prebound.insert(*key, VerifiedNativeBinding::Issued(issued));
+        prebound.insert(
+            *key,
+            match issuer {
+                RootIssuer::Historical(_) => VerifiedNativeBinding::Issued(issued),
+                RootIssuer::Current => VerifiedNativeBinding::CurrentIssued(issued),
+            },
+        );
     }
     Ok(CertifiedNativeDemandAcquisition {
         entries: incoming,
@@ -989,7 +1063,7 @@ pub(super) fn bind_fresh_product_dependencies(
             if let Some(offer) = support.offer {
                 acquisition.offers.push(offer.clone());
             }
-            VerifiedNativeBinding::Issued(issued)
+            VerifiedNativeBinding::CurrentIssued(issued)
         } else {
             let dependencies = current_product_dependencies(
                 state,
@@ -1002,7 +1076,7 @@ pub(super) fn bind_fresh_product_dependencies(
             pending.extend(dependencies.iter().filter_map(
                 |dependency| match dependency.target() {
                     NativeGroupTarget::NewGroup(group) => Some(*group),
-                    NativeGroupTarget::ExactGroup(_) => None,
+                    NativeGroupTarget::ExactGroup(_) | NativeGroupTarget::CurrentIssued(_) => None,
                 },
             ));
             VerifiedNativeBinding::NewCurrent { dependencies }
@@ -1022,11 +1096,13 @@ impl CertifiedNativeDemandAcquisition {
     ) -> Result<(), CompileError> {
         for binding in self.bindings.values() {
             let closures = match binding {
-                VerifiedNativeBinding::Issued(issued) => vec![&issued.closure],
+                VerifiedNativeBinding::Issued(issued)
+                | VerifiedNativeBinding::CurrentIssued(issued) => vec![&issued.closure],
                 VerifiedNativeBinding::NewCurrent { dependencies } => dependencies
                     .iter()
                     .filter_map(|dependency| match dependency.target() {
-                        NativeGroupTarget::ExactGroup(issued) => Some(&issued.closure),
+                        NativeGroupTarget::ExactGroup(issued)
+                        | NativeGroupTarget::CurrentIssued(issued) => Some(&issued.closure),
                         NativeGroupTarget::NewGroup(_) => None,
                     })
                     .collect(),

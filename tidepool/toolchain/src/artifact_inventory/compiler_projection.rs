@@ -439,23 +439,23 @@ pub(crate) struct IssuedInputNativeDecisions {
 /// Live acquisitions of actually selected support are separate from graph facts.
 /// Missing support is sticky even when another selected source supplies a live owner.
 #[derive(Clone, Debug)]
-enum SelectedNativeSupport {
+pub(super) enum SelectedNativeSupport {
     Acquired(Arc<[IssuedNativeOffer]>),
     Missing(Arc<[IssuedNativeOffer]>),
 }
 
 impl SelectedNativeSupport {
-    fn missing() -> Self {
+    pub(super) fn missing() -> Self {
         Self::Missing(Arc::from([]))
     }
 
-    fn acquisitions(&self) -> &[IssuedNativeOffer] {
+    pub(super) fn acquisitions(&self) -> &[IssuedNativeOffer] {
         match self {
             Self::Acquired(offers) | Self::Missing(offers) => offers,
         }
     }
 
-    fn merge(&mut self, other: &Self) -> bool {
+    pub(super) fn merge(&mut self, other: &Self) -> bool {
         let missing = matches!(self, Self::Missing(_)) || matches!(other, Self::Missing(_));
         let mut acquired = self.acquisitions().to_vec();
         let mut changed = false;
@@ -485,6 +485,13 @@ pub(crate) enum InputNativeDecision<'a> {
 }
 
 impl IssuedInputNativeDecisions {
+    pub(super) fn selected_support(
+        &self,
+        group: NativeGroupBinding,
+    ) -> Option<&SelectedNativeSupport> {
+        self.selected.get(&group)
+    }
+
     fn with_recorded_facts(
         &self,
         facts: imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,

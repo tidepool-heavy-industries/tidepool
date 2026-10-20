@@ -1408,15 +1408,74 @@ proptest! {
             let mut missing_dependency = owned.clone();
             missing_dependency.remove(&required);
             assert!(native_groups_in_custody(
-                &state, &view.lease.payloads, &missing_dependency, vec![root], None,
+                &state, &view.lease.payloads, &missing_dependency, vec![root], None, None,
             ).is_err(), "groups-only traversal must refuse a dependency outside custody");
-            native_groups_in_custody(&state, &view.lease.payloads, owned, vec![root], None).unwrap()
+            native_groups_in_custody(&state, &view.lease.payloads, owned, vec![root], None, None).unwrap()
         };
         let group_only_keys = exact_groups.iter().map(|group| NativeGroupKey {
             artifact: group.binding.artifact(),
             original_ordinal: group.original_ordinal,
         }).collect::<BTreeSet<_>>();
         prop_assert_eq!(&group_only_keys, &expected_keys);
+        {
+            let state = view.lease.inventory.0.lock().expect("inventory lock");
+            let owned = &view.read_projection(&state).nodes;
+            let binding = |logical: GroupState| {
+                owned.iter().find_map(|node| match node {
+                    InventoryNodeKey::Group(group) if group.binding.artifact() == native_ids[logical.0]
+                        && group.original_ordinal == logical.1 => Some(*group),
+                    _ => None,
+                }).expect("fixture issued every modeled group")
+            };
+            let selected_missing = extra_edges[0] & 1 != 0;
+            let edge_missing = |parent: GroupState, child: GroupState| {
+                // The unselected parent's contribution must never taint the
+                // shared descendant. A selected missing edge must remain sticky.
+                parent == (0, 11)
+                    || (selected_missing && parent == (1, 11) && child == (3, 7))
+            };
+            let mut receipts = NativeSourceReceipts::default();
+            receipts.insert(NativeSourceUse::Root(binding((0, 7))), NativeSourceCause::Current);
+            receipts.insert(NativeSourceUse::Root(binding((0, 11))), NativeSourceCause::missing());
+            for (parent, children) in &edges {
+                for child in children {
+                    receipts.insert(NativeSourceUse::Edge {
+                        parent: binding(*parent), child: binding(*child),
+                    }, if edge_missing(*parent, *child) {
+                        NativeSourceCause::missing()
+                    } else {
+                        NativeSourceCause::Current
+                    });
+                }
+            }
+            // Independent worklist over integer model states, with source
+            // absence as data. It does not call the production receipt merger.
+            let mut model = BTreeMap::<GroupState, BTreeSet<bool>>::new();
+            let mut pending = vec![((0, 7), false)];
+            while let Some((parent, missing)) = pending.pop() {
+                if !model.entry(parent).or_default().insert(missing) { continue; }
+                for child in edges.get(&parent).into_iter().flatten() {
+                    pending.push((*child, missing || edge_missing(parent, *child)));
+                }
+            }
+            let mut sources = NativeSourceTraversal {
+                issued: &receipts,
+                selected: NativeSourceReceipts::default(),
+            };
+            let reached = native_groups_in_custody(&state, &view.lease.payloads, owned,
+                vec![binding((0, 7))], None, Some(&mut sources)).unwrap();
+            prop_assert_eq!(&reached, &exact_groups);
+            prop_assert!(!sources.selected.0.contains_key(&NativeSourceUse::Root(binding((0, 11)))));
+            for (logical, expected) in model {
+                let actual = sources.selected.0[&NativeSourceUse::Root(binding(logical))].iter()
+                    .map(|cause| match cause {
+                        NativeSourceCause::Current => false,
+                        NativeSourceCause::Historical(compiler_projection::SelectedNativeSupport::Missing(_)) => true,
+                        NativeSourceCause::Historical(_) => panic!("model has no live source acquisitions"),
+                    }).collect::<BTreeSet<_>>();
+                prop_assert_eq!(actual, expected, "logical source state {:?}", logical);
+            }
+        }
         prop_assert_eq!(&actual_groups, &reversed_view.native_requirements_with_groups_from_roots(&roots).unwrap().1);
         prop_assert!(actual_groups.len() < view.selected_native_groups().len(), "available groups must not become executable roots");
         prop_assert_eq!(&actual, &reversed_view.native_requirements_from_roots(&roots).unwrap());
