@@ -27,7 +27,7 @@ import qualified Data.Text.Encoding as TE
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, makeRelative, takeExtension)
 import System.IO (hClose, hFlush, hGetLine, hPutStrLn, openTempFile, Handle, stderr, stdout, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Foreign.C.String (CString, withCString)
@@ -1979,10 +1979,14 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
   captured <- forM ["CacheEven.hs","CacheEven.hs-boot","CacheOdd.hs","CacheEntry.hs"] $ \name -> do
     body <- BS.readFile ("test-source-boot/fixtures" </> name)
     pure (BS8.pack name,body)
-  let word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
+  libraryRoot <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe
+    (fail "missing declared renderer source resource") pure
+  library <- captureSourceFiles libraryRoot libraryRoot
+  let capturedFiles = sortOn fst (captured ++ library)
+      word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
       frame bytes = word32 (BS.length bytes) <> bytes
-      sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length captured)
-        <> foldMap (\(name,body) -> frame name <> frame body) (sortOn fst captured)
+      sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length capturedFiles)
+        <> foldMap (\(name,body) -> frame name <> frame body) capturedFiles
       sourcePath = work </> "world-admission-sources.bin"
       text = TString . T.pack
       blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]
@@ -1997,6 +2001,16 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
   BS.writeFile path (encode packet)
   pure (path,primary)
   where
+    captureSourceFiles root directory = do
+      children <- listDirectory directory
+      fmap concat $ forM children $ \name -> do
+        let path = directory </> name
+        nested <- doesDirectoryExist path
+        if nested then captureSourceFiles root path
+        else if takeExtension path == ".hs" then do
+          bytes <- BS.readFile path
+          pure [(BS8.pack (makeRelative root path),bytes)]
+        else pure []
     fixture operation arguments = do
       path <- issueCodecFixturePacket work (operation ++ ".cbor") (encode
         (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments]))
