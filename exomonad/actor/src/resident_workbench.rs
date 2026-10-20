@@ -8929,6 +8929,7 @@ where
             logical_world = ?world_output.logical().logical_id(),
             output_certificate = ?world_output.certificate_sha256(),
             leased_runtime_roots = demanded_bindings.len(),
+            leased_binding_ids = ?world_output.demanded_session_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>(),
             "checked World runtime binding demand");
         let item_capabilities = program
             .items()
