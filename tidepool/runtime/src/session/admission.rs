@@ -3128,7 +3128,7 @@ impl PersistentSession {
             let selected = item
                 .world_selected_runtime_inputs()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            let mut retained_ids = std::collections::BTreeSet::new();
+            let mut retained_ids = std::collections::HashSet::new();
             for input in selected.inputs() {
                 let entry = self
                     .bindings
@@ -3150,7 +3150,8 @@ impl PersistentSession {
                 }
                 retained_ids.insert(entry.id);
             }
-            let retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
+            let mut retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
+            retained_ids.sort_by_key(|id| id.raw());
             return self.adopt_staged_declaration_with_world_activation(
                 staged,
                 &prior.visibility,

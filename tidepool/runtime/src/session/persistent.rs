@@ -2645,7 +2645,10 @@ impl PersistentSession {
         let entries = self
             .bindings
             .prepared_iter_current_in(&self.scopes, scope, Some(origin), changes)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            .map_err(SessionError::InvalidPublicBindingPromotion)?
+            .into_iter()
+            .map(|(name, entry)| (name, entry.id, entry.module))
+            .collect::<Vec<_>>();
         let source_selection = self
             .bindings
             .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
@@ -2676,10 +2679,10 @@ impl PersistentSession {
         projection
             .persistent_imports
             .extend(&staged.turn.workbench_imports);
-        projection.visible_values = entries.iter().map(|(_, entry)| entry.module).collect();
+        projection.visible_values = entries.iter().map(|(_, _, module)| *module).collect();
         let mut names = HashMap::<SessionModule, Vec<String>>::new();
-        for (name, entry) in &entries {
-            names.entry(entry.module).or_default().push(name.0.clone());
+        for (name, _, module) in &entries {
+            names.entry(*module).or_default().push(name.0.clone());
         }
         projection.visible_value_names = names.into_iter().collect();
         projection.reachable_values = self
@@ -2693,7 +2696,7 @@ impl PersistentSession {
             .current_items_with_turn(staged.base_tip, &staged.turn);
         projection
             .shadowing
-            .extend(entries.iter().map(|(name, _)| super::ExportItem::Value {
+            .extend(entries.iter().map(|(name, _, _)| super::ExportItem::Value {
                 name: name.0.clone(),
             }));
         view.injected_values = self
@@ -2703,7 +2706,7 @@ impl PersistentSession {
             .collect();
         let mut bindings = entries
             .into_iter()
-            .map(|(name, entry)| (name.0, entry.id))
+            .map(|(name, id, _)| (name.0, id))
             .collect::<Vec<_>>();
         bindings.sort_by(|a, b| a.0.cmp(&b.0));
         let mut source_instances = self
