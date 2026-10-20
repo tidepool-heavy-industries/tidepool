@@ -20,7 +20,8 @@ mod admission;
 mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, RuntimeSourceLeaseClaim, RuntimeSourceReopen, SourceAdmissionError,
+    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
+    SourceAdmissionError, SourceFenceTransitionFailure,
     SourceAdmissionHook, SourceAdmissionPhase,
 };
 mod binding_table;
