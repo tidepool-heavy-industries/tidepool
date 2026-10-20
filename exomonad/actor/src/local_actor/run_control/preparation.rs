@@ -96,11 +96,13 @@ impl PublicationWriter {
                 })
             }
         };
+        // Publish compact completion before either the oneshot receiver or
+        // the serial owner can wake. The actual delivery remains owned here.
+        let _ = self.terminal.set(observed);
         let rejected = self
             .sender
             .take()
             .and_then(|sender| sender.send(delivery).err());
-        let _ = self.terminal.set(observed);
         self.notify();
         drop(rejected);
     }
@@ -131,6 +133,7 @@ impl Drop for PublicationWriter {
 /// boundary. Its Drop first returns Reserved, then releases the publisher.
 pub(super) struct PublicationTransfer {
     payload: Option<(ReservedActorGeneration, ActorGenerationPublicationDriver)>,
+    publication_owner: Option<generation::GenerationRetirementPublicationOwner>,
     writer: PublicationWriter,
     nonstart: PublicationNonStart,
 }
@@ -162,10 +165,12 @@ impl PublicationTransfer {
     pub(super) fn new(
         reserved: ReservedActorGeneration,
         publisher: ActorGenerationPublicationDriver,
+        publication_owner: Option<generation::GenerationRetirementPublicationOwner>,
         writer: PublicationWriter,
     ) -> Self {
         Self {
             payload: Some((reserved, publisher)),
+            publication_owner,
             writer,
             nonstart: PublicationNonStart::TransferOwnerLostBeforeExecute,
         }
@@ -180,9 +185,13 @@ impl PublicationTransfer {
             return;
         };
         match publisher.run(reserved).await {
-            Ok(settlement) => self
-                .writer
-                .deliver(PublicationDelivery::Settled(settlement)),
+            Ok(settlement) => {
+                if let Some(owner) = self.publication_owner.as_mut() {
+                    owner.observe(&settlement);
+                }
+                self.writer
+                    .deliver(PublicationDelivery::Settled(settlement));
+            }
             Err((reserved, publisher)) => {
                 self.writer.deliver(PublicationDelivery::NotStarted {
                     reserved,

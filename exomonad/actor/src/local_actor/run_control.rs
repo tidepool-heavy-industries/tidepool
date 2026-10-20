@@ -784,12 +784,7 @@ pub(super) enum RunControlMessage {
         preparation: crate::resident_workbench::ActorGenerationRetirementPreparation,
         inventory: generation::GenerationRetirementInventory,
         diagnostic: generation::GenerationRetirementDiagnostic,
-        reply: oneshot::Sender<
-            Result<
-                crate::resident_workbench::ActorPublicationAttemptObserver,
-                generation::GenerationRetirementBeginFailure,
-            >,
-        >,
+        reply: generation::GenerationRetirementBeginReply,
     },
     CaptureGenerationRetirement {
         actor: ActorRef,
@@ -1293,9 +1288,7 @@ impl Actor for RunControl {
                 diagnostic,
                 reply,
             } => {
-                let outcome =
-                    state.begin_generation_retirement(&myself, preparation, inventory, diagnostic);
-                let _ = reply.send(outcome);
+                state.receive_generation_retirement(&myself, preparation, inventory, diagnostic, reply);
             }
             #[cfg(test)]
             RunControlMessage::ObserveGenerationRetirementCompletion { actor, reply } => {
@@ -1320,7 +1313,7 @@ impl Actor for RunControl {
                 );
             }
             RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
-                state.capture_generation_retirement(actor, observer);
+                state.capture_generation_retirement(&myself, actor, observer);
             }
             RunControlMessage::GenerationPopulation { dependency, reply } => {
                 let _ = reply.send(state.generation_population(dependency));
