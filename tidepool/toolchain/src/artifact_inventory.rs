@@ -8889,6 +8889,20 @@ impl ArtifactView {
         Ok(Some(existing))
     }
 
+    /// Borrow native payloads from this view's actual immutable custody owner.
+    /// This observes bytes without choosing a namespace or executable group.
+    pub(crate) fn native_original_payloads(
+        &self,
+    ) -> impl Iterator<Item = (ArtifactId, &CertifiedRecoveryProduct)> {
+        self.lease
+            .payloads
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+    }
+
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
