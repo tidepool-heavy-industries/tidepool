@@ -7541,15 +7541,11 @@ mod tests {
             alternate.include_paths().unwrap()
         );
         assert!(crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
-            .begin_cell_program(alternate_program)
+            .begin_cell_program(alternate_program.clone())
             .is_err());
-        let (_, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
-        })
-        .unwrap();
         state
-            .begin_cell_program(program)
-            .expect("refusal must leave original admission unclaimed")
+            .begin_cell_program(alternate_program)
+            .expect("foreign receiver refusal must leave the same settled prefix unclaimed")
             .unwrap();
     }
 
@@ -8078,6 +8074,88 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn checked_declaration_cancellation_after_reservation_preserves_prefix() {
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident, &fixture.execution, &fixture.effects,
+            fixture.root.path(), "declaredNumber = (42 :: Int)", &[], None,
+        ).unwrap();
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let outcome = admission.source_lease().with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            cancellation.clone(), None, |_| {},
+            |source_owner, _| prepare_cell_program_admitted(source_owner, admission, &mut |_| {}),
+        ).unwrap();
+        assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
+        let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
+        let prefix = fixture.resident.begin_cell_program(program).unwrap().unwrap();
+        let item = checked.checked_item(0).unwrap();
+        assert_eq!(item.kind(), tidepool_toolchain::checked_cell::CheckedItemKind::Declaration);
+        let reservation = fixture.resident.admit_checked_item(prefix.clone(), item).unwrap();
+        let before = prefix.snapshot();
+        let requests = tidepool_extract_cmd::extract_spawn_count();
+        cancellation.cancel();
+        assert!(fixture.resident.adopt_checked_declaration(reservation).is_err());
+        assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn checked_host_carrier_cancellation_after_reservation_preserves_prefix() {
+        use crate::session::{HostBindingType, HostCarrier, HostPayload, SourceImports};
+        let mut fixture = CheckedHomeFixture::new();
+        let scope = fixture.execution.private_scope();
+        let view = fixture.resident.compile_view_for_execution(&fixture.execution).unwrap();
+        let imports = view.turn_imports(&SourceImports::from_specs(["import qualified Data.Text"]));
+        let specification = Arc::new(CellRecipe::new(
+            "let carrier = Data.Text.pack \"\"".to_owned(),
+            crate::session::resident_cell_check_template(fixture.effects.preamble(), fixture.effects.row(), &imports),
+            crate::session::resident_workbench_templates(fixture.effects.preamble(), fixture.effects.row(), &imports)
+                .into_iter().map(|template| (template.kind.wire_name().to_owned(), template.source)).collect(),
+            view.injected_module_names(),
+        ).unwrap());
+        let includes = view.include_paths(fixture.effects.include_paths());
+        let admitted = fixture.resident.with_source_compiler_transaction(
+            fixture.execution.retained_lexical_scope(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |resident, settlement| {
+                let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes, settlement)?;
+                resident.admit_host_carrier_cell_in(
+                    scope, plan, specification.clone(), specification.specification_digest(),
+                    [1;32], includes, "carrier".to_owned(), HostBindingType::TEXT, None,
+                ).map_err(|error| CompileError::ExtractFailed(error.to_string()))
+            },
+        ).unwrap().into_outcome().action.unwrap();
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let outcome = admitted.source_lease().with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            cancellation.clone(), None, |_| {},
+            |owner, _| prepare_cell_program_admitted(owner, admitted, &mut |_| {}),
+        ).unwrap();
+        assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
+        let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
+        let prefix = fixture.resident.begin_cell_program(program).unwrap().unwrap();
+        let reservation = fixture.resident.admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap()).unwrap();
+        let TurnResult::Bind { bound, compiled, .. } = consume_cell_program_item(reservation.clone()).unwrap()
+            else { panic!("expected actual host binder"); };
+        let carrier = HostCarrier::from_checked(reservation, bound[0].clone(), compiled.into_code(), HostBindingType::TEXT).unwrap();
+        let before = prefix.snapshot();
+        let requests = tidepool_extract_cmd::extract_spawn_count();
+        cancellation.cancel();
+        assert!(tidepool_testing::with_settlement(|settlement| {
+            fixture.resident.mount_checked_host_input(&carrier, HostPayload::Text("never mounted"), settlement)
+        }).is_err());
+        assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert!(fixture.resident.current_binding_in(scope, "carrier").is_none());
+        assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn completed_cell_preparation_with_observed_retirement_refuses_publication_without_retaining_scratch(
     ) {
         let mut fixture = CheckedHomeFixture::new();
@@ -8273,12 +8351,12 @@ mod tests {
             legitimate.admission.specification_digest().unwrap()
         );
         assert!(crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
-            .begin_cell_program(alternate.program)
+            .begin_cell_program(alternate.program.clone())
             .is_err());
         let prefix = fixture
             .resident
-            .begin_cell_program(legitimate.program)
-            .expect("refused alternate specification must not claim the one-shot prefix")
+            .begin_cell_program(alternate.program)
+            .expect("foreign receiver refusal must not claim the same settled prefix")
             .unwrap();
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
     }
@@ -8301,12 +8379,12 @@ mod tests {
             legitimate.admission.reserved_generations()
         );
         assert!(crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
-            .begin_cell_program(alternate.program)
+            .begin_cell_program(alternate.program.clone())
             .is_err());
         let prefix = fixture
             .resident
-            .begin_cell_program(legitimate.program)
-            .expect("refused alternate original owner must not claim the one-shot prefix")
+            .begin_cell_program(alternate.program)
+            .expect("foreign receiver refusal must not claim the same settled prefix")
             .unwrap();
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
     }
