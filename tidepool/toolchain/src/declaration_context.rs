@@ -6456,7 +6456,7 @@ impl ProgramSourceSupport {
     ) -> Option<&crate::certified_products::CertifiedModuleInterface> {
         self.compiler_support
             .implementation_entry(owner)
-            .and_then(canonical_source_interface)
+            .and_then(|entry| canonical_source_interface(entry))
             .filter(|interface| interface.source_imports().is_some())
     }
 
@@ -9050,7 +9050,7 @@ impl ProductInputFacts<'_> {
         (context
             .compiler_source_support()
             .implementation_entry(owner)
-            .and_then(canonical_source_interface)
+            .and_then(|entry| canonical_source_interface(entry))
             == Some(prior))
         .then_some(prior)
     }
@@ -9825,7 +9825,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
                     .sources
                     .push(crate::cache::SourceEvidence {
                         path,
-                        sha256: hex(&sha2::Sha256::digest(&bytes)),
+                        sha256: hex(&sha2::Sha256::digest(&bytes).into()),
                     });
             }
             Observation::ChangedImport => {
