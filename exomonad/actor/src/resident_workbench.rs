@@ -2290,6 +2290,7 @@ impl ActorGenerationPublicationRefusalObservation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ActorPublicationFailureCause {
     SourceAdmission(tidepool_runtime::session::SourceAdmissionError),
+    OperationDiagnostic(crate::WorkbenchDiagnosticRefusal),
     Io(std::io::ErrorKind),
     RecoveryStore(tidepool_runtime::session::StoreErrorKind),
     RecoveryStoreRefused,
@@ -7505,6 +7506,8 @@ fn admit_explicit_effects(
 pub enum ResidentActorWorkbenchError {
     #[error(transparent)]
     SourceAdmission(#[from] generation_admission::GenerationAdmissionError),
+    #[error("operation diagnostic handoff refused: {0}")]
+    OperationDiagnostic(#[from] crate::WorkbenchDiagnosticRefusal),
     #[error("request {request:?} reply refused: {refusal}")]
     RequestReplyRefused {
         request: crate::RequestId,
@@ -7674,6 +7677,7 @@ impl ResidentActorWorkbenchError {
         use ActorPublicationFailureCause as Cause;
         match self {
             Self::SourceAdmission(source) => Cause::SourceAdmission(source.clone()),
+            Self::OperationDiagnostic(refusal) => Cause::OperationDiagnostic(*refusal),
             Self::RequestReplyRefused { .. } => Cause::RequestAdmission,
             Self::UnsupportedToolSurface { .. } => Cause::ToolSurface,
             Self::Directory(_) => Cause::Directory,
