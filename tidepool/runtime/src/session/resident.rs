@@ -2789,7 +2789,7 @@ impl PendingPreparedSource {
                 registry,
                 admitted_public,
             } => {
-                let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
+                let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
                     prepared, &resolved, &registry,
                 )?;
                 Ok(ReadyPreparedSource::Certified {
@@ -2811,7 +2811,7 @@ enum ReadyPreparedSource {
     Certified {
         resolved: super::persistent::ResolvedCertifiedTurn,
         admitted_public: super::PublicVisibilitySnapshot,
-        target: super::prepared::CertifiedTargetImage,
+        target: super::prepared::ScopedTargetImage,
         demanded: Vec<DemandedImage>,
     },
 }
@@ -4248,8 +4248,7 @@ where
         &mut self,
         scope: ScopeId,
         metadata: &DataConTable,
-        target: super::prepared::CertifiedTargetImage,
-        target_owners: &[ImportOwner],
+        target: super::prepared::ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
@@ -4264,7 +4263,6 @@ where
             scope,
             metadata,
             target,
-            target_owners,
             source_evidence,
             demanded,
             inherited_needed,
@@ -6383,14 +6381,13 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
+            let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
                 prepared, &resolved, &registry,
             )?;
             self.install_certified_turn_in(
                 scope,
                 &table,
                 target,
-                &resolved.target_owners,
                 &resolved.source_evidence,
                 demanded,
                 &resolved.inherited_needed,
@@ -7374,13 +7371,13 @@ where
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::CertifiedTargetImage::lookup_scoped(
+                    super::prepared::ScopedTargetImage::lookup_scoped(
                         prepared, &resolved, bundle,
                     )?
                 }
                 TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
-                    super::prepared::CertifiedTargetImage::compile_scoped(
+                    super::prepared::ScopedTargetImage::compile_scoped(
                         prepared, &resolved, &registry,
                     )?
                 }
@@ -7389,7 +7386,6 @@ where
                 scope,
                 &metadata,
                 target,
-                &resolved.target_owners,
                 &resolved.source_evidence,
                 demanded,
                 &resolved.inherited_needed,
@@ -7750,7 +7746,6 @@ where
                     lexical_scope,
                     &constructor_table,
                     target,
-                    &resolved.target_owners,
                     &resolved.source_evidence,
                     demanded,
                     &resolved.inherited_needed,

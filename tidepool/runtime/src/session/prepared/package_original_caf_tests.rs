@@ -51,12 +51,14 @@ fn package_original_group(digest: [u8; 32]) -> CertifiedGroup {
 }
 
 fn package_original_machine(registry: &ImageRegistry) -> (PreparedEngine, ProgramId) {
-    let target = CertifiedTargetImage::compile(producer_program(), registry).unwrap();
+    let target = scoped_fixture(
+        ImageTarget::compile(producer_program(), registry).unwrap(),
+        Vec::new(),
+    );
     let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
     let staged = engine
         .install_certified_turn_admitted(
             target,
-            &[],
             &BTreeMap::new(),
             vec![],
             &[],

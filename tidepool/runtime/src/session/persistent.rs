@@ -34,9 +34,7 @@ use tidepool_repr::execution_schema::{
 use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{
-    CertifiedTargetImage, InstallSnapshot, PreparedEngine, PreparedRuntimeError,
-};
+use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
 use super::turn::TurnCertification;
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, PublicManifestBase,
@@ -934,8 +932,7 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         metadata: &DataConTable,
-        target: CertifiedTargetImage,
-        target_owners: &[ImportOwner],
+        target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
@@ -946,9 +943,7 @@ impl PersistentSession {
         ),
         PreparedRuntimeError,
     > {
-        let plan = target
-            .source_plan()
-            .ok_or(PreparedRuntimeError::MissingSourceDomainPlan)?;
+        let plan = target.source_plan();
         self.admit_source_work_in(scope)?;
 
         if !self.scopes.is_live(scope) {
@@ -974,7 +969,7 @@ impl PersistentSession {
         };
         let mut exact_external = HashMap::new();
         let retained = std::cell::OnceCell::new();
-        for (globals, owners) in std::iter::once((target.globals(), target_owners)).chain(
+        for (globals, owners) in std::iter::once((target.globals(), target.owners())).chain(
             demanded.iter().map(|selected| {
                 (
                     selected.group().definitions().globals(),
@@ -1016,7 +1011,6 @@ impl PersistentSession {
         engine.set_invocation_cancel(self.invocation_cancel.clone());
         let mut staged = engine.install_certified_turn(
             target,
-            target_owners,
             source_evidence,
             demanded,
             inherited_needed,
@@ -5568,20 +5562,16 @@ mod checkpoint_scope_tests {
             .resolve_certification_in(scope, &prepared, &TurnCertification::default())
             .unwrap();
         assert!(resolved.groups.is_empty());
-        let target = CertifiedTargetImage::compile_with_plan(
-            prepared,
-            &ImageRegistry::new(),
-            resolved.source_plan.clone(),
-        )
-        .unwrap();
+        let (target, demanded) =
+            ScopedTargetImage::compile_scoped(prepared, &resolved, &ImageRegistry::new()).unwrap();
+        assert!(demanded.is_empty());
         let (program, keys) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
                 target,
-                &[],
                 &BTreeMap::new(),
-                vec![],
+                demanded,
                 &[],
             )
             .unwrap();
@@ -6087,14 +6077,14 @@ mod checkpoint_scope_tests {
             session.retire_scope(d);
             session.retire_scope(e);
             let later = session.mint_detached_scope(public).unwrap();
-            let (target, owners, evidence, demanded, inherited) = prepare_selected_groups_fixture(
+            let (target, evidence, demanded, inherited) = prepare_selected_groups_fixture(
                 &session,
                 later,
                 &groups,
                 &[source("D", "d2"), source("E", "e2")],
             );
-            let root_domain = target.source_plan().unwrap().target[&source("D", "d2")].domain;
-            let e_domain = target.source_plan().unwrap().target[&source("E", "e2")].domain;
+            let root_domain = target.source_plan().target[&source("D", "d2")].domain;
+            let e_domain = target.source_plan().target[&source("E", "e2")].domain;
             assert_ne!(root_domain, e_domain);
             let d2: Vec<_> = demanded
                 .iter()
@@ -6128,7 +6118,6 @@ mod checkpoint_scope_tests {
                     later,
                     &target.fixture_constructor_metadata(),
                     target,
-                    &owners,
                     &evidence,
                     demanded,
                     &inherited,
@@ -6176,7 +6165,7 @@ mod checkpoint_scope_tests {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("D", "d1"),
         };
-        let (target, owners, evidence, demanded, inherited) =
+        let (target, evidence, demanded, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
         let admitted = session.public_visibility_snapshot_in(scope).unwrap();
         let cache = session
@@ -6208,7 +6197,6 @@ mod checkpoint_scope_tests {
                 scope,
                 &target.fixture_constructor_metadata(),
                 target,
-                &owners,
                 &evidence,
                 demanded,
                 &inherited,
@@ -6232,7 +6220,7 @@ mod checkpoint_scope_tests {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("D", "d1"),
         };
-        let (target, owners, evidence, demanded, inherited) =
+        let (target, evidence, demanded, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
         let mut metadata = target.fixture_constructor_metadata();
         let staged_only = super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
@@ -6245,7 +6233,7 @@ mod checkpoint_scope_tests {
         assert_ne!(before.source_selection, after.source_selection);
         assert!(matches!(
             session.install_certified_turn_in(
-                scope, &metadata, target, &owners, &evidence, demanded, &inherited
+                scope, &metadata, target, &evidence, demanded, &inherited
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
@@ -6343,7 +6331,7 @@ mod checkpoint_scope_tests {
         assert!(session.prepared_mut().unwrap().unpin(old_target));
         assert!(session.retire_failed_turn_source_instances(a, &old_delta));
         assert!(!session.prepared_mut().unwrap().release(stale.handle()));
-        let (target, owners, evidence, demanded, inherited) =
+        let (target, evidence, demanded, inherited) =
             prepare_selected_groups_fixture(&session, b, &groups, &[source("b")]);
         assert_eq!(inherited.len(), 1);
         assert!(
@@ -6358,7 +6346,6 @@ mod checkpoint_scope_tests {
                 b,
                 &target.fixture_constructor_metadata(),
                 target,
-                &owners,
                 &evidence,
                 demanded,
                 &inherited,
@@ -6461,17 +6448,15 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert_eq!(resolved.target_owners, vec![expected]);
         let registry = ImageRegistry::new();
-        let target =
-            CertifiedTargetImage::compile_with_plan(prepared.clone(), &registry, resolved.source_plan.clone())
-                .unwrap();
+        let (target, demanded) =
+            ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
         let (program, keys) = session
             .install_certified_turn_in(
                 ScopeId::ROOT,
                 &target.fixture_constructor_metadata(),
                 target,
-                &resolved.target_owners,
                 &resolved.source_evidence,
-                vec![],
+                demanded,
                 &resolved.inherited_needed,
             )
             .unwrap();
@@ -7539,32 +7524,31 @@ mod checkpoint_scope_tests {
     #[test]
     fn certified_install_refuses_plan_less_target_before_source_work() {
         use tidepool_repr::execution_schema::testing;
-        let registry = ImageRegistry::new();
-        let mut session = PersistentSession::new(None, 1024 * 1024);
-        let scope = session.mint_isolated_scope();
-        let target = CertifiedTargetImage::compile(
+        // A plan-less image target has no install entry point: the signature
+        // below admits only a `ScopedTargetImage`, which is issued together
+        // with the resolved plan. This function-item check is the type-level
+        // replacement for the former runtime refusal.
+        let _install: fn(
+            &mut PersistentSession,
+            ScopeId,
+            &DataConTable,
+            ScopedTargetImage,
+            &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
+            Vec<DemandedImage>,
+            &[InheritedSourceDemand],
+        ) -> Result<
+            (
+                ProgramId,
+                tidepool_codegen::binding_table::SourceScopeAdmission,
+            ),
+            PreparedRuntimeError,
+        > = PersistentSession::install_certified_turn_in;
+        let image = super::super::prepared::ImageTarget::compile(
             testing::prepare(testing::wire_program()).unwrap(),
-            &registry,
+            &ImageRegistry::new(),
         )
         .unwrap();
-        let refused = session.install_certified_turn_in(
-            scope,
-            &target.fixture_constructor_metadata(),
-            target,
-            &[],
-            &BTreeMap::new(),
-            Vec::new(),
-            &[],
-        );
-        assert!(matches!(
-            refused,
-            Err(PreparedRuntimeError::MissingSourceDomainPlan)
-        ));
-        assert!(session.residency().is_none());
-        assert!(session
-            .bindings()
-            .source_instances_in(session.scope_tree(), scope)
-            .is_empty());
+        assert!(image.globals().is_empty());
     }
 
     #[test]
@@ -7584,19 +7568,27 @@ mod checkpoint_scope_tests {
                 .scope_snapshot(session.scope_tree(), scope)
                 .unwrap(),
         );
-        let target = CertifiedTargetImage::compile_with_plan(
+        let resolved = ResolvedCertifiedTurn {
+            groups: Vec::new(),
+            target_owners: Vec::new(),
+            package_interfaces: Default::default(),
+            source_evidence: BTreeMap::new(),
+            inherited_needed: Vec::new(),
+            source_plan: plan,
+        };
+        let (target, demanded) = ScopedTargetImage::compile_scoped(
             testing::prepare(testing::wire_program()).unwrap(),
+            &resolved,
             &registry,
-            plan,
         )
         .unwrap();
+        assert!(demanded.is_empty());
         let refused = session.install_certified_turn_in(
             scope,
             &target.fixture_constructor_metadata(),
             target,
-            &[],
             &BTreeMap::new(),
-            Vec::new(),
+            demanded,
             &[],
         );
         assert!(matches!(
