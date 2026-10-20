@@ -1958,6 +1958,23 @@ impl ActorGenerationCandidateCustody {
     pub(crate) fn same_candidate(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+
+    #[cfg(test)]
+    pub(crate) fn retention_observer(&self) -> ActorGenerationCandidateRetentionObserver {
+        ActorGenerationCandidateRetentionObserver(Arc::downgrade(&self.0))
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ActorGenerationCandidateRetentionObserver(
+    std::sync::Weak<ActorGenerationCandidate>,
+);
+
+#[cfg(test)]
+impl ActorGenerationCandidateRetentionObserver {
+    pub(crate) fn is_retained(&self) -> bool {
+        self.0.upgrade().is_some()
+    }
 }
 
 struct PreparingActorGeneration {
@@ -2282,6 +2299,78 @@ pub(crate) enum ActorGenerationPublicationSettlement {
     Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
 }
 
+/// Causal metadata only: no source leases, compiler products, or error Arcs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ActorGenerationPublicationRefusalObservation {
+    Refused,
+    Failed {
+        cause: ActorPublicationFailureCause,
+        execution: Option<tidepool_runtime::session::PreparedFailureKind>,
+        requires_recovery: bool,
+    },
+}
+
+impl ActorGenerationPublicationRefusalObservation {
+    pub(crate) fn requires_recovery(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed {
+                requires_recovery: true,
+                ..
+            }
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ActorPublicationFailureCause {
+    SourceAdmission(tidepool_runtime::session::SourceAdmissionError),
+    Io(std::io::ErrorKind),
+    RecoveryStore(tidepool_runtime::session::StoreErrorKind),
+    RecoveryStoreRefused,
+    RequestAdmission,
+    ToolSurface,
+    Directory,
+    CleanupOwnerUnavailable,
+    CleanupAdmissionClosed,
+    ContinuationHandoff,
+    ActorRetired,
+    InvocationCancelled,
+    CompileView,
+    Checkout,
+    Compilation,
+    WorldInspection,
+    CellCheck,
+    CompileInfrastructure,
+    PreparedEntryAbsent,
+    PublicationSettlement,
+    Resident,
+    Delivered,
+    MachineLost,
+    NativeTaskCancelled,
+    NativeTaskPanicked,
+    InputCompilation,
+    RendererProduction,
+    RendererAdmission,
+    InputMount,
+    ActivationPreviewSuspended,
+    Inspection,
+    CompletedResultObservation,
+    InterpreterSupport,
+    ActorProtocol,
+    PublicOwner,
+    Kernel,
+    ToolDeclaration,
+    UnsupportedRequest,
+    RequestDecode,
+    Bridge,
+    InteractiveSessionCapture,
+    StartCapture,
+    WaitCapture,
+    ToolDispatch,
+    ToolDeclarations,
+}
+
 #[must_use]
 pub(crate) struct ActorGenerationPublicationRefusal {
     guard: ActorPublicationGuard,
@@ -2293,6 +2382,24 @@ impl ActorGenerationPublicationRefusal {
         &self,
     ) -> &Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>> {
         &self.outcome
+    }
+
+    pub(crate) fn observation(&self) -> ActorGenerationPublicationRefusalObservation {
+        match self.outcome.as_ref() {
+            Ok(ActorGenerationCommit::Refused(_)) => {
+                ActorGenerationPublicationRefusalObservation::Refused
+            }
+            Err(error) => ActorGenerationPublicationRefusalObservation::Failed {
+                cause: error.publication_failure_cause(),
+                execution: error.execution_failure_kind(),
+                requires_recovery: error.requires_recovery(),
+            },
+            Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_)) => {
+                unreachable!(
+                    "the publisher issues refusal custody only for a known unpublished body"
+                )
+            }
+        }
     }
 
     pub(crate) fn refuse_retirement(
@@ -7666,6 +7773,113 @@ pub enum ResidentActorWorkbenchError {
     ToolDispatch(ToolDispatchError),
     #[error("invalid agent tool declaration set: {0}")]
     ToolDeclarations(serde_json::Error),
+}
+
+impl ResidentActorWorkbenchError {
+    fn publication_failure_cause(&self) -> ActorPublicationFailureCause {
+        use ActorPublicationFailureCause as Cause;
+        match self {
+            Self::SourceAdmission(source) => Cause::SourceAdmission(source.clone()),
+            Self::RequestReplyRefused { .. } => Cause::RequestAdmission,
+            Self::UnsupportedToolSurface { .. } => Cause::ToolSurface,
+            Self::Directory(_) => Cause::Directory,
+            Self::CompilerCleanupOwnerUnavailable => Cause::CleanupOwnerUnavailable,
+            Self::CompilerCleanupAdmissionClosed => Cause::CleanupAdmissionClosed,
+            Self::PrivatePublication { source, .. }
+            | Self::ActivationBindingCommitted { source, .. } => source.publication_failure_cause(),
+            Self::PreparationAdmission(source) => source.publication_failure_cause(),
+            Self::ContinuationHandoff { .. } => Cause::ContinuationHandoff,
+            Self::RetiredBeforeAdmission(_) => Cause::ActorRetired,
+            Self::InvocationCancelled => Cause::InvocationCancelled,
+            Self::CompileView(_) => Cause::CompileView,
+            Self::Checkout(_) => Cause::Checkout,
+            Self::Compile(_) => Cause::Compilation,
+            Self::WorldInspection(_) => Cause::WorldInspection,
+            Self::CellCheck(_) => Cause::CellCheck,
+            Self::CompileInfrastructure(_) => Cause::CompileInfrastructure,
+            Self::PreparedEntryAbsent { .. } => Cause::PreparedEntryAbsent,
+            Self::PublicationSettlement { failure } => match failure.outcome.as_ref() {
+                Err(primary) => primary.publication_failure_cause(),
+                Ok(_) => Cause::PublicationSettlement,
+            },
+            Self::Resident(error) => publication_resident_failure_cause(error, Cause::Resident),
+            Self::Delivered(error) => publication_resident_failure_cause(error, Cause::Delivered),
+            Self::MachineLost => Cause::MachineLost,
+            Self::Join(error) if error.is_cancelled() => Cause::NativeTaskCancelled,
+            Self::Join(_) => Cause::NativeTaskPanicked,
+            Self::InputCompilation { .. } => Cause::InputCompilation,
+            Self::RendererProduction { .. } => Cause::RendererProduction,
+            Self::RendererAdmission { .. } => Cause::RendererAdmission,
+            Self::InputMount(_) => Cause::InputMount,
+            Self::ActivationPreviewSuspended { .. } => Cause::ActivationPreviewSuspended,
+            Self::Inspection(_) => Cause::Inspection,
+            Self::CompletedResultObservation { .. } => Cause::CompletedResultObservation,
+            Self::UnavailableInterpreterSupport { .. } => Cause::InterpreterSupport,
+            Self::ActorProtocol(_) => Cause::ActorProtocol,
+            Self::PublicOwner(_) => Cause::PublicOwner,
+            Self::Kernel(_) => Cause::Kernel,
+            Self::ToolDeclaration(_) => Cause::ToolDeclaration,
+            Self::UnsupportedRequest { .. } => Cause::UnsupportedRequest,
+            Self::RequestDecode { .. } => Cause::RequestDecode,
+            Self::Bridge(_) => Cause::Bridge,
+            Self::InteractiveSessionCapture(_) => Cause::InteractiveSessionCapture,
+            Self::StartCapture(_) => Cause::StartCapture,
+            Self::WaitCapture(_) => Cause::WaitCapture,
+            Self::ToolDispatch(_) => Cause::ToolDispatch,
+            Self::ToolDeclarations(_) => Cause::ToolDeclarations,
+        }
+    }
+}
+
+fn publication_resident_failure_cause(
+    error: &ResidentError,
+    fallback: ActorPublicationFailureCause,
+) -> ActorPublicationFailureCause {
+    match error {
+        ResidentError::Session(error) => publication_session_failure_cause(error, fallback),
+        ResidentError::Run(error) => publication_runtime_failure_cause(error, fallback),
+        ResidentError::ActivationInputConsumed { source, .. }
+        | ResidentError::ActivationMountCommitted { source, .. } => {
+            publication_resident_failure_cause(source, fallback)
+        }
+        _ => fallback,
+    }
+}
+
+fn publication_runtime_failure_cause(
+    error: &tidepool_runtime::RuntimeError,
+    fallback: ActorPublicationFailureCause,
+) -> ActorPublicationFailureCause {
+    use tidepool_runtime::RuntimeError;
+    match error {
+        RuntimeError::SourceAdmission(source) => {
+            ActorPublicationFailureCause::SourceAdmission(source.clone())
+        }
+        RuntimeError::Session(error) => publication_session_failure_cause(error, fallback),
+        RuntimeError::CompilerClose {
+            primary: Some(primary),
+            ..
+        } => publication_runtime_failure_cause(primary, fallback),
+        _ => fallback,
+    }
+}
+
+fn publication_session_failure_cause(
+    error: &tidepool_runtime::session::SessionError,
+    fallback: ActorPublicationFailureCause,
+) -> ActorPublicationFailureCause {
+    use tidepool_runtime::session::{SessionError, StoreRefusal};
+    use ActorPublicationFailureCause as Cause;
+    match error {
+        SessionError::SourceAdmission(source) => Cause::SourceAdmission(source.clone()),
+        SessionError::Io(error) => Cause::Io(error.kind()),
+        SessionError::RecoveryStore(error) => Cause::RecoveryStore(error.kind),
+        SessionError::RecoveryStoreRefused(StoreRefusal::Storage(error)) => {
+            Cause::RecoveryStore(error.kind)
+        }
+        SessionError::RecoveryStoreRefused(_) => Cause::RecoveryStoreRefused,
+        _ => fallback,
+    }
 }
 
 impl ResidentActorWorkbenchError {

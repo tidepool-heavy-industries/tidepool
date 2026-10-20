@@ -1480,6 +1480,14 @@ mod tests {
             refusal.outcome().as_ref(),
             Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
         ));
+        assert_eq!(
+            refusal.observation(),
+            super::super::ActorGenerationPublicationRefusalObservation::Failed {
+                cause: super::super::ActorPublicationFailureCause::InvocationCancelled,
+                execution: Some(tidepool_runtime::session::PreparedFailureKind::Cancelled),
+                requires_recovery: false,
+            }
+        );
         assert!(expected.scope.admit_source().is_err());
         assert!(fixture.generation.scope.admit_source().is_err());
         refusal.refuse_retirement(&mut original).unwrap();
@@ -1491,6 +1499,103 @@ mod tests {
         assert!(fixture.generation.scope.admit_source().is_ok());
         drop(refusal);
         assert!(expected.scope.admit_source().is_ok());
+    }
+
+    #[test]
+    fn retirement_source_restoration_preserves_independent_storage_failure() {
+        use super::super::{
+            ActorGenerationPublicationRefusalObservation as Observation,
+            ActorPublicationFailureCause as Cause,
+        };
+        use tidepool_runtime::session::{ResidentError, SessionError, StoreError, StoreErrorKind};
+        for kind in [
+            StoreErrorKind::MissingDatabase,
+            StoreErrorKind::Storage,
+            StoreErrorKind::RecoveryRequired,
+        ] {
+            let fixture = PublicationFixture::replacement(true);
+            let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let mut original = capture_original(&mut guard);
+            let error = crate::ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                SessionError::RecoveryStore(StoreError {
+                    path: "actual-owner-boundary-control.db".into(),
+                    kind,
+                    detail: "retained storage evidence".into(),
+                }),
+            ));
+            let completion = super::super::PublicationBodyCompletion::Observed {
+                guard,
+                outcome: Err(error),
+            }
+            .for_retirement();
+            let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+                completion
+            else {
+                panic!("unpublished storage failure retains its actual source settlement owner");
+            };
+            let primary = refusal.outcome().clone();
+            let observation = Observation::Failed {
+                cause: Cause::RecoveryStore(kind),
+                execution: None,
+                requires_recovery: kind == StoreErrorKind::RecoveryRequired,
+            };
+            assert_eq!(refusal.observation(), observation);
+            refusal.refuse_retirement(&mut original).unwrap();
+            assert_eq!(refusal.observation(), observation);
+            assert!(Arc::ptr_eq(&primary, refusal.outcome()));
+            assert_eq!(
+                refusal.observation().requires_recovery(),
+                kind == StoreErrorKind::RecoveryRequired
+            );
+            assert!(fixture
+                .expected
+                .generation()
+                .unwrap()
+                .scope
+                .admit_source()
+                .is_ok());
+            assert!(fixture.generation.scope.admit_source().is_ok());
+            assert!(primary
+                .as_ref()
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("retained storage evidence"));
+        }
+    }
+
+    #[test]
+    fn publication_observation_preserves_nested_source_and_storage_causes() {
+        use super::super::ActorPublicationFailureCause as Cause;
+        use tidepool_runtime::session::{ResidentError, SessionError, StoreError, StoreErrorKind};
+        let source = tidepool_runtime::session::SourceAdmissionError::Unconfirmed {
+            scope: tidepool_codegen::scope::ScopeId::ROOT,
+            count: 2,
+        };
+        let error = crate::ResidentActorWorkbenchError::Resident(ResidentError::Run(
+            tidepool_runtime::RuntimeError::SourceAdmission(source.clone()),
+        ));
+        assert_eq!(
+            error.publication_failure_cause(),
+            Cause::SourceAdmission(source)
+        );
+        for kind in [
+            StoreErrorKind::MissingDatabase,
+            StoreErrorKind::Storage,
+            StoreErrorKind::RecoveryRequired,
+        ] {
+            let error = crate::ResidentActorWorkbenchError::Delivered(ResidentError::Run(
+                tidepool_runtime::RuntimeError::Session(SessionError::RecoveryStore(StoreError {
+                    path: "nested-owner-boundary-control.db".into(),
+                    kind,
+                    detail: "nested storage evidence".into(),
+                })),
+            ));
+            assert_eq!(
+                error.publication_failure_cause(),
+                Cause::RecoveryStore(kind)
+            );
+        }
     }
 
     #[test]
