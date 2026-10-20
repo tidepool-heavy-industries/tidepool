@@ -20,6 +20,7 @@ module Tidepool.ExactScope
   , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
+  , InputRetentionLimits, optionalInputByteLimit, originalImageCountLimit
   , exactInputRetentionLimits, commitWorldInputRetention
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, ExactScopeRequestFailure(..), validateExactScopeRequest, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
@@ -481,8 +482,13 @@ newExactInputOwner = do
 -- Original bytes and optional world backing consume this one byte allowance.
 -- The count limit belongs only to original images, never World graph entries.
 -- The world index belongs to CompilerUniverse; this owner stores only its bytes.
-exactInputRetentionLimits :: ExactInputOwner -> (Integer,Int)
-exactInputRetentionLimits (ExactInputOwner limit _) = (limit,maxRetainedOriginalImages)
+data InputRetentionLimits = InputRetentionLimits
+  { optionalInputByteLimit :: !Integer
+  , originalImageCountLimit :: !Int
+  }
+
+exactInputRetentionLimits :: ExactInputOwner -> InputRetentionLimits
+exactInputRetentionLimits (ExactInputOwner limit _) = InputRetentionLimits limit maxRetainedOriginalImages
 
 -- Bound optional original-image metadata in its original unit. World and
 -- backing-node counts are observations, not claims on these image slots.

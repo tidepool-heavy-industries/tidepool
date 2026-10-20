@@ -308,7 +308,7 @@ import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
-  , exactInputRetentionLimits, commitWorldInputRetention
+  , exactInputRetentionLimits, optionalInputByteLimit, originalImageCountLimit, commitWorldInputRetention
   , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs, worldSuccessorFacts, worldSuccessorChangedAliases, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
   , worldInputsCompilerIdentity, worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
@@ -1628,7 +1628,7 @@ removeCompilerWorld root cache = case Map.lookup root (cachedCompilerWorlds cach
 admitCompilerWorld :: Integer -> String -> HeldCompilerWorld -> CompilerWorldCache
   -> (CompilerWorldCache,[HeldCompilerWorld])
 admitCompilerWorld byteLimit root world@(HeldCompilerWorld facts _ materialized _) cache
-  | standaloneBytes > byteLimit = (cache,[])
+  | WorldActiveOnly _ <- worldAdmissionResidency byteLimit world = (cache,[])
   | Map.member root (cachedCompilerWorlds cache) = throw WorldQueryCorrupt
   | otherwise = case Map.lookup key (compilerWorldBackingAccounts cache) of
       Just (WorldBackingAccounting live resident bytes nodes) -> trim [] cache
@@ -1642,7 +1642,6 @@ admitCompilerWorld byteLimit root world@(HeldCompilerWorld facts _ materialized 
       Nothing -> throw WorldQueryCorrupt
   where
     ticket = nextCompilerWorldTicket cache
-    standaloneBytes = fst (compilerWorldCharge world)
     key = worldMaterializationKey materialized
     (raw,rawEntries) = worldInputsRetainedCharge facts
     (charge,entries) = (raw,rawEntries+1)
@@ -1757,11 +1756,12 @@ observeCompilerWorld :: Bool -> CompilerUniverse -> WorldRetentionEvent -> Strin
   -> Maybe HeldCompilerWorld -> IO ()
 observeCompilerWorld timing universe event root reference world =
   forM_ (universePackageAssociation universe) $ \association -> do
-    let backing = (\(HeldCompilerWorld _ _ materialized _) -> worldMaterializationCharge materialized) <$> world
+    let limits = exactInputRetentionLimits (universeOriginalInputs universe)
+        backing = (\(HeldCompilerWorld _ _ materialized _) -> worldMaterializationCharge materialized) <$> world
         directory = (\(HeldCompilerWorld _ _ (WorldMaterialization path _ _ _ _ _ _ _ _) _) -> path) <$> world
     emitWorldRetention timing event root (hexBytes (servicePackageWorkerInstance association)) reference
       (compilerWorldCharge <$> world) backing (compilerWorldCacheCharge (universeWorlds universe))
-      (exactInputRetentionLimits (universeOriginalInputs universe)) directory
+      (optionalInputByteLimit limits,originalImageCountLimit limits) directory
     let (liveBytes,liveNodes) = compilerWorldLiveCharge (universeWorlds universe)
     emitCount timing "worlds.live_backing_bytes" liveBytes
     emitCount timing "worlds.live_backing_nodes" (fromIntegral liveNodes)
@@ -7178,17 +7178,17 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         writeIORef heldWorld (Just world)
                         observeCompilerWorld timing selected event root reference (Just world)
                         pure (ExactInputsReady (worldInputsIdentity facts) reference
-                          (worldAdmissionResidency (fst (exactInputRetentionLimits (universeOriginalInputs selected))) world))
+                          (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                       publish world@(HeldCompilerWorld facts reference _ _) = do
                         selected <- readIORef universe
                         let (nextWorlds,evicted) = admitCompilerWorld
-                              (fst (exactInputRetentionLimits (universeOriginalInputs selected))) root world (universeWorlds selected)
+                              (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) root world (universeWorlds selected)
                             retiredWorlds = removeCompilerWorld root nextWorlds
                         _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
                         retired <- evaluate (selected {universeWorlds=retiredWorlds})
                         held <- evaluate (Just world)
                         ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference
-                          (worldAdmissionResidency (fst (exactInputRetentionLimits (universeOriginalInputs selected))) world))
+                          (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                         -- Retire old private owners before unlinking their backing.
                         -- The shared reservation remains conservative until cleanup
                         -- succeeds; failure retains it and retires this worker.
@@ -7203,7 +7203,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         finishCompletion (appendCleanupFailures released failures)
                         settled <- readIORef universe
                         let (settledWorlds,unexpected) = admitCompilerWorld
-                              (fst (exactInputRetentionLimits (universeOriginalInputs settled))) root world (universeWorlds settled)
+                              (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs settled))) root world (universeWorlds settled)
                             finalNext = settled {universeWorlds=settledWorlds}
                             settledBytes = fst (compilerWorldCacheCharge settledWorlds)
                         unless (null unexpected) (throwIO WorldQueryCorrupt)

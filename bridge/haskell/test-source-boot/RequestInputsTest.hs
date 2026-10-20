@@ -76,7 +76,7 @@ import Tidepool.ExactScope
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
-  , exactInputRetentionLimits, commitWorldInputRetention
+  , exactInputRetentionLimits, optionalInputByteLimit, commitWorldInputRetention
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration
   , WorldObservationProfile(..), worldLexicalObservation, worldObservationProfile
   , worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
@@ -1227,7 +1227,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       unless (total "original_inputs.retained_encoded_bytes" unreserved > 0
           && total "original_inputs.certificate.hits" unreserved > 0)
         (fail "zero World byte reservation consumed original-image retention")
-      let (byteLimit,_) = exactInputRetentionLimits shared
+      let byteLimit = optionalInputByteLimit (exactInputRetentionLimits shared)
           interfaces = [iface | (iface,_,_) <- scopeInterfaces sharedLive]
           decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) sharedLive interfaces >>= either fail pure
       before <- mapM (scopeInterfaceBytes sharedLive) interfaces
@@ -1825,7 +1825,7 @@ worldResidencyHistories handles work producer profile parcel scopePath = do
     (maybe (unsetEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES") (setEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES")) $ \_ -> do
     unsetEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES"
     owner <- newExactInputOwner
-    unless (fst (exactInputRetentionLimits owner) == 128 * 1024 * 1024)
+    unless (optionalInputByteLimit (exactInputRetentionLimits owner) == 128 * 1024 * 1024)
       (fail "residency control did not exercise the default shared storage allowance")
     withResidentCompilerScopes [] $ \runScope -> do
       before <- directories
