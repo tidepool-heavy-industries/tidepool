@@ -1384,7 +1384,9 @@ fn absolute_source_alias(path: &Path) -> bool {
         })
 }
 
-#[derive(Clone, Debug)]
+/// One issued compiler World. Observations retain this shared owner; only a
+/// checked successor or explicit restoration creates another World.
+#[derive(Debug)]
 pub struct CompilerWorld {
     restoration: Arc<CompilerWorldRestoration>,
     realization: Arc<Mutex<Option<String>>>,
@@ -3262,19 +3264,17 @@ pub fn open_world(
 /// loss restores its retained product; accepted/uncertain queries are not replayed.
 pub fn query_public_module(
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    world: &CompilerWorld,
+    world: &Arc<CompilerWorld>,
     question: PublicModuleQuestion,
 ) -> Result<WorldQueryResult, CompileError> {
-    scoped_world_action(|| {
-        query_world_inner(endpoint.identity(), Arc::new(world.clone()), question)
-    })
+    scoped_world_action(|| query_world_inner(endpoint.identity(), Arc::clone(world), question))
 }
 
 /// Parse current authored input in the logical world. Source authority and
 /// physical END remain with the caller's runtime source compiler transaction.
 pub fn plan_cell(
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    world: &CompilerWorld,
+    world: &Arc<CompilerWorld>,
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
     operand: Option<Arc<CompilerWorldCellOperand>>,
 ) -> Result<Arc<crate::cell_plan::CompilerWorldCellPlan>, CompileError> {
@@ -3339,7 +3339,7 @@ pub fn plan_cell(
         )?;
         let receipt = crate::checked_cell::read(output, 8 << 20)?;
         crate::cell_plan::admit_world_plan(
-            Arc::new(world.clone()),
+            Arc::clone(world),
             recipe,
             operand,
             CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256(),
@@ -5261,11 +5261,11 @@ pub fn restore_world(
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     question: PublicModuleQuestion,
 ) -> Result<WorldQueryResult, CompileError> {
-    let world = CompilerWorld {
+    let world = Arc::new(CompilerWorld {
         restoration: Arc::clone(restoration),
         realization: Arc::new(Mutex::new(None)),
         position: None,
-    };
+    });
     query_public_module(endpoint, &world, question)
 }
 

@@ -3115,7 +3115,7 @@ enum PreparedRuntimeCellEvidence {
 /// rather than from a reconstructed compile view.
 fn plan_world_cell_admitted(
     source: &super::RuntimeSourceCompilerTransaction,
-    world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    world: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
     operand: Option<Arc<super::RuntimeWorldCellOperand>>,
 ) -> Result<RuntimeWorldCellPlan, super::WorldInspectionError> {
@@ -3161,7 +3161,7 @@ pub struct PreparedWorldCellPlan {
 
 pub fn prepare_world_cell_plan_admitted(
     source: &super::RuntimeSourceCompilerTransaction,
-    world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    world: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
     operand: Option<Arc<super::RuntimeWorldCellOperand>>,
 ) -> Result<PreparedWorldCellPlan, super::WorldInspectionError> {
