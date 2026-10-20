@@ -15,6 +15,7 @@ module Tidepool.DeclarationJoin
   , renderDeclarationInventoryOutcome
   , HostBindingInterfaceInput(..), BindingInterfacePurpose(..), encodeHostBindingInterface, encodeBindingInterfacePurpose
   , renderDeclarationSelection
+  , encodeDeclarationExports, decodeDeclarationExports
   ) where
 
 import Codec.CBOR.Decoding
@@ -545,22 +546,10 @@ decodeDeclarationJoin = do
     reservation = array 3 >> ReservedJoin <$> nonempty <*> nonempty <*> absolutePath
     write = array 4 >> DeclarationWrite <$> decodeWord64 <*> snapshot
       <*> vector declarationExport <*> vector identity
-    declarationExport = array 3 >> DeclarationExport <$> kind <*> identity <*> vector identity
+    declarationExport = decodeDeclarationExport
     inventory = array 2 >> InstanceInventory <$> vector classInstance <*> vector identity
     classInstance = array 3 >> ClassInstanceEvidence <$> identity <*> identity <*> vector identity
-    identity = array 5 >> ExportIdentity <$> nonempty <*> nonempty <*> namespace
-      <*> nonempty <*> optional text
-    namespace = text >>= \case
-      "value" -> pure ValueNamespace
-      "type" -> pure TypeNamespace
-      "constructor" -> pure ConstructorNamespace
-      "field" -> pure FieldNamespace
-      _ -> fail "invalid declaration export namespace"
-    kind = text >>= \case
-      "value" -> pure ValueDeclaration
-      "type" -> pure TypeDeclaration
-      "class" -> pure ClassDeclaration
-      _ -> fail "invalid declaration export kind"
+    identity = decodeExportIdentity
     artifact = do
       array 2
       iface <- exact
@@ -573,6 +562,39 @@ decodeDeclarationJoin = do
     absolutePath = text >>= \value -> if isAbsolute value then pure value else fail "relative declaration artifact path"
     digest = text >>= \value -> if length value == 64 && all (`elem` ['0'..'9'] ++ ['a'..'f']) value
       then pure value else fail "invalid declaration artifact SHA256"
+
+-- World lexical products carry the same declaration owner's inventory bytes.
+-- Decoding this immutable selection does not issue a declaration certificate.
+decodeDeclarationExports :: BS.ByteString -> Either String [DeclarationExport]
+decodeDeclarationExports bytes = case deserialiseFromBytes (vector decodeDeclarationExport) (BL.fromStrict bytes) of
+  Left failure -> Left (show failure)
+  Right (remaining,values)
+    | BL.null remaining && encodeDeclarationExports values == bytes -> Right values
+    | otherwise -> Left "declaration exports must be canonical CBOR with no trailing bytes"
+
+encodeDeclarationExports :: [DeclarationExport] -> BS.ByteString
+encodeDeclarationExports = toStrictByteString . wireList wireExport
+
+decodeDeclarationExport :: Decoder s DeclarationExport
+decodeDeclarationExport = array 3 >> DeclarationExport <$> kind <*> decodeExportIdentity <*> vector decodeExportIdentity
+  where
+    kind = text >>= \case
+      "value" -> pure ValueDeclaration
+      "type" -> pure TypeDeclaration
+      "class" -> pure ClassDeclaration
+      _ -> fail "invalid declaration export kind"
+
+decodeExportIdentity :: Decoder s ExportIdentity
+decodeExportIdentity = array 5 >> ExportIdentity <$> nonempty <*> nonempty <*> namespace
+  <*> nonempty <*> optional text
+  where
+    nonempty = text >>= \value -> if null value then fail "empty declaration identity" else pure value
+    namespace = text >>= \case
+      "value" -> pure ValueNamespace
+      "type" -> pure TypeNamespace
+      "constructor" -> pure ConstructorNamespace
+      "field" -> pure FieldNamespace
+      _ -> fail "invalid declaration export namespace"
 
 array :: Int -> Decoder s ()
 array expected = decodeListLen >>= \count -> unless (count == expected) (fail "invalid join field count")

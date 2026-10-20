@@ -42,6 +42,8 @@ module Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
+  , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
+  , worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface, worldDeclarationExports
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner, decodeWorldSources, readWorldStringMap
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
@@ -90,6 +92,7 @@ import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, che
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports)
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures
   , CellExpressionPlan(..), ExpressionLiftPlan(..), decodeCellExpressionPlan
@@ -2246,7 +2249,32 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsBindings :: Map.Map String WorldBinding
   , worldInputsBindingCharge :: (Integer,Int)
   , worldInputsPrimary :: WorldPrimaryFacts
+  , ownedWorldInputsLexicalSurface :: WorldLexicalSurface
   }
+
+-- Ordered imports and an explicitly selected declaration facade belong to the
+-- logical product. Custody of other interfaces cannot populate this surface.
+data WorldLexicalSurface = WorldLexicalSurface [String] (Maybe WorldDeclarationSurface) (Integer,Int)
+
+data WorldDeclarationSurface = WorldDeclarationSurface ScopeInterfaceInput [DeclarationExport]
+
+worldInputsLexicalSurface :: WorldInputFacts -> WorldLexicalSurface
+worldInputsLexicalSurface = ownedWorldInputsLexicalSurface
+
+worldLexicalImports :: WorldLexicalSurface -> [String]
+worldLexicalImports (WorldLexicalSurface imports _ _) = imports
+
+worldLexicalDeclaration :: WorldLexicalSurface -> Maybe WorldDeclarationSurface
+worldLexicalDeclaration (WorldLexicalSurface _ declaration _) = declaration
+
+worldLexicalCharge :: WorldLexicalSurface -> (Integer,Int)
+worldLexicalCharge (WorldLexicalSurface _ _ charge) = charge
+
+worldDeclarationInterface :: WorldDeclarationSurface -> ExactIfaceArtifact
+worldDeclarationInterface (WorldDeclarationSurface (ScopeInterfaceInput (artifact,_,_) _) _) = artifact
+
+worldDeclarationExports :: WorldDeclarationSurface -> [DeclarationExport]
+worldDeclarationExports (WorldDeclarationSurface _ exports) = exports
 
 -- One demanded Context row carries its sealed interface bytes, canonical proof,
 -- decoded interface and package evidence together. Consumers borrow this
@@ -2423,11 +2451,13 @@ readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate o
 -- Equal seals alone do not establish physical sharing between acquisitions.
 worldInputsRetainedCharge :: WorldInputFacts -> (Integer,Int)
 worldInputsRetainedCharge facts =
-  (requestInputBytes custody + bindingBytes + primaryBytes,requestInputCount custody + bindingEntries + primaryEntries)
+  (requestInputBytes custody + bindingBytes + primaryBytes + lexicalBytes
+    ,requestInputCount custody + bindingEntries + primaryEntries + lexicalEntries)
   where
     custody = worldInputsCustody facts
     (bindingBytes,bindingEntries) = worldInputsBindingCharge facts
     (primaryBytes,primaryEntries) = worldPrimaryRetainedCharge (worldInputsPrimary facts)
+    (lexicalBytes,lexicalEntries) = worldLexicalCharge (worldInputsLexicalSurface facts)
 
 data CapturedWorldSources = CapturedWorldSources
   { worldSourceOrigin :: BS.ByteString
@@ -2458,7 +2488,7 @@ data OfferedWorldInputs = OfferedWorldInputs BS.ByteString FilePath BS.ByteStrin
 type OfferedWorldRow = ((InterfaceRow,ParsedInterfaceEvidence),BS.ByteString)
 
 data WorldRestoration = WorldRestoration BS.ByteString BS.ByteString BS.ByteString BS.ByteString
-  Word64 BS.ByteString BS.ByteString
+  Word64 BS.ByteString BS.ByteString BS.ByteString
 
 worldCorrupt :: String -> IO a
 worldCorrupt = throwIO . WorldInputsFailure WorldInputsCorrupt
@@ -2482,17 +2512,18 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
         sourceBytes <- readInput sourcePath bound
         pure (offered,sourceBytes)
       let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
-      WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedScope associationRoot expectedBindings <-
+      WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedScope associationRoot expectedBindings lexicalRoot <-
         decodeWorldBytes decodeWorldRestoration restoration
       (bindingScope,bindingRoot) <- decodeWorldBytes decodeWorldBindingRoot visibility
-      -- Fixed owner/root order is Context, primary associations, occurrences.
-      frontier <- verifyWorldBlocks [primary,associationRoot,bindingRoot] blocks
+      -- Fixed roots are Context, primary associations, occurrences and lexical
+      -- surface. The semantic product authenticates all four together.
+      frontier <- verifyWorldBlocks [primary,associationRoot,bindingRoot,lexicalRoot] blocks
       context <- readWorldContext frontier primary producer
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
-      let canonicalRestoration = toStrictByteString (E.encodeListLen 9 <> text "TPCWREST" <> E.encodeWord 3
+      let canonicalRestoration = toStrictByteString (E.encodeListLen 10 <> text "TPCWREST" <> E.encodeWord 4
             <> E.encodeBytes expectedPrimary <> E.encodeBytes domainSeal <> E.encodeBytes expectedProducer
             <> E.encodeBytes expectedProfile <> E.encodeWord64 expectedScope
-            <> E.encodeBytes associationRoot <> E.encodeBytes expectedBindings)
+            <> E.encodeBytes associationRoot <> E.encodeBytes expectedBindings <> E.encodeBytes lexicalRoot)
       unless (restoration == canonicalRestoration && primary == expectedPrimary && producer == expectedProducer && profile == expectedProfile
           && bindingScope == expectedScope && bindingRoot == expectedBindings && worldSourceDomainSha256 sources == domainSeal)
         (worldCorrupt "world restoration differs from captured source, profile, context or roots")
@@ -2531,14 +2562,16 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
             other -> other
           complete = map bind rows
       primaryFacts <- readWorldPrimary frontier associationRoot context producer (zip baseRows (take (length baseRows) complete))
+      lexical <- readWorldLexicalSurface frontier lexicalRoot primaryFacts
       (bindings,bindingCharge) <- readWorldBindings frontier bindingRoot producer
         (zip visibleRows (drop (length baseRows) complete))
       let (_,primaryEntries) = worldPrimaryRetainedCharge primaryFacts
-      when (toInteger (requestInputCount custody) + toInteger (snd bindingCharge) + toInteger primaryEntries > toInteger (maxBound :: Int))
+      when (toInteger (requestInputCount custody) + toInteger (snd bindingCharge) + toInteger primaryEntries
+          + toInteger (snd (worldLexicalCharge lexical)) > toInteger (maxBound :: Int))
         (worldCorrupt "compiler world retained entry count exceeds host range")
       let identity = SHA.hash restoration
       pure (WorldInputFacts (hexBytes identity) identity producer profile sources
-        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility bindingScope bindings bindingCharge primaryFacts)
+        (take (length baseRows) complete) (drop (length baseRows) complete) custody primary visibility bindingScope bindings bindingCharge primaryFacts lexical)
 
 decodeWorldBytes :: (forall s. Decoder s a) -> BS.ByteString -> IO a
 decodeWorldBytes parser bytes = case deserialiseFromBytes parser (BL.fromStrict bytes) of
@@ -2795,6 +2828,56 @@ worldInputsPrimaryIsEmpty facts =
     && Map.null (worldSelectionScopes selected) && Map.null (worldSelectionNamespace selected)
     && Set.null (worldSelectionRoots selected) && Set.null (worldSelectionCustody selected)
     && Map.null (worldPrimaryAssociations (worldInputsPrimary facts))
+
+readWorldLexicalSurface :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+  -> WorldPrimaryFacts -> IO WorldLexicalSurface
+readWorldLexicalSurface frontier root primary = do
+  body <- maybe (worldCorrupt "compiler world lexical surface is absent") pure (Map.lookup root frontier)
+  (imports,selected) <- decodeWorldBytes (decodeSurface body) body
+  declaration <- forM selected $ \(owner,interface,encodedExports) -> do
+    association <- maybe (worldCorrupt "world declaration facade has no primary selected role") pure
+      (Map.lookup owner (worldPrimarySelected primary))
+    unless (fst (worldPrimaryInterfaceBinding association) == interface)
+      (worldCorrupt "world declaration facade has another selected interface artifact")
+    exports <- either worldCorrupt pure (decodeDeclarationExports encodedExports)
+    case worldPrimaryRow association of
+      row@(ScopeInterfaceInput (artifact,_,_) _) -> do
+        unless ((exactUnit artifact,exactModule artifact) == owner)
+          (worldCorrupt "world declaration facade has another acquired interface owner")
+        pure (WorldDeclarationSurface row exports)
+  let exports = maybe [] worldDeclarationExports declaration
+      entries = 1 + toInteger (length imports) + toInteger (length exports)
+        + sum [toInteger (length (exportChildren value)) | value <- exports]
+  when (entries > toInteger (maxBound :: Int))
+    (worldCorrupt "compiler world lexical retention count exceeds host range")
+  pure (WorldLexicalSurface imports declaration (toInteger (BS.length body),fromInteger entries))
+  where
+    decodeSurface body = do
+      worldArray 3
+      magic <- decodeStringCanonical
+      unless (magic == "TPCWLEX1") (fail "unsupported compiler world lexical surface")
+      imports <- worldFactList (BS.length body) $ do
+        spec <- T.unpack <$> worldBindingText
+        when (any (`elem` ['\0','\n']) spec) (fail "invalid published compiler import specification")
+        pure spec
+      selected <- peekTokenType >>= \case
+        TypeNull -> decodeNull >> pure Nothing
+        _ -> do
+          worldArray 4
+          unit <- T.unpack <$> worldBindingText
+          name <- T.unpack <$> worldBindingText
+          artifact <- rawWorldDigestCanonical
+          exports <- decodeBytesCanonical
+          pure (Just ((unit,name),artifact,exports))
+      let text = E.encodeString . T.pack
+          encodedDeclaration = case selected of
+            Nothing -> E.encodeNull
+            Just ((unit,name),artifact,exports) -> E.encodeListLen 4 <> text unit <> text name
+              <> E.encodeBytes artifact <> E.encodeBytes exports
+          canonical = toStrictByteString (E.encodeListLen 3 <> text "TPCWLEX1"
+            <> E.encodeListLen (fromIntegral (length imports)) <> foldMap text imports <> encodedDeclaration)
+      unless (canonical == body) (fail "world lexical surface must be canonical CBOR")
+      pure (imports,selected)
 
 worldFactField :: String -> Decoder s ()
 worldFactField expected = do
@@ -3394,7 +3477,7 @@ decodeWorldInputs payloadBytes = do
   array 11
   magic <- string
   version <- decodeWord
-  unless (magic == "TPCWORLD" && version == 3) (fail "unsupported compiler world descriptor")
+  unless (magic == "TPCWORLD" && version == 4) (fail "unsupported compiler world descriptor")
   restoration <- decodeBytes
   source <- absolute
   producer <- rawWorldDigest
@@ -3413,12 +3496,12 @@ decodeWorldInputs payloadBytes = do
 
 decodeWorldRestoration :: Decoder s WorldRestoration
 decodeWorldRestoration = do
-  worldArray 9
+  worldArray 10
   magic <- decodeStringCanonical
   version <- decodeWordCanonical
-  unless (magic == "TPCWREST" && version == 3) (fail "unsupported compiler world restoration")
+  unless (magic == "TPCWREST" && version == 4) (fail "unsupported compiler world restoration")
   WorldRestoration <$> worldRawCID <*> rawWorldDigestCanonical <*> rawWorldDigestCanonical <*> rawWorldDigestCanonical
-    <*> decodeWord64Canonical <*> worldRawCID <*> worldRawCID
+    <*> decodeWord64Canonical <*> worldRawCID <*> worldRawCID <*> worldRawCID
 
 worldRawCID :: Decoder s BS.ByteString
 worldRawCID = do

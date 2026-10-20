@@ -587,7 +587,22 @@ declarationConsumer = lookupEnv "TIDEPOOL_TEST_DECLARATION_JOIN_CHILD" >>= maybe
 
 wireRoundTripChecks :: IO ()
 wireRoundTripChecks = bracket temporary removeDirectoryRecursive $ \root -> do
-  forM_ [emptyWireInput, typedWireInput] $ \input -> do
+  let identity namespace occurrence parent = ExportIdentity "main" "Original" namespace occurrence parent
+      exported = typedWireInput {expectedExports =
+        [ DeclarationExport ValueDeclaration (identity ValueNamespace "+" Nothing) []
+        , DeclarationExport TypeDeclaration (identity TypeNamespace "Box" Nothing)
+            [identity ConstructorNamespace "Box" Nothing,identity FieldNamespace "field" (Just "Box")]
+        , DeclarationExport ClassDeclaration (identity TypeNamespace "Class" Nothing)
+            [identity ValueNamespace "method" Nothing]
+        ]}
+  forM_ [emptyWireInput, typedWireInput, exported] $ \input -> do
+    let exports = expectedExports input
+        encodedExports = encodeDeclarationExports exports
+    unless (decodeDeclarationExports encodedExports == Right exports)
+      (fail "shared declaration export inventory codec lost a typed selection")
+    forM_ [encodedExports <> BS.singleton 0,BS.pack [0x98,fromIntegral (length exports)] <> BS.tail encodedExports] $ \malformed ->
+      unless (either (const True) (const False) (decodeDeclarationExports malformed))
+        (fail "shared declaration export inventory codec accepted trailing or noncanonical framing")
     let path = root </> "join.cbor"
     BS.writeFile path (encodeDeclarationJoin input)
     operation <- readDeclarationOperation path
