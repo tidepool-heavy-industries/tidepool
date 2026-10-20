@@ -4921,7 +4921,6 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         let mut entries = std::collections::BTreeSet::new();
-        let mut bound = std::collections::BTreeSet::new();
         let mut owners = std::collections::BTreeMap::new();
         let mut hash = blake3::Hasher::new();
         hash.update(b"TidepoolAdmittedNativeImports1");
@@ -4951,25 +4950,6 @@ impl PersistentSession {
                 (entry.value.identity.clone(), entry.module.gen.0),
                 handle.raw().0,
             );
-            bound.insert(entry.value.identity.clone());
-        }
-        if let Some(engine) = self.prepared() {
-            for (identity, generation) in engine.protected_code_export_retentions() {
-                if bound.contains(&identity) {
-                    continue;
-                }
-                let Some(ImportOwner::CodeExport { root_id, .. }) =
-                    engine.retained_code_export_owner(&identity, generation)
-                else {
-                    return Err(SessionError::StaleStagedDeclaration);
-                };
-                hash.update(b"code-export");
-                hash.update(&generation.to_le_bytes());
-                hash.update(&root_id.to_le_bytes());
-                frame_native_identity(&mut hash, &identity);
-                owners.insert((identity.clone(), generation), root_id);
-                entries.insert((identity, generation));
-            }
         }
         Ok(AdmittedNativeImports {
             entries: entries.into_iter().collect(),

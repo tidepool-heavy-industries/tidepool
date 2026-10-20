@@ -4228,6 +4228,7 @@ impl PreparedEngine {
     /// Only live exports with an authenticated package interface may cause a
     /// checked compiler projection to omit their native definitions. Ordinary
     /// graph installs also retain package tops, but do not issue that proof.
+    #[cfg(test)]
     pub(crate) fn protected_code_export_retentions(
         &self,
     ) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {

@@ -19,8 +19,8 @@ use tidepool_codegen::binding_table::{
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
-    ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
+    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId, ResidencyCounts,
+    SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -1760,20 +1760,7 @@ impl PersistentSession {
     /// binding instead of recompiling a body it does not have.
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
-        let mut retained = self.binding_index.prepared_retained();
-        if let Some(engine) = self.machine.as_ref() {
-            // Package tops the machine already carries compiled code for.
-            // A value binding wins any collision: the binding store's own
-            // generation is what a turn that reads `x` must link against.
-            let bound: std::collections::BTreeSet<&SymbolIdentity> =
-                retained.iter().map(|(identity, _)| identity).collect();
-            let exported: Vec<(SymbolIdentity, u64)> = engine
-                .protected_code_export_retentions()
-                .filter(|(identity, _)| !bound.contains(identity))
-                .collect();
-            retained.extend(exported);
-        }
-        retained
+        self.binding_index.prepared_retained()
     }
 
     /// How many package tops this session's machine can hand a later turn
@@ -7253,7 +7240,7 @@ mod checkpoint_scope_tests {
                     &target.fixture_constructor_metadata(),
                     target,
                     &evidence,
-                        &inherited,
+                    &inherited,
                     &|_| None,
                 )
                 .unwrap()
