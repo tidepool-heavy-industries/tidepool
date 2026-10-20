@@ -19008,6 +19008,17 @@ pub(crate) mod request_tests {
             ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
             crate::ActorSessionContext,
         ) {
+            self.private_with_input(Some(serde_json::json!({"greeting": "hi"})))
+                .await
+        }
+
+        async fn private_with_input(
+            &self,
+            input: Option<serde_json::Value>,
+        ) -> (
+            ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            crate::ActorSessionContext,
+        ) {
             let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
             let (mut context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
                 self.public.clone(),
@@ -19019,7 +19030,7 @@ pub(crate) mod request_tests {
             let frontend = self
                 .workbench
                 .shared_view()
-                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
+                .with_json_input(input)
                 .with_compilation_authority(authority);
             let observation = frontend.capture_observation_scaffold(&context).await
                 .expect("the production public preflight settles the input TYPE prototype");
@@ -19176,6 +19187,135 @@ pub(crate) mod request_tests {
             "successful parser work confirms END; owner preflight refusal submits no request"
         );
         (result, input)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn world_declaration_publication_retains_operand_after_failed_later_cell() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client, 7).await;
+            let (declaration, context) = fixture.private().await;
+            declaration
+                .execute_cell_for_test(
+                    context.clone(),
+                    include_str!("fixtures/world-declaration-captured-input.hs"),
+                )
+                .await
+                .expect("the actual declaration-only World cell captures its hidden operand");
+            declaration
+                .publish_completed_cell_for_test(context)
+                .await
+                .expect("the completed declaration publishes through the actual actor World owner");
+            drop(declaration);
+
+            let (invocation, context) = fixture
+                .private_with_input(Some(serde_json::json!({"greeting": "different"})))
+                .await;
+            invocation
+                .execute_cell_for_test(
+                    context.clone(),
+                    &format!(
+                        "import qualified Data.Maybe as RetainedMaybe\n{}",
+                        include_str!("fixtures/world-declaration-invoke-captured-input.hs")
+                    ),
+                )
+                .await
+                .expect("later execution uses the original captured input under a different current input");
+            invocation
+                .publish_completed_cell_for_test(context)
+                .await
+                .unwrap();
+            drop(invocation);
+
+            let before = fixture
+                .workbench
+                .access
+                .with_machine(fixture.public.clone(), |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let view = session.compile_view_in(scope).unwrap();
+                    assert!(view.persistent_imports().source_lines().iter().any(|line|
+                        line == "import qualified Data.Maybe as RetainedMaybe"));
+                    assert!(session.current_binding_in(scope, "observed").is_some());
+                    assert!(session.current_decl_heads_in(scope).iter().any(|(name, _)|
+                        name == "capturedGreeting"));
+                    Ok((
+                        view,
+                        session.public_visibility_snapshot_in(scope),
+                        session.workbench_bindings_in(scope),
+                        session.current_decl_heads_in(scope),
+                    ))
+                })
+                .await
+                .unwrap();
+            let world_before = installed_world_query(
+                &fixture.workbench,
+                fixture.public.clone(),
+                fixture.captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Info,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            )
+            .await;
+
+            let (failed, context) = fixture.private_with_input(None).await;
+            let error = match failed
+                .prepare_cell(
+                    context,
+                    include_str!("fixtures/world-declaration-type-failure.hs").into(),
+                )
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("the ill-typed declaration unexpectedly prepared"),
+            };
+            let ResidentActorWorkbenchError::CellCheck(failure) = error else {
+                panic!("the authored type error lost its typed compiler refusal: {error:?}");
+            };
+            assert_eq!(classify_compile(&failure.error).class, FailureClass::UserHaskell);
+            drop(failed);
+            fixture
+                .workbench
+                .access
+                .with_machine(fixture.public.clone(), move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let view = session.compile_view_in(scope).unwrap();
+                    assert!(view.is_current_for(&before.0) && before.0.is_current_for(&view),
+                        "failed preparation must preserve the published namespace and exact inputs");
+                    assert!(session.public_visibility_snapshot_in(scope) == before.1,
+                        "failed preparation must not publish a visibility revision");
+                    assert_eq!(session.workbench_bindings_in(scope), before.2);
+                    assert_eq!(session.current_decl_heads_in(scope), before.3);
+                    assert!(session.current_binding_in(scope, "neverPublished").is_none());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let world_after = installed_world_query(
+                &fixture.workbench,
+                fixture.public.clone(),
+                fixture.captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Info,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            )
+            .await;
+            assert_eq!(world_after.provenance().fingerprint, world_before.provenance().fingerprint,
+                "the failed later cell must preserve the logical public World");
+
+            let (retained, context) = fixture.private_with_input(None).await;
+            retained
+                .execute_cell_for_test(
+                    context.clone(),
+                    include_str!("fixtures/world-declaration-invoke-after-failure.hs"),
+                )
+                .await
+                .expect("published closure, binding and import still execute after failure without a new input");
+            retained
+                .publish_completed_cell_for_test(context)
+                .await
+                .unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
