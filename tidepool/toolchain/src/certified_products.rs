@@ -4843,6 +4843,28 @@ impl ResolvedOriginalBindings {
         }))
     }
 
+    pub(crate) fn merge(&self, other: &Self) -> CertResult<Arc<Self>> {
+        if !other.belongs_to(&self.basis, &self.operation) {
+            return Err(CertificationError::Mismatch("native demand batches have different input owners"));
+        }
+        self.operation.reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(
+            self.uses.len().saturating_add(other.uses.len()),
+        )?;
+        let mut uses = BTreeMap::new();
+        for (import, resolved) in self.uses.iter().chain(&other.uses) {
+            let ReceiptImportOwner::OriginalBinding { unit, module, binder, .. } = import else {
+                return Err(CertificationError::Mismatch("native demand contains a non-Original reference"));
+            };
+            charge_symbol(&self.operation, binder)?;
+            self.operation.charge(unit.len().saturating_add(module.len())
+                .saturating_add(resolved.0.unit.len()).saturating_add(resolved.0.module.len()))?;
+            if uses.insert(import.clone(), resolved.clone()).is_some_and(|prior| prior != *resolved) {
+                return Err(CertificationError::Mismatch("native demand changed a resolved Original reference"));
+            }
+        }
+        Ok(Arc::new(Self { basis: Arc::clone(&self.basis), operation: Arc::clone(&self.operation), uses }))
+    }
+
     pub(crate) fn belongs_to(
         &self,
         source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
@@ -19826,6 +19848,7 @@ pub(crate) mod tests {
                 value_identity(&binder),
             ]));
         }
+        let batch_uses = uses.clone();
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(
             &value_array([value_text("TPNATIVEDEMAND1"), value_array(uses)]),
@@ -19836,6 +19859,27 @@ pub(crate) mod tests {
         let resolved = inputs
             .resolve_native_demand(&packet, &mut validation)
             .unwrap();
+        let packet = |uses: Vec<Value>, operation: &InventoryOperation| {
+            let bytes = encode_value_with_operation(
+                &value_array([value_text("TPNATIVEDEMAND1"), value_array(uses)]),
+                CertificationFormat::ProductReceipt, COMPILER_RECEIPT_BYTES_LIMIT, operation,
+            ).unwrap();
+            NativeDemandPacket::decode(&bytes, operation).unwrap()
+        };
+        let first = inputs.resolve_native_demand(
+            &packet(vec![batch_uses[0].clone()], &validation.inventory), &mut validation,
+        ).unwrap();
+        let second = inputs.resolve_native_demand(
+            &packet(vec![batch_uses[1].clone()], &validation.inventory), &mut validation,
+        ).unwrap();
+        let merged = first.groups().merge(second.groups()).unwrap();
+        assert_eq!(merged.bindings(), BTreeSet::from([old_r, old_g, fresh_g, fresh_j]));
+        assert_eq!(merged.retained_bindings(), resolved.groups().retained_bindings());
+        let mut foreign_validation = PackageInterfaceValidation::default();
+        let foreign = inputs.resolve_native_demand(
+            &packet(vec![batch_uses[0].clone()], &foreign_validation.inventory), &mut foreign_validation,
+        ).unwrap();
+        assert!(merged.merge(foreign.groups()).is_err());
         let rows = resolved.groups().selected_rows();
         assert_eq!(
             rows.keys().copied().collect::<BTreeSet<_>>(),
