@@ -804,19 +804,192 @@ pub(super) struct RuntimeAdmissionOwner {
     identity: uuid::Uuid,
     epoch: std::sync::atomic::AtomicU64,
     source_issuance: parking_lot::RwLock<()>,
-    retired: parking_lot::Mutex<Vec<ScopeId>>,
+    retired: parking_lot::Mutex<Vec<RuntimeAdmissionRelease>>,
     lexical_leases: parking_lot::Mutex<BTreeMap<ScopeId, RuntimeLexicalScopeRecord>>,
     session_live: std::sync::atomic::AtomicBool,
     uncertain_scopes: std::sync::Weak<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
 }
 
 struct RuntimeLexicalScopeRecord {
+    owner_epoch: u64,
     lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    original_source: Option<std::sync::Weak<RuntimeOriginalSource>>,
     owns_source_admission: bool,
     source_admission: super::RuntimeSourceAdmission,
     // The actual canonical lease owns strong prerequisites. Keeping them
     // strong in the issuer's own record would form owner→lease→owner cycles.
     prerequisites: Vec<std::sync::Weak<RuntimeLexicalScopeLease>>,
+}
+
+enum RuntimeAdmissionRelease {
+    Lexical { scope: ScopeId, owner_epoch: u64 },
+    OriginalSource { scope: ScopeId, owner_epoch: u64 },
+}
+
+/// Canonical original-source authority, independent of mutable lexical roots.
+/// Its scope is a diagnostic identity and does not assert lexical liveness.
+pub struct RuntimeOriginalSource {
+    owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    scope: ScopeId,
+    source_admission: super::RuntimeSourceAdmission,
+    prerequisites: Vec<Arc<RuntimeOriginalSource>>,
+}
+
+impl RuntimeOriginalSource {
+    fn validate_local_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+        let canonical = self
+            .owner
+            .session_live
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self.owner_epoch == self.owner.epoch()
+            && self
+                .owner
+                .lexical_leases
+                .lock()
+                .get(&self.scope)
+                .is_some_and(|record| {
+                    record.owner_epoch == self.owner_epoch
+                        && record.source_admission.same_owner(&self.source_admission)
+                        && record
+                            .original_source
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_some_and(|source| std::ptr::eq(source.as_ref(), self))
+                });
+        if canonical {
+            Ok(())
+        } else {
+            Err(super::SourceAdmissionError::StaleSourceLease)
+        }
+    }
+
+    pub fn validate_source_issuer(self: &Arc<Self>) -> Result<(), super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [], |_, _| Ok(()))
+    }
+
+    /// Validate both immutable source DAGs and actual lexical custody under one
+    /// total order of issuer locks. Inner validators never acquire issuer locks.
+    pub(crate) fn with_sources_and_targets<T>(
+        originals: impl IntoIterator<Item = Arc<Self>>,
+        targets: impl IntoIterator<Item = Arc<RuntimeLexicalScopeLease>>,
+        action: impl FnOnce(
+            &[Arc<Self>],
+            &[Arc<RuntimeLexicalScopeLease>],
+        ) -> Result<T, super::SourceAdmissionError>,
+    ) -> Result<T, super::SourceAdmissionError> {
+        fn source_dag(
+            source: Arc<RuntimeOriginalSource>,
+            sources: &mut Vec<Arc<RuntimeOriginalSource>>,
+        ) {
+            if sources.iter().any(|held| Arc::ptr_eq(held, &source)) {
+                return;
+            }
+            for prerequisite in &source.prerequisites {
+                source_dag(prerequisite.clone(), sources);
+            }
+            sources.push(source);
+        }
+        fn lexical_dag(
+            lease: Arc<RuntimeLexicalScopeLease>,
+            leases: &mut Vec<Arc<RuntimeLexicalScopeLease>>,
+        ) {
+            if leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
+                return;
+            }
+            for prerequisite in &lease.prerequisites {
+                lexical_dag(prerequisite.clone(), leases);
+            }
+            leases.push(lease);
+        }
+        let mut sources = Vec::new();
+        for source in originals {
+            source_dag(source, &mut sources);
+        }
+        let mut leases = Vec::new();
+        for target in targets {
+            lexical_dag(target, &mut leases);
+        }
+        for lease in &leases {
+            source_dag(lease.original_source.clone(), &mut sources);
+        }
+        let mut owners = sources
+            .iter()
+            .map(|source| source.owner.clone())
+            .chain(leases.iter().map(|lease| lease.owner.clone()))
+            .collect::<Vec<_>>();
+        owners.sort_unstable_by_key(|owner| owner.identity());
+        owners.dedup_by(|a, b| Arc::ptr_eq(a, b));
+        let _issuance = owners
+            .iter()
+            .map(|owner| owner.source_issuance.read())
+            .collect::<Vec<_>>();
+        let validate = || {
+            for source in &sources {
+                source.validate_local_source_issuer()?;
+            }
+            for lease in &leases {
+                lease.validate_local_source_issuer()?;
+            }
+            Ok::<_, super::SourceAdmissionError>(())
+        };
+        validate()?;
+        let result = action(&sources, &leases)?;
+        validate()?;
+        Ok(result)
+    }
+
+    pub fn with_open_target<T>(
+        self: &Arc<Self>,
+        target: &Arc<RuntimeLexicalScopeLease>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [target.clone()], |sources, _| {
+            super::RuntimeSourceAdmission::with_open_admissions(
+                sources.iter().map(|source| source.source_admission()),
+                action,
+            )
+        })
+    }
+
+    pub fn with_open_source_admission<T>(
+        self: &Arc<Self>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [], |sources, _| {
+            super::RuntimeSourceAdmission::with_open_admissions(
+                sources.iter().map(|source| source.source_admission()),
+                action,
+            )
+        })
+    }
+
+    pub fn source_admission(&self) -> &super::RuntimeSourceAdmission {
+        &self.source_admission
+    }
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+
+impl std::fmt::Debug for RuntimeOriginalSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeOriginalSource")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for RuntimeOriginalSource {
+    fn drop(&mut self) {
+        self.owner
+            .retired
+            .lock()
+            .push(RuntimeAdmissionRelease::OriginalSource {
+                scope: self.scope,
+                owner_epoch: self.owner_epoch,
+            });
+    }
 }
 
 /// Synchronous exclusion with registrations. Unknown commit or unwinding
@@ -901,10 +1074,14 @@ pub struct RuntimeLexicalScopeLease {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     scope: ScopeId,
+    original_source: Arc<RuntimeOriginalSource>,
     source_admission: super::RuntimeSourceAdmission,
     prerequisites: Vec<Arc<RuntimeLexicalScopeLease>>,
 }
 impl RuntimeLexicalScopeLease {
+    pub fn original_source(&self) -> &Arc<RuntimeOriginalSource> {
+        &self.original_source
+    }
     fn validate_local_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
         if self.owner_epoch != self.owner.epoch() || !self.has_live_canonical_custody() {
             return Err(super::SourceAdmissionError::StaleSourceLease);
@@ -953,49 +1130,16 @@ impl RuntimeLexicalScopeLease {
         roots: impl IntoIterator<Item = Arc<Self>>,
         action: impl FnOnce(&[Arc<Self>]) -> Result<T, super::SourceAdmissionError>,
     ) -> Result<T, super::SourceAdmissionError> {
-        fn collect(
-            lease: Arc<RuntimeLexicalScopeLease>,
-            leases: &mut Vec<Arc<RuntimeLexicalScopeLease>>,
-        ) {
-            if leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
-                return;
-            }
-            for prerequisite in &lease.prerequisites {
-                collect(prerequisite.clone(), leases);
-            }
-            leases.push(lease);
-        }
-        let mut leases = Vec::new();
-        for root in roots {
-            collect(root, &mut leases);
-        }
-        let mut owners = leases
-            .iter()
-            .map(|lease| lease.owner.clone())
-            .collect::<Vec<_>>();
-        owners.sort_unstable_by_key(|owner| owner.identity());
-        owners.dedup_by(|a, b| Arc::ptr_eq(a, b));
-        let _issuance = owners
-            .iter()
-            .map(|owner| owner.source_issuance.read())
-            .collect::<Vec<_>>();
-        for lease in &leases {
-            lease.validate_local_source_issuer()?;
-        }
-        let result = action(&leases)?;
-        for lease in &leases {
-            lease.validate_local_source_issuer()?;
-        }
-        Ok(result)
+        RuntimeOriginalSource::with_sources_and_targets([], roots, |_, leases| action(leases))
     }
 
     pub fn with_open_source_admission<T>(
         self: &Arc<Self>,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        Self::with_source_leases([self.clone()], |leases| {
+        RuntimeOriginalSource::with_sources_and_targets([], [self.clone()], |sources, _| {
             super::RuntimeSourceAdmission::with_open_admissions(
-                leases.iter().map(|lease| lease.source_admission()),
+                sources.iter().map(|source| source.source_admission()),
                 action,
             )
         })
@@ -1042,7 +1186,13 @@ impl std::fmt::Debug for RuntimeLexicalScopeLease {
 }
 impl Drop for RuntimeLexicalScopeLease {
     fn drop(&mut self) {
-        self.owner.retired.lock().push(self.scope);
+        self.owner
+            .retired
+            .lock()
+            .push(RuntimeAdmissionRelease::Lexical {
+                scope: self.scope,
+                owner_epoch: self.owner_epoch,
+            });
     }
 }
 
@@ -2834,17 +2984,39 @@ impl PersistentSession {
                         .map(|lease| lease.source_admission().clone()),
                 )
             });
+        let owner_epoch = self.admission_owner().epoch();
+        let original_source = match leases
+            .get(&scope)
+            .and_then(|record| record.original_source.as_ref())
+        {
+            Some(source) => source
+                .upgrade()
+                .ok_or(super::SourceAdmissionError::StaleSourceLease)?,
+            None => Arc::new(RuntimeOriginalSource {
+                owner: self.admission_owner().clone(),
+                owner_epoch,
+                scope,
+                source_admission: source_admission.clone(),
+                prerequisites: prerequisites
+                    .iter()
+                    .map(|lease| lease.original_source.clone())
+                    .collect(),
+            }),
+        };
         let lease = Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
+            owner_epoch,
             scope,
+            original_source,
             source_admission: source_admission.clone(),
             prerequisites,
         });
         leases.insert(
             scope,
             RuntimeLexicalScopeRecord {
+                owner_epoch,
                 lease: Some(Arc::downgrade(&lease)),
+                original_source: Some(Arc::downgrade(&lease.original_source)),
                 owns_source_admission,
                 prerequisites: lease.prerequisites.iter().map(Arc::downgrade).collect(),
                 source_admission,
@@ -2928,7 +3100,9 @@ impl PersistentSession {
             self.admission_owner().lexical_leases.lock().insert(
                 target,
                 RuntimeLexicalScopeRecord {
+                    owner_epoch: self.admission_owner().epoch(),
                     lease: None,
+                    original_source: None,
                     owns_source_admission: false,
                     source_admission,
                     prerequisites,
@@ -2959,6 +3133,28 @@ impl PersistentSession {
             released
         };
         drop(released);
+    }
+
+    pub(super) fn release_unheld_original_source_record(&self, scope: ScopeId) {
+        let released = {
+            let mut records = self.admission_owner().lexical_leases.lock();
+            let unheld = records.get(&scope).is_some_and(|record| {
+                record
+                    .lease
+                    .as_ref()
+                    .is_none_or(|lease| lease.upgrade().is_none())
+                    && record
+                        .original_source
+                        .as_ref()
+                        .is_none_or(|source| source.upgrade().is_none())
+            });
+            unheld.then(|| records.remove(&scope)).flatten()
+        };
+        if let Some(record) = released {
+            if record.owns_source_admission {
+                record.source_admission.retire_scope(scope);
+            }
+        }
     }
     /// Validate a retained placement without minting another scope or changing
     /// its custody. Owner transfer invalidates an unconsumed placement grant.
@@ -3263,9 +3459,35 @@ impl PersistentSession {
     /// their detached lease scopes through the same binding/native owner.
     pub(crate) fn reap_admission_leases(&mut self) {
         let retired = std::mem::take(&mut *self.admission_owner().retired.lock());
-        for scope in retired {
-            self.retire_scope(scope);
-            self.admission_owner().lexical_leases.lock().remove(&scope);
+        for event in retired {
+            let (scope, owner_epoch, lexical) = match event {
+                RuntimeAdmissionRelease::Lexical { scope, owner_epoch } => {
+                    (scope, owner_epoch, true)
+                }
+                RuntimeAdmissionRelease::OriginalSource { scope, owner_epoch } => {
+                    (scope, owner_epoch, false)
+                }
+            };
+            let current = self
+                .admission_owner()
+                .lexical_leases
+                .lock()
+                .get(&scope)
+                .is_some_and(|record| {
+                    record.owner_epoch == owner_epoch
+                        && (!lexical
+                            || record
+                                .lease
+                                .as_ref()
+                                .is_some_and(|lease| lease.upgrade().is_none()))
+                });
+            if !current {
+                continue;
+            }
+            if lexical {
+                self.release_lexical_scope_resources(scope);
+            }
+            self.release_unheld_original_source_record(scope);
         }
     }
 
@@ -4794,6 +5016,81 @@ mod tests {
             .into_outcome();
         assert_eq!(settled.close, crate::CompilerTransactionClose::NotStarted);
         settled.action
+    }
+
+    #[test]
+    fn original_source_survives_lexical_resource_release_without_retaining_native_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let lease = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = lease.scope();
+        let original = lease.original_source().clone();
+        let gate = original.source_admission().clone();
+        let (id, handle) = native_source_action(&mut session, &lease, |session| {
+            let value = crate::session::prepared::tests::rooted_publication_fixture(
+                session,
+                "sourceOwned",
+                992,
+            );
+            let id = value.id;
+            let handle = value.value.handle;
+            session.bind_in(scope, value).unwrap();
+            (id, handle)
+        });
+        assert!(session.bindings().get(id).is_some());
+        let roots = session.persistent_roots_count();
+        assert!(roots > 0);
+        drop(lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(scope));
+        assert!(session.bindings().get(id).is_none());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+        assert!(session.persistent_roots_count() < roots);
+        original.with_open_source_admission(|| ()).unwrap();
+        drop(original);
+        session.reap_admission_leases();
+        assert!(!session
+            .admission_owner()
+            .lexical_leases
+            .lock()
+            .contains_key(&scope));
+        assert!(gate.admit().is_err());
+    }
+
+    #[test]
+    fn original_source_and_target_guard_refuses_cutoff_and_stale_target_independently() {
+        let mut session = PersistentSession::new(None, 1024);
+        let lease = session.mint_isolated_scope_with_lease().unwrap();
+        let original = lease.original_source().clone();
+        let scope = lease.scope();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        original.with_open_target(&target, || ()).unwrap();
+        drop(lease);
+        session.reap_admission_leases();
+        original.with_open_target(&target, || ()).unwrap();
+        let retired = session.retire_scope(scope);
+        assert_eq!(retired.scopes_retired, 0);
+        assert_eq!(retired.bindings_retired, 0);
+        assert_eq!(retired.roots_released, 0);
+        assert!(matches!(
+            original.with_open_target(&target, || ()),
+            Err(super::super::SourceAdmissionError::StaleSourceLease)
+        ));
+        target
+            .original_source()
+            .with_open_target(&target, || ())
+            .unwrap();
+        session.retire_scope(target.scope());
+        assert!(target
+            .original_source()
+            .with_open_target(&target, || ())
+            .is_err());
     }
 
     #[test]
