@@ -269,7 +269,9 @@ fn restored_graph_roles(
         match reference {
             RecoveryPayloadReference::Original(reference) => products.push(reference),
             RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
-            RecoveryPayloadReference::Join(_) | RecoveryPayloadReference::Value(_) => {
+            RecoveryPayloadReference::Join(_)
+            | RecoveryPayloadReference::Value(_)
+            | RecoveryPayloadReference::PackageCode(_) => {
                 panic!("native-only history contains joined or value interface")
             }
         }

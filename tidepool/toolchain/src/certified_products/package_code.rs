@@ -5,8 +5,10 @@ use super::*;
 use tidepool_repr::execution_schema::{PackageCodeOwner, PackageGroupCode};
 
 fn parse_code(bytes: &[u8], operation: &InventoryOperation) -> CertResult<PackageGroupCode> {
-    let value = operation.decode_value(bytes,
-        COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_module_bytes))?;
+    let value = operation.decode_value(
+        bytes,
+        COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_module_bytes),
+    )?;
     let packet = sized(&value, 3)?;
     if string(&packet[0])? != "TPPACKAGEGROUP1" {
         return Err(CertificationError::Receipt("package code envelope version"));
@@ -16,16 +18,30 @@ fn parse_code(bytes: &[u8], operation: &InventoryOperation) -> CertResult<Packag
         let Value::Bytes(bytes) = value else {
             return Err(CertificationError::Receipt("package code owner digest"));
         };
-        bytes.as_slice().try_into().map_err(|_| CertificationError::Receipt("package code owner digest"))
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| CertificationError::Receipt("package code owner digest"))
     };
     let owner = PackageCodeOwner {
-        unit: string(&fields[0])?.to_owned(), module: string(&fields[1])?.to_owned(),
-        compiler_sha256: raw(&fields[2])?, profile_sha256: raw(&fields[3])?,
-        interface_sha256: raw(&fields[4])?, defining_version_sha256: raw(&fields[5])?,
+        unit: string(&fields[0])?.to_owned(),
+        module: string(&fields[1])?.to_owned(),
+        compiler_sha256: raw(&fields[2])?,
+        profile_sha256: raw(&fields[3])?,
+        interface_sha256: raw(&fields[4])?,
+        defining_version_sha256: raw(&fields[5])?,
     };
-    if [owner.compiler_sha256, owner.profile_sha256, owner.interface_sha256, owner.defining_version_sha256]
-        .contains(&[0; 32]) {
-        return Err(CertificationError::Mismatch("package code defining provenance"));
+    if [
+        owner.compiler_sha256,
+        owner.profile_sha256,
+        owner.interface_sha256,
+        owner.defining_version_sha256,
+    ]
+    .contains(&[0; 32])
+    {
+        return Err(CertificationError::Mismatch(
+            "package code defining provenance",
+        ));
     }
     let Value::Bytes(group) = &packet[2] else {
         return Err(CertificationError::Receipt("package code group bytes"));
@@ -156,25 +172,50 @@ impl CertifiedPackageCodeProduct {
         std::fs::create_dir_all(root.join("package-code"))?;
         let envelope_sha256 = sha(&self.bytes);
         let envelope_path = envelope_path(&envelope_sha256);
-        write(&root.join(&envelope_path), &self.bytes, &envelope_sha256, mode, validation)?;
+        write(
+            &root.join(&envelope_path),
+            &self.bytes,
+            &envelope_sha256,
+            mode,
+            validation,
+        )?;
         let mut materialize_interface = |interface: &CertifiedPackageCodeInterface| {
             let path = interface_path(&interface.sha256);
-            write(&root.join(&path), &interface.bytes, &interface.sha256, mode, validation)?;
-            Ok::<_, crate::recovery_artifacts::RecoveryArtifactError>(RecoveryPackageCodeInterfaceRef {
-                unit: interface.unit.clone(), module: interface.module.clone(),
-                path, sha256: interface.sha256,
-            })
+            write(
+                &root.join(&path),
+                &interface.bytes,
+                &interface.sha256,
+                mode,
+                validation,
+            )?;
+            Ok::<_, crate::recovery_artifacts::RecoveryArtifactError>(
+                RecoveryPackageCodeInterfaceRef {
+                    unit: interface.unit.clone(),
+                    module: interface.module.clone(),
+                    path,
+                    sha256: interface.sha256,
+                },
+            )
         };
         let defining_interface = materialize_interface(&self.defining_interface)?;
-        let import_interfaces = self.import_interface_witnesses.iter()
-            .map(|interface| materialize_interface(interface)).collect::<Result<_, _>>()?;
+        let import_interfaces = self
+            .import_interface_witnesses
+            .iter()
+            .map(|interface| materialize_interface(interface))
+            .collect::<Result<_, _>>()?;
         let owner = self.code.owner();
         Ok(RecoveryPackageCodeRef {
-            version: 1, unit: owner.unit.clone(), module: owner.module.clone(),
-            producer_sha256: owner.compiler_sha256, profile_sha256: owner.profile_sha256,
+            version: 1,
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            producer_sha256: owner.compiler_sha256,
+            profile_sha256: owner.profile_sha256,
             defining_version_sha256: owner.defining_version_sha256,
-            product_sha256: self.product_sha256, envelope_path, envelope_sha256,
-            defining_interface, import_interfaces,
+            product_sha256: self.product_sha256,
+            envelope_path,
+            envelope_sha256,
+            defining_interface,
+            import_interfaces,
         })
     }
 
@@ -187,23 +228,47 @@ impl CertifiedPackageCodeProduct {
     ) -> CertResult<Arc<Self>> {
         use crate::recovery_artifacts::{read_checked, resolve_owned};
         let invalid = || CertificationError::Mismatch("package code recovery reference");
-        if reference.version != 1 || reference.envelope_path != envelope_path(&reference.envelope_sha256) {
+        if reference.version != 1
+            || reference.envelope_path != envelope_path(&reference.envelope_sha256)
+        {
             return Err(invalid());
         }
-        let read = |relative: &Path, sha: &[u8; 32], validation: &mut PackageInterfaceValidation| {
-            let path = resolve_owned(root, relative).map_err(package_validation_error)?;
-            read_checked(&path, sha, validation.inventory.limits().max_module_bytes as u64, validation)
-                .map(Arc::<[u8]>::from).map_err(package_validation_error)
-        };
-        let bytes = read(&reference.envelope_path, &reference.envelope_sha256, validation)?;
+        let read =
+            |relative: &Path, sha: &[u8; 32], validation: &mut PackageInterfaceValidation| {
+                let path = resolve_owned(root, relative)
+                    .map_err(CertificationError::CapturedModulePayload)?;
+                read_checked(
+                    &path,
+                    sha,
+                    validation.inventory.limits().max_module_bytes as u64,
+                    validation,
+                )
+                .map(Arc::<[u8]>::from)
+                .map_err(CertificationError::CapturedModulePayload)
+            };
+        let bytes = read(
+            &reference.envelope_path,
+            &reference.envelope_sha256,
+            validation,
+        )?;
         let code = parse_code(&bytes, &validation.inventory)?;
         let owner = code.owner();
-        if owner.unit != reference.unit || owner.module != reference.module
+        if owner.unit != reference.unit
+            || owner.module != reference.module
             || owner.compiler_sha256 != reference.producer_sha256
             || owner.profile_sha256 != reference.profile_sha256
             || owner.defining_version_sha256 != reference.defining_version_sha256
             || reference.import_interfaces.len() != code.globals().len()
-        { return Err(invalid()); }
+        {
+            return Err(invalid());
+        }
+        validation
+            .inventory
+            .reserve::<Arc<CertifiedPackageCodeInterface>>(code.globals().len())?;
+        validation
+            .inventory
+            .reserve::<[u8; 32]>(code.globals().len())?;
+        validation.inventory.reserve::<Self>(1)?;
         let mut read_interface = |reference: &RecoveryPackageCodeInterfaceRef| -> CertResult<Arc<CertifiedPackageCodeInterface>> {
             if reference.unit.is_empty() || reference.module.is_empty()
                 || reference.sha256 == [0; 32] || reference.path != interface_path(&reference.sha256) {
@@ -218,25 +283,41 @@ impl CertifiedPackageCodeProduct {
             }))
         };
         let defining_interface = read_interface(&reference.defining_interface)?;
-        if defining_interface.unit != owner.unit || defining_interface.module != owner.module
-            || defining_interface.sha256 != owner.interface_sha256 { return Err(invalid()); }
-        let import_interface_witnesses = reference.import_interfaces.iter()
-            .map(&mut read_interface).collect::<CertResult<Vec<_>>>()?;
+        if defining_interface.unit != owner.unit
+            || defining_interface.module != owner.module
+            || defining_interface.sha256 != owner.interface_sha256
+        {
+            return Err(invalid());
+        }
+        let import_interface_witnesses = reference
+            .import_interfaces
+            .iter()
+            .map(&mut read_interface)
+            .collect::<CertResult<Vec<_>>>()?;
         let mut identity = Sha256::new();
         identity.update(b"tidepool.package-code-product.v1\0");
         identity.update(reference.envelope_sha256);
         let mut import_interfaces = Vec::with_capacity(code.globals().len());
         for (global, interface) in code.globals().iter().zip(&import_interface_witnesses) {
-            if global.identity.unit != interface.unit || global.identity.module != interface.module {
+            if global.identity.unit != interface.unit || global.identity.module != interface.module
+            {
                 return Err(invalid());
             }
             identity.update(interface.sha256);
             import_interfaces.push(interface.sha256);
         }
         let product_sha256: [u8; 32] = identity.finalize().into();
-        if product_sha256 != reference.product_sha256 { return Err(invalid()); }
-        Ok(Arc::new(Self { code, bytes, product_sha256, import_interfaces: import_interfaces.into(),
-            defining_interface, import_interface_witnesses: import_interface_witnesses.into() }))
+        if product_sha256 != reference.product_sha256 {
+            return Err(invalid());
+        }
+        Ok(Arc::new(Self {
+            code,
+            bytes,
+            product_sha256,
+            import_interfaces: import_interfaces.into(),
+            defining_interface,
+            import_interface_witnesses: import_interface_witnesses.into(),
+        }))
     }
 
     pub fn defining_interface(&self) -> &Arc<CertifiedPackageCodeInterface> {
@@ -292,7 +373,9 @@ impl CertifiedPackageCodeProduct {
             || owner.profile_sha256 != *program.logical().profile_sha256()
             || receipt.finalization.home_units.contains(&owner.unit)
         {
-            return Err(CertificationError::Mismatch("package code defining provenance"));
+            return Err(CertificationError::Mismatch(
+                "package code defining provenance",
+            ));
         }
         let interface = receipt
             .packages
@@ -365,5 +448,99 @@ impl CertifiedPackageCodeProduct {
             defining_interface,
             import_interface_witnesses: import_interface_witnesses.into(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    use crate::recovery_artifacts::RecoveryArtifactError;
+
+    // Reference data cannot issue a product. These controls stop before any
+    // valid package envelope and exercise the actual bounded storage reader.
+    fn reference(bytes: &[u8]) -> RecoveryPackageCodeRef {
+        let digest = sha(bytes);
+        RecoveryPackageCodeRef {
+            version: 1,
+            unit: "package-unit".into(),
+            module: "Package.Module".into(),
+            producer_sha256: [1; 32],
+            profile_sha256: [2; 32],
+            defining_version_sha256: [3; 32],
+            product_sha256: [4; 32],
+            envelope_path: envelope_path(&digest),
+            envelope_sha256: digest,
+            defining_interface: RecoveryPackageCodeInterfaceRef {
+                unit: "package-unit".into(),
+                module: "Package.Module".into(),
+                path: interface_path(&[5; 32]),
+                sha256: [5; 32],
+            },
+            import_interfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn package_storage_preserves_missing_and_corrupt_refusals() {
+        let root = tempfile::tempdir().unwrap();
+        let reference = reference(b"expected envelope");
+        let restore = || {
+            CertifiedPackageCodeProduct::restore(
+                root.path(),
+                &reference,
+                &mut PackageInterfaceValidation::default(),
+            )
+        };
+        assert!(matches!(
+            restore(),
+            Err(CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::Unavailable(_)
+            ))
+        ));
+        std::fs::create_dir_all(root.path().join("package-code")).unwrap();
+        std::fs::write(
+            root.path().join(&reference.envelope_path),
+            b"corrupt envelope",
+        )
+        .unwrap();
+        assert!(matches!(
+            restore(),
+            Err(CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::DigestMismatch(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn package_storage_requires_versioned_content_addressed_references() {
+        let root = tempfile::tempdir().unwrap();
+        let original = reference(b"unissued envelope");
+        for changed in [
+            RecoveryPackageCodeRef {
+                version: 0,
+                ..original.clone()
+            },
+            RecoveryPackageCodeRef {
+                envelope_path: PathBuf::from("../outside"),
+                ..original.clone()
+            },
+        ] {
+            assert!(matches!(
+                CertifiedPackageCodeProduct::restore(
+                    root.path(),
+                    &changed,
+                    &mut PackageInterfaceValidation::default()
+                ),
+                Err(CertificationError::Mismatch(
+                    "package code recovery reference"
+                ))
+            ));
+        }
+        let mut missing = serde_json::to_value(&original).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("defining_interface");
+        assert!(serde_json::from_value::<RecoveryPackageCodeRef>(missing).is_err());
     }
 }

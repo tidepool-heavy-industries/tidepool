@@ -4228,6 +4228,7 @@ pub enum RecoveryPayloadReference {
     Canonical(recovery_artifacts::RecoveryModuleInterfaceRef),
     Join(RecoveryJoinRef),
     Value(RecoveryValueInterfaceRef),
+    PackageCode(crate::certified_products::RecoveryPackageCodeRef),
 }
 
 impl RecoveryPayloadReference {
@@ -4241,6 +4242,9 @@ impl RecoveryPayloadReference {
             Self::Join(reference) => ArtifactDescriptor::from_recovery_join(reference).id,
             Self::Value(reference) => {
                 ArtifactDescriptor::from_recovery_value_interface(reference).id
+            }
+            Self::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference).id
             }
         }
     }
@@ -4311,6 +4315,20 @@ impl RecoveredArtifactAcquisition {
         values: &[RecoveryValueInterfaceRef],
     ) -> Result<Self, RecoveryInventoryError> {
         let references = Self::references(products, module_interfaces, joins, values)?;
+        self.stage_references(references)
+    }
+
+    pub fn stage_payloads(
+        &self,
+        references: &[RecoveryPayloadReference],
+    ) -> Result<Self, RecoveryInventoryError> {
+        self.stage_references(Self::index_payloads(references)?)
+    }
+
+    fn stage_references(
+        &self,
+        references: BTreeMap<ArtifactId, RecoveryPayloadReference>,
+    ) -> Result<Self, RecoveryInventoryError> {
         let mut stage = Self::new(&self.root);
         for (id, reference) in references {
             if let Some(held) = self.payloads.get(&id) {
@@ -4336,10 +4354,50 @@ impl RecoveredArtifactAcquisition {
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
         let references = Self::references(products, module_interfaces, joins, values)?;
+        self.capture_references(references, descriptors, bindings, edges)
+    }
+
+    /// Restore one explicit payload batch under its already-issued exact graph.
+    /// Package records carry no interface role and cannot replace missing rows.
+    pub fn capture_payloads_bound(
+        &mut self,
+        references: &[RecoveryPayloadReference],
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        bindings: &[ArtifactBinding],
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
+        self.capture_references(
+            Self::index_payloads(references)?,
+            descriptors,
+            bindings,
+            edges,
+        )
+    }
+
+    fn index_payloads(
+        references: &[RecoveryPayloadReference],
+    ) -> Result<BTreeMap<ArtifactId, RecoveryPayloadReference>, RecoveryInventoryError> {
+        let mut indexed = BTreeMap::new();
+        for reference in references {
+            if indexed.insert(reference.id(), reference.clone()).is_some() {
+                return Err(failure("duplicate recovery payload reference").into());
+            }
+        }
+        Ok(indexed)
+    }
+
+    fn capture_references(
+        &mut self,
+        references: BTreeMap<ArtifactId, RecoveryPayloadReference>,
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        bindings: &[ArtifactBinding],
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
         let mut missing_products = Vec::new();
         let mut missing_interfaces = Vec::new();
         let mut missing_joins = Vec::new();
         let mut missing_values = Vec::new();
+        let mut missing_packages = Vec::new();
         let mut held_interfaces = BTreeMap::new();
         for (id, reference) in &references {
             if let Some(held) = self.payloads.get(id) {
@@ -4366,17 +4424,21 @@ impl RecoveredArtifactAcquisition {
                 RecoveryPayloadReference::Value(reference) => {
                     missing_values.push(reference.clone())
                 }
+                RecoveryPayloadReference::PackageCode(reference) => {
+                    missing_packages.push(reference.clone())
+                }
             }
         }
         let captured = if missing_products.is_empty()
             && missing_interfaces.is_empty()
             && missing_joins.is_empty()
             && missing_values.is_empty()
+            && missing_packages.is_empty()
         {
             BTreeMap::new()
         } else {
             recovery_artifacts::with_artifact_work(&mut self.work, |validation| {
-                RecoveredArtifactInventory::capture_inputs_with_validation(
+                let mut captured = RecoveredArtifactInventory::capture_inputs_with_validation(
                     &self.root,
                     &missing_products,
                     &missing_interfaces,
@@ -4385,7 +4447,18 @@ impl RecoveredArtifactAcquisition {
                     None,
                     validation,
                     &held_interfaces,
-                )
+                )?;
+                for reference in &missing_packages {
+                    let product = crate::certified_products::CertifiedPackageCodeProduct::restore(
+                        &self.root, reference, validation,
+                    ).map_err(compiler_evidence_failure)?;
+                    let entry = Arc::new(ArtifactEntry::package_code(product));
+                    if entry.descriptor != crate::artifact_inventory::ArtifactDescriptor::from_recovery_package_code(reference) {
+                        return Err(failure("package recovery descriptor differs from captured bytes").into());
+                    }
+                    captured.entries.insert(entry.descriptor.id, entry);
+                }
+                Ok(captured)
             })?
             .entries
         };
@@ -5386,6 +5459,7 @@ pub(crate) struct RetainedArtifactMaterialization {
     _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
     rows: imbl::OrdMap<ArtifactId, Arc<RetainedArtifactRow>>,
+    package_rows: imbl::OrdMap<ArtifactId, Arc<RetainedPackageCodeRow>>,
     groups:
         imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
     execution_scope: Option<Arc<Value>>,
@@ -5405,6 +5479,7 @@ struct OwnedExecutionGraphFile {
 
 struct MaterializationFacts<'a> {
     rows: BTreeMap<ArtifactId, &'a Arc<RetainedArtifactRow>>,
+    package_rows: BTreeMap<ArtifactId, &'a Arc<RetainedPackageCodeRow>>,
     groups:
         BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>,
     graph_paths: BTreeMap<[u8; 32], &'a Arc<OwnedExecutionGraphFile>>,
@@ -5429,6 +5504,11 @@ impl MaterializationFacts<'_> {
             _parents: Vec::new(),
             rows: self
                 .rows
+                .into_iter()
+                .map(|(id, row)| (id, Arc::clone(row)))
+                .collect(),
+            package_rows: self
+                .package_rows
                 .into_iter()
                 .map(|(id, row)| (id, Arc::clone(row)))
                 .collect(),
@@ -5486,6 +5566,23 @@ thread_local! {
 }
 
 impl RetainedArtifactMaterialization {
+    pub(crate) fn package_rows(
+        &self,
+        artifacts: &impl crate::artifact_inventory::ArtifactEntryMap<ArtifactId>,
+    ) -> BTreeMap<ArtifactId, Arc<RetainedPackageCodeRow>> {
+        let mut rows = BTreeMap::new();
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            rows.extend(
+                owner
+                    .package_rows
+                    .iter()
+                    .filter(|(id, _)| artifacts.contains_key(*id))
+                    .map(|(id, row)| (*id, Arc::clone(row))),
+            );
+        });
+        rows
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fact_detach_count() -> usize {
         CHECKED_VALUE_FACT_DETACHES.with(std::cell::Cell::get)
@@ -5525,6 +5622,7 @@ impl RetainedArtifactMaterialization {
                 _directory: None,
                 _parents: Vec::new(),
                 rows: complete.rows.clone(),
+                package_rows: complete.package_rows.clone(),
                 groups: complete.groups.clone(),
                 execution_scope: complete.execution_scope.clone(),
                 graph_paths: complete.graph_paths.clone(),
@@ -5655,6 +5753,7 @@ impl RetainedArtifactMaterialization {
             _directory: None,
             _parents: Vec::new(),
             rows: std::iter::once((id, row)).collect(),
+            package_rows: Default::default(),
             groups: Default::default(),
             execution_scope: None,
             graph_paths: Arc::new(BTreeMap::new()),
@@ -5692,6 +5791,11 @@ impl RetainedArtifactMaterialization {
             .groups
             .iter()
             .map(|(binding, group)| (*binding, (slot(), *group)))
+            .collect::<BTreeMap<_, _>>();
+        let package_slots = selected
+            .package_rows
+            .keys()
+            .map(|id| (*id, slot()))
             .collect::<BTreeMap<_, _>>();
         let graph_slots = selected
             .graph_paths
@@ -5738,6 +5842,17 @@ impl RetainedArtifactMaterialization {
                     .filter(|(_, selected)| group.same_issuance(selected))
                 {
                     facts.insert(*slot);
+                } else {
+                    excluded = true;
+                }
+            }
+            for (id, row) in &owner.package_rows {
+                if selected
+                    .package_rows
+                    .get(id)
+                    .is_some_and(|selected| Arc::ptr_eq(row, selected))
+                {
+                    facts.insert(package_slots[id]);
                 } else {
                     excluded = true;
                 }
@@ -5812,9 +5927,13 @@ impl RetainedArtifactMaterialization {
             .groups
             .retain(|binding, _| !covered.contains(&group_slots[binding].0));
         selected
+            .package_rows
+            .retain(|id, _| !covered.contains(&package_slots[id]));
+        selected
             .graph_paths
             .retain(|id, _| !covered.contains(&graph_slots[id]));
         if !selected.rows.is_empty()
+            || !selected.package_rows.is_empty()
             || !selected.groups.is_empty()
             || !selected.graph_paths.is_empty()
         {
@@ -5848,6 +5967,7 @@ impl RetainedArtifactMaterialization {
             })
             .collect::<BTreeSet<_>>();
         let mut rows = BTreeMap::new();
+        let mut package_rows = BTreeMap::new();
         let mut graph_paths = BTreeMap::new();
         let mut observed = Vec::new();
         let mut visited = BTreeSet::new();
@@ -5865,6 +5985,13 @@ impl RetainedArtifactMaterialization {
             );
         }
         for &owner in &observed {
+            package_rows.extend(
+                owner
+                    .package_rows
+                    .iter()
+                    .filter(|(id, _)| artifacts.contains_key(*id))
+                    .map(|(id, row)| (*id, row)),
+            );
             rows.extend(
                 owner
                     .rows
@@ -5880,11 +6007,13 @@ impl RetainedArtifactMaterialization {
                     .map(|(digest, file)| (*digest, file)),
             );
         }
-        if rows.is_empty() && groups.is_empty() && graph_paths.is_empty() {
+        if rows.is_empty() && package_rows.is_empty() && groups.is_empty() && graph_paths.is_empty()
+        {
             return None;
         }
         Some(MaterializationFacts {
             rows,
+            package_rows,
             groups,
             graph_paths,
             observed,
@@ -5976,6 +6105,38 @@ impl RetainedArtifactMaterialization {
             }));
         });
         paths
+    }
+}
+
+/// Package backing has no compiler interface row. Sharing this owner retains
+/// its immutable product and directory, independently of any source role.
+pub(crate) struct RetainedPackageCodeRow {
+    entry: Arc<ArtifactEntry>,
+    reference: crate::certified_products::RecoveryPackageCodeRef,
+    directory: Arc<tempfile::TempDir>,
+}
+
+impl RetainedPackageCodeRow {
+    pub(crate) fn reference(&self) -> &crate::certified_products::RecoveryPackageCodeRef {
+        &self.reference
+    }
+    pub(crate) fn restore(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Arc<ArtifactEntry>, CompileError> {
+        let product = crate::certified_products::CertifiedPackageCodeProduct::restore(
+            self.directory.path(),
+            &self.reference,
+            validation,
+        )
+        .map_err(compiler_evidence_failure)?;
+        let entry = Arc::new(ArtifactEntry::package_code(product));
+        if entry.descriptor != self.entry.descriptor {
+            return Err(failure(
+                "restored package code differs from its retained artifact",
+            ));
+        }
+        Ok(entry)
     }
 }
 
@@ -11788,7 +11949,14 @@ impl ExactDeclarationContext {
                         .map_err(materialization_failure)?,
                     ));
                 }
-                ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_) | ArtifactPayload::PackageCode(_) => {}
+                ArtifactPayload::PackageCode(product) => {
+                    references.push(RecoveryPayloadReference::PackageCode(
+                        product
+                            .materialize(root, MaterializationMode::Durable, &mut validation)
+                            .map_err(materialization_failure)?,
+                    ));
+                }
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_) => {}
             }
         }
         Ok(references)
@@ -13238,6 +13406,29 @@ impl ExactDeclarationContext {
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
         let mut validation = PackageInterfaceValidation::default();
+        let mut package_rows = parents
+            .iter()
+            .flat_map(|parent| parent.package_rows(&metadata.retained.artifacts))
+            .collect::<imbl::OrdMap<_, _>>();
+        for entry in metadata.retained.artifacts.values() {
+            let ArtifactPayload::PackageCode(product) = &entry.payload else {
+                continue;
+            };
+            if package_rows.contains_key(&entry.descriptor.id) {
+                continue;
+            }
+            let reference = product
+                .materialize(root, MaterializationMode::Scratch, &mut validation)
+                .map_err(materialization_failure)?;
+            package_rows.insert(
+                entry.descriptor.id,
+                Arc::new(RetainedPackageCodeRow {
+                    entry: Arc::clone(entry),
+                    reference,
+                    directory: Arc::clone(&directory),
+                }),
+            );
+        }
         for entry in &new_entries {
             if matches!(
                 &entry.payload,
@@ -13455,6 +13646,7 @@ impl ExactDeclarationContext {
                 .into_iter()
                 .map(|(id, row)| (id, Arc::new(row)))
                 .collect(),
+            package_rows,
             groups: groups.shared_rows(),
             execution_scope: execution_scope.map(Arc::new),
             graph_paths: Arc::new(
@@ -14502,7 +14694,9 @@ fn partition_native_recovery_references(
         match reference {
             RecoveryPayloadReference::Original(reference) => products.push(reference),
             RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
-            RecoveryPayloadReference::Join(_) | RecoveryPayloadReference::Value(_) => {
+            RecoveryPayloadReference::Join(_)
+            | RecoveryPayloadReference::Value(_)
+            | RecoveryPayloadReference::PackageCode(_) => {
                 panic!("native-only recovery fixture contains a joined or value interface")
             }
         }
@@ -20646,6 +20840,9 @@ mod tests {
                 RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
                 RecoveryPayloadReference::Join(reference) => joins.push(reference),
                 RecoveryPayloadReference::Value(reference) => values.push(reference),
+                RecoveryPayloadReference::PackageCode(_) => {
+                    panic!("source recovery fixture contains package code")
+                }
             }
         }
         let mut descriptors = context.artifact_view().descriptors();

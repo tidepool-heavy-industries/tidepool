@@ -1986,6 +1986,27 @@ pub struct ArtifactDescriptor {
 }
 
 impl ArtifactDescriptor {
+    pub fn from_recovery_package_code(
+        reference: &crate::certified_products::RecoveryPackageCodeRef,
+    ) -> Self {
+        let seals = reference
+            .import_interfaces
+            .iter()
+            .flat_map(|interface| interface.sha256)
+            .collect::<Vec<_>>();
+        descriptor(
+            ArtifactKind::PackageCode,
+            ExactModuleIdentity {
+                unit: reference.unit.clone(),
+                module: reference.module.clone(),
+            },
+            reference.producer_sha256,
+            reference.defining_interface.sha256,
+            Some(reference.product_sha256),
+            digest(&seals),
+            None,
+        )
+    }
     /// Describes persisted evidence; constructing a descriptor does not admit it.
     pub fn from_recovery_product(
         reference: &crate::recovery_artifacts::RecoveryArtifactRef,
@@ -6997,6 +7018,12 @@ impl CompilerArtifactMetadata {
             &serde_json::to_vec(&(
                 self.entries
                     .values()
+                    .map(|entry| entry.descriptor.id)
+                    .collect::<Vec<_>>(),
+                self.retained
+                    .artifacts
+                    .values()
+                    .filter(|entry| matches!(entry.payload, ArtifactPayload::PackageCode(_)))
                     .map(|entry| entry.descriptor.id)
                     .collect::<Vec<_>>(),
                 &self.retained.selected_native_groups,

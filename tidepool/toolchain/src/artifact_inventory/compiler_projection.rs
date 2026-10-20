@@ -4317,7 +4317,10 @@ impl CompilerInputProjection {
         interface: &'a Arc<ArtifactEntry>,
         original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
     ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
-        if &interface.descriptor.owner != owner || interface.is_native() {
+        if &interface.descriptor.owner != owner
+            || interface.is_native()
+            || matches!(interface.payload, ArtifactPayload::PackageCode(_))
+        {
             return Err(failure("compiler interface role has another owner or kind"));
         }
         match role.original() {
