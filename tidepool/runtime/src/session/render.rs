@@ -83,6 +83,11 @@ impl TryFrom<&tidepool_toolchain::declaration_join::DeclarationExport> for Expor
         export: &tidepool_toolchain::declaration_join::DeclarationExport,
     ) -> Result<Self, Self::Error> {
         use tidepool_toolchain::declaration_join::{DeclarationKind, ExportNamespace};
+        if export.head.record_parent.is_some() {
+            return Err(crate::CompileError::ExtractFailed(
+                "certified declaration head has a field parent outside the field namespace".into(),
+            ));
+        }
         let name = export.head.occurrence.clone();
         let children = || {
             export
@@ -1850,6 +1855,9 @@ mod tests {
             children: Vec::new(),
         };
         assert_eq!(ExportItem::try_from(&certified).unwrap(), pattern);
+        certified.head.record_parent = Some("AnotherPattern".into());
+        assert!(ExportItem::try_from(&certified).is_err());
+        certified.head.record_parent = None;
         certified.head.namespace = ExportNamespace::Type;
         assert!(ExportItem::try_from(&certified).is_err());
     }
