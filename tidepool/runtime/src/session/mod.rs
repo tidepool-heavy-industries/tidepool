@@ -88,7 +88,7 @@ pub use inspection::{
     AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo, CompletedCompilerWorld,
     CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, InspectionScopeSnapshot, NameNamespace, NameQuery, NameScope,
+    InspectionRequest, InspectionResult, InspectionScopeSnapshot, InspectionActorObservation, InspectionRequestIdentity, NameNamespace, NameQuery, NameScope,
     QueryError,
     ScopeBindingsAnswer, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
     WorldInspectionError, SCOPE_BINDING_LIMIT,

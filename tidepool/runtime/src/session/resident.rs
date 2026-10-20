@@ -4709,6 +4709,7 @@ where
         source_revision: &[u8],
         selected_imports: &super::SourceImports,
         inputs: &super::RuntimeCompileInputs,
+        actor: Option<&super::InspectionActorObservation>,
         label: super::NameScope,
     ) -> Result<super::InspectionScopeSnapshot, SessionError> {
         self.state.capture_inspection_scope_in(
@@ -4716,6 +4717,7 @@ where
             source_revision,
             selected_imports,
             inputs,
+            actor,
             label,
         )
     }

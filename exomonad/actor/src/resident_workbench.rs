@@ -252,6 +252,7 @@ impl ActorWorkbenchSource {
         &self,
         session: &ResidentSession<H, O>,
         context: &crate::ActorSessionContext,
+        request_scope: Option<&RequestWorkbenchScope>,
         label: tidepool_runtime::session::NameScope,
     ) -> Result<tidepool_runtime::session::InspectionScopeSnapshot, ResidentActorWorkbenchError>
     where
@@ -265,6 +266,7 @@ impl ActorWorkbenchSource {
         .filter(|revision| !revision.is_empty())
         .ok_or(ActorCompileViewError::UnobservedSourceIdentity)?;
         let inputs = self.compile_inputs(context)?;
+        let actor = Self::inspection_actor(context, request_scope);
         let mut imports = context.selected_source_imports();
         imports.extend(&self.workbench_imports);
         session
@@ -273,6 +275,7 @@ impl ActorWorkbenchSource {
                 source_revision.as_bytes(),
                 &imports,
                 &inputs,
+                Some(&actor),
                 label,
             )
             .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))
@@ -282,14 +285,31 @@ impl ActorWorkbenchSource {
         &self,
         session: &ResidentSession<H, O>,
         context: &crate::ActorSessionContext,
+        request_scope: Option<&RequestWorkbenchScope>,
         label: tidepool_runtime::session::NameScope,
     ) -> Result<tidepool_runtime::session::ScopeProvenance, ResidentActorWorkbenchError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        self.inspection_scope(session, context, label)
+        self.inspection_scope(session, context, request_scope, label)
             .map(|snapshot| snapshot.provenance())
+    }
+
+    fn inspection_actor(
+        context: &crate::ActorSessionContext,
+        request_scope: Option<&RequestWorkbenchScope>,
+    ) -> tidepool_runtime::session::InspectionActorObservation {
+        use tidepool_runtime::session::{InspectionActorObservation, InspectionRequestIdentity};
+        InspectionActorObservation::new(
+            tidepool_repr::PrincipalId::from(context.actor),
+            context.haskell_effects_alias.clone(),
+            request_scope.map(|scope| InspectionRequestIdentity::new(scope.request.0)),
+            context
+                .current_model
+                .as_ref()
+                .map(|(identity, _)| current_model_type_source(identity)),
+        )
     }
 
     fn request_annotations(
@@ -378,6 +398,28 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
     actor_preamble_for(preamble, context, PreambleBindings::Runtime)
 }
 
+fn current_model_source_profile(
+    identity: &crate::AdmittedModelIdentity,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match identity.model().backend() {
+        crate::Backend::OpenAIPlan => ("OpenAI", "openAI", "OpenAIOptions", "OpenAI"),
+        crate::Backend::GeminiInteractions => ("Argon", "argon", "ArgonOptions", "Effort"),
+        crate::Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
+    }
+}
+
+fn current_model_type_source(
+    identity: &crate::AdmittedModelIdentity,
+) -> tidepool_runtime::session::HaskellTypeSource {
+    let (family, _, _, _) = current_model_source_profile(identity);
+    let mut imports = tidepool_runtime::session::SourceImports::default();
+    imports.extend_text("qualified Tidepool.Model.Selection as TidepoolModelSelection");
+    tidepool_runtime::session::HaskellTypeSource::new(
+        format!("TidepoolModelSelection.Model TidepoolModelSelection.{family}"),
+        imports,
+    )
+}
+
 fn actor_preamble_for(
     preamble: &str,
     context: &crate::ActorSessionContext,
@@ -395,11 +437,8 @@ fn actor_preamble_for(
     });
     let mut rendered = format!("{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = {me}\n",);
     if let Some((identity, reasoning)) = &context.current_model {
-        let (family, constructor, options, prefix) = match identity.model().backend() {
-            crate::Backend::OpenAIPlan => ("OpenAI", "openAI", "OpenAIOptions", "OpenAI"),
-            crate::Backend::GeminiInteractions => ("Argon", "argon", "ArgonOptions", "Effort"),
-            crate::Backend::DeepSeek => ("DeepSeek", "deepSeek", "DeepSeekOptions", "DeepSeek"),
-        };
+        let (_, constructor, options, prefix) = current_model_source_profile(identity);
+        let model_type = current_model_type_source(identity);
         let effort = match reasoning {
             crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAILow)
             | crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortLow)
@@ -418,16 +457,16 @@ fn actor_preamble_for(
                 tidepool_runtime::session::escape_workbench_haskell_string(text)
             )
         };
-        rendered = insert_preamble_imports(
-            &rendered,
-            "qualified Tidepool.Model.Selection as TidepoolModelSelection",
-        );
+        for import in model_type.required_imports().specs() {
+            rendered = insert_preamble_imports(&rendered, import);
+        }
         let current_model = bindings.body(|| format!(
             "TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})",
             literal(identity.catalog_identity()), literal(identity.key()),
         ));
         rendered.push_str(&format!(
-            "\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = {current_model}\n",
+            "\ncurrentModel :: {}\ncurrentModel = {current_model}\n",
+            model_type.expression(),
         ));
     }
     rendered
@@ -10042,6 +10081,8 @@ where
                 .await;
         }
         let source = self.access.source.config.clone();
+        let request_scope = self.request_scope.clone();
+        let snapshot_request_scope = request_scope.clone();
         let snapshot_source = source.clone();
         let query_scope = query.scope.clone();
         let snapshot = self
@@ -10049,7 +10090,7 @@ where
             .with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &snapshot_source)?;
                 let provenance =
-                    match snapshot_source.inspection_provenance(session, context, query_scope) {
+                    match snapshot_source.inspection_provenance(session, context, snapshot_request_scope.as_ref(), query_scope) {
                         Ok(provenance) => provenance,
                         Err(error) => {
                             return Ok(Err(StructuredIntrospectionAnswer::QueryError(
@@ -10154,7 +10195,7 @@ where
         self.access
             .with_continuation_machine(context, move |session, context, _, settlement| {
                 let answer =
-                    match source.inspection_provenance(session, context, query.scope.clone()) {
+                    match source.inspection_provenance(session, context, request_scope.as_ref(), query.scope.clone()) {
                         Ok(current) => {
                             structured_introspection_answer(kind, inspected, provenance, current)
                         }
@@ -10182,6 +10223,7 @@ where
         let snapshot_source = source.clone();
         let snapshot_observation = observation.clone();
         let view_source = self.access.source.config.clone();
+        let request_scope = self.request_scope.clone();
         let query_scope = query.scope.clone();
         let (admitted, observation_pin) = self
             .access
@@ -10194,7 +10236,7 @@ where
                     })?;
                     let original_source = context.source_dependency().source_lease()?;
                     let observation_pin =
-                        view_source.inspection_scope(session, context, query_scope)?;
+                        view_source.inspection_scope(session, context, request_scope.as_ref(), query_scope)?;
                     let admitted = session
                         .capture_inspection_world_in(
                             context.placement.lexical_scope,
@@ -10269,6 +10311,7 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let query_scope = query.scope.clone();
         let view_source = self.access.source.config.clone();
+        let request_scope = self.request_scope.clone();
         let inspected = self
             .query_public_module_world(context.clone(), query, kind, observation.clone())
             .await;
@@ -10286,7 +10329,7 @@ where
                                 )
                             })?;
                             let original_source = context.source_dependency().source_lease()?;
-                            match view_source.inspection_provenance(session, context, query_scope) {
+                            match view_source.inspection_provenance(session, context, request_scope.as_ref(), query_scope) {
                                 Err(error) => StructuredIntrospectionAnswer::QueryError(
                                     unobserved_inspection_source(error)?,
                                 ),
@@ -15969,6 +16012,63 @@ pub(crate) mod request_tests {
     use super::*;
 
     #[test]
+    fn actor_query_observation_keeps_request_row_and_model_type_distinct() {
+        let descriptor = crate::ActorDescriptor::new(
+            "observation",
+            crate::ActorPlacement {
+                session: tidepool_repr::SessionId(17),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+            },
+        );
+        let context = descriptor.session_context(crate::ActorRef::first(crate::ActorId(7)));
+        let request = |id| RequestWorkbenchScope {
+            request: crate::RequestId(id),
+            response: ResponseExpectation::new("Int"),
+        };
+        let first = request(41);
+        let next = request(42);
+        let observe = |context: &crate::ActorSessionContext, request: &RequestWorkbenchScope| {
+            ActorWorkbenchSource::inspection_actor(context, Some(request))
+        };
+        let original = observe(&context, &first);
+        assert_eq!(original, observe(&context.clone(), &first));
+        assert_ne!(original, observe(&context, &next));
+        let mut changed = context.clone();
+        changed.haskell_effects_alias = "'[OtherEffect]".into();
+        assert_ne!(original, observe(&changed, &first));
+        changed = context.clone();
+        changed.actor = crate::ActorRef::first(crate::ActorId(8));
+        assert_ne!(original, observe(&changed, &first));
+        let model = |key, model, reasoning| {
+            Some((
+                crate::AdmittedModelIdentity::new("catalog".into(), key, "provider".into(), model)
+                    .unwrap(),
+                reasoning,
+            ))
+        };
+        changed = context.clone();
+        changed.current_model = model(
+            "first".into(),
+            crate::Model::OpenAIModel(crate::OpenAIModel::Gpt61Sol),
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAILow),
+        );
+        let same_type = observe(&changed, &first);
+        changed.current_model = model(
+            "different-value".into(),
+            crate::Model::OpenAIModel(crate::OpenAIModel::Gpt61Sol),
+            crate::Reasoning::OpenAIReasoning(crate::OpenAIReasoning::OpenAIHigh),
+        );
+        assert_eq!(same_type, observe(&changed, &first));
+        changed.current_model = model(
+            "argon".into(),
+            crate::Model::GeminiArgon,
+            crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium),
+        );
+        assert_ne!(same_type, observe(&changed, &first));
+    }
+
+    #[test]
     fn protected_observation_keeps_helper_types_without_request_values() {
         let source = ActorWorkbenchSource::new("module Expr where\n", Vec::new());
         let observed = |request, row| {
@@ -18851,7 +18951,7 @@ pub(crate) mod request_tests {
                     let mut calibration = context.clone();
                     calibration.placement.lexical_scope = session.mint_scope(context.placement.lexical_scope).unwrap();
                     let view = actor_compile_view(session, &calibration, source)?;
-                    let _ = source.inspection_provenance(session, context, tidepool_runtime::session::NameScope::Current);
+                    let _ = source.inspection_provenance(session, context, None, tidepool_runtime::session::NameScope::Current);
                     session.capture_inspection_inputs(view.session_view())
                         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
                     Ok(())

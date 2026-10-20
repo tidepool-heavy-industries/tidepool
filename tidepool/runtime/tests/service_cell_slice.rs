@@ -138,6 +138,7 @@ fn publish_seed_world(
             sources.seal(),
             &tidepool_runtime::session::SourceImports::default(),
             &tidepool_runtime::session::RuntimeCompileInputs::default(),
+            None,
             query.scope.clone(),
         )
         .map_err(|_| "seed scope observation is unavailable")?;
