@@ -2073,7 +2073,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   let source = capturedGeneratedScaffoldBytes capturedSource
       sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
-  liftIO (requireWorldHeaderPolicy path flags effective)
+  liftIO (requireWorldHeaderPolicy WorldAuthoredHeader path flags effective)
   plan <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (typedPurposePlan purpose)
   parsedDemand <- either (const (liftIO (throwIO WorldCellUnsupported))) pure
     (prepareSegmentDemand plan effective capturedSource)
@@ -3338,7 +3338,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       else elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
     when (checksPublicModule selection || pvWorldOnly variant) $
       forM_ [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw] $ \summary -> liftIO $ do
-        requireWorldHeaderPolicy (ms_hspp_file summary) (hsc_dflags previous) (ms_hspp_opts summary)
+        requireWorldHeaderPolicy WorldDownsweepGraph (ms_hspp_file summary) (hsc_dflags previous) (ms_hspp_opts summary)
         when (isReservedSessionModuleName (moduleNameString (ms_mod_name summary))
             && Just (ms_mod summary) /= policyTarget)
           (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldPrivateModule))
@@ -7124,7 +7124,8 @@ withWorldModulePreprocessing enabled path action
   where
     install = do
       env <- getSession
-      liftIO (requireWorldModuleHeaderFlags path (hsc_dflags env))
+      liftIO (observeWorldHeaderFailure WorldPreprocessingEntry path (hsc_dflags env) (hsc_dflags env)
+        (requireWorldModuleHeaderFlags path (hsc_dflags env)))
       let admitted = hsc_dflags env
           original = runPhaseHook (hsc_hooks env)
           delegate :: forall value. TPhase value -> IO value
@@ -7137,9 +7138,9 @@ withWorldModulePreprocessing enabled path action
             T_Cpp _ _ source -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
             T_HsPp _ _ source _ -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
             T_FileArgs sourceEnv source -> do
-              requireWorldHeaderPolicy source admitted (hsc_dflags sourceEnv)
+              requireWorldHeaderPolicy WorldBeforeFileArguments source admitted (hsc_dflags sourceEnv)
               result@(effective,_,_) <- delegate phase
-              requireWorldHeaderPolicy source admitted effective
+              requireWorldHeaderPolicy WorldAfterFileArguments source admitted effective
               pure result
             _ -> delegate phase
       -- Existing load admission already refuses arbitrary custom phase hooks.
@@ -7167,14 +7168,36 @@ requireWorldModuleHeaderFlags path flags = do
 
 -- Demand renaming can load interfaces before make starts. Both stages use
 -- the same admitted header policy before any interface or external input use.
-requireWorldHeaderPolicy :: FilePath -> DynFlags -> DynFlags -> IO ()
-requireWorldHeaderPolicy path admitted effective = do
+data WorldHeaderPhase
+  = WorldAuthoredHeader | WorldPreprocessingEntry | WorldBeforeFileArguments
+  | WorldAfterFileArguments | WorldDownsweepGraph | WorldCanonicalGraph
+  deriving (Show)
+
+requireWorldHeaderPolicy :: WorldHeaderPhase -> FilePath -> DynFlags -> DynFlags -> IO ()
+requireWorldHeaderPolicy phase path admitted effective = observeWorldHeaderFailure phase path admitted effective $ do
   requireWorldModuleHeaderFlags path effective
   requireWorldOutputPolicy path admitted effective
   unless (importPaths effective == importPaths admitted
       && workingDirectory effective == workingDirectory admitted
       && not (packageFlagsChanged admitted effective))
     (throwIO (WorldModulePolicyFailure path WorldSearchInputsChanged))
+
+observeWorldHeaderFailure :: WorldHeaderPhase -> FilePath -> DynFlags -> DynFlags -> IO value -> IO value
+observeWorldHeaderFailure phase path admitted effective action = action `catch` \(failure :: WorldModulePolicyFailure) -> do
+  emitWorldAcquisitionRejection "world header policy" path
+    ("phase=" ++ show phase ++ " admitted=" ++ properties admitted
+      ++ " effective=" ++ properties effective ++ " refusal=" ++ show failure)
+  throwIO failure
+  where
+    properties flags = show
+      [ ("generates-code",backendGeneratesCode (backend flags))
+      , ("writes-files",backendWritesFiles (backend flags))
+      , ("bytecode",gopt Opt_ByteCode flags)
+      , ("bytecode-and-object",gopt Opt_ByteCodeAndObjectCode flags)
+      , ("quasiquotes",xopt LangExt.QuasiQuotes flags)
+      , ("template-haskell",xopt LangExt.TemplateHaskell flags)
+      , ("static-pointers",xopt LangExt.StaticPointers flags)
+      , ("external-preprocessor",gopt Opt_Pp flags) ]
 
 -- Compare with the operation's fixed admitted policy, not a source environment
 -- that may already contain another module's options. GHC sets dumpPrefix from
@@ -7508,7 +7531,7 @@ validateCanonicalSourceInputs worldOnly proofs interfaces inputArtifacts sourceL
   swept <- withWorldModulePreprocessing worldOnly "<canonical source qualification>" (depanalSourceModules excluded)
   graph <- if worldOnly then admitWorldQuoteFreeModuleGraph False Nothing swept else pure swept
   when worldOnly $ forM_ [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary -> liftIO $ do
-    requireWorldHeaderPolicy (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
+    requireWorldHeaderPolicy WorldCanonicalGraph (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
   env <- getSession
   current <- liftIO (dependencyEvidenceFor env ([],True) graph [])
   -- Fresh downsweep excludes admitted source-less owners. Restore only those
