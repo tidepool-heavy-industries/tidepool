@@ -5396,13 +5396,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         [ ms_mod summary | observation <- observations
                         , let summary = observationSummary observation
                         , ms_mod_name summary `Set.member` taskNames ]
-                      externalOriginals = Set.fromList
-                        ([binder | scope <- maybe [] pure (pvExactScope variant)
-                          , product' <- scopeAvailableOriginalProducts scope, group <- originalGroups product'
-                          , binder <- originalBinders group]
-                         ++ [binder | admitted <- Map.elems acceptedCandidates
-                            , group <- candidateGroups (admittedCandidateOriginal admitted)
-                            , binder <- candidateGroupBinders group])
+                      -- Native availability and exact compiler Names come
+                      -- from the same issued selection, including prior World
+                      -- Originals. Neither projection selects runtime roots.
+                      externalOriginals = Set.fromList (Map.elems externalBindings)
                       inputs = PreparedModuleCompletionInputs recovery sourceOwners siblings externalOriginals externalBindings reuseContext selectedCanonicalInterfaces
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
