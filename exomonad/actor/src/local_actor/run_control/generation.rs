@@ -3,10 +3,11 @@ use super::*;
 use crate::resident_workbench::generation_admission::{GenerationAdmissionError, GenerationFence};
 use crate::ResidentActorWorkbenchError;
 
-use crate::resident_workbench::generation_admission::GenerationRetirementFence;
+use crate::resident_workbench::generation_admission::{GenerationRetirementFence, GenerationRetirementFenceError};
 use crate::resident_workbench::{
     ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationPublicationDiscard,
-    ActorGenerationPublicationOperation, ActorGenerationRetirementPreparation,
+    ActorGenerationPublicationOperation, ActorGenerationRetirementCutoff,
+    ActorGenerationRetirementPreparation, ActorGenerationRetirementPreparationOutcome,
     ActorPublicationAttemptObserver, PreparedActorGeneration, ReservedActorGeneration,
 };
 
@@ -17,11 +18,13 @@ pub(super) struct GenerationRetirementAttempt {
     candidate: ActorGenerationCandidateCustody,
     expected: Arc<ActorGeneration>,
     phase: GenerationRetirementPhase,
+    inventory: GenerationRetirementInventory,
 }
 
 enum GenerationRetirementPhase {
     Preparation(ActorGenerationRetirementPreparation),
     Reserving,
+    ReservationFailed(Arc<ResidentActorWorkbenchError>),
     Reserved {
         operation: ActorGenerationPublicationOperation,
         observer: ActorPublicationAttemptObserver,
@@ -31,16 +34,25 @@ enum GenerationRetirementPhase {
 
 enum GenerationRetirementCutoffPhase {
     NotStarted,
-    AwaitCapture(GenerationRetirementFence),
+    AwaitCapture {
+        fence: GenerationRetirementFence,
+        delivery: GenerationCaptureDelivery,
+    },
     Captured {
         fence: GenerationRetirementFence,
         capture: GenerationRetirementCapture,
     },
     Unconfirmed {
         fence: GenerationRetirementFence,
-        error: ResidentActorWorkbenchError,
+        error: Arc<ResidentActorWorkbenchError>,
     },
-    Refused(ResidentActorWorkbenchError),
+    Refused(Arc<ResidentActorWorkbenchError>),
+}
+
+enum GenerationCaptureDelivery {
+    Pending,
+    Enqueued,
+    Unconfirmed,
 }
 
 /// These are the actual existing cleanup handles, retained separately from the
@@ -49,6 +61,41 @@ struct GenerationRetirementCapture {
     population: GenerationPopulation,
     actors: Vec<LocalActorRef>,
     resources: Vec<ResourceChild>,
+    reservations: Vec<RetainedActorExit>,
+    preparations: Vec<RetainedActorExit>,
+    work: GenerationRetirementWork,
+    pending_claims: Result<usize, GenerationRetirementFenceError>,
+    physical_closure: GenerationCapturePhysicalClosure,
+}
+
+enum GenerationCapturePhysicalClosure {
+    UnknownPhysical,
+}
+
+enum GenerationRetirementWork {
+    Observed(crate::resident_actor::GenerationWorkObservations),
+    Unavailable,
+}
+
+pub(super) enum GenerationRetirementInventory {
+    Resident(crate::resident_actor::ResidentGenerationInventory),
+    Unavailable,
+}
+
+pub(super) struct GenerationRetirementDiscard {
+    _publisher: Option<ActorGenerationPublicationDiscard>,
+    _inventory: GenerationRetirementInventory,
+}
+
+pub(super) enum GenerationRetirementBeginFailure {
+    Directory(DirectoryError),
+    Unregistered {
+        terminal: Option<ActorTerminal>,
+        cleanup: Option<crate::ResidentCleanupOutcome>,
+    },
+    ExpectedGenerationMissing,
+    Refused(String),
+    Publication(Arc<ResidentActorWorkbenchError>),
 }
 
 pub(super) struct RetainedGenerationRetirement {
@@ -61,6 +108,7 @@ pub(super) struct RetainedGenerationRetirement {
 enum RetainedGenerationRetirementPhase {
     Preparation(PreparedActorGeneration),
     Reserving,
+    ReservationFailed(Arc<ResidentActorWorkbenchError>),
     Reserved {
         reserved: ReservedActorGeneration,
         observer: ActorPublicationAttemptObserver,
@@ -73,13 +121,14 @@ impl GenerationRetirementAttempt {
         self,
     ) -> (
         RetainedGenerationRetirement,
-        Option<ActorGenerationPublicationDiscard>,
+        GenerationRetirementDiscard,
     ) {
         let Self {
             actor,
             candidate,
             expected,
             phase,
+            inventory,
         } = self;
         let (phase, discard) = match phase {
             GenerationRetirementPhase::Preparation(preparation) => {
@@ -92,6 +141,10 @@ impl GenerationRetirementAttempt {
             GenerationRetirementPhase::Reserving => {
                 (RetainedGenerationRetirementPhase::Reserving, None)
             }
+            GenerationRetirementPhase::ReservationFailed(error) => (
+                RetainedGenerationRetirementPhase::ReservationFailed(error),
+                None,
+            ),
             GenerationRetirementPhase::Reserved {
                 operation,
                 observer,
@@ -115,12 +168,238 @@ impl GenerationRetirementAttempt {
                 expected,
                 phase,
             },
-            discard,
+            GenerationRetirementDiscard {
+                _publisher: discard,
+                _inventory: inventory,
+            },
         )
     }
 }
 
 impl RunState {
+    pub(super) fn begin_generation_retirement(
+        &mut self,
+        myself: &RactorRef<RunControlMessage>,
+        preparation: ActorGenerationRetirementPreparation,
+        inventory: GenerationRetirementInventory,
+    ) -> Result<ActorPublicationAttemptObserver, GenerationRetirementBeginFailure> {
+        let actor = preparation.actor();
+        let failure = |error| GenerationRetirementBeginFailure::Directory(error);
+        if self.phase != RunPhase::Running {
+            return Err(failure(DirectoryError::Closed));
+        }
+        let Some(record) = self.reservations.get_mut(&actor) else {
+            return Err(failure(DirectoryError::Unauthorized { actor }));
+        };
+        if record.retirement.is_some() {
+            return Err(failure(DirectoryError::LifetimeTransitionPending { actor }));
+        }
+        if !self.entries.contains_key(&actor)
+            || !matches!(record.phase, ReservationPhase::Registered)
+        {
+            return Err(GenerationRetirementBeginFailure::Unregistered {
+                terminal: record.terminal.get(),
+                cleanup: record.terminal.cleanup(),
+            });
+        }
+        let Some(expected) = preparation.expected_generation().cloned() else {
+            return Err(GenerationRetirementBeginFailure::ExpectedGenerationMissing);
+        };
+        let candidate = preparation.candidate_custody();
+        record.retirement = Some(GenerationRetirementAttempt {
+            actor,
+            candidate,
+            expected,
+            inventory,
+            phase: GenerationRetirementPhase::Preparation(preparation),
+        });
+        let attempt = record
+            .retirement
+            .as_mut()
+            .expect("retirement was just installed");
+        let GenerationRetirementPhase::Preparation(preparation) =
+            std::mem::replace(&mut attempt.phase, GenerationRetirementPhase::Reserving)
+        else {
+            unreachable!("new retirement owns one preparation")
+        };
+        let operation = match preparation.reserve() {
+            Ok(ActorGenerationRetirementPreparationOutcome::Reserved(operation)) => operation,
+            Ok(ActorGenerationRetirementPreparationOutcome::Refused(reason)) => {
+                record.retirement = None;
+                return Err(GenerationRetirementBeginFailure::Refused(reason));
+            }
+            Err(error) => {
+                let error = Arc::new(error);
+                attempt.phase = GenerationRetirementPhase::ReservationFailed(error.clone());
+                return Err(GenerationRetirementBeginFailure::Publication(error));
+            }
+        };
+        let observer = operation.attempt_observer();
+        attempt.phase = GenerationRetirementPhase::Reserved {
+            operation,
+            observer: observer.clone(),
+            cutoff: GenerationRetirementCutoffPhase::NotStarted,
+        };
+        let GenerationRetirementPhase::Reserved {
+            operation, cutoff, ..
+        } = &mut attempt.phase
+        else {
+            unreachable!("reservation was just retained")
+        };
+        match operation.reserved_mut().fence_original() {
+            ActorGenerationRetirementCutoff::Fenced(fence) => {
+                *cutoff = GenerationRetirementCutoffPhase::AwaitCapture {
+                    fence,
+                    delivery: GenerationCaptureDelivery::Pending,
+                };
+                // source_enqueue holds the source gate through synchronous
+                // mailbox insertion. Their pre-cutoff messages precede this
+                // FIFO barrier even when they arrived behind Begin.
+                let inserted = myself
+                    .send_message(RunControlMessage::CaptureGenerationRetirement {
+                        actor,
+                        observer: observer.clone(),
+                    })
+                    .is_ok();
+                if let GenerationRetirementCutoffPhase::AwaitCapture { delivery, .. } = cutoff {
+                    *delivery = if inserted {
+                        GenerationCaptureDelivery::Enqueued
+                    } else {
+                        GenerationCaptureDelivery::Unconfirmed
+                    };
+                }
+                if !inserted {
+                    // The same operation and fence stay retained. No capture or
+                    // empty-population decision can be inferred from send loss.
+                    return Err(failure(DirectoryError::Unavailable));
+                }
+                Ok(observer)
+            }
+            ActorGenerationRetirementCutoff::Refused(error) => {
+                let error = Arc::new(error);
+                *cutoff = GenerationRetirementCutoffPhase::Refused(error.clone());
+                Err(GenerationRetirementBeginFailure::Publication(error))
+            }
+            ActorGenerationRetirementCutoff::Unconfirmed { fence, error } => {
+                let error = Arc::new(error);
+                *cutoff = GenerationRetirementCutoffPhase::Unconfirmed {
+                    fence,
+                    error: error.clone(),
+                };
+                Err(GenerationRetirementBeginFailure::Publication(error))
+            }
+        }
+    }
+
+    pub(super) fn capture_generation_retirement(
+        &mut self,
+        actor: ActorRef,
+        observer: ActorPublicationAttemptObserver,
+    ) {
+        let Some(attempt) = self
+            .reservations
+            .get(&actor)
+            .and_then(|record| record.retirement.as_ref())
+        else {
+            return;
+        };
+        let GenerationRetirementPhase::Reserved {
+            observer: current,
+            cutoff:
+                GenerationRetirementCutoffPhase::AwaitCapture {
+                    delivery: GenerationCaptureDelivery::Enqueued,
+                    ..
+                },
+            ..
+        } = &attempt.phase
+        else {
+            return;
+        };
+        if !current.same_attempt(&observer) {
+            return;
+        }
+        let pending_claims = match &attempt.phase {
+            GenerationRetirementPhase::Reserved { cutoff: GenerationRetirementCutoffPhase::AwaitCapture { fence, .. }, .. } => fence.pending_claims(),
+            _ => return,
+        };
+        let population = self.generation_population(attempt.expected.dependency().clone());
+        let work = match &attempt.inventory {
+            GenerationRetirementInventory::Resident(inventory) => {
+                GenerationRetirementWork::Observed(inventory.observe(attempt.expected.dependency()))
+            }
+            GenerationRetirementInventory::Unavailable => GenerationRetirementWork::Unavailable,
+        };
+        let mut identities: HashSet<_> = population
+            .resources
+            .iter()
+            .chain(&population.unclassified)
+            .map(|resource| resource.identity.clone())
+            .collect();
+        for edge in &population.collateral {
+            identities.insert(edge.stopping.clone());
+            if let GenerationCollateralIdentity::Classified(affected) = &edge.affected {
+                identities.insert(affected.clone());
+            }
+        }
+        let mut actors = Vec::new();
+        let mut resources = Vec::new();
+        let mut reservations = Vec::new();
+        let mut preparations = Vec::new();
+        for identity in identities {
+            match identity {
+                GenerationResourceIdentity::Actor(actor) => {
+                    if let Some(entry) = self.entries.get(&actor) {
+                        actors.push(entry.actor.clone());
+                    }
+                    if let Some(record) = self.reservations.get(&actor) {
+                        reservations.push(record.terminal.clone());
+                    }
+                }
+                GenerationResourceIdentity::Native { id, .. } => {
+                    if let Some(resource) = self.resources.get(&id) {
+                        resources.push(resource.resource.clone());
+                    }
+                }
+                GenerationResourceIdentity::Preparation(id) => {
+                    if let Some(preparation) = self.preparations.get(&id) {
+                        preparations.push(preparation.compiler.clone());
+                    }
+                }
+            }
+        }
+        let capture = GenerationRetirementCapture {
+            population,
+            work,
+            actors,
+            resources,
+            reservations,
+            preparations,
+            pending_claims,
+            physical_closure: GenerationCapturePhysicalClosure::UnknownPhysical,
+        };
+        let Some(attempt) = self
+            .reservations
+            .get_mut(&actor)
+            .and_then(|record| record.retirement.as_mut())
+        else {
+            return;
+        };
+        let GenerationRetirementPhase::Reserved { cutoff, .. } = &mut attempt.phase else {
+            return;
+        };
+        match std::mem::replace(cutoff, GenerationRetirementCutoffPhase::NotStarted) {
+            GenerationRetirementCutoffPhase::AwaitCapture {
+                fence,
+                delivery: GenerationCaptureDelivery::Enqueued,
+            } => {
+                *cutoff = GenerationRetirementCutoffPhase::Captured { fence, capture };
+            }
+            previous => *cutoff = previous,
+        }
+        // Physical closure revalidation and publication settlement are separate
+        // owner transitions. Captured grants no authority to initiate a stop.
+    }
+
     /// Both vectors remain empty while the owner is live. Each retained record
     /// has at most one outstanding attempt, including records without an entry.
     pub(super) fn reserve_retirement_loss_capacity(
@@ -143,9 +422,7 @@ impl RunState {
                 // Record admission reserves these slots before any publication
                 // reservation can be issued. Neither vector grows here.
                 self.lost_retirements.push(retained);
-                if let Some(discard) = discard {
-                    self.retirement_discards.push(discard);
-                }
+                self.retirement_discards.push(discard);
             }
         }
         let attempts = std::mem::take(&mut self.lost_retirements);
