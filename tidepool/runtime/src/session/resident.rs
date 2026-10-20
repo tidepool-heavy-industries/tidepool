@@ -6045,9 +6045,7 @@ where
         let scope = execution.private_scope();
         let binder = carrier.binding()?.clone();
         let id = SessionVarId::from_extract(binder.var_id);
-        let facts = execution
-            .world_execution_facts()
-            .ok_or(SessionError::WorldCellRequiresServicePreparation)?;
+        let facts = execution.world_execution_facts();
         let target = execution.retained_lexical_scope();
         let before = self
             .state
@@ -6424,9 +6422,7 @@ where
             return Err(SessionError::MissingDeclarationLibrary.into());
         }
         let target = execution.retained_lexical_scope();
-        let facts = execution
-            .world_execution_facts()
-            .ok_or(SessionError::WorldCellRequiresServicePreparation)?;
+        let facts = execution.world_execution_facts();
         super::RuntimeLexicalScopeLease::with_source_leases(
             [facts.original_source.clone(), target.clone()],
             |leases| {

@@ -547,24 +547,21 @@ impl PersistentSession {
                 != Some(&intent.private)
                 || intent.library != self.lib().compile_view_identity
                 || !intent.private_view_is_current(self)
-                || match (intent.world.as_ref(), world_facts.as_ref()) {
-                    (Some(world), Some(facts)) => {
-                        !Arc::ptr_eq(&world.association, &facts.published)
-                            || !Arc::ptr_eq(&world.source, &facts.source)
-                            || !Arc::ptr_eq(&world.original_source, &facts.original_source)
-                            || !Arc::ptr_eq(&world.target, &facts.public_target)
-                            || self
-                                .lib()
-                                .tips
-                                .get(&admission.private_scope())
-                                .and_then(|tip| tip.inspection_world.as_ref())
-                                .is_none_or(|current| !Arc::ptr_eq(current, &world.private))
-                            || intent.admitted != facts.admitted
-                            || intent.admitted_context != facts.admitted_context
-                    }
-                    (None, None) => false,
-                    _ => true,
-                }
+                || intent.world.as_ref().is_none_or(|world| {
+                    let facts = &world_facts;
+                    !Arc::ptr_eq(&world.association, &facts.published)
+                        || !Arc::ptr_eq(&world.source, &facts.source)
+                        || !Arc::ptr_eq(&world.original_source, &facts.original_source)
+                        || !Arc::ptr_eq(&world.target, &facts.public_target)
+                        || self
+                            .lib()
+                            .tips
+                            .get(&admission.private_scope())
+                            .and_then(|tip| tip.inspection_world.as_ref())
+                            .is_none_or(|current| !Arc::ptr_eq(current, &world.private))
+                        || intent.admitted != facts.admitted
+                        || intent.admitted_context != facts.admitted_context
+                })
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
@@ -602,40 +599,29 @@ impl PersistentSession {
             }
             return Ok(intent.clone());
         }
-        let world_facts = admission.world_execution_facts();
-        let world = world_facts
-            .as_ref()
-            .map(|facts| {
-                let private = self
-                    .lib()
-                    .tips
-                    .get(&admission.private_scope())
-                    .and_then(|tip| tip.inspection_world.clone())
-                    .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                if !self.inspection_world_base_is_current(
-                    &private.base,
-                    &facts.source,
-                    &facts.original_source,
-                ) || !private.base.target.matches(&admission.scope_lease)
-                {
-                    return Err(SessionError::WorldCellPublicationBaseStale);
-                }
-                Ok(WorldExecutionIntent {
-                    association: facts.published.clone(),
-                    source: facts.source.clone(),
-                    original_source: facts.original_source.clone(),
-                    target: facts.public_target.clone(),
-                    private,
-                })
-            })
-            .transpose()?;
-        let (admitted, admitted_context) = match world_facts.as_ref() {
-            Some(facts) => (facts.admitted.clone(), facts.admitted_context.clone()),
-            None => (
-                admission.admitted_public()?.clone(),
-                admission.view()?.exact_declaration_context().cloned(),
-            ),
-        };
+        let facts = admission.world_execution_facts();
+        let private = self
+            .lib()
+            .tips
+            .get(&admission.private_scope())
+            .and_then(|tip| tip.inspection_world.clone())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+        if !self.inspection_world_base_is_current(
+            &private.base,
+            &facts.source,
+            &facts.original_source,
+        ) || !private.base.target.matches(&admission.scope_lease)
+        {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        let world = Some(WorldExecutionIntent {
+            association: facts.published,
+            source: facts.source,
+            original_source: facts.original_source,
+            target: facts.public_target,
+            private,
+        });
+        let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
         let intent = self.freeze_execution_intent_from_snapshot(
             &admitted,
             admitted_context,
@@ -665,9 +651,7 @@ impl PersistentSession {
         if admission.final_intent.get().is_some() {
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
-        let facts = admission
-            .world_execution_facts()
-            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+        let facts = admission.world_execution_facts();
         let target = admission.retained_lexical_scope();
         super::RuntimeLexicalScopeLease::with_source_leases(
             [facts.original_source.clone(), target.clone()],
