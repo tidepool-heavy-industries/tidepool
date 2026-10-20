@@ -2630,7 +2630,8 @@ admitWorldRows state producer acquisition offered = do
         ParsedJoinEvidence -> pure LexicalJoinEvidence
         ParsedValueEvidence -> pure CheckedValueEvidence
       semantic <- toStrictByteString <$> worldSemanticRowEncoding producer entry
-      let charge = (toInteger (sum [BS.length (TE.encodeUtf8 (T.pack path)) + length sha | (path,sha) <- worldOfferedSeals entry] + BS.length semantic),1)
+      let charge = (sum [toInteger (BS.length (TE.encodeUtf8 (T.pack path))) + toInteger (length sha)
+            | (path,sha) <- worldOfferedSeals entry] + toInteger (BS.length semantic),1)
       pure (WorldAdmittedRow entry (ScopeInterfaceInput row admitted) semantic charge)
   let users = Map.fromListWith (+) [(path,1) | entry <- offered, (path,_) <- worldOfferedSeals entry]
   let capturedBodies = requestInputBodies originals
@@ -2961,7 +2962,7 @@ retainVerifiedWorldFrontier roots bodies = do
   links <- Map.traverseWithKey (\_ body -> decodeWorldBytes (worldBlockLinks (BS.length body)) body) bodies
   let refs = Map.fromListWith (+) ([(cid,1) | cid <- roots]
         ++ [(child,1) | children <- Map.elems links,child <- Set.toList children])
-      bytes = sum [toInteger (BS.length cid + BS.length body)
+      bytes = sum [toInteger (BS.length cid) + toInteger (BS.length body)
         + toInteger (Set.size children) * 38
         | (cid,body) <- Map.toList bodies,Just children <- [Map.lookup cid links]]
   pure (VerifiedWorldFrontier bodies links refs (map BS.copy roots) (bytes,Map.size bodies))
@@ -2984,7 +2985,7 @@ advanceVerifiedWorldFrontier (VerifiedWorldFrontier bodies links refs oldRoots c
         (Map.insert cid body nextBodies,Map.insert cid children nextLinks)
       (available,adjacent) = foldl' overlay (bodies,links) blocks
       blockCharge cid body children =
-        (toInteger (BS.length cid + BS.length body) + toInteger (Set.size children) * 38,1)
+        (toInteger (BS.length cid) + toInteger (BS.length body) + toInteger (Set.size children) * 38,1)
       add (counts,cost) cid = case Map.lookup cid counts of
         Just count -> do
           when (count == maxBound) (worldCorrupt "compiler world block reference count exceeds host range")
