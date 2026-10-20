@@ -941,6 +941,19 @@ where
                 return Ok(refusal);
             }
         }
+        if let tidepool_toolchain::compiler_world::WorldObservationQuestion::RowFit(reference) =
+            &question
+        {
+            if reference.module.is_empty()
+                || reference.name.is_empty()
+                || reference.module.contains('\0')
+                || reference.name.contains('\0')
+            {
+                return Ok(ScopedWorldInspection::Unsupported(
+                    "rowFit requires a canonical identifier with a defining module and name".into(),
+                ));
+            }
+        }
         let current_context = PrivateInspectionContext::capture(
             &self.access.source.config,
             &context,

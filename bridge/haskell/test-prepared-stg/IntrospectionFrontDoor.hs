@@ -90,6 +90,19 @@ frontDoor path = do
   require (I.fitIdentifier fit == operationRef && I.fitAvailability fit == I.FitAvailable
     && I.fitProvenance fit == view) "wrong keyed row fit"
 
+  -- The module is genuine (it supplied the discovered operation), while the
+  -- canonical occurrence is absent. Missing is advisory Unknown, not a row
+  -- mismatch or a same-spelled replacement chosen from another generation.
+  let absentRef = I.IdentifierRef (I.identifierModule operationRef)
+        "__absentQueryIdentifier" I.ValueIdentifier
+  absent <- answer "rowFit absent canonical name" =<< I.rowFit (Just view) absentRef
+  require (I.fitIdentifier absent == absentRef && I.fitAvailability absent == I.FitUnknown
+    && I.fitProvenance absent == view) "absent canonical name was not unknown"
+  malformed <- I.rowFit (Just view) (I.IdentifierRef "" "readFile" I.ValueIdentifier)
+  case malformed of
+    Left (I.UnsupportedDeclaration detail) -> require (not (Text.null detail)) "missing malformed-identity reason"
+    _ -> error "malformed canonical identifier was not an admission refusal"
+
   expression <- answer "typeOfExpression" =<< I.typeOfExpression (Just view) "queryEcho"
   require (I.expressionSource expression == "queryEcho"
     && tokenType (I.expressionDisplay expression) == "ProbeToken -> ProbeToken"
