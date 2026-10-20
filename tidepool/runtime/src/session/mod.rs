@@ -154,11 +154,10 @@ pub use resident::{
     truncate_preview_at_line, ActivationDisplayOwners, CompiledActivationPreview,
     HostBindingPrototype, HostBindingType, HostCarrier, HostPayload, MountedActivationInput,
     PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, RequestReceiverEntry,
-    ResidentContinuationEvent,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError,
-    ResidentSession, RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
-    RuntimeActivationPreviewAdmission, RuntimeProgressPublication, RuntimeResultParcel,
-    RuntimeResultPublication, SessionRunContext,
+    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
+    ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
+    RuntimeActivationInputAdmission, RuntimeActivationPreviewAdmission, RuntimeProgressPublication,
+    RuntimeResultParcel, RuntimeResultPublication, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, HaskellTypeSource, SessionCompileView, SourceImports};
@@ -440,6 +439,8 @@ pub enum SessionError {
     WorldCellSuccessorCapabilityMissing { ordinal: usize },
     #[error("world execution final publication requires the SAME post-removal promotion product")]
     WorldCellFinalPromotionCapabilityMissing,
+    #[error("world declaration publication requires its checked lexical promotion product")]
+    WorldCellDeclarationPublicationCapabilityMissing,
     #[error("world execution public semantic base changed before atomic installation")]
     WorldCellPublicationBaseStale,
     #[error("live value module {0:?} has no retained compiler-certified interface")]
@@ -575,8 +576,42 @@ pub struct PublicationSemanticBase {
     library: uuid::Uuid,
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
-    public_view: [u8; 32],
-    private_view: [u8; 32],
+    public_view: PublicationViewWitness,
+    private_view: PublicationViewWitness,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum PublicationViewWitness {
+    Finite([u8; 32]),
+    World {
+        key: persistent::CompileViewKey,
+        logical: [u8; 32],
+    },
+}
+
+impl PublicationViewWitness {
+    fn is_current(&self, session: &PersistentSession, scope: ScopeId) -> bool {
+        match self {
+            Self::Finite(digest) => session.compile_view_digest_in(scope) == Some(*digest),
+            Self::World { key, logical } => {
+                session.compile_view_key_in(scope).as_ref() == Some(key)
+                    && session.has_lib()
+                    && session
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.as_ref())
+                        .is_some_and(|association| association.world.logical_id() == logical)
+            }
+        }
+    }
+
+    fn version_fact(&self) -> serde_json::Value {
+        match self {
+            Self::Finite(digest) => serde_json::json!(digest),
+            Self::World { logical, .. } => serde_json::json!({ "world": logical }),
+        }
+    }
 }
 
 /// One coherent durable graph, compare-and-swap revision and reserved ceiling.

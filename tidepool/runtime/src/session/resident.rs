@@ -41,6 +41,35 @@ use crate::render::EvalResult;
 use crate::timing;
 use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
 
+/// Issued only by successful retirement of an exact hidden private host owner.
+/// Compiler custody stays retained while its runtime name leaves visibility.
+pub(super) struct PrivateHostRetirement {
+    association: Arc<super::inspection::InspectionWorldAssociation>,
+    scope: Arc<super::RuntimeLexicalScopeLease>,
+    before: super::persistent::CompileViewKey,
+    after: super::persistent::CompileViewKey,
+    binder: SessionVarId,
+    name: BindingName,
+}
+
+impl PrivateHostRetirement {
+    pub(super) fn following_key<'a>(
+        &'a self,
+        session: &super::PersistentSession,
+        association: &Arc<super::inspection::InspectionWorldAssociation>,
+        scope: &Arc<super::RuntimeLexicalScopeLease>,
+        before: &super::persistent::CompileViewKey,
+    ) -> Option<&'a super::persistent::CompileViewKey> {
+        (Arc::ptr_eq(&self.association, association)
+            && Arc::ptr_eq(&self.scope, scope)
+            && &self.before == before
+            && session
+                .resolve_in(scope.scope(), &self.name.0)
+                .is_none_or(|entry| entry.id != self.binder))
+        .then_some(&self.after)
+    }
+}
+
 enum ResidentResumeInput {
     Response(Response),
     Handle(ValueHandle),
@@ -828,9 +857,7 @@ impl HostCarrier {
 
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, .. } => {
-                Ok(admission.snapshot().session_root())
-            }
+            HostCarrierOrigin::Checked { admission, .. } => Ok(admission.snapshot().session_root()),
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
@@ -1573,17 +1600,21 @@ impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Compile(error) => write!(formatter, "{error}"),
-            Self::CloseUnconfirmed { close, action_error } => {
-                write!(
-                    formatter,
-                    "compiler close is unconfirmed: {close:?}"
-                )?;
+            Self::CloseUnconfirmed {
+                close,
+                action_error,
+            } => {
+                write!(formatter, "compiler close is unconfirmed: {close:?}")?;
                 if let Some(error) = action_error {
                     write!(formatter, "; primary action failed: {error}")?;
                 }
                 Ok(())
             }
-            Self::Publication { error, close, action_error } => {
+            Self::Publication {
+                error,
+                close,
+                action_error,
+            } => {
                 write!(
                     formatter,
                     "compiler publication failed: {error}; close: {close:?}"
@@ -2574,10 +2605,7 @@ fn refuse_generic_activation_preview_install(
     if certification.is_some_and(|certification| {
         matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
     }) {
-        return Err(SessionError::SourceAdmission(
-            super::SourceAdmissionError::Unqualified,
-        )
-        .into());
+        return Err(SessionError::SourceAdmission(super::SourceAdmissionError::Unqualified).into());
     }
     Ok(())
 }
@@ -5629,14 +5657,7 @@ where
         self.state
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(
-            scope,
-            binder,
-            gen,
-            custody,
-            None,
-            settlement,
-        )
+        self.mount_compiled_binding_prepared(scope, binder, gen, custody, None, settlement)
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -6118,6 +6139,101 @@ where
     /// [`Self::reap_evicted_stub_sources_in`]); an ordinary compiler-issued
     /// binding has no stub source and this is then a no-op past the retire
     /// itself.
+    /// Retire the exact private host carrier and retain the owning key transition
+    /// for final World publication. Generic cleanup remains separately available
+    /// after source fencing and never issues publication evidence.
+    pub fn retire_private_host_binding_owner(
+        &mut self,
+        execution: &super::PrivateExecutionAdmission,
+        binder: &BoundBinder,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        let facts = execution
+            .world_execution_facts()
+            .ok_or(SessionError::WorldCellRequiresServicePreparation)?;
+        let target = execution.retained_lexical_scope();
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [facts.original_source.clone(), target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        let scope = execution.private_scope();
+                        let id = SessionVarId::from_extract(binder.var_id);
+                        if !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
+                            || execution.owner_epoch != self.state.admission_owner().epoch()
+                            || execution.session() != self.state.lib().session_id()
+                            || execution.library != self.state.lib().compile_view_identity
+                            || execution.final_intent.get().is_some()
+                            || !self
+                                .state
+                                .source_lease_in(scope)
+                                .is_ok_and(|live| Arc::ptr_eq(&live, &target))
+                            || !self.hidden_host_bindings.contains_key(&id)
+                            || self
+                                .state
+                                .resolve_in(scope, &binder.name)
+                                .is_none_or(|entry| entry.id != id || entry.scope != scope)
+                        {
+                            return Err(SessionError::StaleStagedDeclaration);
+                        }
+                        let association = self
+                            .state
+                            .lib()
+                            .tips
+                            .get(&scope)
+                            .and_then(|tip| tip.inspection_world.clone())
+                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        let before = self
+                            .state
+                            .compile_view_key_in(scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        let mut records = execution.host_retirements.lock();
+                        let mut expected = &association.base.key;
+                        for record in records.iter() {
+                            expected = record
+                                .following_key(&self.state, &association, &target, expected)
+                                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        }
+                        if expected != &before
+                            || !Arc::ptr_eq(
+                                &association.base.original_source,
+                                &facts.original_source,
+                            )
+                            || !Arc::ptr_eq(&association.base.target, &target)
+                            || association.base.source.sha256() != facts.source.sha256()
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        records
+                            .try_reserve(1)
+                            .map_err(|error| SessionError::RecoveryManifest {
+                                path: self.state.lib().root.clone(),
+                                detail: error.to_string(),
+                            })?;
+                        self.retire_binding_owner_settled(id);
+                        let after = self
+                            .state
+                            .compile_view_key_in(scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        records.push(PrivateHostRetirement {
+                            association,
+                            scope: target.clone(),
+                            before,
+                            after,
+                            binder: id,
+                            name: BindingName(binder.name.clone()),
+                        });
+                        self.reap_evicted_stub_sources_in(&self.state.lib().root.clone());
+                        Ok(())
+                    },
+                )
+            },
+        )
+        .map_err(SessionError::from)??;
+        Ok(())
+    }
+
     pub fn retire_host_binding_owner(&mut self, session_root: &Path, binder: &BoundBinder) {
         let id = SessionVarId::from_extract(binder.var_id);
         self.retire_binding_owner(id);
@@ -6127,6 +6243,10 @@ where
     /// Retire an exact binding owner while preserving existing dependency leases.
     pub fn retire_binding_owner(&mut self, id: SessionVarId) {
         self.settle_dropped_custody();
+        self.retire_binding_owner_settled(id);
+    }
+
+    fn retire_binding_owner_settled(&mut self, id: SessionVarId) {
         let scope = self.state.bindings().get(id).map(|entry| entry.scope);
         self.state.retire_binding_owner(id);
         if let Some(scope) = scope {
@@ -6206,15 +6326,7 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
-        self.mount_host_value_with_interface_in(
-            scope,
-            binder,
-            gen,
-            code,
-            None,
-            build,
-            settlement,
-        )
+        self.mount_host_value_with_interface_in(scope, binder, gen, code, None, build, settlement)
     }
 
     fn mount_host_value_with_interface_in(
@@ -6246,9 +6358,8 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
-                prepared, &resolved, &registry,
-            )?;
+            let (target, demanded) =
+                super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
             self.install_certified_turn_in(
                 scope,
                 &table,
@@ -7236,9 +7347,7 @@ where
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(
-                        prepared, &resolved, bundle,
-                    )?
+                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
                 }
                 TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
@@ -9818,7 +9927,9 @@ mod authored_publication_tests {
                     "explicit A retirement is not evidence of B END"
                 );
                 assert!(matches!(
-                    target_weak.upgrade().map(|lease| target_fence.reopen(&lease)),
+                    target_weak
+                        .upgrade()
+                        .map(|lease| target_fence.reopen(&lease)),
                     Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
