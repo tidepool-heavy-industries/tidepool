@@ -4328,7 +4328,6 @@ fn admit_world_preparation_response(
         .flat_map(|stage| stage.ordinals().iter().map(move |_| Arc::clone(stage)))
         .collect();
     let mut item_proofs = Vec::with_capacity(completed.len());
-    let mut issued_native_ordinals = BTreeMap::<String, u32>::new();
     let mut captured_files = BTreeMap::new();
     for (index, (completed, slot)) in completed.iter().zip(reservation.slots()).enumerate() {
         crate::host_work::checkpoint()?;
@@ -4425,24 +4424,14 @@ fn admit_world_preparation_response(
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             let symbol = world_output_symbol(&observed[9])?;
             validate_world_native_entry_observation(&symbol, typed_item)?;
-            // Field 10 is the native original-group ordinal the compiler issued for
-            // this item entry. Retain it, and refuse a preparation whose two items
-            // claim different ordinals for one entry.
+            // Native original-group membership is authenticated per item by
+            // CheckedTypedEntry against its exact selected original product.
             validation
                 .inventory
                 .charge_value_copies(&observed[10], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             let native_ordinal = u32::try_from(answer_u64(&observed[10])?)
                 .map_err(|_| world_response_error(false))?;
-            match issued_native_ordinals.get(typed_item.entry()) {
-                Some(issued) if *issued != native_ordinal => {
-                    return Err(world_response_error(true));
-                }
-                Some(_) => {}
-                None => {
-                    issued_native_ordinals.insert(typed_item.entry().to_owned(), native_ordinal);
-                }
-            }
             // Field 11 is the two-list `[binders, signatures]`. Binder order and
             // identity must match the reservation, and each signature must name
             // this typed item's entry and ordered capture.
