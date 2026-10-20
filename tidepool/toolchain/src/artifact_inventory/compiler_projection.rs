@@ -3885,7 +3885,8 @@ impl CompilerInputProjection {
                     ),
                     Some(entry.descriptor.id),
                 ),
-                _ => (entry.descriptor.id, None),
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => (entry.descriptor.id, None),
+                ArtifactPayload::PackageCode(_) => continue,
             };
             let role = match original_reuse {
                 Some(original) => CompilerInputRole::ReusableOriginal {

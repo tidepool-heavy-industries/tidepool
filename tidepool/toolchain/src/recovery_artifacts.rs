@@ -1819,7 +1819,7 @@ fn checked_relative(path: &Path) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, RecoveryArtifactError> {
+pub(crate) fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, RecoveryArtifactError> {
     if !checked_relative(relative) {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -1903,7 +1903,7 @@ fn read_admission_bytes(
     Ok(bytes)
 }
 
-fn read_checked(
+pub(crate) fn read_checked(
     path: &Path,
     expected: &[u8; 32],
     limit: u64,
@@ -1918,7 +1918,7 @@ fn read_checked(
     Ok(bytes)
 }
 
-fn materialize_copy_with_validation(
+pub(crate) fn materialize_copy_with_validation(
     path: &Path,
     bytes: &[u8],
     digest: &[u8; 32],
