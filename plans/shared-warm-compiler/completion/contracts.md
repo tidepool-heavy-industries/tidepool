@@ -115,6 +115,12 @@ projection. Keep competing historical custody without making it executable.
 
 ## Source lifetime, reload and cleanup
 
+The [source authority lifetime contract](contracts/SOURCE-AUTHORITY-LIFETIME.md)
+governs the original-source/lexical-resource split. Installed provenance retains
+canonical source tokens; actual generations, captures and operations retain
+lexical leases. Automatic resource release and explicit source cutoff are
+different owner transitions.
+
 Preserve affine Fresh/Bound/Consumed preview states. Capture original A and target
 B separately. Canonical identity plus Open-gate admission must enclose the bind
 claim; recheck both before consumption. A refused run does not reset a bound token
@@ -131,6 +137,14 @@ that captured set through existing owners. Inspect the physical closure of each
 proposed stop and refuse collateral shutdown of independent children before any
 stop. Independent LLM worlds and the exact compiled self-reload continuation/receipt
 remain live; new old-generation work refuses.
+
+The private publisher sends an affine **unreserved** prepared product to
+RunState. The live receiver reserves it only after selecting its existing
+reservation record and securing owner-loss retention capacity. A failed send
+or dropped queued preparation releases B without fencing A. Once reserved,
+the actual attempt, candidate and observer enter that record before an await or
+stop. Reserving outside RunState permits an unowned publication attempt to be
+created after RunState has already published its terminal owner-loss result.
 
 The attempt owns candidate custody, including B's authenticated logical compiler
 world and restoration roots from the same frozen candidate preparation, and

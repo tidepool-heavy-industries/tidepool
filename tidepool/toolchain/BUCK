@@ -1619,7 +1619,6 @@ tidepool_rust_isolated_test(
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
-        "//bridge/haskell:introspection_front_door_prepared",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
         "//tidepool/toolchain:prepared-fixture",
@@ -1630,7 +1629,6 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
-        "TIDEPOOL_INTROSPECTION_FRONT_DOOR_FIXTURE_DIR": "$(location //bridge/haskell:introspection_front_door_prepared)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_PREPARED_FIXTURE_COMPILER": "$(exe //tidepool/toolchain:prepared-fixture)",
     },

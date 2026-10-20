@@ -33,68 +33,90 @@ a reason to preserve the finite engine while building another abstraction layer.
 
 ## Current implementation and evidence
 
-- The compiler-query handlers reach real GHC. A persistent compiler universe and
-  bounded worker infrastructure already exist. Do not describe the baseline as a
-  new GHC process for every cell.
-- The engine area's candidate now connects actor preparation to source-bound
-  World capture, off-checkout acquisition, matched settlement and installation.
-  Native World outputs can be sealed through the existing issuing owners. The
-  actual actor history still fails during compiler preparation; component
-  assembly and consumer compilation do not establish a working hosted notebook.
-  This area candidate is being reviewed before root integration.
-- World preparation currently excludes declarations/multiple inference segments,
-  source-dependent retained value types and ordinary expression reservations.
-  These are required completion work, not unsupported Persona profiles to retain.
-- The 32-case sweep has a first-failure triage, not completed dispositions.
-  The repaired residency fixture enters real source admission. Native completion
-  previously stopped it before measurements; the owner-derived current-product
-  scaffold now allows the bounded-residency and original-source gate controls
-  to execute successfully. Broader collection histories remain receiving work.
-  Q10's earlier four passes still concern synthetic observer histories.
-- Native current membership comes from its actual certified source row.
-  Integrated repairs preserve original publication custody separately from
-  current compiler roles, traverse exact issued historical dependencies, and
-  retain distinct owned payloads without selecting them. Both planners retain
-  genuine ambiguity refusals. The test-only alternative historical issuer is
-  deleted. The genuine hosted A1c target now declares the compiler-service
-  deployment; its execution awaits the joined engine/Haskell producer.
-- The settled-cell review found that separately public admission and raw program
-  values allowed execution to bypass matched END. The engine area's opaque
-  `SettledCellProgram` repair closes that construction route. Remaining
-  declaration/host mutation checkpoints and same-bundle refusal controls must
-  pass review before accepting the joined repair.
-- Query pins now share one observed compiler snapshot across verbs. Full
-  lexical queries still need the active effect row and exact input/request type
-  witnesses carried from their existing issuers; names or displayed types are
-  not substitutes. Recovered lexical facades must retain the exact issuing
-  artifact, even when another artifact has equal interface bytes.
-- The original-generation cutoff and retirement inventory are integrated.
-  Reservation-owned A fencing and B-before-A refusal settlement have focused
-  execution evidence. Linked publication, actual endpoint cutover, frozen B's
-  World and durable force/recovery remain lifecycle work.
-- Successor transport retention has a discriminating execution control: shadowed
-  rows and predecessor transport handles are released by the engine repair.
-  Required cold restoration still returns `Unsupported`; it remains a failed
-  gate. The Haskell reader must reconstruct the exact next product from owned
-  immutable facts without restoring the old whole-inventory path.
+The compiled root checkpoint is `6c289d64dd` on
+`integration/compiler-query-warm-final`. It is an intermediate integration,
+not the release candidate. The compiler service, runtime, native issuer and
+query owners are receiving further reviewed changes on their area branches.
+The baseline already has persistent GHC infrastructure; this campaign replaces
+repeated reconstruction and competing cell paths, not a process-per-cell design.
 
-The initial review ran no new builds or tests. The incoming handoff reports
-runtime/toolchain compilation, Q9 1/1, Q10 4/4 and residency 0/1 at `de12466597`;
-Haskell selectors and the full `session` target were not rerun there. Retained
-evidence is under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`,
-especially `completion/` and `post-de124-review/`. Findings in other revisions
-or dirty instrumentation checkouts retain their own scope. Subsequent receiving
-evidence is in `root-native-scaffold/`, `verification-scaffold/`, `haskell-h/`,
-and the area owners' handoffs. Component passes are not joined World execution
-or release qualification.
+| Evidence | Exact boundary | Remaining gate |
+| --- | --- | --- |
+| Joined `6c289d64dd`: toolchain, runtime, actor and host production/test consumers compile; build `32456ee8-31e8-4fc8-be03-eaf2bcb224a9` passed | Canonical source tokens, exact World owner, private operand, owner-rendered stages, Name-based demand and bounded diagnostics compile together | Counted actual query/private-input histories; compile success is not execution |
+| Root `3c53bc547e`: affected native production/test consumers compile; real v26 first-stage native case 1/1 passes | Actual parser, captured source and native issuer, confirmed END and post-END refusal | Full actor history, declarations, multiple stages and real private operand |
+| Weak association: real lost successful delivery and separately held completed-output controls pass | Installed observations do not own their runtime source/target; admitted outputs retain actual custody | Joined candidate abandonment and reload/force/recovery histories |
+| Canonical source `bba012bfd3`: four runtime/actor consumers compile, 29/29 controls pass | Source authority independent of lexical/native resource roots; source gates, per-site histories and core lifetime cases | Joined actual native contribution, parked values and force recovery |
+| Closed input origins `fb4a88f912` with preparation transport repair: consumers compile, focused origin/scope control 1/1 passes | Base World, prior stage and private operand correlate to their actual captured owner | Real private B over public A, parser END then new preparation, crossed runtime owner |
+| Native authored custody `6827c71114`: consumers compile, 2/2 scope and persistent-snapshot controls pass | Same stage ArtifactView reaches the existing authored-declaration issuer; issuer and carrier scopes remain distinct | Ordered stage fold and cumulative runtime lexical publication |
+| Queries `8b0920cab9` + `3b61732cec`: affected consumers and authored fixture compile | Nominal published binding, all five query operations, returned identities/provenance, ordinary file read and stale pin after publication | Execute the joined hosted fixture; compilation is not execution |
 
-Root checkpoint `a94a140dc2` compiled `tidepool-extract-cmd`,
-`tidepool-toolchain`, `tidepool-runtime`, `exomonad-actor` and `exomonad-host`
-successfully (build `abd924b6-5152-42d3-9bf7-b4b25cb76846`, launcher exit 0).
-The subsequent native custody, lifecycle cutoff and hosted-test registration
-folds require their own joined checks. Retain exact execution evidence per
-checkpoint; neither this compile nor an area's passing controls qualify the
-combined bundle.
+Exact commands, artifact hashes, selected/executed counts and logs are retained
+under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`, especially
+`completion/engine/`, `completion/queries/` and
+`post-de124-review/canonical-source-checkpoint.json`. The closed-origin handoff is
+`/srv/swarm/evidence/inanna/world-input-origin-receiver-20261020/handoff.json`.
+The authored native scope controls are under
+`/srv/swarm/evidence/inanna/world-stage-native-scopes-final-20261020/`.
+Leaf passes qualify their exact revisions and boundaries only. Frozen-bundle
+qualification and a new Persona launch have not passed.
+
+### Current receiving frontier
+
+| Owner | Concrete result in progress | Required discrimination |
+| --- | --- | --- |
+| Root runtime + engine receiver | Opaque runtime operand and parser plan, real actor input extraction | Exact mounted input and binding lifetime survive END; wrong original or World refuses before claims/hooks; no public World mutation |
+| Haskell + compiler request | Owner-rendered stage and exact prior-stage prefix, same retry owner | No raw caller source/plan pairing; later-stage type failure runs no early effect; declarations/imports/expressions remain supported |
+| Engine + native assembly | Ordered actual native outputs and authentic cumulative lexical projection | Stage Lib is not relabelled as a facade; actual declaration join and runtime delta advance the World without finite compile-view reconstruction |
+| Lifecycle + source owner | Receive canonical source token throughout publication, parked values and cleanup | Automatic resource release preserves source authority; explicit cutoff and stale target refuse independently |
+| Native selection + runtime provenance | Actual selected support acquisition follows the same winning source-choice branch | Merely available equal-interface code adds no source obligation; actually selected supports retain their exact owners; passive recovery is not live authority |
+| Lifecycle retirement/recovery | Unreserved publisher result crosses the real RunControl owner, then reservation/cutoff | Lost delivery before/after reserve, actual A/B registration and acknowledgements, durable B import, no unauthorized replay |
+| Query + verification | Execute semantic all-five hosted program and real private-input controls | Correct returned evidence, no effect authority inferred from row fit, unchanged public state after read-only query |
+| Engine qualification | Full syntax/history gate, legacy-path deletion audit, then frozen bundle | One production cell path, real actor execution and exact bundle metrics |
+
+Receiving work not yet included in this compiled checkpoint:
+
+- Declaration publication roots use actual exported values, instance dictionaries,
+  class defaults and pattern implementations. Runtime adoption must retain their
+  exact captured inputs, including hidden private operands, through the existing
+  declaration dependency owner.
+- A declaration delta may reveal an ancestor binding after a local shadow is
+  removed. Carry that actual winner and its retained checked row; the preceding
+  visible-name map cannot reconstruct a previously hidden winner.
+- Native installation must issue source contributions per installed program from
+  its actual imports. Distinct members of a compilation batch must not inherit
+  one another's unrelated source obligations.
+- Cold recovery must preserve the requested proof-scope snapshot and namespace
+  exactly, including an explicitly empty namespace. Narrowing materializations
+  must neither discard proof-only scopes nor widen to parent custody.
+- Scoped queries must share the held compiler source/checking owner, including
+  the same resolved native annotations before demand renaming and final checking.
+- Force retirement must block new affected admission while allowing already
+  issued transfers to settle. The final physical recapture and first stop belong
+  to one owner transition. Lost transfer ownership remains uncertain in the
+  surviving terminal owner, even after the RunControl state is destroyed.
+
+The native support owner keeps an explicit residual qualification step only when
+an existing interface-only role becomes a selected Original. A fresh-owner or
+canonical-only insertion must not rescan all retained native rows. Preserve exact
+historical dependencies and genuine conflict refusals before optimizing this
+remaining transition.
+
+Compiler input availability and executable demand are separate facts. A protected
+helper RHS may require an input's type even when the selected runtime root does
+not reach it. Retain the compiler's actual reference inventory and derive runtime
+requirements from actual emitted root/dependency evidence. Across stages, preserve
+the original producing/consuming witness; do not reconstruct it from names or
+stamp an earlier capture as a later one.
+
+The 32-case historical sweep still needs explicit dispositions. A stale fixture
+must be replaced by coverage through its real owning API, not weakened until it
+passes. Existing exact historical dependency refusals, source-defined TYPE
+controls, native custody properties and cold restoration remain required receiving
+controls. The current first-stage pass does not supersede them.
+
+Resume a completed worker explicitly for its next wave. Every area delivers a
+reviewed consolidated checkpoint; the root receives and pushes those checkpoints
+rather than leaving accepted work only on leaf branches.
 
 ## Delivery tree and ownership
 

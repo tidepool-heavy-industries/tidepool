@@ -131,7 +131,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, publishStagedOriginalProducts
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs, publishStagedOriginalProducts
   , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
@@ -3756,7 +3756,9 @@ originalProjectionProducts = withScratch $ \work -> do
     let itemDirectory = segmentDirectory </> ("item-" ++ show ordinal)
         target = if even ordinal then currentProgram else safeProgram
     createDirectory itemDirectory
-    void $ writeCertifiedSegmentItemProducts paired sharedCertificate itemDirectory target
+    (_,executionInputs) <- writeCertifiedSegmentItemProductsWithInputs paired sharedCertificate itemDirectory target
+    unless (Set.null executionInputs) $
+      fail "source-only native root acquired a retained value obligation"
     itemFacts <- readSegmentItemCodecFacts work (itemDirectory </> "certified-products.cbor")
     unless (null (codecCertificateModules itemFacts)
         && length (codecCertificateOwners itemFacts) == length (programGlobals target)

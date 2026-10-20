@@ -831,6 +831,7 @@ mod tests {
                 b"immutable-source-a",
                 &imports,
                 &inputs,
+                None,
                 super::super::NameScope::Current,
             )
         };
@@ -844,6 +845,7 @@ mod tests {
             b"immutable-source-b",
             &imports,
             &inputs,
+                None,
             super::super::NameScope::Current,
         );
         assert!(!original_pin.same_view(&source_changed));
@@ -853,6 +855,7 @@ mod tests {
             b"immutable-source-a",
             &SourceImports::from_specs(["Data.Text qualified as Other"]),
             &inputs,
+                None,
             super::super::NameScope::Current,
         );
         assert!(!original_pin.same_view(&import_changed));

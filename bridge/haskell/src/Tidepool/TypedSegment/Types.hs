@@ -152,7 +152,8 @@ typedSegmentRoots segment =
   ++ typedSegmentAuxiliaryRoots segment
 
 data TypedSegmentFailure
-  = InvalidReservationDigest
+  = ConflictingDemandName
+  | InvalidReservationDigest
   | EmptySegmentPlan
   | InvalidItemOrdinals
   | InvalidItemGenerations
