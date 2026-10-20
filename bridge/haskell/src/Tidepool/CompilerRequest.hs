@@ -739,12 +739,12 @@ writePreparedSidecars delivery outDir binds capturedType warnings artifacts = do
 -- aliases whose types need only fixed packages. Other closures are refused.
 -- It never
 -- constructs an ExactScope or publishes a runtime world during compilation.
--- Per-item facts admitted for one held-world cell. Parsed source, captures,
+-- Per-item facts admitted for one held-world cell. Authored identity, captures,
 -- signatures, issued interface and artifact are correlated by exact identity
 -- before any terminal manifest or response is exposed.
 data WorldCellItemSource = WorldCellItemSource
   { worldCellItemTyped :: TypedItem
-  , worldCellItemParsed :: CellAnalysisItem
+  , worldCellItemSourceIdentity :: HeldWorldCellItem
   , worldCellItemBindings :: ResolvedTypedItemBindings
   , worldCellItemSignatures :: [CheckedSignature]
   , worldCellItemArtifact :: PreparedArtifact
@@ -765,7 +765,6 @@ data PreparedWorldCellItem = PreparedWorldCellItem
 -- admission owns the compiler cursor; this record owns only emitted DATA.
 data PreparedWorldCellStage = PreparedWorldCellStage
   { preparedWorldStageItems :: [PreparedWorldCellItem]
-  , preparedWorldStagePlan :: CellSourcePlan
   , preparedWorldStageSource :: String
   , preparedWorldStageCompilerInputs :: [WorldCellInputReference]
   , preparedWorldStageExecutionInputs :: Set.Set (SymbolIdentity,Word64)
@@ -778,9 +777,9 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   }
 
 correlateWorldCellItems
-  :: [TypedItem] -> [PreparedArtifact] -> [(Int,CellAnalysisItem)]
+  :: [TypedItem] -> [PreparedArtifact] -> [HeldWorldCellItem]
   -> [ResolvedTypedItemBindings] -> [(Int,[CheckedSignature])] -> IO [WorldCellItemSource]
-correlateWorldCellItems typedItems artifacts parsedItems captures signatures = do
+correlateWorldCellItems typedItems artifacts sourceItems captures signatures = do
   let itemPlan item = typedItemPlan item
       itemOrdinal = plannedItemOrdinal . itemPlan
       itemTarget = plannedItemEntry . itemPlan
@@ -799,21 +798,21 @@ correlateWorldCellItems typedItems artifacts parsedItems captures signatures = d
   artifactsByTarget <- uniqueEntries "world item artifacts" paTarget artifacts
   unless (Map.keysSet artifactsByTarget == targets)
     (fail "world item artifacts do not cover exactly the typed items")
-  parsedByKey <- Map.map snd <$> uniqueEntries "world parsed execution items" fst parsedItems
-  unless (Map.keysSet parsedByKey == expected)
-    (fail "world parsed items do not cover exactly the typed items")
+  sourceByKey <- uniqueEntries "world admitted execution items" heldWorldCellItemOrdinal sourceItems
+  unless (Map.keysSet sourceByKey == expected)
+    (fail "world admitted items do not cover exactly the typed items")
   sources <- forM typedItems $ \item -> do
     let plan = itemPlan item
         key = plannedItemOrdinal plan
-    parsed <- maybe (fail "world typed item lost its parsed source") pure
-      (Map.lookup key parsedByKey)
+    source <- maybe (fail "world typed item lost its admitted source identity") pure
+      (Map.lookup key sourceByKey)
     selected <- maybe (fail "world typed item lost its captures") pure
       (Map.lookup key capturesByItem)
     itemSignatures <- maybe (fail "world typed item lost its capture witnesses") pure
       (Map.lookup key signaturesByItem)
     artifact <- maybe (fail "world typed item lost its prepared artifact") pure
       (Map.lookup (plannedItemEntry plan) artifactsByTarget)
-    pure (WorldCellItemSource item parsed selected itemSignatures artifact)
+    pure (WorldCellItemSource item source selected itemSignatures artifact)
   pure sources
   where
     uniqueEntries label key values = do
@@ -841,8 +840,7 @@ prepareWorldCellQuestion bound question = do
           case attempted of
             Right stages -> do
               let items = concatMap preparedWorldStageItems stages
-                  finalized = initial {cellPlanItems = concatMap (cellPlanItems . preparedWorldStagePlan) stages}
-                  observations = encodeCellOut finalized [] (mapMaybe preparedWorldCellObservation items)
+                  observations = encodeCellOut initial [] (mapMaybe preparedWorldCellObservation items)
                     (concatMap preparedWorldStageSource stages)
                   common = concatMap preparedWorldStageFiles stages
                   plans = concatMap preparedWorldStageTypedPlans stages
@@ -867,13 +865,12 @@ prepareWorldCellQuestion bound question = do
         Nothing -> pure (reverse reversed)
         Just stage -> do
           let initial = heldWorldCellStagePlan stage
-              slots = heldWorldCellStageSlots stage
               offset = heldWorldCellStageOffset stage
               stageDirectory = directory </> "stage-" ++ show offset
           output <- case cellPlanItems initial of
             [item] | sbKind (cellAnalysisVerdict item) == KDecl ->
-              prepareDeclaration preparation prior stageDirectory initial slots
-            _ -> prepareSegment preparation prior stageDirectory offset initial
+              prepareDeclaration preparation prior stageDirectory stage
+            _ -> prepareSegment preparation prior stageDirectory initial
           let needed = preparedWorldStageExecutionInputs output
               current = preparedWorldStageCompilerInputs output
               currentKeys = Set.fromList (map worldCellInputReferenceBinding current)
@@ -895,7 +892,6 @@ prepareWorldCellQuestion bound question = do
     requireStage preparation = nextStage preparation >>= maybe (throwIO WorldCellCorrupt) pure
     directory = worldCellPrepareDirectory question
     text = encodeString . T.pack
-    digestText = SHA256.hash . TE.encodeUtf8 . T.pack
     base = rawWorldID (worldCellPrepareIdentity question)
     planDigest = SHA256.hash (worldCellPreparePlan question)
     admission = worldCellPrepareAdmission question
@@ -919,7 +915,7 @@ prepareWorldCellQuestion bound question = do
         <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
         <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans
         <> encodeListLen (fromIntegral (length stages)) <> mconcat stages)
-    prepareSegment preparation prior stageDirectory offset initial = do
+    prepareSegment preparation prior stageDirectory initial = do
       createDirectoryIfMissing True stageDirectory
       preparedBatch <- newIORef Nothing
       attempt <- newIORef (0 :: Int)
@@ -937,8 +933,8 @@ prepareWorldCellQuestion bound question = do
                   pure (typedSegmentSessionEnvironment batch,typedSegmentSessionGlobals batch,typedSegmentSessionInterfaces batch)
             completed <- compilePreparedWorldSegmentRequest bound
               (WithTypedSegmentPreparation prepare (PreparedSegmentProducts typedPlan Nothing))
-            pure (heldWorldCellStagePlan issued,authored,completed)
-      (_,(finalized,authored,(completion,typed))) <- checkCellInstances compile initial
+            pure (issued,authored,completed)
+      (_,(issued,authored,(completion,typed))) <- checkCellInstances compile initial
       batch <- readIORef preparedBatch >>= maybe (fail "world cell has no actual typed batch") pure
       withPreparedCompilation completion $ \prepared _ _ _ -> do
         let result = pprPipelineResult prepared
@@ -969,13 +965,13 @@ prepareWorldCellQuestion bound question = do
         (artifacts,context) <- prepareArtifactsWithProjectionIntent prior NativeOriginals requireProjection
           originalInterfaces stageDirectory completion targets (standardAuxiliaryRoots binds)
           generations (typedSegmentSessionBindingRepresentations batch)
-        correlated <- correlateWorldCellItems items artifacts (zip [offset..] (cellPlanItems finalized)) captures
+        correlated <- correlateWorldCellItems items artifacts (heldWorldCellStageItems issued) captures
           signaturesByItem
         products <- maybe (fail "world cell has no actual original inventory") pure context
         staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result))) originalInterfaces stageDirectory prepared products
         preparedItemsWithInputs <- forM correlated $ \correlatedItem -> do
           let item = worldCellItemTyped correlatedItem
-              sourceItem = worldCellItemParsed correlatedItem
+              sourceItem = worldCellItemSourceIdentity correlatedItem
               artifact = worldCellItemArtifact correlatedItem
               selected = worldCellItemCaptures correlatedItem
               itemSignatures = worldCellItemSignatures correlatedItem
@@ -1007,7 +1003,7 @@ prepareWorldCellQuestion bound question = do
           let description = toStrictByteString (encodeListLen 13 <> text "TPCWITEM2"
                 <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
                 <> encodeWord64 (fromIntegral ordinal) <> encodeWord64 generation
-                <> text (typedSegmentPlanDigest typedPlan) <> encodeBytes (digestText (cellAnalysisSource sourceItem))
+                <> text (typedSegmentPlanDigest typedPlan) <> encodeBytes (heldWorldCellItemSourceDigest sourceItem)
                 <> text (plannedItemEntry itemPlan) <> encodeSymbol (preparedRootIdentity (typedItemRoot item))
                 <> encodeWord64 (fromIntegral nativeOrdinal)
                 <> encodeListLen 2
@@ -1027,22 +1023,25 @@ prepareWorldCellQuestion bound question = do
         _ <- publishStagedOriginalProducts prepared staged
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
-          finalized rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared staged
+          rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared staged
           (Set.unions (map snd preparedItemsWithInputs) `Set.difference`
             Set.fromList (Map.toList producedGenerations))
-    prepareDeclaration preparation prior stageDirectory initial matchedSlots = do
-      (ordinal,generation,kind,sourceItem) <- case (matchedSlots,cellPlanItems initial) of
-        ([(ordinal,PlannedDeclaration generation)],[item]) -> pure (ordinal,generation,"declaration",item)
-        ([(ordinal,PlannedPrologue generation)],[item]) -> pure (ordinal,generation,"prologue",item)
+    prepareDeclaration preparation prior stageDirectory stage = do
+      let initial = heldWorldCellStagePlan stage
+      (ordinal,generation,kind,sourceItem) <- case heldWorldCellStageItems stage of
+        [item] -> case heldWorldCellItemSlot item of
+          PlannedDeclaration generation -> pure (fromIntegral (heldWorldCellItemOrdinal item),generation,"declaration",item)
+          PlannedPrologue generation -> pure (fromIntegral (heldWorldCellItemOrdinal item),generation,"prologue",item)
+          _ -> throwIO WorldCellCorrupt
         _ -> throwIO WorldCellCorrupt
       let reserved = sessionModuleString (SessionModule LibMod (Generation generation))
           compile _ = do
             issued <- requireStage preparation
             original <- maybe (throwIO WorldCellCorrupt) pure (heldWorldCellStageOriginal issued)
             completion <- compilePreparedWorldRequest bound (PreparedProducts Nothing)
-            pure (heldWorldCellStagePlan issued,original,completion)
+            pure (original,completion)
       createDirectoryIfMissing True stageDirectory
-      (_,(finalized,submitted,completion)) <- checkCellInstances compile initial
+      (_,(submitted,completion)) <- checkCellInstances compile initial
       withPreparedCompilation completion $ \prepared _ _ _ -> do
         let result = pprPipelineResult prepared
         (original,inventory) <- maybe (fail "world declaration lost its actual certified stage inventory") pure
@@ -1081,16 +1080,16 @@ prepareWorldCellQuestion bound question = do
             description = toStrictByteString (encodeListLen 8 <> text "TPCWORIGINAL1"
               <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
               <> encodeWord64 ordinal <> encodeWord64 generation
-              <> encodeBytes (digestText (cellAnalysisSource sourceItem))
+              <> encodeBytes (heldWorldCellItemSourceDigest sourceItem)
               <> encodeListLen 5 <> text kind <> text unit <> text owner
               <> encodeBytes (SHA256.hash interfaceBytes) <> text (renderPlannedDeclarationInventory inventory))
             child = directory </> "item-" ++ show ordinal
         createDirectoryIfMissing True child
         BS.writeFile (child </> "world-item.cbor") description
         let item = PreparedWorldCellItem (ordinal,generation,SHA256.hash description) Nothing
-        finishStage stageDirectory identity [fromIntegral ordinal] finalized (plannedSource original)
+        finishStage stageDirectory identity [fromIntegral ordinal] (plannedSource original)
           [item] [] completion prepared staged publicationInputs
-    finishStage stageDirectory identity ordinals finalized rendered preparedItems plans completion prepared staged executionInputs = do
+    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared staged executionInputs = do
         validateDependencyEvidence (preparedFreshDependencies prepared)
         inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
           (preparedCompilationWorldInputs completion)
@@ -1136,7 +1135,6 @@ prepareWorldCellQuestion bound question = do
               <> fileRef (stageName "module-products.cbor") <> fileRef (stageName "certified-products.cbor")
         pure PreparedWorldCellStage
           { preparedWorldStageItems = preparedItems
-          , preparedWorldStagePlan = finalized
           , preparedWorldStageSource = rendered
           , preparedWorldStageCompilerInputs = worldCellCompilerInputReferences inputFacts
           , preparedWorldStageExecutionInputs = executionInputs
