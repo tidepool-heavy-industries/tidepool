@@ -647,6 +647,7 @@ mod tests {
         );
 
         let completed = ExtractRun {
+            request_correlation: "representation-only".into(),
             output: std::process::Output {
                 status: std::process::ExitStatus::from_raw(0),
                 stdout: b"completed compiler response".to_vec(),

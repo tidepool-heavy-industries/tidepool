@@ -2648,6 +2648,7 @@ pub fn plan_cell(
 /// Physical completion of one world-bound preparation. Only the checked
 /// program issuer in this module can turn these observations into authority.
 struct WorldCellOutputAdmission {
+    request_correlation: String,
     pub(crate) origin: tidepool_extract_cmd::CompilerTransactionOrigin,
     pub(crate) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(crate) directory: Arc<tempfile::TempDir>,
@@ -3125,6 +3126,7 @@ impl CheckedWorldCellProgram {
         }
         tracing::debug!(target: "exomonad_harness::timing",
             logical_world = ?logical.logical_id(),
+            compile_request = %output.request_correlation,
             output_certificate = ?certificate_sha256,
             visible_bindings = plan.world().restoration.inputs.bindings.entries.len(),
             demanded_runtime_roots = output.demanded_session_bindings.len(),
@@ -3346,7 +3348,7 @@ fn prepare_world_cell_outputs(
             &validation.inventory,
         )
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        admit_world_preparation_response(origin, reservation, directory, &bytes, validation)
+        admit_world_preparation_response(origin, run.request_correlation, reservation, directory, &bytes, validation)
     })
 }
 
@@ -3457,6 +3459,7 @@ fn validate_world_native_entry_observation(
 
 fn admit_world_preparation_response(
     origin: tidepool_extract_cmd::CompilerTransactionOrigin,
+    request_correlation: String,
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
@@ -3766,6 +3769,7 @@ fn admit_world_preparation_response(
         .reserve::<Arc<CheckedValueArtifact>>(demanded.len())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     Ok(Ok(WorldCellOutputAdmission {
+        request_correlation,
         origin,
         reservation,
         directory,

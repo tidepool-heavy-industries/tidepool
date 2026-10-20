@@ -493,6 +493,9 @@ impl std::error::Error for SpawnError {
 /// One finished `tidepool-extract` process.
 #[derive(Debug)]
 pub struct ExtractRun {
+    /// Logical request correlation issued by the physical transport owner.
+    /// This diagnostic identity grants no compiler or runtime authority.
+    pub request_correlation: String,
     /// The raw process output. Parsing it (diagnostics JSON, CBOR payloads)
     /// is the caller's job — see the module doc.
     pub output: Output,
