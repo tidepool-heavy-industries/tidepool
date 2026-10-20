@@ -1616,7 +1616,7 @@ borrowHeldWorldDependencies :: CompilerExecutor -> WorldInputFacts -> String
 borrowHeldWorldDependencies executor facts reference previous
     completion@(PendingWorldDependencies issued identity realization policy pending) = do
   unless (sameCompilerExecutor executor issued && identity == worldInputsIdentity facts
-      && realization == reference) (throwIO WorldCellCorrupt)
+      && worldRealizationText realization == reference) (throwIO WorldCellCorrupt)
   requireCompilerExecutorOpen executor
   additions <- readIORef pending >>= maybe (throwIO CheckedPurposeMismatch) pure
   retained <- case previous of
