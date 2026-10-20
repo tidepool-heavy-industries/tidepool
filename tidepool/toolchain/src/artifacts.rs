@@ -3537,6 +3537,10 @@ pub struct ResolvedNativeSourceProduct<'a> {
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
+    pub fn matches_group(&self, group: &certified_products::PendingCertifiedGroup) -> bool {
+        self.group.same_issuance(group)
+    }
+
     pub fn group(&self) -> &'a certified_products::PendingCertifiedGroup {
         self.group
     }

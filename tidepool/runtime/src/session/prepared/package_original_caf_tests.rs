@@ -168,7 +168,7 @@ fn immutable_package_only_original_image_keeps_fresh_machine_cafs_independent() 
         let mut staged = engine
             .install_certified_turn(
                 ScopedTargetImage {
-                    demanded: vec![demanded],
+                    demanded: vec![SelectedNativeImage::unqualified(demanded)],
                     ..package_original_target(&group, &registry)
                 },
                 &certified_source_evidence(std::slice::from_ref(&group)),
@@ -284,7 +284,9 @@ fn immutable_package_only_original_refuses_missing_or_changed_proof_atomically()
         let evidence = certified_source_evidence(std::slice::from_ref(&group));
         engine.install_certified_turn(
             ScopedTargetImage {
-                demanded: vec![DemandedImage::compile(group, &registry).unwrap()],
+                demanded: vec![SelectedNativeImage::unqualified(
+                    DemandedImage::compile(group, &registry).unwrap(),
+                )],
                 ..target
             },
             &evidence,

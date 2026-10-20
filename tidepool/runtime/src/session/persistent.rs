@@ -58,13 +58,50 @@ type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId,
 /// installation rechecks the handles under the final checkout; this record
 /// carries no permission to publish a binding.
 pub(crate) struct ResolvedCertifiedTurn {
-    pub groups: Vec<tidepool_codegen::prepared_program::ScopedCertifiedGroup>,
+    pub groups: Vec<ResolvedSourceGroup>,
+    pub target_sources: NativeSourceCustody,
     pub target_owners: Vec<ImportOwner>,
     pub package_interfaces:
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
     pub inherited_needed: Vec<InheritedSourceDemand>,
     pub source_plan: ResolvedSourceDomainPlan,
+}
+
+/// A selected source plan and its own physical runtime source contribution.
+#[derive(Clone)]
+pub(crate) struct ResolvedSourceGroup {
+    group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
+    sources: NativeSourceCustody,
+}
+
+impl ResolvedSourceGroup {
+    #[cfg(test)]
+    pub(crate) fn unqualified(
+        group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
+    ) -> Self {
+        let sources = NativeSourceCustody::unknown(
+            group
+                .original()
+                .definitions()
+                .sites()
+                .iter()
+                .map(|site| site.site),
+        );
+        Self { group, sources }
+    }
+    pub(crate) fn group(&self) -> &tidepool_codegen::prepared_program::ScopedCertifiedGroup {
+        &self.group
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        tidepool_codegen::prepared_program::ScopedCertifiedGroup,
+        NativeSourceCustody,
+    ) {
+        (self.group, self.sources)
+    }
 }
 
 /// One successful native installation and its exact source contribution.
@@ -817,6 +854,41 @@ impl PersistentSession {
         prepared: &PreparedProgram,
         certification: &TurnCertification,
     ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        let current = certification
+            .current_native_sources(prepared)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
+        self.resolve_certification_with_sources(scope, prepared, certification, current.as_ref())
+    }
+
+    pub(crate) fn resolve_runtime_target_in(
+        &self,
+        scope: ScopeId,
+        targets: &crate::RuntimePreparedTargets,
+        name: &str,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        let target = targets
+            .artifacts
+            .targets
+            .get(name)
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        let certification = TurnCertification::from_artifacts(&targets.artifacts, target);
+        let current = super::turn::CurrentNativeSources::from_targets(targets, name)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
+        self.resolve_certification_with_sources(
+            scope,
+            target.prepared.prepared(),
+            &certification,
+            current.as_ref(),
+        )
+    }
+
+    fn resolve_certification_with_sources(
+        &self,
+        scope: ScopeId,
+        prepared: &PreparedProgram,
+        certification: &TurnCertification,
+        current: Option<&super::turn::CurrentNativeSources<'_>>,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
@@ -997,8 +1069,20 @@ impl PersistentSession {
         for plan in plans {
             let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
-            groups.push(
-                tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
+            groups.push(ResolvedSourceGroup {
+                sources: current
+                    .map(|current| current.group(pending))
+                    .unwrap_or_else(|| {
+                        NativeSourceCustody::unknown(
+                            pending
+                                .group()
+                                .definitions()
+                                .sites()
+                                .iter()
+                                .map(|site| site.site),
+                        )
+                    }),
+                group: tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
                     CertifiedGroup::admit(
                         pending.owner().clone(),
                         pending.group().clone(),
@@ -1006,10 +1090,15 @@ impl PersistentSession {
                     )?,
                     plan,
                 )?,
-            );
+            });
         }
         Ok(ResolvedCertifiedTurn {
             groups,
+            target_sources: current
+                .map(super::turn::CurrentNativeSources::target)
+                .unwrap_or_else(|| {
+                    NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
+                }),
             target_owners,
             package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
@@ -8380,6 +8469,7 @@ mod checkpoint_scope_tests {
                 .unwrap(),
         );
         let resolved = ResolvedCertifiedTurn {
+            target_sources: NativeSourceCustody::default(),
             groups: Vec::new(),
             target_owners: Vec::new(),
             package_interfaces: Default::default(),
