@@ -341,7 +341,11 @@ impl super::PreparedNotebookGeneration {
             || base.scope != self.scope
             || base.key != self.prospective_compiler_key()?
             || base.source.as_ref() != &self.next.references.source
-            || !Arc::ptr_eq(&base.original_source, &base.target)
+            || !base.original_source.same_observation(&base.target)
+            || !base
+                .original_source
+                .matches(&completed.custody.original_source)
+            || !base.target.matches(&completed.custody.target)
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -1980,7 +1984,7 @@ impl PersistentSession {
         action: impl FnOnce() -> T,
     ) -> Result<T, SessionError> {
         let association = &completed.association;
-        publication.with_current(&association.base.target, || {
+        publication.with_current(&completed.custody.target, || {
             completed
                 .cancellation
                 .checkpoint()
@@ -1988,13 +1992,18 @@ impl PersistentSession {
             if !self.inspection_world_base_is_current(
                 &association.base,
                 &association.base.source,
-                &association.base.original_source,
-            ) || !self
-                .lib()
-                .tips
-                .get(&association.base.scope)
-                .and_then(|state| state.inspection_world.as_ref())
-                .is_some_and(|installed| Arc::ptr_eq(installed, association))
+                &completed.custody.original_source,
+            ) || !association
+                .base
+                .original_source
+                .matches(&completed.custody.original_source)
+                || !association.base.target.matches(&completed.custody.target)
+                || !self
+                    .lib()
+                    .tips
+                    .get(&association.base.scope)
+                    .and_then(|state| state.inspection_world.as_ref())
+                    .is_some_and(|installed| Arc::ptr_eq(installed, association))
             {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
@@ -9384,15 +9393,19 @@ impl PersistentSession {
                 1,
             );
             return Ok(super::inspection::AdmittedInspectionWorld {
+                custody: super::inspection::InspectionWorldCustody {
+                    original_source: original_source.clone(), target: original_source.clone(),
+                },
                 base: super::inspection::InspectionWorldBase {
                     scope: prepared.scope,
                     key: prepared.prospective_compiler_key()?,
                     owner: self.admission_owner().clone(),
                     epoch: self.admission_owner().epoch(),
                     source: Arc::new(prepared.next.references.source.clone()),
-                    original_source: original_source.clone(),
-                    target: original_source.clone(),
+                    original_source: super::inspection::InspectionWorldLeaseObservation::new(original_source),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(original_source),
                 },
+                observation: None,
                 inputs: super::inspection::InspectionWorldInputs::Cold {
                     primary: Some(source.context.exact().clone()),
                     bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
@@ -9443,7 +9456,7 @@ impl PersistentSession {
         continuing: bool,
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
         let super::PreparedNotebookGenerationWithWorld { prepared, world } = prepared;
-        let target = world.association.base.target.clone();
+        let target = world.custody.target.clone();
         source.with_current(&target, || {
             self.commit_notebook_generation_with_completion(
                 prepared,
