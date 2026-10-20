@@ -4426,6 +4426,10 @@ mod tests {
                 .unwrap();
             assert!(empty.owners().is_empty());
             assert_eq!(empty.work(), DemandCompilerProjectionWork::default());
+            let empty_native = changed.inputs
+                .demanded_native_inputs(empty, &BTreeSet::new(), &empty_budget)
+                .unwrap();
+            assert!(empty_native.native_availability().persistent_facts().is_empty());
             assert_eq!(empty_budget.work_usage().unwrap(), (0, 0));
             let operation = InventoryOperation::new(Default::default());
             let demanded = changed
