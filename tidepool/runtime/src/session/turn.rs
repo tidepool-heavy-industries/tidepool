@@ -2009,7 +2009,7 @@ impl CompiledTurn {
         let products = item.native_products().ok_or_else(missing)?;
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
-            original_output: None,
+            original_output: Some(Arc::clone(products)),
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
