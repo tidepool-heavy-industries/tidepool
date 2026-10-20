@@ -23401,6 +23401,8 @@ pub(crate) mod request_tests {
             .with_spec("QuotedAgentSpec.agentSpec")
             .bind_preparation(preparation_client.clone());
         struct GenerationSource {
+            issuer: crate::SourceLayerIssuer,
+            inspection: crate::SourceInspectionServices,
             _owner: Arc<tempfile::TempDir>,
             _entries: Arc<tempfile::TempDir>,
             paths: Vec<PathBuf>,
@@ -23408,6 +23410,52 @@ pub(crate) mod request_tests {
             evidence: crate::SourceGenerationEvidence,
             entries: crate::SourceEntryStorage,
             compiler_sources: Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
+        }
+        impl crate::ActorSourceLayers for GenerationSource {
+            fn inspection_services(self: Arc<Self>) -> crate::SourceInspectionServices {
+                self.inspection.clone()
+            }
+
+            fn validate_source_authority(
+                &self,
+                source: &crate::CheckpointSourceLayer,
+            ) -> Result<(), String> {
+                if !self.issuer.owns(source)
+                    || source.include_paths() != self.paths
+                    || source.identities() != self.identities
+                    || !source
+                        .generation_evidence()
+                        .is_some_and(|evidence| std::ptr::eq(evidence, &self.evidence))
+                {
+                    return Err("source is not the retained quoted generation selection".into());
+                }
+                let captured = source
+                    .capture_compiler_sources()
+                    .map_err(|error| error.to_string())?;
+                if !captured.is_some_and(|captured| Arc::ptr_eq(&captured, &self.compiler_sources)) {
+                    return Err("source differs from the retained quoted compiler bytes".into());
+                }
+                Ok(())
+            }
+
+            fn toolset_layer_from(
+                &self,
+                source: &crate::CheckpointSourceLayer,
+            ) -> Result<crate::CheckpointSourceLayer, String> {
+                self.validate_source_authority(source)?;
+                Ok(source.clone())
+            }
+
+            fn stage_reload(
+                self: Arc<Self>,
+                _: tidepool_repr::PrincipalId,
+                _: &crate::CheckpointSourceLayer,
+                _: &[String],
+            ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+                Err(crate::SourceLayerReload::Unavailable(
+                    "the retained quoted source owner does not publish reloads".into(),
+                ))
+            }
         }
         impl crate::RetainedSourceLayer for GenerationSource {
             fn identities(&self) -> &[String] {
@@ -23439,7 +23487,8 @@ pub(crate) mod request_tests {
         );
         let entry_storage = Arc::new(tempfile::tempdir().unwrap());
         let source_issuer = crate::SourceLayerIssuer::default();
-        let (_, compiler_source_owner) = world_query_test_source_files_with_support(&[], &roots);
+        let (compiler_source_capsule, compiler_source_owner) =
+            world_query_test_source_files_with_support(&[], &roots);
         assert_eq!(compiler_source_owner.roots.len(), roots.len());
         let quoted_root = compiler_source_owner.roots.last().unwrap();
         assert_eq!(
@@ -23451,6 +23500,7 @@ pub(crate) mod request_tests {
             std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
             "the actual quoted module body contributes to the captured source domain"
         );
+        let inspection = crate::SourceInspectionServices::new(compiler_source_owner.clone());
         let compiler_sources = Arc::new(
             tidepool_toolchain::compiler_world::CapturedCompilerSources::from_captured_roots(
                 compiler_source_owner.roots.clone(),
@@ -23459,7 +23509,9 @@ pub(crate) mod request_tests {
             )
             .unwrap(),
         );
-        let generation_source = source_issuer.issue(Arc::new(GenerationSource {
+        let generation_source_owner = Arc::new(GenerationSource {
+            issuer: source_issuer.clone(),
+            inspection,
             _owner: authored.clone(),
             _entries: entry_storage.clone(),
             entries: crate::SourceEntryStorage::FreshCompilation {
@@ -23473,19 +23525,47 @@ pub(crate) mod request_tests {
                 configuration_digest: [0; 32],
             },
             compiler_sources,
-        }));
+        });
+        let generation_source = source_issuer.issue(generation_source_owner.clone());
+        let source_layers: crate::ActorSourceLayerResolver = generation_source_owner;
+        assert!(
+            source_layers
+                .toolset_layer_from(&compiler_source_capsule)
+                .is_err(),
+            "equal captured roots from another actual issuer cannot authorize this source"
+        );
+        assert!(
+            source_layers
+                .toolset_layer_from(&crate::CheckpointSourceLayer::default())
+                .is_err(),
+            "an unowned default cannot substitute for the captured quoted source"
+        );
+        assert!(
+            crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                context.clone(),
+                compiler_source_capsule,
+                None,
+                Some(&source_layers),
+            )
+            .is_err(),
+            "request admission must refuse the different genuine source capsule"
+        );
+        let (context, compilation_authority) =
+            crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                context,
+                generation_source.clone(),
+                None,
+                Some(&source_layers),
+            )
+            .expect("the actual quoted source owner admits its original request");
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None)
-            .with_compilation_authority(
-                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-            );
-        if publication_failure.is_some() {
-            workbench_runner_for_test(&workbench)
-                .adopt_final_source_scope(context.clone())
-                .await
-                .unwrap();
-        }
+            .with_compilation_authority(compilation_authority);
+        workbench_runner_for_test(&workbench)
+            .adopt_final_source_scope(context.clone())
+            .await
+            .unwrap();
         let recover_context = || {
             let mut lib = tidepool_runtime::session::SessionLib::open(
                 tidepool_repr::SessionId(8_141),
@@ -24334,17 +24414,31 @@ pub(crate) mod request_tests {
                             .placement
                             .lexical_scope,
                     );
-                    let (private, private_context) = ResidentActorWorkbench::new(
-                        Arc::clone(&workbench.access.machines),
-                        source.clone(),
-                        None,
+                    let execution = Arc::new(
+                        workbench_runner_for_test(&workbench)
+                            .begin_private_execution(
+                                replacement.context.clone(),
+                                replacement.public_owner.clone(),
+                                tidepool_runtime::session::PublicationDecision::new(),
+                                None,
+                            )
+                            .await
+                            .unwrap(),
+                    );
+                    let mut private_context = replacement.context.clone();
+                    private_context.placement.lexical_scope = execution.private_scope;
+                    let (private_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                        private_context,
+                        replacement.installation.source().clone(),
+                        Some(replacement.installation.clone()),
+                        Some(&source_layers),
                     )
-                    .admit_private_cell_with_owner_for_test(
-                        replacement.context.clone(),
-                        replacement.public_owner.clone(),
-                    )
-                    .await
-                    .unwrap();
+                    .expect("replacement cells retain their actual installation and source owner");
+                    let private = workbench
+                        .shared_view()
+                        .with_compilation_authority(authority)
+                        .with_private_execution(execution);
+
                     private.execute_cell_for_test(private_context.clone(),
                 "import qualified QuotedAgentSpec as Replacement\nlet replacementSpec = Replacement.agentSpec @'[]").await.unwrap();
                     private
@@ -24713,14 +24807,31 @@ pub(crate) mod request_tests {
             "preparedOriginalHistory :: Int\npreparedOriginalHistory = 41",
             "import qualified QuotedAgentSpec as Frozen\nlet repeatedSpec = Frozen.agentSpec @'[]",
         ] {
-            let (private, private_context) = ResidentActorWorkbench::new(
-                Arc::clone(&workbench.access.machines),
-                source.clone(),
+            let execution = Arc::new(
+                workbench_runner_for_test(&workbench)
+                    .begin_private_execution(
+                        context.clone(),
+                        Arc::clone(&public_owner),
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+            let mut private_context = context.clone();
+            private_context.placement.lexical_scope = execution.private_scope;
+            let (private_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                private_context,
+                generation_source.clone(),
                 None,
+                Some(&source_layers),
             )
-            .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
-            .await
-            .unwrap();
+            .expect("successor cells require the same retained quoted source owner");
+            let private = workbench
+                .shared_view()
+                .with_compilation_authority(authority)
+                .with_private_execution(execution);
+
             private
                 .execute_cell_for_test(private_context.clone(), cell)
                 .await
@@ -24829,14 +24940,31 @@ pub(crate) mod request_tests {
                 })
                 .await
                 .unwrap();
-            let (failed, failed_context) = ResidentActorWorkbench::new(
-                Arc::clone(&workbench.access.machines),
-                source.clone(),
+            let execution = Arc::new(
+                workbench_runner_for_test(&workbench)
+                    .begin_private_execution(
+                        context.clone(),
+                        Arc::clone(&public_owner),
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+            let mut failed_context = context.clone();
+            failed_context.placement.lexical_scope = execution.private_scope;
+            let (failed_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                failed_context,
+                generation_source.clone(),
                 None,
+                Some(&source_layers),
             )
-            .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
-            .await
-            .unwrap();
+            .expect("failed source preparation still requires its actual retained source owner");
+            let failed = workbench
+                .shared_view()
+                .with_compilation_authority(authority)
+                .with_private_execution(execution);
+
             assert!(failed
                 .prepare_cell(
                     failed_context,
