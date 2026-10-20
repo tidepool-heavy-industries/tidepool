@@ -14,6 +14,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
 use super::binding_table::BindingIndex;
+use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
 #[cfg(test)]
 use tidepool_codegen::prepared_program::{ScopedCertifiedGroup, SourceInstanceDomain};
@@ -318,6 +319,8 @@ pub enum PreparedRuntimeError {
     },
     #[error("no exact live owner for certified import {0:?}")]
     MissingCertifiedOwner(ImportOwner),
+    #[error("retained input {id:?} has no paired runtime source provenance")]
+    MissingRetainedSource { id: SessionVarId },
     #[error("certified package owner {owner:?} has no exact source: {evidence:?}")]
     CertifiedPackageOwnerUnavailable {
         owner: ImportOwner,
@@ -544,6 +547,7 @@ impl PreparedRuntimeError {
             | Self::MissingPreparedNativeImage
             | Self::TypeEvidence(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::MissingRetainedSource { .. }
             | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
@@ -598,6 +602,7 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::MissingRetainedSource { .. }
             | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
@@ -698,6 +703,7 @@ impl From<LinkError> for PreparedRuntimeError {
 /// machine has taken its code: the declared entry and, per top-level binding,
 /// the identity and entry signature an importer links against.
 struct ProgramFacts {
+    native_sources: NativeSourceCustody,
     entry: Option<ValueId>,
     definitions: Arc<DefinitionFacts>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
@@ -734,29 +740,6 @@ struct EvidencePlan {
 struct AdmittedProgramFacts {
     facts: ProgramFacts,
     plan: EvidencePlan,
-}
-
-/// Everything [`PreparedEngine::snapshot_install`] produces under a machine
-/// checkout for an off-checkout compile: owned data with no reference to
-/// the machine or its checkout. `values`/`imports` are kept alongside
-/// `linked` (which consumes the resolved imports into linkage order) so
-/// [`PreparedEngine::revalidate_and_install`] can compare a fresh resolve
-/// against exactly what this snapshot resolved, by value.
-pub(crate) struct InstallSnapshot {
-    linked: tidepool_repr::execution_schema::LinkedProgram,
-    values: MachineImports,
-    imports: ImportBindings,
-    facts: ProgramFacts,
-    exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
-    compile: tidepool_codegen::prepared_program::PreparedCompileSnapshot,
-    /// This engine's registry, carried into the off-checkout step so a miss
-    /// there can still be inserted for every other machine sharing it.
-    /// `None` when the engine has none (today's behavior: always compile).
-    registry: Option<Arc<ImageRegistry>>,
-    /// Set when [`PreparedEngine::snapshot_install`] already found this
-    /// content in the registry: [`PreparedEngine::compile_off_checkout`]
-    /// then compiles nothing and just returns this `Arc`.
-    precompiled: Option<Arc<CompiledProgram>>,
 }
 
 /// Exact target definitions and their shared native image, paired off
@@ -1531,6 +1514,7 @@ impl ScopedTargetImage {
 }
 
 pub(crate) struct CertifiedTurnInstall {
+    pub(super) native_sources: NativeSourceCustody,
     pub target: ProgramId,
     pub groups: Vec<ProgramId>,
     pub leases: Vec<SourceInstanceLease>,
@@ -1925,6 +1909,9 @@ impl ProgramFacts {
         let apply_entry = helper(PREPARED_APPLY_ENTRY_TARGET);
         let apply_value = helper(PREPARED_APPLY_VALUE_TARGET);
         let mut facts = Self {
+            native_sources: NativeSourceCustody::unknown(
+                definitions.sites.iter().map(|site| site.site),
+            ),
             entry,
             settled: None,
             definitions,
@@ -4260,6 +4247,14 @@ impl PreparedEngine {
         );
     }
 
+    pub(super) fn installed_program_sources(&self, program: ProgramId) -> &NativeSourceCustody {
+        &self
+            .programs
+            .get(&program)
+            .expect("successful installation owns program facts")
+            .native_sources
+    }
+
     /// Install a later turn's program. Every global it declares is resolved
     /// to a live prepared binding in `bindings` by the identity recorded at
     /// bind time (at the declared `required_generation`, or the newest), and
@@ -4271,6 +4266,7 @@ impl PreparedEngine {
         prepared: PreparedProgram,
         bindings: &BindingTable,
         index: &BindingIndex,
+        retained_sources: &dyn Fn(&BindingEntry) -> Option<NativeSourceCustody>,
     ) -> Result<ProgramId, PreparedRuntimeError> {
         let mut clock = std::time::Instant::now();
         let mut lap = || {
@@ -4279,11 +4275,13 @@ impl PreparedEngine {
             clock = now;
             elapsed.as_millis() as u64
         };
-        let (values, imports) = self.resolve_imports(&prepared, bindings, index)?;
+        let (values, imports, imported_sources) =
+            self.resolve_imports(&prepared, bindings, index, retained_sources)?;
         let resolve_imports_ms = lap();
         let import_count = imports.len();
         let exports = exportable_code_tops(&prepared);
-        let facts = ProgramFacts::of(&prepared);
+        let mut facts = ProgramFacts::of(&prepared);
+        facts.native_sources.merge(&imported_sources);
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
         // site index exactly as they were.
@@ -4305,7 +4303,6 @@ impl PreparedEngine {
             link_ms,
             compile_install_ms,
             imports = import_count,
-            compiled_off_checkout = false,
             "prepared install"
         );
         self.finish_program_install(program, admitted, exports)?;
@@ -4314,19 +4311,17 @@ impl PreparedEngine {
 
     /// Resolve `prepared`'s declared globals against `bindings`/`index` (and
     /// this machine's package-top exports), one live-handle fact snapshot
-    /// per import: `MachineImports` for `link_program`, `ImportBindings` for
-    /// `install_program`. Shared by the single-checkout [`Self::install`]
-    /// and both ends of the off-checkout split
-    /// ([`Self::snapshot_install`]/[`Self::revalidate_and_install`]) so a
-    /// snapshot and its revalidation resolve imports exactly the same way.
+    /// per import, including its paired runtime source contribution.
     fn resolve_imports(
         &self,
         prepared: &PreparedProgram,
         bindings: &BindingTable,
         index: &BindingIndex,
-    ) -> Result<(MachineImports, ImportBindings), PreparedRuntimeError> {
+        retained_sources: &dyn Fn(&BindingEntry) -> Option<NativeSourceCustody>,
+    ) -> Result<(MachineImports, ImportBindings, NativeSourceCustody), PreparedRuntimeError> {
         let mut values = MachineImports::default();
         let mut imports = ImportBindings::new();
+        let mut sources = NativeSourceCustody::default();
         for declaration in prepared.globals() {
             let identity = &declaration.identity;
             let Some(entry) =
@@ -4354,6 +4349,13 @@ impl PreparedEngine {
                         },
                     );
                     imports.insert(identity.clone(), export.handle);
+                    sources.merge(
+                        &self
+                            .programs
+                            .get(&export.program)
+                            .expect("resolved native export retains its physical program facts")
+                            .native_sources,
+                    );
                 }
                 continue;
             };
@@ -4363,6 +4365,9 @@ impl PreparedEngine {
                 .machine
                 .handle_is_evaluated(handle)
                 .map_err(PreparedRuntimeError::Install)?;
+            let source = retained_sources(entry)
+                .ok_or(PreparedRuntimeError::MissingRetainedSource { id: entry.id })?;
+            sources.merge(&source);
             values.values.insert(
                 identity.clone(),
                 ImportedValue {
@@ -4375,156 +4380,7 @@ impl PreparedEngine {
             );
             imports.insert(identity.clone(), handle);
         }
-        Ok((values, imports))
-    }
-
-    /// Install an off-checkout compiled, worker-certified source closure.
-    /// The caller supplies external handles under their exact retained or
-    /// package owner, including the package interface digest; the legacy
-    /// name-keyed package export table is not an owner authority here.
-    /// Every returned program is pinned across the install-to-bind gap.
-    pub fn install_certified_demand(
-        &mut self,
-        demanded: Vec<DemandedImage>,
-        exact_external: &HashMap<ImportOwner, PreparedHandle>,
-        bindings: &BindingTable,
-    ) -> Result<Vec<ProgramId>, PreparedRuntimeError> {
-        let mut source = BTreeMap::<SourceBinder, (usize, ValueId)>::new();
-        for (index, selected) in demanded.iter().enumerate() {
-            let group = selected.group();
-            for (binder, id) in group.exported_values() {
-                let key = SourceBinder {
-                    version: group.owner().module_version.clone(),
-                    binder: binder.clone(),
-                };
-                if source.insert(key.clone(), (index, id)).is_some() {
-                    return Err(DemandError::DuplicateBinder(key).into());
-                }
-            }
-        }
-        let facts: Vec<_> = demanded
-            .iter()
-            .map(|selected| ProgramFacts::from_image(selected.image(), None))
-            .collect();
-        let admitted = self.plan_batch_evidence(facts)?;
-        let mut programs = Vec::with_capacity(demanded.len());
-        let mut package_updates = BTreeMap::new();
-        for selected in &demanded {
-            let group = selected.group();
-            let mut imports = Vec::with_capacity(group.imports().len());
-            for (declaration, owner) in group.definitions().globals().iter().zip(group.imports()) {
-                match owner {
-                    ImportOwner::Source { version, binder } => {
-                        let key = SourceBinder {
-                            version: version.clone(),
-                            binder: binder.clone(),
-                        };
-                        let &(group, binding) = source
-                            .get(&key)
-                            .ok_or_else(|| DemandError::MissingSource(key.clone()))?;
-                        imports.push(BatchImport::Source { group, binding });
-                    }
-                    ImportOwner::Retained { id, generation } => {
-                        let entry = bindings.get(*id).ok_or_else(|| {
-                            PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                        })?;
-                        let handle = exact_external.get(owner).copied().ok_or_else(|| {
-                            PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                        })?;
-                        if entry.module.gen().0 != *generation
-                            || entry.value.identity != declaration.identity
-                            || entry.value.handle != handle
-                        {
-                            return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
-                        }
-                        imports.push(BatchImport::Existing {
-                            handle,
-                            entry_signature: None,
-                        });
-                    }
-                    ImportOwner::CodeExport {
-                        binder,
-                        generation,
-                        root_id,
-                        interface_digest,
-                    } => {
-                        imports.push(self.code_export_import(
-                            CodeExportOwnerRef {
-                                binder,
-                                generation: *generation,
-                                root_id: *root_id,
-                                interface_digest: interface_digest.as_ref(),
-                            },
-                            declaration,
-                        )?);
-                    }
-                    ImportOwner::Package {
-                        unit,
-                        module,
-                        binder,
-                        interface_digest,
-                    } => {
-                        if *interface_digest == [0; 32] {
-                            return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
-                        }
-                        let handle = exact_external.get(owner).copied().ok_or_else(|| {
-                            PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                        })?;
-                        let export = self
-                            .code_exports
-                            .get(binder)
-                            .filter(|export| {
-                                export.handle == handle
-                                    && declaration.identity == *binder
-                                    && binder.unit == *unit
-                                    && binder.module == *module
-                                    && matches_protected_package_interface(export, interface_digest)
-                            })
-                            .ok_or_else(|| {
-                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                            })?;
-                        if package_updates
-                            .insert(binder.clone(), *interface_digest)
-                            .is_some_and(|previous| previous != *interface_digest)
-                        {
-                            return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
-                        }
-                        imports.push(BatchImport::Existing {
-                            handle,
-                            entry_signature: export.entry.clone(),
-                        });
-                    }
-                }
-            }
-            programs.push(BatchProgram {
-                image: Arc::clone(selected.image()),
-                imports,
-            });
-        }
-
-        let ids = self
-            .machine
-            .install_shared_batch(programs)
-            .map_err(PreparedRuntimeError::Install)?;
-        for (binder, digest) in package_updates {
-            self.code_exports
-                .get_mut(&binder)
-                .expect("preflighted package export remains installed")
-                .interface_digest = Some(digest);
-        }
-        assert_eq!(
-            ids.len(),
-            admitted.len(),
-            "installed batch matches admitted definitions"
-        );
-        for (id, admitted) in ids.iter().copied().zip(admitted) {
-            self.machine
-                .pin(id)
-                .expect("batch returned an installed program");
-            self.publish_admitted_program(id, admitted);
-        }
-        self.installs_since_major += ids.len();
-        Ok(ids)
+        Ok((values, imports, sources))
     }
 
     pub(crate) fn admit_source_instances(
@@ -4553,6 +4409,7 @@ impl PreparedEngine {
         inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
+        retained_sources: &HashMap<ImportOwner, NativeSourceCustody>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
         let target_owners = target.owners();
         let mut target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
@@ -4679,6 +4536,7 @@ impl PreparedEngine {
             inherited,
             exact_external,
             bindings,
+            retained_sources,
             target_packages,
             certified_exports,
         )
@@ -4696,6 +4554,7 @@ impl PreparedEngine {
         inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
+        retained_sources: &HashMap<ImportOwner, NativeSourceCustody>,
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
         certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
@@ -4930,7 +4789,7 @@ impl PreparedEngine {
             if let Some(target_facts) = facts.last_mut() {
                 target_facts.settled = settled;
             }
-            let admitted = self.plan_batch_evidence(facts)?;
+            let mut admitted = self.plan_batch_evidence(facts)?;
             // A target can contain incidental package tops absent from its
             // selected canonical interfaces. Keep those definitions local;
             // their presence cannot issue a retained package import later.
@@ -4949,6 +4808,7 @@ impl PreparedEngine {
             let mut source_imports_resolved = 0u64;
             let target_image_instance = target.image.image_instance_id();
 
+            let mut direct_sources = Vec::with_capacity(demanded.len() + 1);
             let mut append = |image: Arc<CompiledProgram>,
                               globals: &[tidepool_repr::execution_schema::GlobalDecl],
                               owners: &[ImportOwner],
@@ -4958,6 +4818,7 @@ impl PreparedEngine {
                 -> Result<ScopedSourceBinder, DemandError>|
              -> Result<(), PreparedRuntimeError> {
                 let mut imports = Vec::with_capacity(owners.len());
+                let mut imported_sources = NativeSourceCustody::default();
                 for (index, (declaration, owner)) in globals.iter().zip(owners).enumerate() {
                     let import = match owner {
                         ImportOwner::Source { version, binder } => {
@@ -5134,8 +4995,51 @@ impl PreparedEngine {
                             import
                         }
                     };
+                    // Literal imports cannot carry executable source obligations.
+                    if image.import_is_literal(GlobalId(index as u32)) == Some(false) {
+                        match owner {
+                            ImportOwner::Retained { id, .. } => {
+                                let sources = retained_sources.get(owner).ok_or(
+                                    PreparedRuntimeError::MissingRetainedSource { id: *id },
+                                )?;
+                                imported_sources.merge(sources);
+                            }
+                            ImportOwner::Source { version, binder } => {
+                                let key = source_plan(&SourceBinder {
+                                    version: version.clone(),
+                                    binder: binder.clone(),
+                                })?;
+                                if !source.contains_key(&key) {
+                                    let lease = inherited
+                                        .get(&key)
+                                        .or_else(|| late_leases.get(&key))
+                                        .expect("validated existing source remains acquired");
+                                    let facts =
+                                        self.programs.get(&lease.instance().program()).expect(
+                                            "live source instance retains admitted program facts",
+                                        );
+                                    imported_sources.merge(&facts.native_sources);
+                                }
+                            }
+                            ImportOwner::CodeExport { binder, .. }
+                            | ImportOwner::Package { binder, .. } => {
+                                if let BatchImport::Existing { .. } = &import {
+                                    let export = self
+                                        .code_exports
+                                        .get(binder)
+                                        .expect("validated export remains installed");
+                                    let facts = self
+                                        .programs
+                                        .get(&export.program)
+                                        .expect("live export retains admitted program facts");
+                                    imported_sources.merge(&facts.native_sources);
+                                }
+                            }
+                        }
+                    }
                     imports.push(import);
                 }
+                direct_sources.push(imported_sources);
                 programs.push(BatchProgram { image, imports });
                 Ok(())
             };
@@ -5189,6 +5093,23 @@ impl PreparedEngine {
                     PreparedRuntimeError::Install(error)
                 })?;
             assert_eq!(installed.programs.len(), demanded.len() + 1);
+            assert_eq!(installed.causal_members.len(), admitted.len());
+            for (sources, facts) in direct_sources.iter_mut().zip(&admitted) {
+                sources.merge(&facts.facts.native_sources);
+            }
+            for (facts, members) in admitted.iter_mut().zip(&installed.causal_members) {
+                let mut sources = NativeSourceCustody::default();
+                for member in members {
+                    sources.merge(&direct_sources[*member]);
+                }
+                facts.facts.native_sources = sources;
+            }
+            let native_sources = admitted
+                .last()
+                .expect("target facts are final")
+                .facts
+                .native_sources
+                .clone();
             let target_id = *installed
                 .programs
                 .last()
@@ -5199,6 +5120,7 @@ impl PreparedEngine {
                     .expect("batch returned installed program");
             }
             let mut staged = CertifiedTurnInstall {
+                native_sources,
                 target: target_id,
                 groups: installed.programs[..installed.programs.len() - 1].to_vec(),
                 domain_leases: installed.source_attachments,
@@ -5325,104 +5247,6 @@ impl PreparedEngine {
             );
         }
         self.quiesce_and_collect_now()
-    }
-
-    /// Step (a) of the off-checkout split install: resolve `prepared`'s
-    /// imports, plan its evidence and take a compile snapshot -- everything
-    /// [`Self::compile_off_checkout`] needs -- without compiling. Run this
-    /// under the machine checkout; the returned [`InstallSnapshot`] carries
-    /// no machine reference and may be compiled after the checkout is
-    /// released.
-    pub(crate) fn snapshot_install(
-        &mut self,
-        prepared: PreparedProgram,
-        bindings: &BindingTable,
-        index: &BindingIndex,
-    ) -> Result<InstallSnapshot, PreparedRuntimeError> {
-        let (values, imports) = self.resolve_imports(&prepared, bindings, index)?;
-        let exports = exportable_code_tops(&prepared);
-        let facts = ProgramFacts::of(&prepared);
-        self.plan_evidence(&facts)?;
-        let linked = link_program(prepared, &values)?;
-        let precompiled = self
-            .registry
-            .as_ref()
-            .and_then(|registry| registry.lookup(&linked));
-        let registry = self.registry.clone();
-        let compile = self.machine.compile_snapshot();
-        Ok(InstallSnapshot {
-            linked,
-            values,
-            imports,
-            facts,
-            exports,
-            compile,
-            registry,
-            precompiled,
-        })
-    }
-
-    /// Step (b): compile `snapshot`'s linked program off any checkout, or
-    /// reuse an image the registry already had at snapshot time -- either
-    /// way returning an `Arc` so [`Self::revalidate_and_install`] can
-    /// install it with [`PreparedMachine::install_shared`]. A fresh compile
-    /// with a registry attached is inserted here, off-checkout, so every
-    /// other machine sharing that registry sees it as soon as this step
-    /// finishes rather than waiting for `revalidate_and_install`. Pure with
-    /// respect to the machine; safe to run on a blocking thread while other
-    /// turns hold the checkout.
-    pub(crate) fn compile_off_checkout(
-        snapshot: &mut InstallSnapshot,
-    ) -> Result<Arc<CompiledProgram>, CompileError> {
-        if let Some(image) = &snapshot.precompiled {
-            return Ok(Arc::clone(image));
-        }
-        let mut compile = || snapshot.compile.compile(&snapshot.linked).map(Arc::new);
-        match &snapshot.registry {
-            Some(registry) => registry.get_or_compile(&snapshot.linked, compile),
-            None => compile(),
-        }
-    }
-
-    /// Step (c): under the machine checkout again, re-resolve `snapshot`'s
-    /// imports and compare them against the facts the off-checkout compile
-    /// ran against. An import that became evaluated, changed representation
-    /// or generation, or was retired invalidates the compile: this returns
-    /// `Ok(None)` and the caller must recompile (or fall back to the
-    /// single-checkout [`Self::install`]) rather than install a program
-    /// linked against stale import facts. Otherwise installs, publishes and
-    /// pins exactly as [`Self::install`] does.
-    pub(crate) fn revalidate_and_install(
-        &mut self,
-        mut snapshot: InstallSnapshot,
-        compiled: Arc<CompiledProgram>,
-        bindings: &BindingTable,
-        index: &BindingIndex,
-    ) -> Result<Option<ProgramId>, PreparedRuntimeError> {
-        let (fresh_values, fresh_imports) =
-            self.resolve_imports(snapshot.linked.prepared(), bindings, index)?;
-        // Reusing code never aliases installation state. Only changes to the
-        // imported values can invalidate this compilation snapshot.
-        if fresh_values != snapshot.values || fresh_imports != snapshot.imports {
-            return Ok(None);
-        }
-        let import_count = snapshot.imports.len();
-        snapshot.facts.definitions = Arc::clone(compiled.definition_facts());
-        // Evidence ownership can change while compilation releases checkout.
-        // Replan against current installations before any native mutation.
-        let admitted = self.admit_program_facts(snapshot.facts)?;
-        let program = self
-            .machine
-            .install_shared(compiled, snapshot.imports)
-            .map_err(PreparedRuntimeError::Install)?;
-        tracing::info!(
-            target: "tidepool_runtime::prepared_install",
-            imports = import_count,
-            compiled_off_checkout = true,
-            "prepared install"
-        );
-        self.finish_program_install(program, admitted, snapshot.exports)?;
-        Ok(Some(program))
     }
 
     /// Run `program`'s settled scaffold under `realm` and read its one
@@ -7438,6 +7262,7 @@ pub(super) mod tests {
                     &BTreeMap::new(),
                     &HashMap::new(),
                     &BindingTable::new(),
+                    &HashMap::new(),
                 ),
                 Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
             ));
@@ -7452,6 +7277,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(installed.groups.len(), 2);
@@ -7575,6 +7401,7 @@ pub(super) mod tests {
                     &BTreeMap::new(),
                     &HashMap::new(),
                     &bindings,
+                    &HashMap::new(),
                 ),
                 Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
             ));
@@ -7589,6 +7416,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &bindings,
+                &HashMap::new(),
             )
             .unwrap();
         assert!(installed.leases.is_empty());
@@ -7969,26 +7797,15 @@ pub(super) mod tests {
             binder: testing::identity("Fixture", "z"),
         };
         assert!(matches!(
-            engine.install_certified_demand(
-                vec![compile(), compile()],
-                &HashMap::new(),
-                &BindingTable::new(),
-            ),
-            Err(PreparedRuntimeError::Demand(DemandError::DuplicateBinder(key))) if key == duplicate
-        ));
-        assert_eq!(engine.residency(), before);
-        assert!(matches!(
             engine.install_certified_turn(
                 target(), &source_evidence, vec![compile(), compile()],
                 &[], &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
+
+                &HashMap::new(),
             ),
             Err(PreparedRuntimeError::Demand(DemandError::DuplicateBinder(key))) if key == duplicate
         ));
         assert_eq!(engine.residency(), before);
-        let standalone = engine
-            .install_certified_demand(vec![compile()], &HashMap::new(), &BindingTable::new())
-            .unwrap();
-        assert_eq!(standalone.len(), 1);
         let mut installed = engine
             .install_certified_turn(
                 target(),
@@ -7998,6 +7815,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(installed.groups.len(), 1);
@@ -8033,52 +7851,79 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn certified_demand_installs_cyclic_groups_with_distinct_instances() {
+    fn certified_turn_stages_cyclic_groups_with_distinct_instances() {
         use tidepool_codegen::prepared_program::GroupInventory;
         let groups = [
             certified_source_group("a", 2, "b"),
             certified_source_group("b", 7, "a"),
         ];
-        let inventory = GroupInventory::new(&groups).unwrap();
-        let demand = inventory
-            .seal([SourceBinder {
-                version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
-                binder: testing::identity("Fixture", "a"),
-            }])
+        let root = SourceBinder {
+            version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "a"),
+        };
+        let demand = GroupInventory::new(&groups)
+            .unwrap()
+            .seal([root.clone()])
             .unwrap();
+        let evidence = certified_source_evidence(&groups);
         let registry = ImageRegistry::new();
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        entry.identity.unit = HOME_UNIT.into();
+        wire.globals.push(GlobalDecl {
+            identity: root.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let target = || {
+            scoped_single_domain_target(
+                prepared.clone(),
+                &registry,
+                vec![ImportOwner::Source {
+                    version: root.version.clone(),
+                    binder: root.binder.clone(),
+                }],
+            )
+        };
         let (mut engine, base) =
             PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
-        let bindings = BindingTable::new();
-        let first = engine
-            .install_certified_demand(
-                demand.compile(&registry).unwrap(),
-                &HashMap::new(),
-                &bindings,
-            )
-            .unwrap();
-        let second = engine
-            .install_certified_demand(
-                demand.compile(&registry).unwrap(),
-                &HashMap::new(),
-                &bindings,
-            )
-            .unwrap();
-        assert_eq!(first.len(), 2);
-        assert_eq!(second.len(), 2);
-        assert_ne!(first, second);
-        for (first, second) in first.iter().zip(&second) {
+        let install = |engine: &mut PreparedEngine| {
+            engine
+                .install_certified_turn(
+                    target(),
+                    &evidence,
+                    demand.compile(&registry).unwrap(),
+                    &[],
+                    &BTreeMap::new(),
+                    &HashMap::new(),
+                    &BindingTable::new(),
+                    &HashMap::new(),
+                )
+                .unwrap()
+        };
+        let mut first = install(&mut engine);
+        let mut second = install(&mut engine);
+        assert_eq!(first.groups.len(), 2);
+        assert_eq!(second.groups.len(), 2);
+        assert_ne!(first.groups, second.groups);
+        for (first, second) in first.admitted.iter().zip(&second.admitted) {
             assert!(Arc::ptr_eq(
-                &engine.programs[first].definitions,
-                &engine.programs[second].definitions,
+                &first.facts.definitions,
+                &second.facts.definitions
             ));
         }
-        assert_eq!(registry.misses(), 2);
-        assert_eq!(registry.hits(), 2);
-        assert_eq!(engine.residency().programs, 5);
-        for id in first.into_iter().chain(second) {
-            assert!(engine.unpin(id));
-        }
+        assert_eq!(registry.misses(), 3);
+        assert_eq!(registry.hits(), 3);
+        assert_eq!(engine.residency().programs, 7);
+        let first_tokens = std::mem::take(&mut first.leases);
+        engine.abort_certified_turn(first, first_tokens).unwrap();
+        let second_tokens = std::mem::take(&mut second.leases);
+        engine.abort_certified_turn(second, second_tokens).unwrap();
         assert!(engine.unpin(base));
         engine.quiesce_and_collect_now().unwrap();
         // Bootstrap's package code export retains its original program.
@@ -8148,6 +7993,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             ),
             Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
         ));
@@ -8161,6 +8007,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             ),
             Err(PreparedRuntimeError::CertifiedTargetOwners)
         ));
@@ -8184,6 +8031,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             ),
             Err(PreparedRuntimeError::UnreachableCertifiedGroup)
         ));
@@ -8197,6 +8045,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(installed.groups.len(), 2);
@@ -8252,6 +8101,7 @@ pub(super) mod tests {
                 &inherited,
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
             .unwrap();
         assert!(reused.groups.is_empty());
@@ -8316,6 +8166,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &bindings,
+                &HashMap::new(),
             )
             .unwrap();
         let dead_scope = scopes.mint_isolated();
@@ -8390,7 +8241,7 @@ pub(super) mod tests {
     ) {
         let (target, evidence, demanded, inherited) =
             prepare_selected_groups_fixture(session, scope, groups, &[root]);
-        session
+        let (program, keys, _) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
@@ -8398,8 +8249,11 @@ pub(super) mod tests {
                 &evidence,
                 demanded,
                 &inherited,
+                &|_| None,
             )
             .unwrap()
+            .into_parts();
+        (program, keys)
     }
 
     pub(in crate::session) fn prepare_selected_groups_fixture(
@@ -8526,7 +8380,8 @@ pub(super) mod tests {
                 dead_target,
                 &BTreeMap::new(),
                 Vec::new(),
-                &[]
+                &[],
+                &|_| None,
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
@@ -8803,6 +8658,7 @@ pub(super) mod tests {
                 selected.inherited(),
                 &HashMap::new(),
                 &bindings,
+                &HashMap::new(),
             )
             .unwrap();
         let dead = refused.leases[0].handle();
@@ -8827,6 +8683,7 @@ pub(super) mod tests {
                     selected.inherited(),
                     &HashMap::new(),
                     bindings,
+                    &HashMap::new(),
                 )
                 .unwrap();
             let admissions = std::mem::take(&mut staged.domain_leases);
@@ -8949,6 +8806,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(first.groups.len(), 1);
@@ -9028,6 +8886,7 @@ pub(super) mod tests {
                 .collect(),
             &HashMap::new(),
             &BindingTable::new(),
+            &HashMap::new(),
         );
         assert!(
             matches!(
@@ -9063,6 +8922,7 @@ pub(super) mod tests {
                     .collect(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
             .unwrap();
         assert!(second.groups.is_empty());
@@ -9136,6 +8996,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
         };
         let before = engine.residency();
@@ -9460,6 +9321,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
             )
         };
         let mut installed = stage(&mut engine, &independent).unwrap();
@@ -9707,6 +9569,8 @@ pub(super) mod tests {
         assert!(matches!(engine.install_certified_turn(
             target(true), &evidence, selected(&good), &[],
             &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
+
+                &HashMap::new(),
         ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
             owner,
             evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
@@ -9733,6 +9597,8 @@ pub(super) mod tests {
         assert!(matches!(engine.install_certified_turn(
             target(false), &evidence, selected(&good), &[],
             &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
+
+                &HashMap::new(),
         ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
             owner,
             evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
@@ -9804,6 +9670,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
                 admitted(),
                 BTreeMap::from([(optional.clone(), [9; 32])]),
             )
@@ -9953,9 +9820,39 @@ pub(super) mod tests {
         let (mut engine, _) =
             PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
         let before = engine.residency();
+        let root = SourceBinder {
+            version: groups[0].owner().module_version.clone(),
+            binder: testing::identity("Fixture", "entry"),
+        };
+        let mut target_wire = testing::wire_program();
+        let Group::NonRecursive(entry) = &mut target_wire.bindings[0] else {
+            unreachable!()
+        };
+        entry.identity.unit = HOME_UNIT.into();
+        target_wire.globals.push(GlobalDecl {
+            identity: root.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let target = scoped_single_domain_target(
+            testing::prepare(target_wire).unwrap(),
+            &registry,
+            vec![ImportOwner::Source {
+                version: root.version,
+                binder: root.binder,
+            }],
+        );
         assert!(matches!(
-            engine.install_certified_demand(demand.compile(&registry).unwrap(), &HashMap::new(), &BindingTable::new()),
-            Err(PreparedRuntimeError::MissingCertifiedOwner(missing)) if missing == owner
+            engine.install_certified_turn(
+                target, &certified_source_evidence(&groups), demand.compile(&registry).unwrap(),
+                &[], &BTreeMap::new(), &HashMap::new(), &BindingTable::new(), &HashMap::new(),
+            ),
+            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                owner: missing,
+                evidence: CertifiedPackageOwnerEvidence::TargetDefinition { present: false, .. },
+            }) if missing == owner
         ));
         assert_eq!(engine.residency(), before);
     }
@@ -9973,21 +9870,15 @@ pub(super) mod tests {
             binder: package.clone(),
             interface_digest: [9; 32],
         };
-        let group = |mismatched_signature: bool, digest| {
+        let group = |digest| {
             let mut wire = testing::wire_program();
             if let Group::NonRecursive(top) = &mut wire.bindings[0] {
                 top.identity = testing::identity("Fixture", "cached");
             }
-            if mismatched_signature {
-                wire.signatures.push(Signature {
-                    arguments: vec![],
-                    results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                });
-            }
             wire.globals.push(GlobalDecl {
                 identity: package.clone(),
                 rep: RuntimeRep::LiftedRef,
-                entry_signature: mismatched_signature.then_some(SignatureId(1)),
+                entry_signature: None,
                 required_evaluated: false,
                 required_generation: None,
             });
@@ -10024,21 +9915,56 @@ pub(super) mod tests {
                 .compile(&ImageRegistry::new())
                 .unwrap()
         }
-        let bad = [group(true, [9; 32])];
-        assert!(engine
-            .install_certified_demand(selected(&bad), &exact, &BindingTable::new())
-            .is_err_and(|error| matches!(
-                error,
-                PreparedRuntimeError::MissingCertifiedOwner(missing) if missing == owner
-            )));
-        assert_eq!(engine.code_exports[&package].interface_digest, None);
-        let good = [group(false, [9; 32])];
-        let error = engine
-            .install_certified_demand(selected(&good), &exact, &BindingTable::new())
-            .unwrap_err();
+        let registry = ImageRegistry::new();
+        let target = |group: &CertifiedGroup| {
+            let root = SourceBinder {
+                version: group.owner().module_version.clone(),
+                binder: testing::identity("Fixture", "cached"),
+            };
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            entry.identity.unit = HOME_UNIT.into();
+            wire.globals.push(GlobalDecl {
+                identity: root.binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
+            scoped_single_domain_target(
+                testing::prepare(wire).unwrap(),
+                &registry,
+                vec![ImportOwner::Source {
+                    version: root.version,
+                    binder: root.binder,
+                }],
+            )
+        };
+        let install = |engine: &mut PreparedEngine,
+                       groups: &[CertifiedGroup],
+                       exact: &HashMap<ImportOwner, PreparedHandle>| {
+            engine.install_certified_turn(
+                target(&groups[0]),
+                &certified_source_evidence(groups),
+                selected(groups),
+                &[],
+                &BTreeMap::new(),
+                exact,
+                &BindingTable::new(),
+                &HashMap::new(),
+            )
+        };
+        let before = engine.residency();
+        let good = [group([9; 32])];
+        let error = install(&mut engine, &good, &exact).err().unwrap();
         assert!(matches!(
             error,
-            PreparedRuntimeError::MissingCertifiedOwner(missing) if missing == owner
+            PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                owner: missing,
+                evidence: CertifiedPackageOwnerEvidence::RetainedExport { interface_digest: None },
+            } if missing == owner
         ));
         assert_eq!(engine.code_exports[&package].interface_digest, None);
         let zero_owner = ImportOwner::Package {
@@ -10047,13 +9973,9 @@ pub(super) mod tests {
             binder: package.clone(),
             interface_digest: [0; 32],
         };
-        let zero = [group(false, [0; 32])];
+        let zero = [group([0; 32])];
         assert!(matches!(
-            engine.install_certified_demand(
-                selected(&zero),
-                &HashMap::from([(zero_owner.clone(), handle)]),
-                &BindingTable::new(),
-            ),
+            install(&mut engine, &zero, &HashMap::from([(zero_owner.clone(), handle)])),
             Err(PreparedRuntimeError::MissingCertifiedOwner(missing)) if missing == zero_owner
         ));
         assert_eq!(engine.code_exports[&package].interface_digest, None);
@@ -10064,8 +9986,8 @@ pub(super) mod tests {
             interface_digest: [8; 32],
         };
         let wrong_exact = HashMap::from([(wrong.clone(), handle)]);
-        // The native image is identical; only the newly claimed package owner
-        // differs. The already attached provenance must refuse it.
+        // The native image is identical; a changed package claim still cannot
+        // authenticate the legacy export.
         let mut wire = testing::wire_program();
         if let Group::NonRecursive(top) = &mut wire.bindings[0] {
             top.identity = testing::identity("Fixture", "cached");
@@ -10085,10 +10007,14 @@ pub(super) mod tests {
         .unwrap();
         let wrong_groups = [mismatched];
         assert!(matches!(
-            engine.install_certified_demand(selected(&wrong_groups), &wrong_exact, &BindingTable::new()),
-            Err(PreparedRuntimeError::MissingCertifiedOwner(rejected)) if rejected == wrong
+            install(&mut engine, &wrong_groups, &wrong_exact),
+            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                owner: rejected,
+                evidence: CertifiedPackageOwnerEvidence::RetainedExport { interface_digest: None },
+            }) if rejected == wrong
         ));
         assert_eq!(engine.code_exports[&package].interface_digest, None);
+        assert_eq!(engine.residency(), before);
     }
 
     #[test]
@@ -10142,6 +10068,10 @@ pub(super) mod tests {
     /// A memoized CAF returning `Field(99)`: unevaluated until first run,
     /// then an updated indirection to an evaluated constructor.
     fn producer_program() -> PreparedProgram {
+        testing::prepare(producer_wire()).expect("producer fixture")
+    }
+
+    fn producer_wire() -> tidepool_repr::execution_schema::WireProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(mount_constructor(
@@ -10171,7 +10101,7 @@ pub(super) mod tests {
             captures: vec![],
             body: 0,
         };
-        testing::prepare(wire).expect("producer fixture")
+        wire
     }
 
     pub(in crate::session) fn certified_package_export_fixture(
@@ -10193,6 +10123,7 @@ pub(super) mod tests {
                 &BTreeMap::new(),
                 &HashMap::new(),
                 &BindingTable::new(),
+                &HashMap::new(),
                 BTreeMap::new(),
                 BTreeMap::from([(binder, digest)]),
             )
@@ -10729,7 +10660,7 @@ pub(super) mod tests {
     /// at generation 1 -- the same shape [`PreparedEngine::install`]'s
     /// `resolve_imports` reads through [`resolve_prepared_import`], built
     /// the way `ResidentSession::bind_prepared` builds one (`adopt` then a
-    /// `BindingEntry`), so a split install against it exercises the same
+    /// `BindingEntry`), so an install against it exercises the same
     /// import-resolution path a live turn does, not the hand-assembled
     /// `MachineImports` `install_importing` uses.
     fn engine_with_bound_producer(
@@ -10784,6 +10715,106 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn raw_install_preserves_imported_unknown_and_refuses_unpaired_bindings() {
+        use tidepool_repr::{BindingName, Generation, SessionModule};
+        let mut wire = producer_wire();
+        wire.types = testing::closed_type_graph(
+            testing::identity("RawSource", "Reply"),
+            tidepool_repr::type_graph::DeclarationForm::Text,
+        );
+        wire.sites.push(SiteRow {
+            site: 17,
+            origin: "RawSource.hs:1".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![],
+        });
+        let mut state = super::super::PersistentSession::new(None, 64 * 1024);
+        let source = state.mint_isolated_scope_with_lease().unwrap();
+        let settled = state.with_source_compiler_transaction(
+            source.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |state, _| {
+                let producer = state
+                    .install_prepared(testing::prepare(wire).unwrap(), None)
+                    .unwrap();
+                let engine = state.prepared_mut().unwrap();
+                let expected = engine.installed_program_sources(producer).clone();
+                assert_ne!(
+                    expected,
+                    NativeSourceCustody::default(),
+                    "actual producer contributes an unknown site"
+                );
+                let handle = engine.machine.retain_top(producer, ValueId(0)).unwrap();
+                assert!(engine.adopt(handle));
+                let binding = |id, generation, handle| BindingEntry {
+                    name: BindingName("producer".into()),
+                    id: SessionVarId::from_extract(id),
+                    module: SessionModule::val(Generation(generation)),
+                    value: BoundValue {
+                        handle,
+                        identity: producer_identity(),
+                    },
+                    type_display: None,
+                    defining_expr: None,
+                    scope: tidepool_codegen::scope::ScopeId::ROOT,
+                };
+                state.bind(binding(1, 1, handle)).unwrap();
+                let before = state.prepared().unwrap().residency();
+                assert!(matches!(
+                    state.install_prepared(plain_import_consumer_program(false, Some(1)), None),
+                    Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(1)
+                ));
+                assert_eq!(state.prepared().unwrap().residency(), before);
+                let actual_source = |input: super::super::persistent::ValidatedRetainedSourceRef<'_>| {
+                    if input.id() != SessionVarId::from_extract(1) {
+                        return None;
+                    }
+                    assert_eq!(input.handle(), handle);
+                    Some(expected.clone())
+                };
+                let target = plain_import_consumer_program(false, Some(1));
+                assert!(target.sites().is_empty());
+                let (wrapper, sources) = state
+                    .install_prepared_with_sources(target, None, &actual_source)
+                    .unwrap();
+                assert_eq!(
+                    sources, expected,
+                    "site-free wrapper retains its actual input's Unknown contribution"
+                );
+                assert_eq!(
+                    state.prepared().unwrap().installed_program_sources(wrapper),
+                    &expected
+                );
+                let engine = state.prepared_mut().unwrap();
+                let alias = engine.retain_handle_value(handle, RealmId::ROOT).unwrap();
+                assert!(engine.adopt(alias));
+                state.bind(binding(2, 2, alias)).unwrap();
+                let before = state.prepared().unwrap().residency();
+                assert!(
+                    matches!(
+                        state.install_prepared_with_sources(
+                            plain_import_consumer_program(false, Some(2)), None, &actual_source,
+                        ),
+                        Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(2)
+                    ),
+                    "new binding cannot borrow another binding's retained source pair"
+                );
+                assert_eq!(state.prepared().unwrap().residency(), before);
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
+        ));
+    }
+
+    #[test]
     fn native_install_refusal_retains_stage_on_shared_and_owned_images() {
         for shared in [false, true] {
             let (mut engine, first, _, bindings, index) = engine_with_bound_producer(false);
@@ -10792,9 +10823,10 @@ pub(super) mod tests {
             }
             let (mut foreign, foreign_program, foreign_top) = producer_machine();
             let foreign_handle = foreign.retain_top(foreign_program, foreign_top).unwrap();
+            let source = engine.installed_program_sources(first).clone();
             let prepared = plain_import_consumer_program(false, Some(1));
-            let (values, mut imports) = engine
-                .resolve_imports(&prepared, &bindings, &index)
+            let (values, mut imports, _) = engine
+                .resolve_imports(&prepared, &bindings, &index, &|_| Some(source.clone()))
                 .unwrap();
             imports.insert(producer_identity(), foreign_handle);
             let linked = link_program(prepared, &values).unwrap();
@@ -10823,143 +10855,11 @@ pub(super) mod tests {
                     plain_import_consumer_program(false, Some(1)),
                     &bindings,
                     &index,
+                    &|_| Some(source.clone()),
                 )
                 .unwrap();
             assert!(foreign.release(foreign_handle));
         }
-    }
-
-    #[test]
-    fn split_install_matches_single_checkout_install_with_imports() {
-        let (mut single, _, _, bindings, index) = engine_with_bound_producer(true);
-        let single_program = single
-            .install(
-                plain_import_consumer_program(true, Some(1)),
-                &bindings,
-                &index,
-            )
-            .expect("single-checkout install links against the bound producer");
-        let single_read = read_consumer_import(&mut single, single_program);
-
-        let (mut split, _, _, bindings, index) = engine_with_bound_producer(true);
-        let snapshot = split
-            .snapshot_install(
-                plain_import_consumer_program(true, Some(1)),
-                &bindings,
-                &index,
-            )
-            .expect("snapshot step resolves the same imports off no checkout yet");
-        let mut snapshot = snapshot;
-        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
-            .expect("off-checkout compile of the linked program succeeds");
-        let definitions = Arc::clone(compiled.definition_facts());
-        let split_program = split
-            .revalidate_and_install(snapshot, compiled, &bindings, &index)
-            .expect("revalidation runs")
-            .expect("nothing changed the import between snapshot and revalidation");
-        assert!(Arc::ptr_eq(
-            &split.programs[&split_program].definitions,
-            &definitions,
-        ));
-        let split_read = read_consumer_import(&mut split, split_program);
-
-        // Both engines were bootstrapped and bound identically, so the split
-        // install must be observably the same program as the single-checkout
-        // one: same value read back through the same import.
-        assert_eq!(single_read, split_read);
-    }
-
-    /// Run `program`'s one entry (a [`plain_import_consumer_program`],
-    /// which just returns its imported global) and decode the constructor
-    /// it reads back, releasing the observed value afterward.
-    fn read_consumer_import(
-        engine: &mut PreparedEngine,
-        program: ProgramId,
-    ) -> (tidepool_repr::DataConId, Vec<u64>) {
-        let read = engine
-            .machine
-            .run_entry_retained(
-                program,
-                ValueId(0),
-                &[],
-                PreparedCallOptions {
-                    observation_budget: RunOptions::default().observation_budget,
-                    collect_before_observation: true,
-                },
-                RealmId::ROOT,
-            )
-            .expect("consumer entry runs and reads its import through the slot");
-        let mut values = read.values;
-        let PreparedResult::Managed(value) = values.remove(0) else {
-            panic!("consumer must return the imported managed value");
-        };
-        let CodegenPreparedOuter::Constructor { identity, fields } = engine
-            .machine
-            .inspect_outer(value, RealmId::ROOT)
-            .expect("imported value inspects through the shared machine");
-        let scalars = fields
-            .iter()
-            .map(|field| match field {
-                PreparedResult::Scalar(n) => *n,
-                other => panic!("expected a scalar field, got {other:?}"),
-            })
-            .collect();
-        assert!(engine.machine.release(value));
-        (identity, scalars)
-    }
-
-    #[test]
-    fn stale_import_between_snapshot_and_revalidation_falls_back() {
-        // Snapshot against the UNFORCED producer top (required_evaluated:
-        // false, so linking the snapshot itself does not reject it), then
-        // force the CAF -- simulating another actor's turn mutating the
-        // same shared import while this compile ran off-checkout -- before
-        // revalidating.
-        let (mut engine, first, top, bindings, index) = engine_with_bound_producer(false);
-        let snapshot = engine
-            .snapshot_install(
-                plain_import_consumer_program(false, Some(1)),
-                &bindings,
-                &index,
-            )
-            .expect("snapshot resolves the still-unforced import");
-        let mut snapshot = snapshot;
-        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot)
-            .expect("off-checkout compile succeeds against the unforced snapshot");
-
-        engine
-            .machine
-            .run_entry(
-                first,
-                top,
-                &[],
-                PreparedCallOptions {
-                    observation_budget: RunOptions::default().observation_budget,
-                    collect_before_observation: true,
-                },
-                RealmId::ROOT,
-            )
-            .expect("forcing the CAF between snapshot and revalidation");
-
-        let outcome = engine
-            .revalidate_and_install(snapshot, compiled, &bindings, &index)
-            .expect("revalidation itself does not error");
-        assert!(
-            outcome.is_none(),
-            "an import that became evaluated between snapshot and revalidation \
-             must invalidate the split compile rather than install it"
-        );
-
-        // The caller's documented recovery -- recompile fresh, or fall back
-        // to the single-checkout path -- still succeeds against the now-
-        // forced import.
-        engine
-            .install(
-                plain_import_consumer_program(false, Some(1)),
-                &bindings,
-                &index,
-            )
-            .expect("the single-checkout fallback installs against the current import");
     }
 
     #[test]
@@ -12758,7 +12658,9 @@ pub(super) mod tests {
         let (mut engine, first) = PreparedEngine::bootstrap(a.clone()).unwrap();
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
-        let second = engine.install(b.clone(), &bindings, &index).unwrap();
+        let second = engine
+            .install(b.clone(), &bindings, &index, &|_| None)
+            .unwrap();
         let original_request = engine.request_site_type_evidence(101).unwrap();
         let new_request = engine.request_site_type_evidence(102).unwrap();
         assert_ne!(original_request, new_request);
@@ -12797,7 +12699,7 @@ pub(super) mod tests {
             .build_host_value(RealmId::ROOT, &new_reply, &table)
             .unwrap();
         let resume_runner = engine
-            .install(json_mount_program(), &bindings, &index)
+            .install(json_mount_program(), &bindings, &index, &|_| None)
             .expect("fixture with the prepared two-argument resume ABI installs");
         let continuation = engine
             .machine
@@ -12868,7 +12770,12 @@ pub(super) mod tests {
         };
         let programs_before = engine.programs.len();
         assert!(engine
-            .install(testing::prepare(conflict).unwrap(), &bindings, &index)
+            .install(
+                testing::prepare(conflict).unwrap(),
+                &bindings,
+                &index,
+                &|_| None,
+            )
             .is_err());
         assert_eq!(engine.programs.len(), programs_before);
         for export in std::mem::take(&mut engine.code_exports).into_values() {
@@ -12888,7 +12795,7 @@ pub(super) mod tests {
             HaskellValue::Con(DataConId(1002), _)
         ));
         let third = engine
-            .install(versioned_reply_program(1, 4), &bindings, &index)
+            .install(versioned_reply_program(1, 4), &bindings, &index, &|_| None)
             .unwrap();
         assert!(
             matches!(
@@ -13505,6 +13412,7 @@ pub(super) mod tests {
                 testing::prepare(wire).unwrap(),
                 &BindingTable::new(),
                 &BindingIndex::new(),
+                &|_| None,
             )
             .unwrap();
         let batch = engine
@@ -13725,6 +13633,7 @@ pub(super) mod tests {
                 verb_program(site, closed_reply_type(DeclarationForm::Text)),
                 &bindings,
                 &index,
+                &|_| None,
             )
             .expect("an equivalent duplicate is not a SiteConflict");
         assert_ne!(first, second);
@@ -13737,6 +13646,7 @@ pub(super) mod tests {
                 verb_program(6, closed_reply_type(DeclarationForm::Integer)),
                 &bindings,
                 &index,
+                &|_| None,
             )
             .expect_err("a conflicting verb reply refuses the install");
         match error {
@@ -13782,8 +13692,12 @@ pub(super) mod tests {
         let (mut engine, first) = PreparedEngine::bootstrap(routing(101)).unwrap();
         let bindings = BindingTable::new();
         let index = BindingIndex::new();
-        let second = engine.install(routing(102), &bindings, &index).unwrap();
-        let third = engine.install(routing(103), &bindings, &index).unwrap();
+        let second = engine
+            .install(routing(102), &bindings, &index, &|_| None)
+            .unwrap();
+        let third = engine
+            .install(routing(103), &bindings, &index, &|_| None)
+            .unwrap();
         assert_eq!(engine.sites[&7].owner, first);
         assert_eq!(engine.constructor_replies[&DataConId(77)].owner, first);
         for export in std::mem::take(&mut engine.code_exports).into_values() {
@@ -13874,6 +13788,7 @@ pub(super) mod tests {
                 verb_program(6, closed_reply_type(DeclarationForm::Text)),
                 &BindingTable::new(),
                 &BindingIndex::new(),
+                &|_| None,
             )
             .unwrap();
         assert!(engine.unpin(first));
@@ -13955,115 +13870,20 @@ pub(super) mod tests {
                 ),
                 &bindings,
                 &index,
+                &|_| None,
             )
             .expect("alpha-stable polymorphic evidence is equivalent");
         assert_ne!(first, second);
 
         let different = polymorphic_reply_type("forall a. a", false);
         let error = engine
-            .install(verb_program(site, different), &bindings, &index)
+            .install(verb_program(site, different), &bindings, &index, &|_| None)
             .expect_err("different type evidence must remain a conflict");
         assert!(
             matches!(error, PreparedRuntimeError::ConstructorReplyConflict { owner, .. } if owner == first),
             "expected SiteConflict, got {error:?}"
         );
         assert_eq!(engine.programs.len(), 2);
-    }
-
-    #[test]
-    fn off_checkout_install_reuses_code_already_installed_on_the_machine() {
-        let registry = Arc::new(ImageRegistry::new());
-        let (mut engine, _) =
-            PreparedEngine::bootstrap(verb_program(40, closed_reply_type(DeclarationForm::Text)))
-                .expect("bootstrap");
-        engine.set_image_registry(Arc::clone(&registry));
-        let bindings = BindingTable::new();
-        let index = BindingIndex::new();
-        let prepared = verb_program(41, closed_reply_type(DeclarationForm::Text));
-        let mut snapshot = engine
-            .snapshot_install(prepared.clone(), &bindings, &index)
-            .expect("capture installation");
-        let key = snapshot.linked.clone();
-        let compiled =
-            PreparedEngine::compile_off_checkout(&mut snapshot).expect("compile code off checkout");
-        let shared = Arc::clone(&compiled);
-        let first = engine
-            .install(prepared, &bindings, &index)
-            .expect("another actor installs shared code first");
-        let second = engine
-            .revalidate_and_install(snapshot, compiled, &bindings, &index)
-            .expect("imports remain current")
-            .expect("same code does not stale an installation");
-        assert_ne!(first, second, "each installation owns a separate instance");
-        for program in [first, second] {
-            assert!(Arc::ptr_eq(
-                &engine.programs[&program].definitions,
-                shared.definition_facts(),
-            ));
-        }
-        assert!(Arc::ptr_eq(
-            &shared,
-            &registry
-                .lookup(&key)
-                .expect("installed code remains shared")
-        ));
-    }
-
-    #[test]
-    fn off_checkout_install_rejects_intervening_evidence_conflict() {
-        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
-        let bindings = BindingTable::new();
-        let index = BindingIndex::new();
-        let site = 42;
-        let mut snapshot = engine
-            .snapshot_install(
-                verb_program(site, closed_reply_type(DeclarationForm::Text)),
-                &bindings,
-                &index,
-            )
-            .unwrap();
-        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot).unwrap();
-        let owner = engine
-            .install(
-                verb_program(site, closed_reply_type(DeclarationForm::Integer)),
-                &bindings,
-                &index,
-            )
-            .unwrap();
-        let before = engine.residency();
-        assert!(matches!(
-            engine.revalidate_and_install(snapshot, compiled, &bindings, &index),
-            Err(PreparedRuntimeError::ConstructorReplyConflict { constructor: rejected, owner: actual, .. })
-                if rejected == DataConId(77) && actual == owner
-        ));
-        assert_eq!(engine.residency(), before);
-        assert_eq!(engine.programs.len(), 1);
-        assert_eq!(engine.constructor_replies[&DataConId(77)].owner, owner);
-    }
-
-    #[test]
-    fn off_checkout_install_restores_retired_evidence_ownership() {
-        let site = 43;
-        let prepared = verb_program(site, closed_reply_type(DeclarationForm::Text));
-        let (mut engine, owner) = PreparedEngine::bootstrap(prepared.clone()).unwrap();
-        let bindings = BindingTable::new();
-        let index = BindingIndex::new();
-        let mut snapshot = engine
-            .snapshot_install(prepared, &bindings, &index)
-            .unwrap();
-        let compiled = PreparedEngine::compile_off_checkout(&mut snapshot).unwrap();
-        assert!(engine.unpin(owner));
-        for export in std::mem::take(&mut engine.code_exports).into_values() {
-            assert!(engine.release(export.handle));
-        }
-        engine.quiesce_and_collect_now().unwrap();
-        assert!(!engine.programs.contains_key(&owner));
-        assert!(!engine.constructor_replies.contains_key(&DataConId(77)));
-        let installed = engine
-            .revalidate_and_install(snapshot, compiled, &bindings, &index)
-            .unwrap()
-            .unwrap();
-        assert_eq!(engine.constructor_replies[&DataConId(77)].owner, installed);
     }
 
     #[test]
@@ -14092,6 +13912,7 @@ pub(super) mod tests {
                 verb_program(shared_site, closed_reply_type(DeclarationForm::Text)),
                 &bindings,
                 &index,
+                &|_| None,
             )
             .expect("engine a compiles and registers the image");
         assert_eq!(
@@ -14106,6 +13927,7 @@ pub(super) mod tests {
                 verb_program(shared_site, closed_reply_type(DeclarationForm::Text)),
                 &bindings,
                 &index,
+                &|_| None,
             )
             .expect("engine b installs the same content against its own machine");
         assert_eq!(

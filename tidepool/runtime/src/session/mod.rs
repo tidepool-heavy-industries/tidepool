@@ -1951,10 +1951,7 @@ impl SessionLib {
         selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
     ) {
         let sources = &mut self.tips.entry(scope).or_default().published_sources;
-        if !sources
-            .iter()
-            .any(|old| old.context() == selection.context())
-        {
+        if !sources.iter().any(|old| Arc::ptr_eq(old, &selection)) {
             sources.push(selection);
         }
     }

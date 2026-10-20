@@ -1991,13 +1991,8 @@ impl CheckedTurnCompletion {
         >,
         demanded: Vec<tidepool_codegen::prepared_program::DemandedImage>,
         inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
-    ) -> Result<
-        (
-            tidepool_codegen::prepared_program::ProgramId,
-            tidepool_codegen::binding_table::SourceScopeAdmission,
-        ),
-        super::resident::ResidentError,
-    > {
+        retained_sources: &dyn Fn(super::persistent::ValidatedRetainedSourceRef<'_>) -> Option<super::resident::NativeSourceCustody>,
+    ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
         let association = {
             let state = self.prefix.state.lock();
             if !self.prefix.admission.belongs_to(session)
@@ -2044,6 +2039,7 @@ impl CheckedTurnCompletion {
             source_evidence,
             demanded,
             inherited_needed,
+            retained_sources,
         )?;
         if let Some(association) = association {
             let refreshed = session.compile_view_key_in(scope).map(|key| {

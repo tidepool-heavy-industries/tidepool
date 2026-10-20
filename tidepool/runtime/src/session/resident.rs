@@ -193,7 +193,7 @@ impl CapturedSourceOrigin {
 /// Immutable per-site original-source custody shared with actual native owners.
 /// It retains no lexical roots, compiled turn, renderer or mutable session state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct NativeSourceCustody {
+pub(crate) struct NativeSourceCustody {
     sites: Arc<BTreeMap<u64, RuntimeSourceOrigin>>,
 }
 
@@ -255,67 +255,18 @@ impl NativeSourceCustody {
     }
 }
 
-enum RuntimeSourceContribution<'a> {
-    Retained {
-        id: u64,
-        provenance: &'a Arc<ProgramProvenance>,
-    },
-    MissingNative,
-}
-
-fn classify_import_source<'a>(
-    owner: &ImportOwner,
-    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
-) -> RuntimeSourceContribution<'a> {
-    match owner {
-        ImportOwner::Retained { id, .. } => match bindings.get(&id.raw()) {
-            Some(provenance) => RuntimeSourceContribution::Retained {
-                id: id.raw(),
-                provenance,
-            },
-            None => RuntimeSourceContribution::MissingNative,
-        },
-        ImportOwner::Source { .. }
-        | ImportOwner::CodeExport { .. }
-        | ImportOwner::Package { .. } => RuntimeSourceContribution::MissingNative,
-    }
-}
-
-/// Gather exact imports once per binding identity. Unresolved native custody
-/// contributes uncertainty once over the selected target's possible sites.
-fn contribute_import_sources<'a>(
+/// Compiler/display metadata follows exact retained binding identities. Runtime
+/// source custody is resolved independently by the actual native installation.
+fn retained_import_metadata<'a>(
     imports: impl IntoIterator<Item = &'a ImportOwner>,
     bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
-    possible_sites: impl Iterator<Item = u64>,
-    sources: &mut BTreeMap<u64, RuntimeSourceOrigin>,
 ) -> Vec<&'a Arc<ProgramProvenance>> {
     let mut retained = BTreeMap::new();
-    let mut unresolved_native = false;
     for owner in imports {
-        match classify_import_source(owner, bindings) {
-            RuntimeSourceContribution::Retained { id, provenance } => {
-                retained.entry(id).or_insert(provenance);
+        if let ImportOwner::Retained { id, .. } = owner {
+            if let Some(provenance) = bindings.get(&id.raw()) {
+                retained.entry(id.raw()).or_insert(provenance);
             }
-            RuntimeSourceContribution::MissingNative => unresolved_native = true,
-        }
-    }
-    for original in retained.values() {
-        for site in original.sites.keys() {
-            let source = original.original_sources.source(*site);
-            sources
-                .entry(*site)
-                .and_modify(|held| held.merge(&source))
-                .or_insert(source);
-        }
-    }
-    if unresolved_native {
-        for site in possible_sites {
-            sources
-                .entry(site)
-                .and_modify(|held| {
-                    held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
-                })
-                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
         }
     }
     retained.into_values().collect()
@@ -726,6 +677,12 @@ pub enum ProgramProvenanceError {
     },
 }
 
+#[derive(Clone, Copy)]
+enum ProvenanceMerge {
+    MetadataOnly,
+    WithRuntimeSources,
+}
+
 impl ProgramProvenance {
     pub fn from_sites(sites: &[YieldSite]) -> Result<Self, ProgramProvenanceError> {
         let mut provenance = Self::default();
@@ -755,7 +712,30 @@ impl ProgramProvenance {
         Ok(())
     }
 
+    fn source_custody(&self) -> NativeSourceCustody {
+        let mut sources = self.original_sources.clone();
+        for site in self.sites.keys().copied().chain(self.native_sites.ids()) {
+            if !sources.sites.contains_key(&site) {
+                Arc::make_mut(&mut sources.sites)
+                    .insert(site, RuntimeSourceOrigin::Unknown(Vec::new()));
+            }
+        }
+        sources
+    }
+
     fn merge(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
+        self.merge_with(other, ProvenanceMerge::WithRuntimeSources)
+    }
+
+    fn merge_metadata(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
+        self.merge_with(other, ProvenanceMerge::MetadataOnly)
+    }
+
+    fn merge_with(
+        &mut self,
+        other: &Self,
+        mode: ProvenanceMerge,
+    ) -> Result<(), ProgramProvenanceError> {
         // A failed composition leaves the original value's evidence unchanged.
         // Site/type compatibility is independent of original execution scope.
         let mut native_sites = self.native_sites.clone();
@@ -794,27 +774,31 @@ impl ProgramProvenance {
             }
         }
         for site in other.sites.values() {
-            let existing = self.sites.contains_key(&site.site)
-                || self.original_sources.sites.contains_key(&site.site);
-            self.extend(std::slice::from_ref(site))?;
-            let incoming = other.original_sources.source(site.site);
-            let sources = Arc::make_mut(&mut self.original_sources.sites);
-            if existing {
-                sources
-                    .entry(site.site)
-                    .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()))
-                    .merge(&incoming);
-            } else {
-                sources.insert(site.site, incoming);
+            if matches!(mode, ProvenanceMerge::WithRuntimeSources) {
+                let existing = self.sites.contains_key(&site.site)
+                    || self.original_sources.sites.contains_key(&site.site);
+                let incoming = other.original_sources.source(site.site);
+                let sources = Arc::make_mut(&mut self.original_sources.sites);
+                if existing {
+                    sources
+                        .entry(site.site)
+                        .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()))
+                        .merge(&incoming);
+                } else {
+                    sources.insert(site.site, incoming);
+                }
             }
+            self.sites.entry(site.site).or_insert_with(|| site.clone());
         }
-        // Native receipts can carry raw effect sites without typed yield metadata.
-        for (site, incoming) in other.original_sources.sites.iter() {
-            if !other.sites.contains_key(site) {
-                Arc::make_mut(&mut self.original_sources.sites)
-                    .entry(*site)
-                    .and_modify(|held| held.merge(incoming))
-                    .or_insert_with(|| incoming.clone());
+        if matches!(mode, ProvenanceMerge::WithRuntimeSources) {
+            // Raw effect origins do not require typed yield metadata.
+            for (site, incoming) in other.original_sources.sites.iter() {
+                if !other.sites.contains_key(site) {
+                    Arc::make_mut(&mut self.original_sources.sites)
+                        .entry(*site)
+                        .and_modify(|held| held.merge(incoming))
+                        .or_insert_with(|| incoming.clone());
+                }
             }
         }
         for (site, interfaces) in &other.authenticated_inputs {
@@ -2688,6 +2672,9 @@ pub enum ResidentContinuationEvent {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
+    #[error("prepared provenance belongs to another immutable code owner")]
+    ProvenanceCodeOwnerMismatch,
+
     /// Checked items must enter a route that validates their sealed recipe
     /// and owns successful prefix settlement.
     #[error("checked turn requires its authenticated execution route")]
@@ -3102,11 +3089,19 @@ struct AdmittedTurnCode<'a> {
     resolved: Option<super::persistent::ResolvedCertifiedTurn>,
 }
 
+/// Fallible compiler/display composition completed before native installation.
+/// The owner reference couples metadata to code; it conveys no runtime source.
+struct PreparedProgramProvenance {
+    code_owner: Arc<std::sync::OnceLock<CompiledProvenancePlan>>,
+    metadata: Arc<ProgramProvenance>,
+}
+
 /// Installation retains input metadata and certification through execution and
 /// publication; moving the native image does not release that custody.
 struct InstalledAdmittedTurn<'a> {
     program: ProgramId,
     source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
+    provenance: Arc<ProgramProvenance>,
     _inputs: (
         std::borrow::Cow<'a, DataConTable>,
         std::borrow::Cow<'a, [YieldSite]>,
@@ -4600,11 +4595,25 @@ where
         self.state.restage_publication_metadata(certified)
     }
 
+    fn install_prepared_with_sources(
+        &mut self,
+        prepared: tidepool_repr::execution_schema::PreparedProgram,
+        metadata: &DataConTable,
+    ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
+        let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+            self.binding_provenance
+                .get(&input.id().raw())
+                .map(|provenance| provenance.source_custody())
+        };
+        self.state
+            .install_prepared_with_sources(prepared, Some(metadata), &retained_sources)
+    }
+
     /// Admit one compiler-certified target and its demanded source closure
     /// against a single scope snapshot under this session's machine checkout.
     /// The persistent registrar owns every new source root before the target
     /// can be run; failed registration rolls the native batch back.
-    pub(crate) fn install_certified_turn_in(
+    fn install_certified_turn_in(
         &mut self,
         scope: ScopeId,
         metadata: &DataConTable,
@@ -4612,13 +4621,12 @@ where
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
         demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-    ) -> Result<
-        (
-            ProgramId,
-            tidepool_codegen::binding_table::SourceScopeAdmission,
-        ),
-        PreparedRuntimeError,
-    > {
+    ) -> Result<super::persistent::InstalledCertifiedTurn, PreparedRuntimeError> {
+        let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+            self.binding_provenance
+                .get(&input.id().raw())
+                .map(|provenance| provenance.source_custody())
+        };
         self.state.install_certified_turn_in(
             scope,
             metadata,
@@ -4626,6 +4634,7 @@ where
             source_evidence,
             demanded,
             inherited_needed,
+            &retained_sources,
         )
     }
 
@@ -6959,17 +6968,19 @@ where
             let registry = self.state.certified_image_registry();
             let (target, demanded) =
                 super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
-            self.install_certified_turn_in(
+            let installed = self.install_certified_turn_in(
                 scope,
                 &table,
                 target,
                 &resolved.source_evidence,
                 demanded,
                 &resolved.inherited_needed,
-            )?
+            )?;
+            let (program, source_keys, _native_sources) = installed.into_parts();
+            (program, source_keys)
         } else {
             (
-                self.state.install_prepared(prepared, Some(&table))?,
+                self.install_prepared_with_sources(prepared, &table)?.0,
                 Default::default(),
             )
         };
@@ -7516,7 +7527,7 @@ where
     fn provenance_for(
         &self,
         admission: &AdmittedTurnCode<'_>,
-    ) -> Result<Arc<ProgramProvenance>, ResidentError> {
+    ) -> Result<PreparedProgramProvenance, ResidentError> {
         let code = &admission.code;
         if code.provenance.get().is_none() {
             let plan = CompiledProvenancePlan::build(code)?;
@@ -7529,28 +7540,6 @@ where
             .get()
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
-        // Pending origins live only in this local builder. Cached plans retain
-        // compiler facts alone; every site is finalized before provenance escapes.
-        let mut sources = BTreeMap::<u64, RuntimeSourceOrigin>::new();
-        let source = match code.certification().map(|proof| proof.purpose()) {
-            Some(TurnPurpose::Execution { prefix, .. }) => {
-                Some(prefix.admission().original_source()?)
-            }
-            Some(TurnPurpose::Ordinary { original: Some(_) } | TurnPurpose::HostPrototype(_)) => {
-                self.state
-                    .source_transaction
-                    .as_ref()
-                    .map(|owner| owner.admitted_original_source())
-                    .transpose()
-                    .map_err(SessionError::from)?
-            }
-            _ => None,
-        };
-        if let Some(source) = source {
-            for site in code.prepared().sites() {
-                sources.insert(site.site, RuntimeSourceOrigin::Known(source.clone()));
-            }
-        }
         let mut retained = Vec::new();
         if let Some(resolved) = &admission.resolved {
             let imports = resolved.target_owners.iter().chain(
@@ -7559,22 +7548,19 @@ where
                     .iter()
                     .flat_map(|group| group.original().imports()),
             );
-            retained = contribute_import_sources(
-                imports,
-                &self.binding_provenance,
-                provenance.native_sites.ids(),
-                &mut sources,
-            );
+            retained = retained_import_metadata(imports, &self.binding_provenance);
         }
         {
             let provenance = Arc::make_mut(&mut provenance);
             for original in retained {
-                provenance.merge(original)?;
+                provenance.merge_metadata(original)?;
             }
-            provenance.original_sources =
-                NativeSourceCustody::complete(provenance.sites.keys().copied(), sources);
+            provenance.original_sources = NativeSourceCustody::default();
         }
-        Ok(provenance)
+        Ok(PreparedProgramProvenance {
+            code_owner: code.provenance.clone(),
+            metadata: provenance,
+        })
     }
 
     fn next_cont_id(&self) -> String {
@@ -7865,7 +7851,7 @@ where
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
         purpose: PreparedExecutionPurpose<'_>,
-        provenance: Arc<ProgramProvenance>,
+        provenance: PreparedProgramProvenance,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let (checked, lexical_scope, _execution_scope_lease, retained_images) = match purpose {
@@ -7894,6 +7880,7 @@ where
         let InstalledAdmittedTurn {
             program,
             source_keys,
+            provenance,
             _inputs: _installed_inputs,
         } = self.install_admitted_turn(
             admission,
@@ -7901,6 +7888,7 @@ where
                 Some(bundle) => TurnImageAcquisition::Ready { bundle },
                 None => TurnImageAcquisition::Compile,
             },
+            provenance,
             checked.as_deref(),
         )?;
         timing::record_stage(
@@ -7965,8 +7953,12 @@ where
         &mut self,
         admission: AdmittedTurnCode<'a>,
         images: TurnImageAcquisition<'_>,
+        provenance: PreparedProgramProvenance,
         checked: Option<&CheckedTurnCompletion>,
     ) -> Result<InstalledAdmittedTurn<'a>, ResidentError> {
+        if !Arc::ptr_eq(&provenance.code_owner, &admission.code.provenance) {
+            return Err(ResidentError::ProvenanceCodeOwnerMismatch);
+        }
         let AdmittedTurnCode {
             code,
             scope,
@@ -7977,7 +7969,7 @@ where
             .admit_source_work_in(scope)
             .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
-        let (program, source_keys) = if let Some(resolved) = resolved {
+        let (program, source_keys, native_sources) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
                     super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
@@ -7989,6 +7981,9 @@ where
                     )?
                 }
             };
+            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+                self.binding_provenance.get(&input.id().raw()).map(|p| p.source_custody())
+            };
             match checked {
                 Some(checked) => checked.install_certified_turn_in(
                     &mut self.state,
@@ -7998,6 +7993,7 @@ where
                     &resolved.source_evidence,
                     demanded,
                     &resolved.inherited_needed,
+                    &retained_sources,
                 )?,
                 None => self.install_certified_turn_in(
                     scope,
@@ -8007,19 +8003,30 @@ where
                     demanded,
                     &resolved.inherited_needed,
                 )?,
-            }
+            }.into_parts()
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
             }
-            (
-                self.state.install_prepared(prepared, Some(&metadata))?,
-                Default::default(),
-            )
+            let (program, native_sources) =
+                self.install_prepared_with_sources(prepared, &metadata)?;
+            (program, Default::default(), native_sources)
         };
+        // Every fallible metadata check preceded installation. Runtime sources
+        // come only from this exact installed outcome; missing evidence is Unknown.
+        let mut provenance = provenance.metadata;
+        let sealed = Arc::make_mut(&mut provenance);
+        sealed.original_sources = native_sources;
+        for site in sealed.sites.keys() {
+            if !sealed.original_sources.sites.contains_key(site) {
+                Arc::make_mut(&mut sealed.original_sources.sites)
+                    .insert(*site, RuntimeSourceOrigin::Unknown(Vec::new()));
+            }
+        }
         Ok(InstalledAdmittedTurn {
             program,
             source_keys,
+            provenance,
             _inputs: (metadata, sites, certification),
         })
     }
@@ -8069,8 +8076,9 @@ where
         let InstalledAdmittedTurn {
             program,
             source_keys,
+            provenance,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, None)?;
+        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -12986,6 +12994,17 @@ mod activation_input_tests;
 
 #[cfg(test)]
 mod source_origin_tests {
+    #[derive(Clone)]
+    struct EmptyOutput;
+    impl OutputSink for EmptyOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
     use super::*;
     use proptest::prelude::*;
     use std::collections::BTreeSet;
@@ -13127,7 +13146,7 @@ mod source_origin_tests {
     }
 
     #[test]
-    fn unresolved_import_owners_poison_only_selected_native_sites() {
+    fn import_metadata_keeps_runtime_sources_pending() {
         let mut owner = PersistentSession::new(None, 1024);
         let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
         let source = lexical.original_source().clone();
@@ -13171,45 +13190,27 @@ mod source_origin_tests {
         ];
         for missing in &missing_owners {
             for missing_first in [false, true] {
-                let mut sources =
-                    BTreeMap::from([(23, RuntimeSourceOrigin::Known(source.clone()))]);
                 let imports = if missing_first {
                     [missing, &retained]
                 } else {
                     [&retained, missing]
                 };
-                let traversed = std::cell::Cell::new(0);
-                let retained_refs = contribute_import_sources(
+                let retained_refs = retained_import_metadata(
                     imports
                         .into_iter()
                         .chain([&retained, missing, &retained, missing]),
                     &bindings,
-                    [17, 19]
-                        .into_iter()
-                        .inspect(|_| traversed.set(traversed.get() + 1)),
-                    &mut sources,
                 );
                 assert_eq!(retained_refs.len(), 1, "one unique retained binding");
-                assert_eq!(traversed.get(), 2, "one traversal of two selected sites");
-                assert!(matches!(
-                    sources[&17].require_unique(17),
-                    Err(ResidentError::MissingOriginalSource {
-                        known_origins: 1,
-                        ..
-                    })
-                ));
-                assert!(Arc::ptr_eq(&sources[&17].known()[0], &source));
-                assert!(matches!(
-                    sources[&19].require_unique(19),
-                    Err(ResidentError::MissingOriginalSource {
-                        known_origins: 0,
-                        ..
-                    })
-                ));
-                assert!(Arc::ptr_eq(
-                    &sources[&23].require_unique(23).unwrap(),
-                    &source
-                ));
+                let mut metadata = ProgramProvenance::default();
+                for original in retained_refs {
+                    metadata.merge_metadata(original).unwrap();
+                }
+                assert_eq!(metadata.sites.keys().copied().collect::<Vec<_>>(), [17]);
+                assert!(
+                    metadata.original_sources.sites.is_empty(),
+                    "compiler metadata preflight does not select runtime sources"
+                );
             }
         }
     }
@@ -13233,6 +13234,26 @@ mod source_origin_tests {
                 })
             ));
         }
+        let mut missing_custody = missing.source_custody();
+        assert!(matches!(
+            missing_custody.require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        missing_custody.merge(&issued(17, &source).source_custody());
+        assert!(matches!(
+            missing_custody.require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 1,
+                ..
+            })
+        ));
+        assert!(ProgramProvenance::default()
+            .source_custody()
+            .sites
+            .is_empty());
         let mut metadata_only = ProgramProvenance::default();
         metadata_only.sites.insert(17, site(17));
         metadata_only.extend(&[site(17)]).unwrap();
@@ -13243,19 +13264,6 @@ mod source_origin_tests {
                 ..
             })
         ));
-        let id = SessionVarId::from_extract(7);
-        let imports = [ImportOwner::Retained { id, generation: 1 }];
-        let bindings = HashMap::from([(id.raw(), Arc::new(missing))]);
-        let mut sources = BTreeMap::from([(17, RuntimeSourceOrigin::Known(source.clone()))]);
-        contribute_import_sources(&imports, &bindings, [].into_iter(), &mut sources);
-        assert!(matches!(
-            sources[&17].require_unique(17),
-            Err(ResidentError::MissingOriginalSource {
-                known_origins: 1,
-                ..
-            })
-        ));
-
         let mut raw = ProgramProvenance::default();
         raw.original_sources = NativeSourceCustody::complete(
             [31],
@@ -13289,6 +13297,20 @@ mod source_origin_tests {
                 })
             ));
         }
+        let missing_typed = ProgramProvenance::from_sites(&[site(29)]).unwrap();
+        for (mut left, right) in [
+            (raw.clone(), missing_typed.clone()),
+            (missing_typed, raw.clone()),
+        ] {
+            left.merge(&right).unwrap();
+            assert!(matches!(
+                left.original_sources.require_unique(29),
+                Err(ResidentError::MissingOriginalSource {
+                    known_origins: 1,
+                    ..
+                })
+            ));
+        }
         let unknown_raw = ProgramProvenance {
             original_sources: NativeSourceCustody::unknown([29]),
             ..ProgramProvenance::default()
@@ -13305,6 +13327,65 @@ mod source_origin_tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn foreign_metadata_owner_refuses_before_native_installation() {
+        use tidepool_repr::execution_schema::testing;
+        let prepared = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let make_code = || {
+            super::super::turn::CompiledTurn::from_prepared(
+                prepared.clone(),
+                DataConTable::new(),
+                Default::default(),
+                vec![site(17)],
+            )
+            .unwrap()
+        };
+        let a = make_code();
+        let b = make_code();
+        assert!(Arc::ptr_eq(
+            &a.code().provenance,
+            &a.code().into_owned().provenance
+        ));
+        assert!(!Arc::ptr_eq(&a.code().provenance, &b.code().provenance));
+        let mut resident = ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let source = resident.state.mint_notebook_scope_with_lease(None).unwrap();
+        source.original_source().validate_source_issuer().unwrap();
+        resident.with_source_compiler_transaction(
+            source.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |resident, _| {
+                let own = resident.admit_turn_code_in(
+                    source.scope(), a.code(), TurnInstallationAdmission::Compilation,
+                ).unwrap();
+                let pending = resident.provenance_for(&own).unwrap();
+                let installed = resident.install_admitted_turn(
+                    own, TurnImageAcquisition::Compile, pending, None,
+                ).expect("the same code owner reaches actual native installation");
+                assert!(matches!(
+                    installed.provenance.original_sources.require_unique(17),
+                    Err(ResidentError::MissingOriginalSource { known_origins: 0, .. }),
+                ), "raw prepared code gains no source origin from the live transaction");
+                resident.state.prepared_mut().unwrap().unpin(installed.program);
+                let own = resident.admit_turn_code_in(
+                    source.scope(), a.code(), TurnInstallationAdmission::Compilation,
+                ).unwrap();
+                let pending = resident.provenance_for(&own).unwrap();
+                let foreign = resident.admit_turn_code_in(
+                    source.scope(), b.code(), TurnInstallationAdmission::Compilation,
+                ).unwrap();
+                let before = resident.residency();
+                let compiled = tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+                assert!(matches!(
+                    resident.install_admitted_turn(foreign, TurnImageAcquisition::Compile, pending, None),
+                    Err(ResidentError::ProvenanceCodeOwnerMismatch),
+                ));
+                assert_eq!(resident.residency(), before);
+                assert_eq!(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), compiled);
+            },
+        ).unwrap().into_outcome().action;
     }
 
     proptest! {

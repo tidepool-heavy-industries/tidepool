@@ -2249,15 +2249,20 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                         output.code(),
                         TurnInstallationAdmission::Compilation,
                     )
-                    .and_then(|admission| source.provenance_for(&admission))
+                    .and_then(|admission| {
+                        source
+                            .provenance_for(&admission)
+                            .map(|prepared| prepared.metadata)
+                    })
                     .unwrap()
             })
         })
         .collect::<Vec<_>>();
     for (output, retained) in outputs.iter().zip(&reobserved) {
-        let recomputed = CompiledProvenancePlan::build(&output.code())
+        let mut recomputed = CompiledProvenancePlan::build(&output.code())
             .unwrap()
             .instantiate(&source.display_owners);
+        Arc::make_mut(&mut recomputed).original_sources = NativeSourceCustody::default();
         assert_eq!(
             retained, &recomputed,
             "retained plan agrees with fresh selected-fact recomputation"
@@ -2394,7 +2399,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                         compiled.code(),
                         TurnInstallationAdmission::Compilation,
                     )
-                    .and_then(|admission| source.provenance_for(&admission))
+                    .and_then(|admission| {
+                        source
+                            .provenance_for(&admission)
+                            .map(|prepared| prepared.metadata)
+                    })
                     .unwrap()
                     .authenticated_inputs
                     .clone()
@@ -2420,7 +2429,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                             compiled.code(),
                             TurnInstallationAdmission::Compilation,
                         )
-                        .and_then(|admission| source.provenance_for(&admission))),
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
                     ))
@@ -2436,7 +2449,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                             compiled.code(),
                             TurnInstallationAdmission::Compilation,
                         )
-                        .and_then(|admission| source.provenance_for(&admission))),
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::SourceScopeAdmission
                     ))
@@ -2453,7 +2470,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                             compiled.code(),
                             TurnInstallationAdmission::Compilation,
                         )
-                        .and_then(|admission| source.provenance_for(&admission))
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })
                         .unwrap()
                         .authenticated_inputs
                         .clone()
@@ -3862,11 +3883,13 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
                     TurnInstallationAdmission::ActivationPreviewFresh(compiled.admission()),
                 )
                 .unwrap();
+            let provenance = resident.provenance_for(&admission).unwrap();
             resident.install_admitted_turn(
                 admission,
                 TurnImageAcquisition::Ready {
                     bundle: &incomplete,
                 },
+                provenance,
                 None,
             )
         });
