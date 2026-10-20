@@ -1939,6 +1939,8 @@ class IsolatedLibtestTests(unittest.TestCase):
             'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600',
             'TIDEPOOL_TIMING': '1',
             'TIDEPOOL_MEMO_TRACE': '1',
+            'RUST_LOG': 'tidepool::artifact_inventory::ambiguity_trace=debug',
+            'RUST_BACKTRACE': '1',
             'UNRELATED_VARIABLE': 'not-forwarded',
         }
         record = {}
