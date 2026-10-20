@@ -5903,10 +5903,9 @@ mod tests {
             .unwrap();
         let authored_only = authored_admission.artifacts();
         let authored_groups =
-            crate::declaration_context::certify_artifact_view_groups_with_validation(
+            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
                 &authored_only,
-                &[],
-                &[],
+                None,
                 &mut validation,
             )
             .unwrap();
@@ -5961,13 +5960,13 @@ mod tests {
                 "available sibling groups cannot issue completion authority"
             );
         }
-        let groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
-            &complete,
-            &[],
-            &[],
-            &mut validation,
-        )
-        .unwrap();
+        let groups =
+            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+                &complete,
+                None,
+                &mut validation,
+            )
+            .unwrap();
         certified_products::certify_target_owners(&target, &accepted, &groups, &BTreeMap::new())
             .unwrap();
         for mutation in 0..4 {

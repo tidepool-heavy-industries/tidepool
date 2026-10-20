@@ -462,27 +462,39 @@ fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
         (vec![second_owner.clone(), first_owner.clone()], first_owner),
         (vec![first_owner.clone(), first_owner.clone()], first_owner),
     ] {
-        let selected =
-            RetainedArtifactMaterialization::select_custody_inputs(&owners, &metadata.retained);
+        let selected = RetainedArtifactMaterialization::select_custody_inputs(
+            &owners,
+            &metadata.retained,
+            &first
+                .artifact_view()
+                .selected_native_binding_rows()
+                .1
+                .into_iter()
+                .collect(),
+        );
         assert_eq!(selected.len(), 1);
         assert!(Arc::ptr_eq(&selected[0], expected));
     }
     let empty = ArtifactInventory::default()
         .empty_view()
         .metadata_snapshot();
-    assert!(
-        RetainedArtifactMaterialization::select_custody_inputs(&[first_owner.clone()], &empty)
-            .is_empty()
-    );
+    assert!(RetainedArtifactMaterialization::select_custody_inputs(
+        &[first_owner.clone()],
+        &empty,
+        &BTreeSet::new()
+    )
+    .is_empty());
     let beta = metadata.entries[&identity("fixture", "Beta")].descriptor.id;
-    let selected_metadata = first
-        .artifact_view()
-        .select_roots(vec![beta])
-        .unwrap()
-        .metadata_snapshot();
+    let selected_view = first.artifact_view().select_roots(vec![beta]).unwrap();
+    let selected_metadata = selected_view.metadata_snapshot();
     let captured = RetainedArtifactMaterialization::select_custody_inputs(
         &[first_owner.clone()],
         &selected_metadata,
+        &selected_view
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect(),
     );
     assert_eq!(captured.len(), 1);
     assert!(!Arc::ptr_eq(&captured[0], first_owner));
@@ -612,6 +624,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .artifacts()
             .retain_materialization(&metadata, |parents| {
                 context.materialize_retained_artifacts(
+                    context.artifact_view(),
                     &metadata,
                     parents,
                     tempfile::tempdir().unwrap(),
@@ -857,15 +870,13 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         &Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
         "PrivateBase",
     );
-    let materialize = |context: &Arc<ExactDeclarationContext>,
-                       metadata: &CompilerArtifactMetadata| {
-        context
-            .owner
-            .facts
-            .compiler_support
+    let materialize = |context: &Arc<ExactDeclarationContext>, inputs: &RequestCompilerInputs| {
+        let metadata = &inputs.metadata;
+        inputs
             .artifacts()
             .retain_materialization(metadata, |parents| {
                 context.materialize_retained_artifacts(
+                    inputs.artifacts(),
                     metadata,
                     parents,
                     tempfile::tempdir().unwrap(),
@@ -925,7 +936,9 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     let descendant = extend(&ancestor, "BeforePrivate");
     let completed = materialize(
         &descendant,
-        &descendant.compiler_metadata_snapshot().unwrap(),
+        &ProtectedScaffoldRequirements::default()
+            .compiler_inputs(&descendant, None)
+            .unwrap(),
     );
     assert!(completed.groups.is_empty());
     assert!(completed.graph_paths.is_empty());
@@ -935,7 +948,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         late_inputs.metadata.retained.selected_native_groups.len(),
         2
     );
-    let late = materialize(&ancestor, &late_inputs.metadata);
+    let late = materialize(&ancestor, &late_inputs);
     let late_directory = late.directory().path().to_path_buf();
     let next = extend(&descendant, "AfterPrivate");
     let (inputs, support) = private_inputs(&next);
@@ -946,17 +959,25 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             .unwrap()
             .materialization_key()
     );
-    let current = materialize(&next, &inputs.metadata);
+    let current = materialize(&next, &inputs);
     let current_directory = current.directory().path().to_path_buf();
-    let check_native = |owner: &RetainedArtifactMaterialization,
-                        metadata: &CompilerArtifactMetadata| {
+    let check_native = |owner: &RetainedArtifactMaterialization, inputs: &RequestCompilerInputs| {
+        let metadata = &inputs.metadata;
         assert_eq!(metadata.retained.selected_native_groups.len(), 2);
-        let selected =
-            RetainedArtifactMaterialization::selected_group_refs([owner], &metadata.retained);
+        let selected = RetainedArtifactMaterialization::selected_group_refs(
+            [owner],
+            &inputs
+                .artifacts()
+                .selected_native_binding_rows()
+                .1
+                .into_iter()
+                .collect(),
+        );
         assert_eq!(selected.len(), 2);
         let root = selected
             .iter()
-            .find(|group| group.owner().module == "LateNativeRoot")
+            .find(|(_, group)| group.owner().module == "LateNativeRoot")
+            .map(|(_, group)| *group)
             .unwrap();
         assert_eq!(root.imports(), std::slice::from_ref(&import));
         let bindings = root.group().definitions().bindings();
@@ -970,8 +991,8 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             root_product_bytes
         );
     };
-    check_native(&late, &late_inputs.metadata);
-    check_native(&current, &inputs.metadata);
+    check_native(&late, &late_inputs);
+    check_native(&current, &inputs);
     let paths = current
         .graph_path_refs()
         .into_iter()
@@ -1035,7 +1056,9 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     for path in paths.values() {
         assert!(path.is_file());
     }
-    let restored_metadata = captured.compiler_metadata_snapshot().unwrap();
+    let restored_metadata = ProtectedScaffoldRequirements::default()
+        .compiler_inputs(&captured, None)
+        .unwrap();
     let restored = materialize(&captured, &restored_metadata);
     check_native(&restored, &restored_metadata);
     assert_eq!(restored.payload_work.written_bytes, 0);

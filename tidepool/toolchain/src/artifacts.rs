@@ -1006,8 +1006,12 @@ pub fn prepare_world_cell_program(
                     .as_ref()
                     .map_or_else(|| segment.artifacts(), |prefix| prefix.artifact_view());
                 let prior_groups = native_prefix.as_ref().map_or_else(
-                    || segment.groups(),
-                    |prefix| prefix.certified_groups.as_ref(),
+                    || segment.group_baseline(),
+                    |prefix| {
+                        crate::declaration_context::CertifiedNativeGroupBaseline::Target(
+                            prefix.target.certified_groups(),
+                        )
+                    },
                 );
                 let admitted = admit_native_target_products(
                     *program.producer_sha256(),
@@ -1018,7 +1022,7 @@ pub fn prepare_world_cell_program(
                     Some(&segment.originals),
                     Some(entry),
                     None,
-                    &[],
+                    None,
                     Some(SegmentItemDemand {
                         selection: &mut artifacts,
                         view: prior_view,
@@ -1149,7 +1153,7 @@ struct BoundSegment {
 struct SegmentItemDemand<'a> {
     selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
     view: &'a crate::artifact_inventory::ArtifactView,
-    groups: &'a [certified_products::PendingCertifiedGroup],
+    groups: crate::declaration_context::CertifiedNativeGroupBaseline<'a>,
 }
 
 struct SegmentCursor {
@@ -1175,10 +1179,16 @@ impl SegmentNativePrefix {
         }
     }
 
-    fn groups(&self) -> &[certified_products::PendingCertifiedGroup] {
+    fn groups(&self) -> crate::declaration_context::CertifiedNativeGroupBaseline<'_> {
         match self {
-            Self::Initial(request) => request.groups(),
-            Self::Advanced(products) => &products.certified_groups,
+            Self::Initial(request) => {
+                crate::declaration_context::CertifiedNativeGroupBaseline::InitialRequest(request)
+            }
+            Self::Advanced(products) => {
+                crate::declaration_context::CertifiedNativeGroupBaseline::Target(
+                    products.target.certified_groups(),
+                )
+            }
         }
     }
 }
@@ -4134,7 +4144,7 @@ fn seal_turn_outputs_with_validation(
         segment_originals,
         typed_entry,
         request_admission.map(|request| request.compiler_inputs().artifacts()),
-        request_admission.map_or(&[], |request| request.groups()),
+        request_admission.map(|request| request.certified_groups()),
         segment_cursor.take(),
         validation,
     )?;
@@ -4307,7 +4317,7 @@ fn admit_native_target_products(
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     compiler_artifacts: Option<&crate::artifact_inventory::ArtifactView>,
-    inherited_groups: &[certified_products::PendingCertifiedGroup],
+    inherited_groups: Option<&crate::declaration_context::CertifiedArtifactGroupBindings>,
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
@@ -4376,17 +4386,22 @@ fn admit_native_target_products(
         }
     };
     let artifact_view = admitted_target.artifacts();
-    let selected_groups = Arc::new(
-        crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+    let selected_groups = Arc::new(match segment_cursor.as_ref() {
+        Some(cursor) => {
+            crate::declaration_context::certify_bound_artifact_view_groups_with_validation(
+                &artifact_view,
+                &certified.groups,
+                cursor.groups,
+                validation,
+            )?
+        }
+        None => crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
             &artifact_view,
             &certified.groups,
-            segment_cursor
-                .as_ref()
-                .map(|cursor| cursor.groups)
-                .unwrap_or_else(|| inherited_groups),
+            inherited_groups,
             validation,
         )?,
-    );
+    });
     let package_closure =
         package_catalog.select(selected_groups.groups(), &imports, &validation.inventory)?;
     let pending_imports = certified_products::certify_target_owners_with_validation(
@@ -6179,7 +6194,7 @@ fn compile_invocation_inner(
                 &certified.groups,
                 exact_request
                     .as_ref()
-                    .map_or(&[], |request| request.groups.as_ref()),
+                    .map(|request| request.groups.as_ref()),
                 &mut validation,
             )?,
         );

@@ -903,71 +903,28 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
 }
 
 #[test]
-fn selected_source_islands_require_the_exact_helper_variant() {
+fn reference_source_islands_distinguish_exact_helper_variants() {
     let catalog = Catalog::new(true, [61, 67, 71, 73, 79, 83]);
-    let available = catalog
-        .originals
-        .iter()
-        .map(|entry| match &entry.payload {
-            ArtifactPayload::Original(product) => (entry.descriptor.id, product),
-            _ => unreachable!(),
-        })
-        .collect::<BTreeMap<_, _>>();
-    let selected = catalog
-        .closure([(0, 0, 11)])
-        .into_iter()
-        .map(|group| catalog.key(group))
-        .collect::<BTreeSet<_>>();
-    let certify =
-        |available: &BTreeMap<ArtifactId, &crate::recovery_artifacts::CertifiedRecoveryProduct>,
-         selected: &BTreeSet<NativeGroupKey>| {
-            crate::certified_products::certify_selected_owned_products_in_context_with_validation(
-                available,
-                &[],
-                selected,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-        };
-    assert_eq!(
-        certify(&available, &selected).unwrap().len(),
-        selected.len(),
-        "one selected source island uses its exact helper variant"
-    );
-    let both_islands = catalog
-        .closure([(0, 0, 11), (0, 1, 11)])
-        .into_iter()
-        .map(|group| catalog.key(group))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        certify(&available, &both_islands).unwrap().len(),
-        both_islands.len(),
-        "both same-named helper variants may be retained across exact domains"
-    );
-    let mut wrong_selection = selected.clone();
-    wrong_selection.remove(&catalog.key((1, 1, 3)));
-    wrong_selection.extend(
-        catalog
-            .closure([(1, 0, 3)])
-            .into_iter()
-            .map(|group| catalog.key(group)),
-    );
-    assert!(
-        certify(&available, &wrong_selection).is_err(),
-        "a same module/ordinal/binder with another original version cannot satisfy the source edge"
-    );
-    let mut missing_helper = available.clone();
-    missing_helper.remove(&catalog.original(1, 1).descriptor.id);
-    assert!(certify(&missing_helper, &selected).is_err());
+    let selected = catalog.closure([(0, 0, 11)]);
+    let both = catalog.closure([(0, 0, 11), (0, 1, 11)]);
+    assert!(selected.is_subset(&both));
+    assert_ne!(selected, both);
+    let consumer = match &catalog.original(0, 0).payload {
+        ArtifactPayload::Original(product) => product,
+        _ => unreachable!(),
+    };
+    let imports = crate::certified_products::original_native_group_imports(consumer, 11).unwrap();
+    assert!(imports.iter().any(|import| matches!(import,
+        PendingImportOwner::Source { owner, original_ordinal: 3, .. }
+        if owner == match &catalog.original(1, 1).payload {
+            ArtifactPayload::Original(product) => product.owner(), _ => unreachable!(),
+        }
+    )));
     assert_ne!(
         catalog.expected_ids([Some(0); MODULES]),
-        catalog.expected_ids([Some(1); MODULES]),
-        "reference role observations distinguish availability from the active implementation"
+        catalog.expected_ids([Some(1); MODULES])
     );
-    assert_ne!(
-        catalog.closure([(0, 0, 11)]),
-        catalog.closure([(0, 0, 29)]),
-        "reference graph observations distinguish an actual dependency from zero-edge groups"
-    );
+    assert_ne!(catalog.closure([(0, 0, 11)]), catalog.closure([(0, 0, 29)]));
 }
 
 #[test]

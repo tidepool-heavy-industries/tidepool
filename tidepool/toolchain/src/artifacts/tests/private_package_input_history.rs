@@ -650,13 +650,13 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-    let late_groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
-        &demanded_view,
-        &[],
-        late_request.groups.as_ref(),
-        &mut PackageInterfaceValidation::default(),
-    )
-    .unwrap();
+    let late_groups =
+        crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+            &demanded_view,
+            Some(&late_request.groups),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
     assert_eq!(late_groups.len(), 1);
     let selection_operation = PackageInterfaceValidation::default().inventory.clone();
     let direct_only = catalog
