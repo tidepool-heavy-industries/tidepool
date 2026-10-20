@@ -3454,11 +3454,15 @@ impl WorldStageOutputs {
 /// exact ordered reservation. Named outputs remain in that physical owner.
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedWorldCellStage {
+    index: usize,
     identity: WorldCellStageIdentity,
     ordinals: Vec<usize>,
     outputs: WorldStageOutputs,
 }
 impl CheckedWorldCellStage {
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
     pub(crate) fn identity(&self) -> &WorldCellStageIdentity {
         &self.identity
     }
@@ -4731,6 +4735,7 @@ fn decode_world_stages(
         };
         next += ordinals.len();
         stages.push(Arc::new(CheckedWorldCellStage {
+            index: stages.len(),
             identity,
             ordinals,
             outputs,
@@ -5096,6 +5101,8 @@ mod answer_tests {
         };
         let checked = decode(rows.clone(), &manifest).unwrap();
         assert_eq!(checked[0].ordinals(), &[0]);
+        assert_eq!(checked[0].index(), 0);
+        assert_eq!(checked[1].index(), 1);
         assert!(
             matches!(checked[1].identity(), WorldCellStageIdentity::Declaration { ordinal: 1, owner } if owner.module == "Tidepool.Session.Lib.G8")
         );

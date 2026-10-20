@@ -4933,11 +4933,16 @@ pub(crate) fn admit_world_cell(
                 let planned = planned_declarations.get(&item.ordinal()).ok_or_else(|| {
                     failure("World original lacks its planned declaration certificate")
                 })?;
+                let (stage_source, stage_text) = sources[item.proof().stage().index()];
                 let product = planned.certificate.product();
                 if product.owner().unit != proof.owner().unit
                     || product.owner().module != proof.owner().module
                     || product.owner().skinny_iface_sha256 != *proof.iface_sha256()
                     || planned.certificate.toolchain_identity_sha256() != *program.producer_sha256()
+                    || planned.receipt_digest != *program.certificate_sha256()
+                    || planned.source != stage_text
+                    || planned.certificate.source_sha256()
+                        != *stage_source.witness().source_sha256()
                 {
                     return Err(failure(
                         "World original certificate belongs to another owner or producer",
