@@ -2435,6 +2435,7 @@ impl DemandNativeInputs {
         let mut selected = BTreeSet::new();
         let mut bindings = BTreeMap::new();
         let mut available = BTreeMap::new();
+        let mut selected_contributions = Vec::new();
         for (key, binding) in roots {
             budget.checkpoint()?;
             budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;
@@ -2491,26 +2492,70 @@ impl DemandNativeInputs {
                     }
                 }
             }
+            budget.reserve::<Arc<crate::artifact_inventory::NativeOfferContribution>>(1)?;
+            selected_contributions.push(closure);
         }
-        // The empty slice is only an absent reuse memo. This existing issuer
-        // returns every selected authenticated group as the final authority.
-        let mut rows = crate::certified_products::certify_selected_owned_group_rows_in_context_with_validation(
-            &available, &[], &selected, validation,
-        ).map_err(compiler_evidence_failure)?;
-        // Both immutable slices use the same issued key order. No receiving
-        // consumer needs to rediscover an artifact from its rendered owner.
-        rows.sort_by_key(|(key, _)| *key);
-        if rows.len() != bindings.len()
-            || rows
-                .iter()
-                .zip(bindings.keys())
-                .any(|((key, _), binding_key)| key != binding_key)
-        {
+        let mut group_validation =
+            crate::certified_products::OriginalValidationInventory::selected(
+                &available, &operation,
+            )
+            .map_err(compiler_evidence_failure)?;
+        let mut certified =
+            BTreeMap::<crate::artifact_inventory::NativeGroupBinding, PendingCertifiedGroup>::new();
+        for contribution in &selected_contributions {
+            let mut previous = BTreeMap::new();
+            for id in contribution.originals() {
+                for binding in contribution.original_groups(*id) {
+                    if let Some(row) = certified.get(&binding) {
+                        budget.reserve::<(
+                            crate::artifact_inventory::NativeGroupBinding,
+                            &PendingCertifiedGroup,
+                            [usize; 4],
+                        )>(1)?;
+                        previous.insert(binding, row);
+                    }
+                }
+            }
+            let additional = group_validation
+                .certify_selected_scope(
+                    crate::certified_products::SelectedOriginalGroupScope::Contribution(
+                        contribution,
+                    ),
+                    &previous,
+                    validation,
+                )
+                .map_err(compiler_evidence_failure)?;
+            for (binding, row) in additional {
+                budget.reserve::<(
+                    crate::artifact_inventory::NativeGroupBinding,
+                    PendingCertifiedGroup,
+                    [usize; 4],
+                )>(1)?;
+                if certified.insert(binding, row).is_some() {
+                    return Err(failure("certified receipt group was issued twice"));
+                }
+            }
+        }
+        let mut groups = Vec::new();
+        budget.reserve::<PendingCertifiedGroup>(bindings.len())?;
+        for (key, binding) in &bindings {
+            let group = certified
+                .remove(binding)
+                .ok_or_else(|| failure("certified receipt group lost its exact binding"))?;
+            if binding.binding.artifact() != key.artifact
+                || binding.original_ordinal != key.original_ordinal
+            {
+                return Err(failure(
+                    "certified receipt groups and executable bindings disagree",
+                ));
+            }
+            groups.push(group);
+        }
+        if !certified.is_empty() {
             return Err(failure(
-                "certified receipt groups and executable bindings disagree",
+                "certified receipt groups exceed selected executable bindings",
             ));
         }
-        let groups = rows.into_iter().map(|(_, group)| group).collect();
         Ok(DemandCertifiedGroups {
             basis: Arc::clone(&self.cold),
             groups,
@@ -13679,21 +13724,49 @@ fn certify_artifact_view_groups(
         }
         _ => {}
     }
-    let additional =
-        crate::certified_products::certify_selected_owned_group_rows_in_context_with_validation(
-            &available,
-            &current,
-            &metadata.selected_native_groups,
+    let keyed_current = selected_bindings
+        .iter()
+        .filter_map(|binding| {
+            let key = NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            };
+            current_positions
+                .get(&key)
+                .map(|index| (*binding, &current[*index]))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut group_validation = crate::certified_products::OriginalValidationInventory::selected(
+        &available,
+        &validation.inventory,
+    )
+    .map_err(compiler_evidence_failure)?;
+    let additional = group_validation
+        .certify_selected_scope(
+            crate::certified_products::SelectedOriginalGroupScope::View(view),
+            &keyed_current,
             validation,
         )
-        .map_err(failure)?;
-    for (key, group) in additional {
-        if current_positions.insert(key, current.len()).is_some() {
-            return Err(failure(
-                "certified artifact group duplicated an admitted key",
-            ));
+        .map_err(compiler_evidence_failure)?;
+    for (binding, group) in additional {
+        let key = NativeGroupKey {
+            artifact: binding.binding.artifact(),
+            original_ordinal: binding.original_ordinal,
+        };
+        if let Some(index) = current_positions.get(&key) {
+            let previous = &current[*index];
+            if previous.group() != group.group()
+                || previous.imports() != group.imports()
+                || previous.owner() != group.owner()
+            {
+                return Err(failure(
+                    "scoped groups disagree on their immutable physical row",
+                ));
+            }
+        } else {
+            current_positions.insert(key, current.len());
+            current.push(group);
         }
-        current.push(group);
     }
     let bindings = selected_bindings
         .into_iter()

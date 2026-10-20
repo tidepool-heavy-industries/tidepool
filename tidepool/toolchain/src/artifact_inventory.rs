@@ -5863,6 +5863,62 @@ fn native_requirements_for_exact_groups_in_custody(
     ))
 }
 
+fn original_group_children_in_scope(
+    state: &InventoryState,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
+    group: NativeGroupBinding,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<Vec<NativeGroupBinding>, CompileError> {
+    let source = InventoryNodeKey::Group(group);
+    if !owned.contains(&source) {
+        return Err(failure("original group is outside its issued selection"));
+    }
+    let mut carrier = None;
+    let mut children = Vec::new();
+    for (target, edge) in state.outgoing(source) {
+        crate::host_work::checkpoint()?;
+        if !owned.contains(&target) {
+            return Err(failure(
+                "original group dependency is outside its issued selection",
+            ));
+        }
+        match (target, edge) {
+            (InventoryNodeKey::Artifact(binding), ArtifactDependency::Interface) => {
+                if binding.artifact != group.binding.artifact()
+                    || carrier.replace(binding).is_some()
+                {
+                    return Err(failure("original group has competing carrier bindings"));
+                }
+            }
+            (
+                InventoryNodeKey::Group(child),
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal,
+                    required_ordinal,
+                },
+            ) => {
+                if *dependent_ordinal != group.original_ordinal
+                    || *required_ordinal != child.original_ordinal
+                {
+                    return Err(failure(
+                        "original group dependency ordinal differs from its issued edge",
+                    ));
+                }
+                operation
+                    .reserve::<NativeGroupBinding>(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                children.push(child);
+            }
+            (_, ArtifactDependency::NativeBinding { .. }) => {}
+            _ => return Err(failure("original group has an invalid dependency edge")),
+        }
+    }
+    if carrier.is_none() {
+        return Err(failure("original group lacks its exact carrier binding"));
+    }
+    Ok(children)
+}
+
 #[derive(Default)]
 struct NativeRequirementCollector {
     bindings: BTreeSet<NativeBindingRequirement>,
@@ -7595,11 +7651,42 @@ impl ArtifactView {
         &self,
     ) -> (NativeGroupViewStamp, Vec<NativeGroupBinding>) {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let bindings = self.selected_nodes(&state).iter().filter_map(|node| match node {
-            InventoryNodeKey::Group(group) => Some(*group),
-            _ => None,
-        }).collect();
+        let bindings = self
+            .selected_nodes(&state)
+            .iter()
+            .filter_map(|node| match node {
+                InventoryNodeKey::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect();
         (NativeGroupViewStamp(Arc::downgrade(&self.lease)), bindings)
+    }
+
+    pub(crate) fn original_group_bindings(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let selected = self.selected_nodes(&state);
+        operation
+            .reserve::<NativeGroupBinding>(selected.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        Ok(selected
+            .iter()
+            .filter_map(|node| match node {
+                InventoryNodeKey::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub(crate) fn original_group_children(
+        &self,
+        group: NativeGroupBinding,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        original_group_children_in_scope(&state, self.selected_nodes(&state), group, operation)
     }
 
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {

@@ -6893,6 +6893,7 @@ pub(crate) fn validate_available_originals_with_validation(
                 &key,
                 &facts,
                 |required| advertised.contains(required) || closure.contains(required),
+                None,
                 validation,
             )?;
         }
@@ -7197,13 +7198,52 @@ type OriginalGroupFacts<'a> = BTreeMap<
 
 /// Borrow one immutable inventory for this validation call. Authentication of
 /// group facts is separate from each root's allowed dependency membership.
-struct OriginalValidationInventory<'a> {
+#[derive(Clone, Copy)]
+pub(crate) enum SelectedOriginalGroupScope<'a> {
+    View(&'a crate::artifact_inventory::ArtifactView),
+    Contribution(&'a crate::artifact_inventory::NativeOfferContribution),
+}
+
+impl SelectedOriginalGroupScope<'_> {
+    fn bindings(
+        &self,
+        operation: &InventoryOperation,
+    ) -> Result<Vec<crate::artifact_inventory::NativeGroupBinding>, crate::CompileError> {
+        match self {
+            Self::View(view) => view.original_group_bindings(operation),
+            Self::Contribution(proof) => proof.original_group_bindings(operation),
+        }
+    }
+    fn children(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        operation: &InventoryOperation,
+    ) -> Result<Vec<crate::artifact_inventory::NativeGroupBinding>, crate::CompileError> {
+        match self {
+            Self::View(view) => view.original_group_children(binding, operation),
+            Self::Contribution(proof) => proof.original_group_children(binding, operation),
+        }
+    }
+    fn has_home_owner(&self, unit: &str, module: &str) -> bool {
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: unit.to_owned(),
+            module: module.to_owned(),
+        };
+        match self {
+            Self::View(view) => view.has_observed_owner(&owner),
+            Self::Contribution(proof) => proof.has_observed_original_owner(&owner),
+        }
+    }
+}
+
+pub(crate) struct OriginalValidationInventory<'a> {
     available: &'a BTreeMap<
         crate::artifact_inventory::ArtifactId,
         &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
     >,
     native_ids: std::collections::HashMap<CachedHomeOwner, crate::artifact_inventory::ArtifactId>,
     home_modules: BTreeSet<(String, String)>,
+    selected_facts: OriginalGroupFacts<'a>,
 }
 
 impl<'a> OriginalValidationInventory<'a> {
@@ -7236,7 +7276,116 @@ impl<'a> OriginalValidationInventory<'a> {
             available,
             native_ids,
             home_modules,
+            selected_facts: BTreeMap::new(),
         })
+    }
+
+    /// Selected scopes already own exact children. Their package census does
+    /// not impose a namespace choice across historical original custody.
+    pub(crate) fn selected(
+        available: &'a BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
+        >,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        operation.reserve::<((String, String), [usize; 4])>(available.len())?;
+        for product in available.values() {
+            crate::host_work::checkpoint()
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            operation.charge(product.owner().unit.len() + product.owner().module.len())?;
+        }
+        Ok(Self {
+            available,
+            native_ids: std::collections::HashMap::new(),
+            home_modules: available
+                .values()
+                .map(|product| {
+                    let owner = product.owner();
+                    (owner.unit.clone(), owner.module.clone())
+                })
+                .collect(),
+            selected_facts: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) fn certify_selected_scope(
+        &mut self,
+        scope: SelectedOriginalGroupScope<'_>,
+        current: &BTreeMap<crate::artifact_inventory::NativeGroupBinding, &PendingCertifiedGroup>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<
+        Vec<(
+            crate::artifact_inventory::NativeGroupBinding,
+            PendingCertifiedGroup,
+        )>,
+    > {
+        let operation = Arc::clone(&validation.inventory);
+        let bindings = scope
+            .bindings(&operation)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        operation.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
+            bindings.len(),
+        )?;
+        let selected = bindings.iter().copied().collect::<BTreeSet<_>>();
+        if current.keys().any(|binding| !selected.contains(binding)) {
+            return Err(CertificationError::Mismatch(
+                "current group outside selected binding closure",
+            ));
+        }
+        for binding in &bindings {
+            crate::host_work::checkpoint()
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            let key = crate::artifact_inventory::NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            };
+            if !self.selected_facts.contains_key(&key) {
+                operation.reserve::<(crate::artifact_inventory::NativeGroupKey, [usize; 8])>(1)?;
+                let facts = self.authenticate_group(&key)?;
+                self.selected_facts.insert(key, facts);
+            }
+        }
+        let mut additional = Vec::new();
+        for binding in bindings {
+            crate::host_work::checkpoint()
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            let key = crate::artifact_inventory::NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            };
+            let (original, _) = self.selected_facts[&key];
+            if let Some(group) = current.get(&binding) {
+                if original.owner != group.owner
+                    || !(Arc::ptr_eq(&original.group, &group.group)
+                        || original.group == group.group)
+                    || !(Arc::ptr_eq(&original.imports, &group.imports)
+                        || original.imports == group.imports)
+                {
+                    return Err(CertificationError::Mismatch("shared original home groups"));
+                }
+            }
+            let children = scope
+                .children(binding, &operation)
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            // The scoped edge reader already required every child to belong
+            // to this same selected closure, including its exact issuing scope.
+            self.validate_imports(
+                &key,
+                &self.selected_facts,
+                |_| true,
+                Some((&children, scope)),
+                validation,
+            )?;
+            if !current.contains_key(&binding) {
+                operation.reserve::<(
+                    crate::artifact_inventory::NativeGroupBinding,
+                    PendingCertifiedGroup,
+                )>(1)?;
+                additional.push((binding, original.admitted()));
+            }
+        }
+        Ok(additional)
     }
 
     fn authenticate_group(
@@ -7272,6 +7421,10 @@ impl<'a> OriginalValidationInventory<'a> {
         key: &crate::artifact_inventory::NativeGroupKey,
         originals: &OriginalGroupFacts<'_>,
         contains: impl Fn(&crate::artifact_inventory::NativeGroupKey) -> bool,
+        children: Option<(
+            &[crate::artifact_inventory::NativeGroupBinding],
+            SelectedOriginalGroupScope<'_>,
+        )>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<()> {
         use crate::artifact_inventory::NativeGroupKey;
@@ -7287,19 +7440,51 @@ impl<'a> OriginalValidationInventory<'a> {
                     original_ordinal,
                     binder,
                 } => {
-                    let artifact = native_ids.get(owner).ok_or_else(|| {
-                        source_closure_mismatch(
-                            "selected_original_carrier",
-                            Some(owner),
-                            *original_ordinal,
-                            binder,
-                            None,
-                        )
-                    })?;
-                    let required = NativeGroupKey {
-                        artifact: *artifact,
-                        original_ordinal: *original_ordinal,
+                    let required = match children {
+                        Some((children, _)) => {
+                            let mut matching = children.iter().filter(|child| {
+                                let child_key = NativeGroupKey {
+                                    artifact: child.binding.artifact(),
+                                    original_ordinal: child.original_ordinal,
+                                };
+                                child.original_ordinal == *original_ordinal
+                                    && originals
+                                        .get(&child_key)
+                                        .is_some_and(|(group, _)| &group.owner == owner)
+                            });
+                            let child = matching.next().ok_or_else(|| {
+                                source_closure_mismatch(
+                                    "selected_original_edge",
+                                    Some(owner),
+                                    *original_ordinal,
+                                    binder,
+                                    None,
+                                )
+                            })?;
+                            if matching.next().is_some() {
+                                return Err(CertificationError::Mismatch(
+                                    "source import has competing issued native edges",
+                                ));
+                            }
+                            NativeGroupKey {
+                                artifact: child.binding.artifact(),
+                                original_ordinal: child.original_ordinal,
+                            }
+                        }
+                        None => NativeGroupKey {
+                            artifact: *native_ids.get(owner).ok_or_else(|| {
+                                source_closure_mismatch(
+                                    "selected_original_carrier",
+                                    Some(owner),
+                                    *original_ordinal,
+                                    binder,
+                                    None,
+                                )
+                            })?,
+                            original_ordinal: *original_ordinal,
+                        },
                     };
+                    let artifact = &required.artifact;
                     if !contains(&required)
                         || originals.get(&required).is_none_or(|(original, _)| {
                             original.owner != *owner || !original.group.binders().contains(binder)
@@ -7357,7 +7542,10 @@ impl<'a> OriginalValidationInventory<'a> {
                     interface_digest,
                     ..
                 } => {
-                    if home_modules.contains(&(unit.clone(), module.clone())) {
+                    validation.inventory.charge(unit.len() + module.len())?;
+                    if home_modules.contains(&(unit.clone(), module.clone()))
+                        || children.is_some_and(|(_, scope)| scope.has_home_owner(unit, module))
+                    {
                         return Err(CertificationError::Mismatch(
                             "home owner downgraded to package",
                         ));
@@ -7441,7 +7629,7 @@ fn validate_selected_originals_with_validation(
         if validation_roots.is_some_and(|roots| !roots.contains(key)) {
             continue;
         }
-        inventory.validate_imports(key, &originals, |_| true, validation)?;
+        inventory.validate_imports(key, &originals, |_| true, None, validation)?;
         if native_use == OriginalNativeUse::SelectedGroups && !inherited.contains(key) {
             additional.push((*key, group.admitted()));
         }
@@ -12734,6 +12922,92 @@ pub(crate) mod tests {
             assert!(weak.upgrade().is_none());
             eprintln!("original_membership_history owners=2 groups={} overlay_calls={overlay_calls} recovered=2", ordinals.len());
         }
+    }
+
+    #[test]
+    fn selected_group_validation_keeps_exact_bindings_across_equal_owner_custody() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+        let product = full_native_fixture("SelectedScopeIdentity", vec![(7, vec![])], 1);
+        let producer = product.module_interface().unwrap().producer_sha256();
+        let original = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
+        let alternate = Arc::new(
+            ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
+                .unwrap(),
+        );
+        let ArtifactPayload::Original(alternate_product) = &alternate.payload else {
+            unreachable!()
+        };
+        assert_eq!(product.owner(), alternate_product.owner());
+        assert_ne!(original.descriptor.id, alternate.descriptor.id);
+        let inventory = ArtifactInventory::default();
+        let selected = inventory
+            .admit_shared(&inventory.empty_view(), vec![original.clone()])
+            .unwrap();
+        let foreign = inventory
+            .admit_shared(&inventory.empty_view(), vec![alternate.clone()])
+            .unwrap();
+        let broad = selected.retain_custody(&foreign).unwrap();
+        let metadata = broad.metadata_snapshot();
+        let available = metadata
+            .artifacts
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+            .collect();
+        let mut validation = PackageInterfaceValidation::default();
+        let mut checked =
+            OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
+        let rows = checked
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (binding, row) = &rows[0];
+        assert_eq!(binding.binding.artifact(), original.descriptor.id);
+        assert_eq!(binding.original_ordinal, 7);
+        let current = BTreeMap::from([(*binding, row)]);
+        assert!(checked
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &current,
+                &mut validation
+            )
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            checked.certify_selected_scope(
+                SelectedOriginalGroupScope::View(&foreign),
+                &current,
+                &mut validation
+            ),
+            Err(CertificationError::Mismatch(
+                "current group outside selected binding closure"
+            ))
+        ));
+        let mut changed = row.clone();
+        changed.imports = vec![PendingImportOwner::Retained {
+            identity: testing::identity("Captured", "different"),
+            generation: 99,
+        }]
+        .into();
+        assert!(matches!(
+            checked.certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &BTreeMap::from([(*binding, &changed)]),
+                &mut validation
+            ),
+            Err(CertificationError::Mismatch("shared original home groups"))
+        ));
+        assert_eq!(
+            broad.selected_native_groups(),
+            selected.selected_native_groups()
+        );
+        assert_eq!(rows[0].0, *binding);
     }
 
     #[test]

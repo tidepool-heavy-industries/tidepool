@@ -1625,6 +1625,40 @@ impl NativeOfferContribution {
             })
     }
 
+    pub(crate) fn has_observed_original_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        self.offer()
+            .custody_lease()
+            .acquired_owner_counts
+            .contains_key(owner)
+    }
+
+    pub(crate) fn original_group_bindings(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        operation
+            .reserve::<NativeGroupBinding>(self.reachable.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        Ok(self
+            .reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub(crate) fn original_group_children(
+        &self,
+        group: NativeGroupBinding,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        let lease = self.offer().custody_lease();
+        let state = lease.inventory.0.lock().expect("inventory lock");
+        original_group_children_in_scope(&state, &self.reachable, group, operation)
+    }
+
     pub(crate) fn contains_group(&self, group: NativeGroupBinding) -> bool {
         self.reachable.contains(&ArtifactBindingNode::Group(group))
     }
