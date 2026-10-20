@@ -43,7 +43,7 @@ import Tidepool.CompilerProducts
   ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , StagedOriginalProducts, stagedOriginalBinders, withPriorStagedOriginalProducts
+  , StagedOriginalProducts, stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts
   , stagedDeclarationInputReferences
   , newPreparedOriginalInterfaceArtifactsWithPrior
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
@@ -68,7 +68,7 @@ import qualified Tidepool.EffectSchema
 import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature)
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained, unrecoveredExactProducts)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithPrior, unrecoveredExactProducts)
 import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver)
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
@@ -581,8 +581,9 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
                 [(originalOrdinal group, originalBinders group, originalGlobals group)
                  | group <- originalGroups originalProduct])
               | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
-            originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
+            originalPackageGlobals = requiredOriginalPackageGlobalsWithPrior
               originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
+              (stagedOriginalPackageDemand prior)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
           originalConstructors,originalSites,originalPackageGlobals)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}

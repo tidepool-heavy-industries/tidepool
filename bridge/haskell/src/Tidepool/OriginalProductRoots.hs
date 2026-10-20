@@ -2,7 +2,7 @@
 -- target no longer references. Their executable closure is part of admission.
 module Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
-  , requiredOriginalPackageGlobalsWithRetained
+  , requiredOriginalPackageGlobalsWithRetained, requiredOriginalPackageGlobalsWithPrior
   , ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand ) where
 
@@ -83,17 +83,28 @@ requiredOriginalPackageGlobalsWithRetained
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
   -> Set.Set SymbolIdentity -> [GlobalDecl] -> Either String [SymbolIdentity]
 requiredOriginalPackageGlobalsWithRetained fresh cached exact retained =
+  requiredOriginalPackageGlobalsWithPrior fresh cached exact retained (const (Right Nothing))
+
+-- The read-only prior query stays with its certified owner. It is evaluated
+-- only for reached symbols, never flattened into this current-group index.
+requiredOriginalPackageGlobalsWithPrior
+  :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
+  -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
+  -> Set.Set SymbolIdentity
+  -> (SymbolIdentity -> Either String (Maybe (Set.Set SymbolIdentity)))
+  -> [GlobalDecl] -> Either String [SymbolIdentity]
+requiredOriginalPackageGlobalsWithPrior fresh cached exact retained prior =
   -- The original inventory is immutable across target and recovery passes.
   -- Partially applying this function retains its validated binder index;
   -- each target still starts a fresh traversal of that inventory.
   case foldM insert Map.empty groups of
     Left reason -> const (Left reason)
-    Right indexed -> \target -> Set.toAscList <$> walk indexed Set.empty Set.empty
-      [globalIdentity global | global <- target
-        , globalRequiredGeneration global == Nothing
-        , globalIdentity global `Set.notMember` retained
-        , (symbolUnit (globalIdentity global), symbolModule (globalIdentity global))
-            `Set.member` owners]
+    Right indexed -> \target -> do
+      (roots,packages) <- foldM seed ([],Set.empty)
+        [globalIdentity global | global <- target
+          , globalRequiredGeneration global == Nothing
+          , globalIdentity global `Set.notMember` retained]
+      Set.toAscList <$> walk indexed Set.empty packages roots
   where
     groups =
       [ ((unit, name, fromIntegral (projectedOriginalOrdinal group)),
@@ -117,6 +128,11 @@ requiredOriginalPackageGlobalsWithRetained fresh cached exact retained =
       (\current binder -> if Map.member binder current
         then Left "duplicate original binder in package root inventory"
         else Right (Map.insert binder (key, globals) current)) indexed binders
+    seed (roots,packages) symbol
+      | (symbolUnit symbol,symbolModule symbol) `Set.member` owners = Right (symbol:roots,packages)
+      | otherwise = do
+          selected <- prior symbol
+          Right (roots,maybe packages (Set.union packages) selected)
     walk _ _ packages [] = Right packages
     walk indexed seen packages (symbol : pending)
       | symbol `Set.member` retained = walk indexed seen packages pending
@@ -125,10 +141,14 @@ requiredOriginalPackageGlobalsWithRetained fresh cached exact retained =
             | key `Set.member` seen -> walk indexed seen packages pending
             | otherwise -> walk indexed (Set.insert key seen) packages
                 ([identity | (identity, required) <- globals, required] ++ pending)
-          Nothing
-            | (symbolUnit symbol, symbolModule symbol) `Set.member` owners ->
-                let owner = (symbolUnit symbol, symbolModule symbol)
-                    reason = Map.findWithDefault "no original group" owner failures
-                in Left ("required source global has no original group in package root inventory: "
-                  ++ show symbol ++ ": " ++ reason)
-            | otherwise -> walk indexed seen (Set.insert symbol packages) pending
+          Nothing -> do
+            selected <- prior symbol
+            case selected of
+              Just leaves -> walk indexed seen (Set.union packages leaves) pending
+              Nothing
+                | (symbolUnit symbol, symbolModule symbol) `Set.member` owners ->
+                    let owner = (symbolUnit symbol, symbolModule symbol)
+                        reason = Map.findWithDefault "no original group" owner failures
+                    in Left ("required source global has no original group in package root inventory: "
+                      ++ show symbol ++ ": " ++ reason)
+                | otherwise -> walk indexed seen (Set.insert symbol packages) pending

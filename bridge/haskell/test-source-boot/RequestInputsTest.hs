@@ -1867,7 +1867,12 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readBootStage value = value && CacheEntry.result"
                           ,"let bootAnswerStage = readBootStage True"]
                         ,[(0,PlannedPrologue 71),(1,PlannedDeclaration 72),(2,PlannedBind 73)]
-                        ,["prologue","declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
+                        ,["prologue","declaration","exec"])
+                      ,("prior-package",unlines ["readPackageStage :: Int -> String"
+                          ,"readPackageStage value = show value"
+                          ,"let packageAnswerStage = readPackageStage 7"]
+                        ,[(0,PlannedDeclaration 81),(1,PlannedBind 82)]
+                        ,["declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
                       let ownRecipe = recipe {worldCellSource=source}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
@@ -1953,7 +1958,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 8 1)
+      unless (admissionParses == replicate 9 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
