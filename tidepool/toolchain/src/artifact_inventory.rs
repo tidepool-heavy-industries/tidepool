@@ -322,9 +322,103 @@ thread_local! {
     };
 }
 
+/// A source cause follows the selected root or exact parent edge. It is not
+/// graph identity, and available alternatives cannot contribute to this owner.
+#[derive(Clone, Debug)]
+enum NativeSourceCause {
+    Current,
+    Historical {
+        selected_at: NativeGroupBinding,
+        support: compiler_projection::SelectedNativeSupport,
+    },
+    Unwitnessed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum NativeSourceUse {
+    Root(NativeGroupBinding),
+    Edge {
+        parent: NativeGroupBinding,
+        child: NativeGroupBinding,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct NativeSourceReceipts(imbl::OrdMap<NativeSourceUse, Arc<[NativeSourceCause]>>);
+
+/// Live solver causes are not recoverable from authenticated graph facts.
+#[derive(Clone, Debug)]
+enum IssuedNativeSourceReceipt {
+    Solved(Arc<NativeSourceReceipts>),
+    Unwitnessed,
+}
+
+impl NativeSourceReceipts {
+    fn insert(&mut self, key: NativeSourceUse, cause: NativeSourceCause) -> bool {
+        let Some(held) = self.0.get(&key) else {
+            self.0.insert(key, Arc::from([cause]));
+            return true;
+        };
+        let mut held = held.to_vec();
+        match cause {
+            NativeSourceCause::Current => {
+                if held
+                    .iter()
+                    .any(|cause| matches!(cause, NativeSourceCause::Current))
+                {
+                    return false;
+                }
+                held.push(NativeSourceCause::Current);
+            }
+            NativeSourceCause::Historical { selected_at, support: incoming } => {
+                if let Some(NativeSourceCause::Historical { support: prior, .. }) = held
+                    .iter_mut()
+                    .find(|cause| matches!(cause, NativeSourceCause::Historical { selected_at: prior, .. } if *prior == selected_at))
+                {
+                    if !prior.merge(&incoming) {
+                        return false;
+                    }
+                } else {
+                    held.push(NativeSourceCause::Historical { selected_at, support: incoming });
+                }
+            }
+            NativeSourceCause::Unwitnessed => {
+                if held.iter().any(|cause| matches!(cause, NativeSourceCause::Unwitnessed)) {
+                    return false;
+                }
+                held.push(NativeSourceCause::Unwitnessed);
+            }
+        }
+        self.0.insert(key, held.into());
+        true
+    }
+}
+
+struct NativeSourceTraversal<'a> {
+    issued: NativeSourceReceiptView<'a>,
+    selected: NativeSourceReceipts,
+}
+
+enum NativeSourceReceiptView<'a> {
+    Operation(&'a NativeSourceReceipts),
+    Frozen(&'a native_availability::FrozenNativeSourceReceipts),
+    Unwitnessed,
+}
+
+impl NativeSourceReceiptView<'_> {
+    fn get(&self, key: &NativeSourceUse) -> Option<&Arc<[NativeSourceCause]>> {
+        match self {
+            Self::Operation(sources) => sources.0.get(key),
+            Self::Frozen(sources) => sources.get(key),
+            Self::Unwitnessed => None,
+        }
+    }
+}
+
 /// Exact executable roots remain private to their solver-issued view.
 #[derive(Clone, Debug)]
 struct IssuedTargetNativeSelection {
+    sources: NativeSourceReceipts,
     roots: Arc<[NativeGroupBinding]>,
 }
 
@@ -337,6 +431,43 @@ pub(crate) struct AdmittedTargetArtifacts {
 impl AdmittedTargetArtifacts {
     pub(crate) fn artifacts(&self) -> &ArtifactView {
         &self.artifacts
+    }
+
+    /// Narrow this issuer's already chosen roots to one authenticated target.
+    /// Exact bindings and their historical edges remain those of this owner.
+    pub(crate) fn for_ordinary_target(
+        &self,
+        imports: Vec<crate::certified_products::PendingImportOwner>,
+    ) -> Result<TargetNativeInputs, CompileError> {
+        let ids = self
+            .selection
+            .roots
+            .iter()
+            .map(|group| group.binding.artifact())
+            .collect::<BTreeSet<_>>();
+        let entries = ids
+            .iter()
+            .map(|id| Arc::clone(&self.artifacts.lease.payloads[id]))
+            .collect::<Vec<_>>();
+        let expected = certified_target_source_groups(&entries, &imports)?;
+        let mut admitted = self.clone();
+        admitted.selection.roots = self
+            .selection
+            .roots
+            .iter()
+            .copied()
+            .filter(|group| {
+                expected.contains(&NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into();
+        if admitted.selection.roots.len() != expected.len() {
+            return Err(failure("ordinary target exceeds its admitted native roots"));
+        }
+        Ok(admitted.bind_target(None, imports))
     }
 
     /// Final target observations are moved under the same admission owner.
@@ -376,6 +507,16 @@ pub(crate) struct TargetNativeInputs {
 }
 
 impl TargetNativeInputs {
+    pub(crate) fn with_certified_groups(
+        self,
+        groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
+    ) -> Result<CertifiedTargetNativeInputs, CompileError> {
+        if !groups.matches_view(self.artifacts()) {
+            return Err(failure("native group products belong to another target acquisition"));
+        }
+        Ok(CertifiedTargetNativeInputs { target: self, groups })
+    }
+
     pub(crate) fn artifacts(&self) -> &ArtifactView {
         self.admitted.artifacts()
     }
@@ -442,12 +583,17 @@ impl TargetNativeInputs {
                 })
                 .expect("validated target contains its one typed entry")
         });
+        let mut source_traversal = NativeSourceTraversal {
+            issued: NativeSourceReceiptView::Operation(&self.admitted.selection.sources),
+            selected: NativeSourceReceipts::default(),
+        };
         let groups = native_groups_in_custody(
             &state,
             &view.lease.payloads,
             owned,
             self.admitted.selection.roots.to_vec(),
             None,
+            Some(&mut source_traversal),
         )?;
         #[cfg(test)]
         NATIVE_TARGET_RESOLUTION_WORK.with(|work| {
@@ -456,8 +602,56 @@ impl TargetNativeInputs {
         });
         Ok(ResolvedNativeTarget {
             owner: self,
+            sources: source_traversal.selected,
             groups,
             entry_binding,
+        })
+    }
+}
+
+/// The actual group certifier closes the selected graph with its physical
+/// products. Graph-only compiler consumers cannot issue runtime source proofs.
+#[derive(Debug)]
+pub(crate) struct CertifiedTargetNativeInputs {
+    target: TargetNativeInputs,
+    groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
+}
+
+impl std::ops::Deref for CertifiedTargetNativeInputs {
+    type Target = TargetNativeInputs;
+    fn deref(&self) -> &TargetNativeInputs { &self.target }
+}
+
+impl CertifiedTargetNativeInputs {
+    pub(crate) fn resolve_sources(&self) -> Result<ResolvedNativeSourceTarget<'_>, CompileError> {
+        Ok(ResolvedNativeSourceTarget {
+            target: self.target.resolve()?,
+            groups: &self.groups,
+        })
+    }
+}
+
+/// One operation's exact selected groups and its already paired product owner.
+pub(crate) struct ResolvedNativeSourceTarget<'a> {
+    target: ResolvedNativeTarget<'a>,
+    groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
+}
+
+impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
+    type Target = ResolvedNativeTarget<'a>;
+    fn deref(&self) -> &Self::Target { &self.target }
+}
+
+impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn group(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&'a crate::certified_products::PendingCertifiedGroup, CompileError> {
+        if !self.target.groups().contains(&binding) {
+            return Err(failure("native source row is outside its resolved target"));
+        }
+        self.groups.get(binding).ok_or_else(|| {
+            failure("selected native binding lacks its exact certified product")
         })
     }
 }
@@ -465,11 +659,23 @@ impl TargetNativeInputs {
 /// Operation-local resolution borrows the one final target owner.
 pub(crate) struct ResolvedNativeTarget<'a> {
     owner: &'a TargetNativeInputs,
+    sources: NativeSourceReceipts,
     groups: BTreeSet<NativeGroupBinding>,
     entry_binding: Option<NativeGroupBinding>,
 }
 
 impl ResolvedNativeTarget<'_> {
+    pub(crate) fn has_only_current_source(&self, group: NativeGroupBinding) -> bool {
+        self.sources
+            .0
+            .get(&NativeSourceUse::Root(group))
+            .is_some_and(|causes| {
+                !causes.is_empty()
+                    && causes
+                        .iter()
+                        .all(|cause| matches!(cause, NativeSourceCause::Current))
+            })
+    }
     pub(crate) fn groups(&self) -> &BTreeSet<NativeGroupBinding> {
         &self.groups
     }
@@ -481,6 +687,7 @@ impl ResolvedNativeTarget<'_> {
     ) -> Result<crate::checked_cell::SelectedNativeSites, CompileError> {
         self.owner.artifacts().native_sites_for_groups(&self.groups)
     }
+
     /// Original execution is a separate issued context. Check its custody of
     /// these already-resolved bindings; never derive another target from it.
     pub(crate) fn ensure_original_execution_custody(
@@ -522,6 +729,7 @@ struct IssuedArtifactCustody {
     lease: Arc<ViewLease>,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     target_native_selection: Option<IssuedTargetNativeSelection>,
+    source_receipt: IssuedNativeSourceReceipt,
 }
 
 impl IssuedArtifactCustody {
@@ -840,7 +1048,7 @@ impl NativeOriginalRequirement {
             .iter()
             .map(|ordinal| index.resolve(carrier, *ordinal))
             .collect::<Result<Vec<_>, _>>()?;
-        let groups = native_groups_in_custody(state, &lease.payloads, &nodes, roots, None)?;
+        let groups = native_groups_in_custody(state, &lease.payloads, &nodes, roots, None, None)?;
         Ok(Some(QualifiedNativeAvailability {
             original: self.original,
             carrier,
@@ -1611,6 +1819,7 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
         &failure,
         ArtifactInventoryFailure::NativeOfferSelectionConflict { .. }
             | ArtifactInventoryFailure::NativeGroupUnavailable { .. }
+            | ArtifactInventoryFailure::NativeRootOutsideView { .. }
     ) {
         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
             ?failure, refusal_site = %std::panic::Location::caller(),
@@ -2866,7 +3075,7 @@ impl SelectedOwners {
     fn planned_edges(
         &self,
         state: &InventoryState,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
         groups: &BTreeSet<NativeGroupKey>,
         stage: NativeClosureStage,
     ) -> Result<
@@ -2877,7 +3086,7 @@ impl SelectedOwners {
         CompileError,
     > {
         let mut planned = BTreeMap::new();
-        for (id, entry) in entries {
+        for (id, entry) in entries.iter() {
             planned.insert(
                 LogicalNodeKey::Artifact(*id),
                 self.dependencies(state, entry, entries)?
@@ -2971,7 +3180,7 @@ impl SelectedOwners {
         &self,
         state: &InventoryState,
         entry: &ArtifactEntry,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
     ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
         let canonical = match &entry.payload {
             ArtifactPayload::Canonical(interface) => Some(interface),
@@ -3029,7 +3238,7 @@ impl SelectedOwners {
         };
         for owner in entry.interface_seals.keys() {
             let id = resolve(owner, &ArtifactDependency::Interface)?;
-            entry.validate_interface_seal(owner, &entries[&id])?;
+            entry.validate_interface_seal(owner, entries.get(&id).expect("selected owner has its admitted row"))?;
         }
         let mut edges = BTreeSet::new();
         for owner in &entry.requirements {
@@ -3054,7 +3263,7 @@ impl SelectedOwners {
                     diagnostic_artifacts: None,
                     native_refusal: None,
                     owner_conflict: Some(ArtifactOwnerConflictEvidence::NativeCanonicalCarrier {
-                        selected: Arc::clone(&entries[&id]),
+                        selected: Arc::clone(entries.get(&id).expect("selected owner has its admitted row")),
                         incoming: Arc::new(carrier),
                     }),
                 }
@@ -3110,14 +3319,19 @@ fn validate_existing_rows(
 
 /// Private physical-segment custody. It never becomes an item view wholesale.
 /// Namespace and native owner choice are fixed by the compiler's certified roles.
+#[derive(Clone)]
 pub(crate) struct BoundArtifactSelection {
     view: ArtifactView,
-    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    owners: SelectedOwners,
-    captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
-    materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    compiler_prefix: CompilerSourceSupport,
+    produced_prefix: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    entries: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owners: Arc<SelectedOwners>,
+    captured_facts: Arc<BTreeMap<ArtifactId, ArtifactFactsHandle>>,
+    materializations: Arc<[Arc<crate::declaration_context::RetainedArtifactMaterialization>]>,
     groups: BTreeMap<NativeGroupKey, NativeGroupBinding>,
     native_source: crate::certified_products::CertifiedSourceSelection,
+    source_receipts: NativeSourceReceipts,
 }
 
 /// Both native planners preserve an already-issued exact target separately
@@ -3158,7 +3372,8 @@ impl From<LogicalNodeKey> for PlannedTarget {
 impl From<native_availability::NativeGroupTarget> for PlannedTarget {
     fn from(target: native_availability::NativeGroupTarget) -> Self {
         match target {
-            native_availability::NativeGroupTarget::ExactGroup(issued) => {
+            native_availability::NativeGroupTarget::ExactGroup(issued)
+            | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
                 Self::ExactGroup(issued.binding())
             }
             native_availability::NativeGroupTarget::NewGroup(group) => Self::NewGroup(group),
@@ -3167,6 +3382,60 @@ impl From<native_availability::NativeGroupTarget> for PlannedTarget {
 }
 
 impl BoundArtifactSelection {
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        &self.physical_inputs
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        &self.native_source
+    }
+
+    pub(crate) fn advance_compiler_prefix(
+        &mut self,
+        physical: &Arc<crate::declaration_context::OriginalCompilerInputs>,
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+        if !Arc::ptr_eq(physical, &self.physical_inputs) {
+            return Err(failure(
+                "item compiler cursor belongs to another physical segment",
+            ));
+        }
+        match (&self.produced_prefix, produced) {
+            (None, None) => {}
+            (Some(previous), Some(item)) if item.follows(previous) => {}
+            _ => {
+                return Err(failure(
+                    "item compiler prefix is not the next checked output",
+                ))
+            }
+        }
+        let next = match produced {
+            Some(item) => {
+                operation
+                    .reserve::<Arc<crate::recovery_artifacts::CertifiedValueInterface>>(
+                        item.required().count(),
+                    )
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                let mut values = Vec::new();
+                for value in item.required() {
+                    crate::host_work::checkpoint()?;
+                    values.push(Arc::clone(value));
+                }
+                self.compiler_prefix.admit_value_interfaces(&values)?
+            }
+            None => self.compiler_prefix.clone(),
+        };
+        let inputs = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::from_issued_support(&next),
+        );
+        self.compiler_prefix = next;
+        self.produced_prefix = produced.cloned();
+        Ok(inputs)
+    }
+
     #[cfg(test)]
     pub(crate) fn observed_binding_state(
         &self,
@@ -3394,21 +3663,37 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<BoundArtifactSelection, CompileError> {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("physical segment belongs to another inventory"));
+        }
         let captured_facts = entries
             .iter()
             .map(|entry| (entry.descriptor.id, entry.facts.clone()))
             .collect();
-        let view = self.admit_certified_with_demand(
-            parent,
-            entries,
-            NativeArtifactDemand::ScopeInterfaces,
-            selection,
-        )?;
+        let mut selection = selection.clone();
+        let physical = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                parent,
+                entries,
+            )?,
+        );
+        self.index_admitted_segment(parent, physical, captured_facts, &selection)
+    }
+
+    fn index_admitted_segment(
+        &self,
+        parent: &ArtifactView,
+        physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<BoundArtifactSelection, CompileError> {
+        let view = physical_inputs.issued_artifacts().clone();
         let entries = view
             .entries()
             .into_iter()
             .map(|entry| (entry.descriptor.id, entry))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<imbl::OrdMap<_, _>>();
         let state = self.0.lock().expect("inventory lock");
         let namespace_entries = view
             .namespace()
@@ -3428,14 +3713,29 @@ impl ArtifactInventory {
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        let produced_prefix = selection
+            .produced_types()
+            .map(|outputs| outputs.before_segment());
+        let excluded = selection
+            .produced_types()
+            .into_iter()
+            .flat_map(|outputs| outputs.required())
+            .map(|output| output.artifact_id())
+            .collect();
+        let compiler_prefix = CompilerSourceSupport::close_complete_output(&physical_inputs)?
+            .segment_value_prefix(&excluded)?;
         Ok(BoundArtifactSelection {
             view,
+            physical_inputs,
+            compiler_prefix,
+            produced_prefix,
             entries,
-            owners,
-            captured_facts,
-            materializations,
+            owners: Arc::new(owners),
+            captured_facts: Arc::new(captured_facts),
+            materializations: materializations.into(),
             groups: BTreeMap::new(),
             native_source: selection.clone(),
+            source_receipts: NativeSourceReceipts::default(),
         })
     }
 
@@ -3519,7 +3819,7 @@ impl ArtifactInventory {
                 &allowed_values,
             )
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let mut materialization_parents = fixed.materializations.clone();
+        let mut materialization_parents = fixed.materializations.to_vec();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
         let mut state = self.0.lock().expect("inventory lock");
         let unbound = demanded
@@ -3573,6 +3873,9 @@ impl ArtifactInventory {
         }
         let cursor_projection = cursor.read_projection(&state);
         let cursor_nodes = &cursor_projection.nodes;
+        let mut source_receipts = fixed.source_receipts.clone();
+        let mut root_causes = BTreeMap::new();
+        let mut edge_causes = Vec::new();
         let mut planned =
             BTreeMap::<NativeGroupKey, BTreeSet<(PlannedTarget, ArtifactDependency)>>::new();
         let mut pending = demanded.iter().copied().collect::<Vec<_>>();
@@ -3617,6 +3920,14 @@ impl ArtifactInventory {
                     .get(&group)
                     .and_then(|verified| verified.binding())
             }) {
+                if let Some(verified) = bound_inputs.get(&group) {
+                    root_causes.insert(group, verified.source_cause());
+                } else if !source_receipts
+                    .0
+                    .contains_key(&NativeSourceUse::Root(binding))
+                {
+                    root_causes.insert(group, NativeSourceCause::Unwitnessed);
+                }
                 resolved_groups.insert(group, binding);
                 reused.insert(group);
                 continue;
@@ -3632,6 +3943,7 @@ impl ArtifactInventory {
                     },
                 ));
             };
+            root_causes.insert(group, NativeSourceCause::Current);
             let mut by_edge = dependencies
                 .iter()
                 .map(|dependency| (dependency.key(), dependency.target().clone()))
@@ -3659,8 +3971,14 @@ impl ArtifactInventory {
                             },
                         )
                     })?;
+                    edge_causes.push((
+                        group,
+                        PlannedTarget::from(target.clone()),
+                        target.source_cause(),
+                    ));
                     let (id, ordinal) = match target {
-                        native_availability::NativeGroupTarget::ExactGroup(ref issued) => {
+                        native_availability::NativeGroupTarget::ExactGroup(ref issued)
+                        | native_availability::NativeGroupTarget::CurrentIssued(ref issued) => {
                             let child = issued.binding();
                             (child.binding.artifact(), child.original_ordinal)
                         }
@@ -3684,7 +4002,8 @@ impl ArtifactInventory {
                         ));
                     }
                     match target {
-                        native_availability::NativeGroupTarget::ExactGroup(issued) => {
+                        native_availability::NativeGroupTarget::ExactGroup(issued)
+                        | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
                             PlannedTarget::ExactGroup(issued.binding())
                         }
                         native_availability::NativeGroupTarget::NewGroup(child) => {
@@ -3755,10 +4074,28 @@ impl ArtifactInventory {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        for (group, cause) in root_causes {
+            let InventoryNodeKey::Group(binding) = resolve(PlannedTarget::NewGroup(group), scope)?
+            else {
+                unreachable!("source root is group");
+            };
+            source_receipts.insert(NativeSourceUse::Root(binding), cause);
+        }
+        for (parent, child, cause) in edge_causes {
+            let InventoryNodeKey::Group(parent) = resolve(PlannedTarget::NewGroup(parent), scope)?
+            else {
+                unreachable!("source parent is group");
+            };
+            let InventoryNodeKey::Group(child) = resolve(child, scope)? else {
+                unreachable!("source child is group");
+            };
+            source_receipts.insert(NativeSourceUse::Edge { parent, child }, cause);
+        }
         let target_native_selection = match demand {
             NativeArtifactDemand::VerifiedTarget { .. }
             | NativeArtifactDemand::CertifiedTargetImports(_) => {
                 Some(IssuedTargetNativeSelection {
+                    sources: source_receipts.clone(),
                     roots: demanded
                         .iter()
                         .map(|group| {
@@ -3923,6 +4260,7 @@ impl ArtifactInventory {
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
+        fixed.source_receipts = source_receipts;
         fixed.entries.extend(incoming);
         fixed.groups.extend(
             bound_inputs
@@ -4382,6 +4720,7 @@ impl ArtifactInventory {
                     .map(|(id, entry)| (*id, Arc::clone(entry)))
                     .collect(),
                 target_native_selection: None,
+                source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
             });
         }
         let materialization_parents = Vec::new();
@@ -4579,6 +4918,8 @@ impl ArtifactInventory {
                 }
             }
         }
+        let mut source_receipts = NativeSourceReceipts::default();
+        let mut issued_causes = BTreeMap::new();
         let mut demanded_offers = Vec::new();
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut issued_pairs = BTreeMap::new();
@@ -4618,6 +4959,9 @@ impl ArtifactInventory {
             selected.extend(entries);
             demanded_offers = offers;
             for (key, verified) in bindings {
+                if let Some(binding) = verified.binding() {
+                    issued_causes.insert(key, (binding, verified.source_cause()));
+                }
                 if let Some(pair) = verified.carrier_pair() {
                     issued_pairs.insert(key, pair);
                 }
@@ -4758,7 +5102,8 @@ impl ArtifactInventory {
             edges
                 .iter()
                 .filter_map(move |dependency| match dependency.target() {
-                    native_availability::NativeGroupTarget::ExactGroup(binding) => {
+                    native_availability::NativeGroupTarget::ExactGroup(binding)
+                    | native_availability::NativeGroupTarget::CurrentIssued(binding) => {
                         Some((InventoryNodeKey::Group(binding.binding()), *parent))
                     }
                     native_availability::NativeGroupTarget::NewGroup(_) => None,
@@ -5142,7 +5487,62 @@ impl ArtifactInventory {
                 (*id, binding)
             })
             .collect::<BTreeMap<_, _>>();
+        for (key, (binding, cause)) in issued_causes {
+            if resolve(LogicalNodeKey::Group(key)) == InventoryNodeKey::Group(binding) {
+                source_receipts.insert(NativeSourceUse::Root(binding), cause);
+            }
+        }
+        for (parent, dependencies) in &current_dependencies {
+            // A retained exact root wins before any proposed current row.
+            if prebound.contains_key(parent) {
+                continue;
+            }
+            let InventoryNodeKey::Group(parent_binding) = resolve(LogicalNodeKey::Group(*parent))
+            else {
+                unreachable!("source parent is group");
+            };
+            source_receipts.insert(
+                NativeSourceUse::Root(parent_binding),
+                NativeSourceCause::Current,
+            );
+            for dependency in dependencies {
+                let InventoryNodeKey::Group(child) = resolve_target(
+                    PlannedTarget::from(dependency.target().clone()),
+                    selection.unwrap_or(provisional),
+                ) else {
+                    unreachable!("source child is group");
+                };
+                source_receipts.insert(
+                    NativeSourceUse::Edge {
+                        parent: parent_binding,
+                        child,
+                    },
+                    dependency.target().source_cause(),
+                );
+            }
+        }
+        if let Some((_, catalog)) = root_intent.input_constraints() {
+            for binding in prebound.values() {
+                let key = NativeSourceUse::Root(*binding);
+                if !source_receipts.0.contains_key(&key) {
+                    source_receipts.insert(
+                        key,
+                        catalog
+                            .input_decisions()
+                            .selected_support(*binding)
+                            .cloned()
+                            .map(|support| NativeSourceCause::Historical {
+                                selected_at: *binding,
+                                support,
+                            })
+                            .unwrap_or(NativeSourceCause::Unwitnessed),
+                    );
+                }
+            }
+        }
+        let source_receipt = IssuedNativeSourceReceipt::Solved(Arc::new(source_receipts.clone()));
         let target_native_selection = target_groups.map(|groups| IssuedTargetNativeSelection {
+            sources: source_receipts,
             roots: groups
                 .into_iter()
                 .map(|group| {
@@ -5246,6 +5646,7 @@ impl ArtifactInventory {
             lease,
             entries: selected,
             target_native_selection,
+            source_receipt,
         })
     }
     /// Restore exact bound facts only after validating every certified edge and
@@ -5407,6 +5808,7 @@ impl ArtifactInventory {
             lease,
             entries: retained_entries,
             target_native_selection: None,
+            source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
         })
     }
 
@@ -5437,8 +5839,14 @@ fn native_requirements_for_exact_groups_in_custody(
     pending: Vec<NativeGroupBinding>,
 ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
     let mut requirements = NativeRequirementCollector::default();
-    let groups =
-        native_groups_in_custody(state, payloads, owned, pending, Some(&mut requirements))?;
+    let groups = native_groups_in_custody(
+        state,
+        payloads,
+        owned,
+        pending,
+        Some(&mut requirements),
+        None,
+    )?;
     Ok((
         NativeRequirements {
             bindings: requirements.bindings.into_iter().collect(),
@@ -5458,12 +5866,38 @@ fn native_groups_in_custody(
     state: &InventoryState,
     payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     owned: &imbl::OrdSet<InventoryNodeKey>,
-    mut pending: Vec<NativeGroupBinding>,
+    pending: Vec<NativeGroupBinding>,
     mut requirements: Option<&mut NativeRequirementCollector>,
+    mut sources: Option<&mut NativeSourceTraversal<'_>>,
 ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+    let mut pending = pending
+        .into_iter()
+        .map(|group| {
+            let causes = sources
+                .as_ref()
+                .map(|sources| {
+                    sources
+                        .issued
+                        .get(&NativeSourceUse::Root(group))
+                        .cloned()
+                        .unwrap_or_else(|| Arc::from([NativeSourceCause::Unwitnessed]))
+                })
+                .unwrap_or_else(|| Arc::from([]));
+            (group, causes)
+        })
+        .collect::<Vec<_>>();
     let mut seen = BTreeSet::new();
-    while let Some(key) = pending.pop() {
-        if !seen.insert(key) {
+    while let Some((key, causes)) = pending.pop() {
+        let first = seen.insert(key);
+        let mut source_changed = false;
+        if let Some(sources) = sources.as_deref_mut() {
+            for cause in causes.iter() {
+                source_changed |= sources
+                    .selected
+                    .insert(NativeSourceUse::Root(key), cause.clone());
+            }
+        }
+        if !first && !source_changed {
             continue;
         }
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
@@ -5491,7 +5925,28 @@ fn native_groups_in_custody(
                     if !owned.contains(&target) {
                         return Err(failure("native dependency outside selected view"));
                     }
-                    pending.push(required);
+                    let mut child_causes = Vec::new();
+                    if let Some(sources) = sources.as_ref() {
+                        for cause in causes.iter() {
+                            match cause {
+                                NativeSourceCause::Current => {
+                                    if let Some(edge) = sources.issued.get(&NativeSourceUse::Edge {
+                                        parent: key,
+                                        child: required,
+                                    }) {
+                                        child_causes.extend(edge.iter().cloned());
+                                    } else {
+                                        child_causes.push(NativeSourceCause::Unwitnessed);
+                                    }
+                                }
+                                NativeSourceCause::Historical { .. }
+                                | NativeSourceCause::Unwitnessed => {
+                                    child_causes.push(cause.clone())
+                                }
+                            }
+                        }
+                    }
+                    pending.push((required, Arc::from(child_causes)));
                 }
                 ArtifactDependency::NativeBinding {
                     generation,
@@ -6371,6 +6826,23 @@ pub struct ArtifactView {
     reads: Arc<ViewReadCache>,
 }
 
+/// Identity of an actual acquisition, without retaining its resource closure.
+/// Equal graph snapshots are insufficient to pair physical group products.
+#[derive(Clone)]
+pub(crate) struct NativeGroupViewStamp(Weak<ViewLease>);
+
+impl std::fmt::Debug for NativeGroupViewStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeGroupViewStamp")
+    }
+}
+
+impl NativeGroupViewStamp {
+    pub(crate) fn matches_view(&self, view: &ArtifactView) -> bool {
+        Weak::ptr_eq(&self.0, &Arc::downgrade(&view.lease))
+    }
+}
+
 /// One retained closure observed under the inventory lock. Entries are ordered
 /// by exact owner; dependency tuples keep their canonical wire order.
 #[derive(Clone, Debug)]
@@ -7108,6 +7580,19 @@ impl ArtifactView {
         pending: Vec<NativeGroupBinding>,
     ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
         native_requirements_for_exact_groups_in_custody(state, &self.lease.payloads, owned, pending)
+    }
+
+    /// Borrow this view's selected native rows, excluding custody-only support.
+    /// The stamp identifies the same acquisition independently of graph equality.
+    pub(crate) fn selected_native_binding_rows(
+        &self,
+    ) -> (NativeGroupViewStamp, Vec<NativeGroupBinding>) {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let bindings = self.selected_nodes(&state).iter().filter_map(|node| match node {
+            InventoryNodeKey::Group(group) => Some(*group),
+            _ => None,
+        }).collect();
+        (NativeGroupViewStamp(Arc::downgrade(&self.lease)), bindings)
     }
 
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
@@ -10660,6 +11145,185 @@ mod tests {
                 assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
                     if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
             }
+        }
+    }
+
+    #[test]
+    fn bound_target_root_choice_keeps_missing_empty_and_unavailable_distinct() {
+        use crate::certified_products::{
+            CertificationError, CertifiedSourceSelection, InputDecisionRefusal,
+        };
+        use crate::declaration_context::{
+            ExactDeclarationContext, OriginalCompilerInputs, ProtectedScaffoldRequirements,
+        };
+        for physical_choice in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let native = Arc::new(issued_native_groups(
+                "BoundInheritedCarrier",
+                vec![(7, vec![])],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let ArtifactPayload::Original(product) = &native.payload else {
+                unreachable!()
+            };
+            let key = NativeGroupKey {
+                artifact: native.descriptor.id,
+                original_ordinal: 7,
+            };
+            let entries = vec![native.clone(), Arc::new(entry("InheritedLeft", &[]))];
+            let physical = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries.clone(),
+                    if physical_choice {
+                        NativeArtifactDemand::AllGroups
+                    } else {
+                        NativeArtifactDemand::ScopeInterfaces
+                    },
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let operation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut current = CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &operation.inventory,
+            )
+            .unwrap();
+            let initial = OriginalCompilerInputs::from_selection(&current, &physical).unwrap();
+            let unselected = CompilerSourceSupport::close_complete_output(&initial)
+                .unwrap()
+                .close_request(None, &ProtectedScaffoldRequirements::default())
+                .unwrap();
+            assert!(!unselected.native_offers().is_empty());
+            assert!(unselected
+                .native_offers()
+                .iter()
+                .all(|offer| offer.is_full()));
+
+            // Finish and select through the same actual producer before input use.
+            let issued = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut current,
+                &physical,
+                entries,
+            )
+            .unwrap()
+            .issued_artifacts()
+            .clone();
+            let closure = current.selected_original_closure(&issued).unwrap();
+            let expected = closure
+                .native_closure()
+                .capture_graph_selection()
+                .native_groups;
+            assert_eq!(expected.len(), 1);
+            assert_eq!(expected[0].binding.artifact(), key.artifact);
+            assert_eq!(expected[0].original_ordinal, key.original_ordinal);
+            let output = OriginalCompilerInputs::from_selection(&current, &issued).unwrap();
+            let selected = CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+                .certify_original_closure(&closure)
+                .unwrap();
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&selected)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let selected_receipt =
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+            let owner = inputs.artifacts().inventory();
+            let imports = [issued_source(&native, 7)];
+            let mut fixed = owner
+                .bind_segment(inputs.artifacts(), vec![], &selected_receipt)
+                .unwrap();
+            let admitted = owner
+                .admit_bound_target(
+                    &mut fixed,
+                    &owner.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selected_receipt,
+                )
+                .unwrap();
+            assert_eq!(
+                admitted.artifacts().capture_graph_selection().native_groups,
+                expected
+            );
+
+            // Current output is not an input continuation, even with Full bodies.
+            assert!(
+                matches!(native_availability::verified_root_choice(&current, key, product.owner(), &native),
+                Err(CompileError::ArtifactInventory(error)) if matches!(&error.native_refusal,
+                    Some(NativeAdmissionRefusal::RootChoiceMissing { owner }) if owner == &native.descriptor.owner))
+            );
+
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&unselected)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let receipt =
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+            let InputNativeDecision::IssuedChoices(choices) = inputs
+                .compiler_source_support()
+                .checked_native_input_decision(key.artifact, canonical, product.owner())
+                .unwrap()
+            else {
+                panic!("the request must preserve its issued decision");
+            };
+            let chosen = choices.get(&key.original_ordinal).copied();
+            if physical_choice {
+                assert!(chosen.is_some());
+                assert!(matches!(
+                    receipt.native_group_candidates(key, product.owner()),
+                    Err(CertificationError::InputDecision {
+                        reason: InputDecisionRefusal::UnavailableChosenBinding,
+                        ..
+                    })
+                ));
+            } else {
+                assert!(choices.is_empty());
+            }
+            let owner = inputs.artifacts().inventory();
+            let mut fixed = owner
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .unwrap();
+            let before = fixed.view.capture_graph_selection();
+            let denied = owner
+                .admit_bound_target(
+                    &mut fixed,
+                    &owner.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &receipt,
+                )
+                .unwrap_err();
+            let CompileError::ArtifactInventory(error) = denied else {
+                panic!("expected typed native root refusal");
+            };
+            assert!(
+                matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if artifact == key.artifact)
+            );
+            match (chosen, error.native_refusal) {
+                (
+                    Some(chosen),
+                    Some(NativeAdmissionRefusal::RootChoiceUnavailable { chosen: refused }),
+                ) => assert_eq!(refused, chosen),
+                (
+                    None,
+                    Some(NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                        owner,
+                        original_ordinal: 7,
+                    }),
+                ) => assert_eq!(owner, native.descriptor.owner),
+                (_, other) => panic!("root refusal lost the issued decision: {other:?}"),
+            }
+            assert_eq!(fixed.view.capture_graph_selection(), before);
         }
     }
 

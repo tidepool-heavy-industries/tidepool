@@ -10,8 +10,8 @@ module Tidepool.CheckedPrefixImports
   , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
   , refineProgramDeclarationImports
   , refineParsedDeclarationImports
-  , selectedImportNames
-  , CompletedValueAliases, hydrateCompletedValueAliases, transformCompletedValueAliases
+  , selectedImportNames, parsedDeclarationOccurrences
+  , CompletedValueAliases, completedValueAliasIds, hydrateCompletedValueAliases, transformCompletedValueAliases
   ) where
 
 import Control.Exception (evaluate)
@@ -74,6 +74,9 @@ newtype CompletedValueImports = CompletedValueImports [RefinementOwner]
 -- This capability comes from exact installed interface allocations and their
 -- actual exported Names. Runtime variable IDs never supply GHC binder identity.
 data CompletedValueAliases = CompletedValueAliases [RefinementOwner] (Map.Map String Id)
+
+completedValueAliasIds :: CompletedValueAliases -> Map.Map String Id
+completedValueAliasIds (CompletedValueAliases _ aliases) = aliases
 
 hydrateCompletedValueAliases
   :: [(String,SymbolIdentity,ExactIfaceArtifact)] -> [(ExactIfaceArtifact,ModIface)] -> HscEnv

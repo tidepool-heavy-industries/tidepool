@@ -22,6 +22,7 @@ async fn submit_ack(fixture: &ConcurrentResident, key: &str) -> ResidentCellCall
 }
 
 #[tokio::test]
+#[ignore = "requires the dedicated rooted notebook contract execution group"]
 async fn parked_cell_does_not_block_another_calls_acknowledgement_or_control() {
     let markers = ["completion-A"];
     let mut fixture = ConcurrentResident::new(194, &markers).await;

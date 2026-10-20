@@ -142,9 +142,12 @@ the actual item/native-group witnesses and published declaration runtime roots.
 Those roots include all published instance dictionaries, class defaults and
 pattern implementations; an unpublished unused helper creates no runtime value
 obligation. Earlier captures retain their original scope, seal and stage
-witness. `TPCWPREP4` reports executable typed plans, closed executable/original
-item proofs and an ordered stage table. Each stage names its sealed source,
-module and certificate outputs under `stage-<firstOrdinal>/`; it grants no runtime
+witness. `TPCWPREP5` reports executable typed plans, closed executable/original
+item proofs and an ordered stage table. Each stage owns its selected runtime
+references and names its sealed source, module and certificate outputs under
+`stage-<firstOrdinal>/`; the program-wide union is derived only for native
+preparation. A transitive reference may reuse only an exact earlier selected
+capture, preserving its original witness. The table grants no runtime
 value permission. The private `TPCWSOURCE3` receipt carries the same closed stage
 identity and the completion's ordered materialized root aliases as transport
 DATA. Their positions map back to the captured source domain;
@@ -437,6 +440,11 @@ Each executable inference segment has one successful authored frontend and
 one canonical finalized module with all its kept entry roots. Descriptors retain
 actual GHC capture Ids, their types and Name-keyed fixities; Session's existing
 decoder supplies the global Ids substituted into later roots before simplification.
+Held-world item identities pair the admitted authored source fingerprint with
+its reserved ordinal and slot before segment rendering. Original and executable
+receipt writers consume that issued identity. Generated instances and retry
+rewrites have their own compilation provenance; never hash their rendered source
+as a replacement for the admitted authored item.
 Planned receipts seal the complete ordered segment plan and each entry's actual
 source owner and compiler-issued original group ordinal. Generalized lets retain
 their real GHC sigma types. Unresolved action-bound captures require a concrete

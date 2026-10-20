@@ -18,6 +18,28 @@ pub enum SessionValueSelectionError {
 pub struct SelectedSessionValueOwners(Arc<[SessionModule]>);
 
 impl SelectedSessionValueOwners {
+    /// World certificate selection follows the exact imported interfaces,
+    /// including an unused operation operand. The checked owner already has
+    /// distinct, validated Val identities; no names or broader inventory need
+    /// to be parsed again. This does not select runtime values.
+    pub(crate) fn from_checked_imports(
+        imports: &crate::checked_cell::CheckedValueImportAuthority,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, crate::CompileError> {
+        crate::host_work::checkpoint()?;
+        let owners = imports.value_owners();
+        // Account for the temporary vector and the immutable shared slice.
+        operation
+            .reserve::<[SessionModule; 2]>(owners.len())
+            .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut selected = Vec::with_capacity(owners.len());
+        for owner in owners {
+            crate::host_work::checkpoint()?;
+            selected.push(owner);
+        }
+        Ok(Self(selected.into()))
+    }
+
     pub(crate) fn from_command(
         command: &tidepool_extract_cmd::ExtractCmd,
     ) -> Result<Self, SessionValueSelectionError> {

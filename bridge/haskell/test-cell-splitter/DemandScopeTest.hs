@@ -53,6 +53,8 @@ demandScopeChecks = do
           "ShadowOperand" -> pure (unlines
             ["module ShadowOperand where", "import qualified Data.Version as Operand"
             ,"root = let versionBranch value = value in versionBranch ()"])
+          "MalformedModule" -> pure (unlines
+            ["module MalformedModule where", "root = ("])
           "DeclarationQuote" -> pure (unlines
             ["{-# LANGUAGE QuasiQuotes #-}", "module DeclarationQuote where"
             ,"[doesNotExist| refuse before rename |]"])
@@ -88,9 +90,14 @@ demandScopeChecks = do
               Left ConflictingDemandName -> pure ()
               _ -> fail "duplicate exact Name association was accepted"
           case prepareModuleDemand actual captured of
-            Left _ | expected == ParseRefusal -> pure ()
-            Left failure -> fail (name ++ ": parsing refused " ++ show failure)
-            Right _ | expected == ParseRefusal -> fail (name ++ ": quote passed the parser gate")
+            Left (ModuleDemandParseRejected actualPath diagnostic)
+              | expected == SyntaxRefusal && actualPath == path && not (null diagnostic) ->
+                  putStrLn (name ++ ": " ++ diagnostic)
+            Left (ModuleDemandQuasiQuoteRejected actualPath quotes)
+              | expected == QuoteRefusal && actualPath == path && quotes == ["doesNotExist"] -> pure ()
+            Left failure -> fail (name ++ ": wrong parsing refusal " ++ show failure)
+            Right _ | expected `elem` [SyntaxRefusal,QuoteRefusal] ->
+              fail (name ++ ": refused source passed the parser gate")
             Right parsed -> do
               let sealedPath = capturedGeneratedScaffoldPath captured
                   sealedBytes = capturedGeneratedScaffoldBytes captured
@@ -147,9 +154,49 @@ demandScopeChecks = do
           case stale of
             Left _ -> pure ()
             Right _ -> fail (name ++ ": source drift was accepted")
+      observationContributionChecks directory initial
       liftIO (putStrLn ("demand scope: " ++ show (length controls) ++ " controls passed"))
 
-data ExpectedDemand = Bindings [String] | ParseRefusal | RenameRefusal
+-- Actual rendered operands must remain inside their single compiler-owned
+-- declaration slot. LINE pragmas cannot move a physical suffix into custody.
+observationContributionChecks :: FilePath -> DynFlags -> Ghc ()
+observationContributionChecks directory flags = liftIO $ do
+  let prefix = "module ObservationContribution where\n-- \955 \26085\nprotected = ()\n"
+      inert = "(let observation = observation in observation)"
+      typeHeader = "\n__tidepool_type_search_query :: " :: String
+      valueHeader = "__tidepool_type_search_query = "
+      expressionHeader = "\n__tidepool_inspect_0 = (\n"
+      typeCase operand accepted =
+        (ObservationTypeOperand (length prefix + length typeHeader + length operand + 1),
+          typeHeader ++ operand ++ "\n" ++ valueHeader ++ inert ++ "\n",accepted)
+      expressionCase operand accepted =
+        (ObservationExpressionOperand,expressionHeader ++ unlines (map ("  " ++) (lines operand)) ++ "  )\n",accepted)
+      cases =
+        [ typeCase "Int" True
+        , typeCase "Int\ninjected = True" False
+        , typeCase "Int\n{-# LINE 1 \"trusted\" #-}\ninjected = True" False
+        , typeCase "Int\ninstance Show Int where" False
+        , typeCase "Int\n__tidepool_type_search_query = 1" False
+        , expressionCase "let local = (1 :: Int) in local" True
+        , expressionCase "() ); injected = True; closer = (" False
+        , expressionCase "() ); {-# LINE 1 \"trusted\" #-} injected = True; closer = (" False
+        ]
+  forM_ (zip [0 :: Int ..] cases) $ \(ordinal,(mode,suffix,accepted)) -> do
+    let source = prefix ++ suffix
+        name = "ObservationContribution"
+        path = directory </> name ++ ".hs"
+    writeFile path source
+    recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
+      prefix source path name >>= either fail pure
+    captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+    parsed <- either (fail . (("operand control " ++ show ordinal ++ " must parse before its contribution check: ") ++) . show) pure
+      (prepareModuleDemand flags captured)
+    let actual = validateObservationContribution (length prefix) mode [] parsed
+    unless (case actual of Right () -> accepted; Left _ -> not accepted)
+      (fail ("wrong observation contribution result " ++ show ordinal ++ ": " ++ show actual))
+  putStrLn ("observation contribution: " ++ show (length cases) ++ " physical-boundary controls passed")
+
+data ExpectedDemand = Bindings [String] | SyntaxRefusal | QuoteRefusal | RenameRefusal
   deriving (Eq, Show)
 
 controls :: [(String,String,[String],ExpectedDemand)]
@@ -168,12 +215,13 @@ controls =
   , ("AliasSynonyms","root",["first","second"],Bindings ["first","second"])
   , ("RenameError","root",["old"],RenameRefusal)
   , ("MissingImport","root",["old"],RenameRefusal)
-  , ("ActualQuote","root",[],ParseRefusal)
+  , ("MalformedModule","root",[],SyntaxRefusal)
+  , ("ActualQuote","root",[],QuoteRefusal)
   , ("QualifiedOperand","root",[],Bindings ["input"])
   , ("SameLabelOperand","root",["input"],Bindings ["input","input"])
   , ("UnusedHelperOperand","root",[],Bindings ["input"])
   , ("UnusedOperand","root",[],Bindings [])
   , ("ShadowOperand","root",[],Bindings [])
   , ("DeclarationModule","",["old"],Bindings ["old"])
-  , ("DeclarationQuote","",[],ParseRefusal)
+  , ("DeclarationQuote","",[],QuoteRefusal)
   ]

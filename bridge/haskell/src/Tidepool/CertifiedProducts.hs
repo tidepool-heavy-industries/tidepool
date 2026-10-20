@@ -6,7 +6,7 @@ module Tidepool.CertifiedProducts
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
   , encodeCertifiedItemProductsWithInputs
   , certifiedContextBinders, certifiedBinderInputClosure
-  , resolvePackageGlobal, homeInterfaceUsageOwners, sourceProductSha256 ) where
+  , resolvePackageGlobal, homeInterfaceUsageOwners, readyNativeProductSourceSha256 ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -226,7 +226,7 @@ encodeCertifiedOriginalProductsWithPrior prior originalInterfaces kind retained 
         [ do
             let original = Map.lookup (T.unpack unit,T.unpack name) retained
             sourceSha <- case original of
-              Nothing -> sourceProductSha256 evidence (T.unpack unit) (T.unpack name)
+              Nothing -> readyNativeProductSourceSha256 evidence (T.unpack unit) (T.unpack name)
               Just proof -> Just (T.pack (canonicalSourceSha256 proof))
             groups <- traverse freshGroup projected
             pure Product
@@ -677,8 +677,10 @@ at values index = case drop index values of
   value : _ -> Just value
   [] -> Nothing
 
-sourceProductSha256 :: DependencyEvidence -> String -> String -> Maybe T.Text
-sourceProductSha256 evidence unit name = do
+-- Native publication additionally requires ProductReady. This is not a
+-- predicate for fresh SOURCE selection, which precedes product admission.
+readyNativeProductSourceSha256 :: DependencyEvidence -> String -> String -> Maybe T.Text
+readyNativeProductSourceSha256 evidence unit name = do
   node <- find (\item -> dependencyModuleUnit item == unit
     && dependencyModuleName item == name
     && not (dependencyModuleBoot item)

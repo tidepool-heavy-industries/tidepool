@@ -48,14 +48,14 @@ worldRequestBoundaries = do
   let root = replicate 64 'a'
       resident = ExactInputsRequest root (ResidentExactInputs "foreign-worker-realization")
       complete = ExactInputsRequest root (CompleteExactInputs "/unavailable/world-inputs.cbor")
-      question = WorldPublicModuleRequest root "foreign-worker-realization" WorldStructuredInfo
+      question = WorldQueryRequest root "foreign-worker-realization" (WorldPublicModuleQuery (WorldPublicInfo
         (StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
-          (InspectionProvenance 1 "display-only")) "/unavailable/world-answer.bin"
+          (InspectionProvenance 1 "display-only")))) "/unavailable/world-answer.bin"
       body = BS.pack [136,1,88,32] <> BS.replicate 32 170 <> BS.pack [0,105] <> "Data.List"
         <> BS.pack [132,1,99] <> "map" <> BS.pack [1,108] <> "display-only"
         <> BS.pack [130,104] <> "rejected" <> BS.pack [1,246,64]
       expected = "TPWQ0002" <> BS.pack [80,0,0,0] <> body
-  args <- case workerRequestFromArgv (workerArgv [WorldPublicModule question]) of
+  args <- case workerRequestFromArgv (workerArgv [WorldQuery question]) of
     Right (Just request) -> pure request
     other -> fail ("invalid world query fixture: " ++ show other)
   (lateEnsure,lateQuery) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do

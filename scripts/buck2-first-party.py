@@ -1217,7 +1217,7 @@ def actor_observation_test_cases(binary):
     return "\n".join(rules)
 
 
-def actor_notebook_contract_test_cases(binary, env, resources, worker):
+def actor_notebook_contract_test_cases(binary):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
     tests = ["resident_local_actor::" + name for name in (
         "completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
@@ -1225,13 +1225,17 @@ def actor_notebook_contract_test_cases(binary, env, resources, worker):
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
     )]
+    env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
     return "\n".join([
         "tidepool_rust_test_cases(",
         '    name = "actor_notebook_contract_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
-        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    expected_count = {len(tests)},", "    ignored = True,", "    jobs = 1,", "    timeout = 600,",
         f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
         runtime_arguments(env, resources, worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ])
@@ -1792,15 +1796,46 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                host_binding_tests = ["session::resident::activation_input_tests::" + name for name in (
+                    "activation_input_reservation_refuses_visible_names_without_recompiling",
+                    "activation_input_committed_binding_owns_interface_and_scope_releases_root_once",
+                    "activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservations",
+                )]
+                host_env, host_resources, host_worker = compiler_service_test_inputs(
+                    package_name, "runtime_host_binding_tests"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_host_binding_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(host_binding_tests, 8), "    ],",
+                    f"    expected_count = {len(host_binding_tests)},",
+                    "    jobs = 1,", "    timeout = 600,",
+                    f"    test_rule_timeout_ms = {(len(host_binding_tests) * 600 + 60) * 1000},",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in host_binding_tests
+                    ) + "},",
+                    runtime_arguments(host_env, host_resources, host_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 for world_target, world_tests in [
                     ("actor_compiler_world_queries_test", [
                         "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                         "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                     ]),
+                    ("actor_world_status_test", [
+                        "resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication",
+                    ]),
                     ("actor_world_cell_input_test", [
                         "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",
                         "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners",
+                    ]),
+                    ("actor_world_declaration_publication_test", [
+                        "resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell",
+                    ]),
+                    ("actor_world_durable_generation_history_test", [
+                        "resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement",
                     ]),
                     ("actor_world_lifetime_test", [
                         "resident_workbench::request_tests::abandoned_private_world_birth_reaps_scope_after_lost_delivery",
@@ -1948,7 +1983,10 @@ tidepool_buildscript_run(
         if package_name == "tidepool-toolchain":
             for world_target, world_case in [
                 ("toolchain_world_native_seal_test", "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"),
+                ("toolchain_world_original_seal_test", "artifacts::module_product_tests::real_world_original_output_seals_its_actual_native_declaration"),
+                ("toolchain_world_mixed_seal_test", "artifacts::module_product_tests::real_world_mixed_output_retains_prior_native_stages"),
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
+                ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
             ]:
                 world_env, world_resources, world_worker = compiler_service_test_inputs(
                     package_name, world_target
@@ -2092,7 +2130,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool-extract-cmd" and target["name"] == "retained_fingerprint":
             NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
         if package_name == "exomonad-actor" and target["name"] == "actor":
-            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary", env, resources, worker))
+            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary"))
     if package_name == "tidepool-extract-cmd":
         rules.append('filegroup(\n    name = "retained_fingerprint_fixtures",\n    srcs = {path[len("tests/fixtures/retained_fingerprint/"):]: path for path in glob(["tests/fixtures/retained_fingerprint/*.hs"])},\n    visibility = ["PUBLIC"],\n)\n')
     if package_name == "tidepool-bignum":

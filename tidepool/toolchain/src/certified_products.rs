@@ -398,10 +398,12 @@ pub(crate) struct CertifiedProducts {
     pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
     pub(crate) source_selection: CertifiedSourceSelection,
+    pub(crate) original_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
 }
 
 /// Exact original facts admitted once by the physical segment owner. Captured
-/// value interfaces stay private until that owner's checked item selects them.
+/// input interfaces remain compiler-available; produced interfaces become
+/// available only through their checked item prefix. Neither grants live values.
 pub(crate) struct CertifiedSegmentOriginals {
     raw: ParsedModuleProducts,
     receipt: CertifiedReceipt,
@@ -414,7 +416,12 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
-    authored_artifacts: Option<crate::artifact_inventory::ArtifactView>,
+    admission: SegmentOriginalAdmission,
+}
+
+enum SegmentOriginalAdmission {
+    OriginalOnly(Arc<crate::declaration_context::OriginalCompilerInputs>),
+    Executable(crate::artifact_inventory::BoundArtifactSelection),
 }
 
 impl CertifiedSegmentOriginals {
@@ -463,6 +470,7 @@ impl CertifiedSegmentOriginals {
             produced,
             validation,
         )?;
+        products.source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
         let mut package_availability =
             inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
@@ -548,24 +556,62 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        // Original stages have no target view. Keep this same physical issuer
-        // for their authored closure; executable items use their bound cursor.
-        let physical =
+        validation.inventory.reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
+            artifact_entries.len() + value_entries.len(),
+        )?;
+        let entries = artifact_entries
+            .iter()
+            .chain(&value_entries)
+            .cloned()
+            .collect();
+        let admitted = if authored.is_some() {
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
-                artifact_entries
-                    .iter()
-                    .chain(&value_entries)
-                    .cloned()
-                    .collect(),
+                entries,
             )
-            .map_err(|error| {
-                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                    stage = "segment_native_availability", %error,
-                    "compiler original selection refused");
-                CertificationError::OriginalClosure(Box::new(error))
-            })?;
+            .map(|physical| SegmentOriginalAdmission::OriginalOnly(Arc::new(physical)))
+        } else {
+            compiler_inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(
+                    compiler_inputs.artifacts(),
+                    entries,
+                    &products.source_selection,
+                )
+                .map(|bound| {
+                    products.source_selection = bound.source_selection().clone();
+                    SegmentOriginalAdmission::Executable(bound)
+                })
+        };
+        let admission = admitted.map_err(|error| {
+            if tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG) {
+                if let crate::CompileError::ArtifactInventory(failure) = &error {
+                    if let crate::artifact_inventory::ArtifactInventoryFailure::NativeRootOutsideView { artifact } = &failure.failure {
+                        let incoming = artifact_entries.iter().chain(&value_entries)
+                            .find(|entry| entry.descriptor.id == *artifact);
+                        let retained = compiler_inputs.artifacts().observed_payload(artifact);
+                        let selected = products.source_selection.native_selections()
+                            .find(|native| native.original_artifact_id().ok() == Some(*artifact));
+                        let offered = products.source_selection.issued_native_availability()
+                            .any(|offer| offer.original_artifact_id() == *artifact);
+                        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                            stage = "segment_native_availability", ?artifact,
+                            incoming_descriptor = ?incoming.map(|entry| &entry.descriptor),
+                            retained_descriptor = ?retained.map(|entry| &entry.descriptor),
+                            selected_owner = ?selected.map(|native| &native.owner),
+                            selected_origin = ?selected.map(|native| &native.origin),
+                            offered,
+                            "native root refusal physical issuer evidence");
+                    }
+                }
+            }
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "segment_native_availability", %error,
+                "compiler original selection refused");
+            CertificationError::OriginalClosure(Box::new(error))
+        })?;
         timing.advance("finish_segment");
         let value_entry_index = value_entries
             .iter()
@@ -576,7 +622,7 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
-            authored_artifacts: authored.map(|_| physical),
+            admission,
             package_availability,
             raw,
             receipt,
@@ -614,11 +660,32 @@ impl CertifiedSegmentOriginals {
     pub(crate) fn authored_artifacts(
         &self,
     ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
-        self.authored_artifacts
-            .as_ref()
-            .ok_or(CertificationError::Mismatch(
+        match &self.admission {
+            SegmentOriginalAdmission::OriginalOnly(inputs) => Ok(inputs.issued_artifacts()),
+            SegmentOriginalAdmission::Executable(_) => Err(CertificationError::Mismatch(
                 "executable segment has no authored original stage",
-            ))
+            )),
+        }
+    }
+
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        match &self.admission {
+            SegmentOriginalAdmission::OriginalOnly(inputs) => inputs,
+            SegmentOriginalAdmission::Executable(bound) => bound.physical_inputs(),
+        }
+    }
+
+    pub(crate) fn bound_artifacts(
+        &self,
+    ) -> CertResult<crate::artifact_inventory::BoundArtifactSelection> {
+        match &self.admission {
+            SegmentOriginalAdmission::Executable(bound) => Ok(bound.clone()),
+            SegmentOriginalAdmission::OriginalOnly(_) => Err(CertificationError::Mismatch(
+                "authored original stage has no executable cursor",
+            )),
+        }
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
@@ -636,9 +703,9 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn select_item(
         &self,
+        cursor: &mut crate::artifact_inventory::BoundArtifactSelection,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
-        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
@@ -650,6 +717,15 @@ impl CertifiedSegmentOriginals {
             return Err(CertificationError::Mismatch(
                 "segment inventory accounting owner",
             ));
+        }
+        match (&self.products.source_selection.produced_types, produced) {
+            (None, None) => {}
+            (Some(segment), Some(item)) if item.is_item_of(segment) => {}
+            _ => {
+                return Err(CertificationError::Mismatch(
+                    "item produced type selection differs from its physical segment",
+                ));
+            }
         }
         for (owner, witness) in &item.packages {
             check_segment_package_addition(
@@ -695,15 +771,15 @@ impl CertifiedSegmentOriginals {
             }
             verify_package_interface(validation, witness)?;
         }
+        // This segment already authenticated every captured input interface.
+        // An item can need an input's type without retaining its runtime value.
+        // Only this request's produced interfaces need ordinal narrowing here;
+        // executable demand is issued separately from the actual target imports.
         let selected_value = |value: &&crate::recovery_artifacts::CertifiedValueInterface| {
-            if let Some(outputs) =
-                produced.filter(|outputs| outputs.owns_artifact(value.artifact_id()))
-            {
-                outputs.selects_artifact(value.artifact_id())
-            } else {
-                tidepool_repr::SessionModule::from_module_name(value.interface().module())
-                    .is_some_and(|owner| selected_values.contains(&owner))
-            }
+            produced.is_none_or(|outputs| {
+                !outputs.owns_artifact(value.artifact_id())
+                    || outputs.selects_artifact(value.artifact_id())
+            })
         };
         let selected_count = self
             .products
@@ -758,7 +834,11 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
+        let original_inputs = cursor
+            .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let products = CertifiedProducts {
+            original_inputs: Some(original_inputs),
             groups: self.products.groups.clone(),
             recovery_products: self.products.recovery_products.clone(),
             module_interfaces: self.products.module_interfaces.clone(),
@@ -2973,6 +3053,12 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn produced_types(
+        &self,
+    ) -> Option<&crate::checked_cell::ProducedValueTypeInterfaces> {
+        self.produced_types.as_ref()
+    }
+
     /// Bind current membership to the actual output row and payload. Available
     /// originals and an absent continuation are not evidence of current output.
     pub(crate) fn current_product<'a>(
@@ -3025,31 +3111,6 @@ impl CertifiedSourceSelection {
             entry,
             ordinal: key.original_ordinal,
         }))
-    }
-
-    /// Physical output membership is independent of native reuse labels and
-    /// already-issued group bindings. Only this output's bound producer rows
-    /// qualify; retained input availability cannot become a current product.
-    pub(crate) fn physical_current_original(
-        &self,
-        owner: &CachedHomeOwner,
-    ) -> CertResult<Option<crate::artifact_inventory::ArtifactId>> {
-        let Some(native) = self
-            .modules
-            .get(&(owner.unit.clone(), owner.module.clone()))
-            .and_then(ReceiptSourceSelection::native)
-        else {
-            return Ok(None);
-        };
-        if &native.owner != owner || !matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
-            return Ok(None);
-        }
-        match native.original {
-            ReceiptOriginalIdentity::Bound(original) => Ok(Some(original)),
-            ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
-                "physical current original identity is not bound",
-            )),
-        }
     }
 
     /// Encoding bases borrow immutable facts only; native decisions still come
@@ -7094,6 +7155,31 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
+    certify_selected_owned_group_rows_in_context_with_validation(
+        available,
+        current_groups,
+        selected,
+        validation,
+    )
+    .map(|groups| groups.into_iter().map(|(_, group)| group).collect())
+}
+
+/// Preserve each checked original key at the owner that admits its group.
+/// Receiving target assembly must not rediscover it from a broader owner map.
+pub(crate) fn certify_selected_owned_group_rows_in_context_with_validation(
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    current_groups: &[PendingCertifiedGroup],
+    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<
+    Vec<(
+        crate::artifact_inventory::NativeGroupKey,
+        PendingCertifiedGroup,
+    )>,
+> {
     validate_selected_originals_with_validation(
         available,
         current_groups,
@@ -7325,7 +7411,12 @@ fn validate_selected_originals_with_validation(
     validation: &mut PackageInterfaceValidation,
     native_use: OriginalNativeUse,
     validation_roots: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
-) -> CertResult<Vec<PendingCertifiedGroup>> {
+) -> CertResult<
+    Vec<(
+        crate::artifact_inventory::NativeGroupKey,
+        PendingCertifiedGroup,
+    )>,
+> {
     use crate::artifact_inventory::NativeGroupKey;
     let inventory = OriginalValidationInventory::new(available)?;
     let native_ids = &inventory.native_ids;
@@ -7373,7 +7464,7 @@ fn validate_selected_originals_with_validation(
         }
         inventory.validate_imports(key, &originals, |_| true, validation)?;
         if native_use == OriginalNativeUse::SelectedGroups && !inherited.contains(key) {
-            additional.push(group.admitted());
+            additional.push((*key, group.admitted()));
         }
     }
     Ok(additional)
@@ -9918,6 +10009,7 @@ pub(crate) fn certify_products_with_validation(
     let groups = IssuedGroupCandidates::bind(groups.into(), &recovery_products)?;
     source_selection.bind_produced_originals(&groups)?;
     Ok(CertifiedProducts {
+        original_inputs: None,
         groups,
         recovery_products: recovery_products.into(),
         module_interfaces: module_interfaces.into(),
@@ -17055,7 +17147,9 @@ pub(crate) mod tests {
                     &inventory.empty_view(),
                     vec![entry.clone()],
                 )
-                .unwrap();
+                .unwrap()
+                .issued_artifacts()
+                .clone();
                 let private =
                     OriginalCompilerInputs::from_selection(&physical, &completed).unwrap();
                 let support =
@@ -17492,7 +17586,9 @@ pub(crate) mod tests {
             &inventory.empty_view(),
             entries.clone(),
         )
-        .unwrap();
+        .unwrap()
+        .issued_artifacts()
+        .clone();
         let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
         let [issued] = physical_availability.as_slice() else {
             panic!("one physical native product");
@@ -17555,14 +17651,18 @@ pub(crate) mod tests {
             item.issued_native_availability().next().unwrap(),
             &issued
         ));
-        assert_eq!(
-            physical.physical_current_original(product.owner()).unwrap(),
-            Some(native.descriptor.id),
-        );
-        assert_eq!(
-            item.physical_current_original(product.owner()).unwrap(),
-            physical.physical_current_original(product.owner()).unwrap()
-        );
+        let current_key = crate::artifact_inventory::NativeGroupKey {
+            artifact: native.descriptor.id,
+            original_ordinal: *native.native_group_ordinals.first().unwrap(),
+        };
+        assert!(physical
+            .current_product(current_key, &native)
+            .unwrap()
+            .is_some());
+        assert!(item
+            .current_product(current_key, &native)
+            .unwrap()
+            .is_some());
         let private = OriginalCompilerInputs::from_selection(&item, &item_view).unwrap();
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
@@ -17588,7 +17688,7 @@ pub(crate) mod tests {
         .unwrap();
         assert!(
             inherited
-                .physical_current_original(product.owner())
+                .current_product(current_key, &native)
                 .unwrap()
                 .is_none(),
             "carrying actual Full availability cannot restamp physical output membership"
@@ -18686,7 +18786,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(next
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .retained
                 .selected_native_groups
                 .is_empty());
@@ -19316,6 +19416,186 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn certified_group_bindings_preserve_exact_scopes_and_target_owner() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+
+        let original = full_native_fixture("BoundGroup", vec![(8, vec![]), (11, vec![])], 7);
+        let other = full_native_fixture("OtherBoundGroup", vec![(12, vec![])], 7);
+        let mut candidates = original
+            .original_native()
+            .unwrap()
+            .groups
+            .iter()
+            .chain(other.original_native().unwrap().groups.iter())
+            .map(AuthenticatedOriginalGroup::admitted)
+            .collect::<Vec<_>>();
+        for group in &mut candidates {
+            group.origin = ProductOrigin::Fresh;
+        }
+        // An available but undemanded duplicate cannot compete with a solved row.
+        candidates.push(candidates[1].clone());
+        let issued =
+            IssuedGroupCandidates::bind(candidates.into(), &[original.clone(), other.clone()])
+                .unwrap();
+        let import = |group: &PendingCertifiedGroup| PendingImportOwner::Source {
+            owner: group.owner().clone(),
+            original_ordinal: group.group().original_ordinal(),
+            binder: group.group().binders().first().unwrap().clone(),
+        };
+        let own_imports = vec![import(&issued[0])];
+        let both_imports = vec![import(&issued[0]), import(&issued[2])];
+        let inventory = ArtifactInventory::default();
+        let mut validation = PackageInterfaceValidation::default();
+        let entries = [&original, &other]
+            .into_iter()
+            .map(|product| {
+                Arc::new(
+                    ArtifactEntry::original_with_validation(
+                        [1; 32],
+                        product.clone(),
+                        &mut validation,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let admit = |imports: &[PendingImportOwner]| {
+            inventory
+                .admit_product_artifacts(
+                    &available,
+                    entries.clone(),
+                    NativeArtifactDemand::CertifiedTargetImports(imports),
+                    None,
+                )
+                .unwrap()
+                .into_target()
+                .unwrap()
+        };
+        let admitted = admit(&own_imports);
+        let owner = Arc::new(
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                admitted.artifacts(),
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap(),
+        );
+        assert_eq!(owner.groups().len(), 1);
+        assert_eq!(owner.groups()[0].origin(), ProductOrigin::Fresh);
+        let (_, selected) = admitted.artifacts().selected_native_binding_rows();
+        let binding = *selected.first().unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(std::ptr::eq(
+            owner.get(binding).unwrap(),
+            &owner.groups()[0]
+        ));
+        assert!(owner.matches_view(&admitted.artifacts().clone()));
+
+        let first = admitted
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(Arc::clone(&owner))
+            .unwrap();
+        let second = admitted
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(Arc::clone(&owner))
+            .unwrap();
+        let first_rows = first.resolve_sources().unwrap();
+        let second_rows = second.resolve_sources().unwrap();
+        assert!(std::ptr::eq(
+            first_rows.group(binding).unwrap(),
+            second_rows.group(binding).unwrap()
+        ));
+
+        // Equal selected bindings do not establish the same acquisition owner.
+        let foreign = admit(&own_imports);
+        let foreign_owner = Arc::new(
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                foreign.artifacts(),
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            foreign.artifacts().selected_native_binding_rows().1,
+            selected
+        );
+        assert!(!foreign_owner.matches_view(admitted.artifacts()));
+        assert!(admitted
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(foreign_owner)
+            .is_err());
+
+        // A separate real demand issues a different scope for the same payload.
+        let independent = admit(&both_imports);
+        let (_, independent_bindings) = independent.artifacts().selected_native_binding_rows();
+        let independent_binding = *independent_bindings
+            .iter()
+            .find(|group| {
+                group.binding.artifact() == binding.binding.artifact()
+                    && group.original_ordinal == binding.original_ordinal
+            })
+            .unwrap();
+        assert_ne!(independent_binding, binding);
+        assert!(owner.get(independent_binding).is_none());
+        let independent_owner = Arc::new(
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                independent.artifacts(),
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap(),
+        );
+        let other_binding = *independent_bindings
+            .iter()
+            .find(|group| group.binding.artifact() != binding.binding.artifact())
+            .unwrap();
+        assert!(independent_owner.get(other_binding).is_some());
+        let narrowed = independent
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(independent_owner)
+            .unwrap();
+        let narrowed_rows = narrowed.resolve_sources().unwrap();
+        assert!(narrowed_rows.group(independent_binding).is_ok());
+        assert!(narrowed_rows.group(other_binding).is_err());
+
+        let joined = admitted
+            .artifacts()
+            .merge_fixture_selections(independent.artifacts())
+            .unwrap();
+        let joined_owner =
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                &joined,
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap();
+        assert!(
+            std::ptr::eq(
+                joined_owner.get(binding).unwrap(),
+                joined_owner.get(independent_binding).unwrap(),
+            ),
+            "independent exact edges share one certified physical row"
+        );
+        assert_eq!(joined_owner.groups().len(), 2);
     }
 
     #[test]
@@ -22732,7 +23012,7 @@ pub(crate) mod tests {
                 .all(|artifact| artifact.product.is_none()));
             let selected = request
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .entries
                 .values()
                 .find(|entry| entry.descriptor.owner.module == "Fresh")
@@ -24215,7 +24495,7 @@ None,
             assert!(request.groups.is_empty());
             assert!(request
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .retained
                 .selected_native_groups
                 .is_empty());
@@ -24223,7 +24503,7 @@ None,
             let effective = request.compiler_inputs();
             assert_eq!(
                 effective
-                    .metadata
+                    .metadata()
                     .retained
                     .artifacts
                     .values()
@@ -24615,7 +24895,7 @@ None,
                 assert!(cached_request.groups.is_empty());
                 assert!(cached_request
                     .compiler_inputs()
-                    .metadata
+                    .metadata()
                     .retained
                     .selected_native_groups
                     .is_empty());

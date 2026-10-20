@@ -116,12 +116,14 @@ import Tidepool.TurnSource
 
 -- | A binder a declaration introduces.
 --
--- 'EValue' is a function/value binder. 'EType' is a type/data head with its
+-- 'EValue' is a function/value binder. 'EPattern' retains the parsed pattern
+-- synonym's constructor namespace. 'EType' is a type/data head with its
 -- data constructor children, so it can render as @Foo(..)@ for both export and
 -- @hiding@. 'EClass' is a typeclass head with its method names, so it renders
 -- as @Class(..)@ (required for instances to see the methods).
 data ExportItem
   = EValue String
+  | EPattern String
   | EType String [String]
   | EClass String [String]
   deriving (Eq, Show)
@@ -167,12 +169,14 @@ extractBindersNamedGhc path includes expectedModuleName = do
 -- carries none (see 'TDecl's doc).
 exportItemName :: ExportItem -> String
 exportItemName (EValue n)   = n
+exportItemName (EPattern n) = n
 exportItemName (EType n _)  = n
 exportItemName (EClass n _) = n
 
 -- | The binders one top-level declaration introduces.
 declItems :: LHsDecl GhcPs -> [ExportItem]
 declItems ldecl = case unLoc ldecl of
+  ValD _ (PatSynBind _ PSB {psb_id = name}) -> [EPattern (occStr (unLoc name))]
   ValD _ bind -> map (EValue . occStr) (collectHsBindBinders CollNoDictBinders bind)
   TyClD _ tcd -> tyClItems tcd
   _           -> []
@@ -854,8 +858,11 @@ automaticGenericDeclarations flags qualifier declarations =
 
 -- | Structural companions are deterministic. GHC resolves class identities
 -- and rejects only generated duplicates, so qualified unrelated classes never
--- suppress a companion merely because their occurrence names match.
+-- suppress a companion merely because their occurrence names match. Their
+-- representation-family constraint requires the recipe's UndecidableInstances
+-- capability; an optional companion cannot widen authored typechecking flags.
 structuralDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellStructuralDisplayTarget]
+structuralDisplayTargets flags _ | not (xopt UndecidableInstances flags) = []
 structuralDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
   PFailed _ -> []
   POk _ parsed ->
@@ -1476,6 +1483,8 @@ renderVerdictsJson sbs =
 
     renderExportItem (EValue name) =
       "[\"EValue\"," ++ jsonString name ++ "]"
+    renderExportItem (EPattern name) =
+      "[\"EPattern\"," ++ jsonString name ++ "]"
     renderExportItem (EType name cons) =
       "[\"EType\"," ++ jsonString name ++ ",["
         ++ intercalate "," (map jsonString cons) ++ "]]"

@@ -40,6 +40,7 @@ fn reload_context(key: &str) -> ToolInvocationContext {
 }
 
 #[tokio::test]
+#[ignore = "requires the dedicated rooted notebook contract execution group"]
 async fn unavailable_reload_leaves_parked_cells_and_control_independent() {
     let markers = ["reload-A", "reload-B"];
     let mut fixture = ConcurrentResident::new_with_source(191, &markers, None).await;
@@ -105,6 +106,7 @@ async fn unavailable_reload_leaves_parked_cells_and_control_independent() {
 }
 
 #[tokio::test]
+#[ignore = "requires the dedicated rooted notebook contract execution group"]
 async fn invalid_authored_reload_arguments_release_the_invocation() {
     let fixture = ConcurrentResident::new_with_source(192, &[], None).await;
     fixture

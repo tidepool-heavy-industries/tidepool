@@ -47,7 +47,9 @@ impl IssuedOriginal {
                 self.request.compiler_inputs().artifacts(),
                 physical.entries(),
             )
-            .unwrap();
+            .unwrap()
+            .issued_artifacts()
+            .clone();
         self.completed_output = Some(
             crate::declaration_context::IssuedOriginalOutput::issue(
                 self.certified.source_selection.clone(),

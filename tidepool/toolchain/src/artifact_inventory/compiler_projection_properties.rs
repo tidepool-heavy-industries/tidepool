@@ -1331,7 +1331,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         .within_view(available),
                     )
                     .unwrap();
-                    let mut selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection, &available.metadata_snapshot(),
                         &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                     ).unwrap();
@@ -1340,11 +1340,6 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             .into_iter()
                             .map(|ordinal| (module, version, ordinal)),
                     );
-                    let external = whole
-                        .iter()
-                        .filter(|group| group.0 != module || group.1 != version)
-                        .copied()
-                        .collect::<BTreeSet<_>>();
                     let expected_groups = whole
                         .iter()
                         .map(|group| catalog.key(*group))
@@ -1365,57 +1360,201 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                                 "whole-original demand must preserve exact dependency variants and omit unrelated roots"
                             );
                         };
-                    // Whole demand includes group 3's exact helper SCC and
-                    // group 11's captured value; group 29 has no source edge.
-                    // A previous demand can already have earned those choices.
-                    let already_earned = published[domain] && external.is_subset(&selected[domain]);
-                    let early = selection.selected_original_closure(available);
-                    if already_earned {
-                        assert_original(&early.unwrap());
-                    } else {
-                        assert!(early.is_err(),
-                            "whole-original demand requires its exact earned helpers and captured values");
-                    }
+                    assert!(
+                        selection.selected_original_closure(available).is_err(),
+                        "logical group demand cannot replace an issued compiler-input owner"
+                    );
+
+                    // Issue a real physical cohort, then receive its exact
+                    // availability through the same request owner as a later
+                    // compiler. Native helpers remain hidden dependencies of
+                    // the single selected Original, not extra source roots.
+                    let cohort = whole
+                        .iter()
+                        .map(|group| (group.0, group.1))
+                        .collect::<BTreeSet<_>>();
+                    let mut entries = cohort
+                        .iter()
+                        .map(|(module, version)| Arc::clone(catalog.original(*module, *version)))
+                        .collect::<Vec<_>>();
                     if published[domain] {
-                        // Also consume an explicit whole-original admission,
-                        // independent of any earlier target's partial demand.
-                        let custody = available
-                            .inventory()
-                            .admit_shared(
-                                available,
-                                vec![Arc::clone(catalog.original(module, version))],
-                            )
-                            .unwrap();
-                        let issued = custody
-                            .select_admission_roots(vec![
-                                catalog.original(module, version).descriptor.id,
-                            ])
-                            .unwrap();
-                        assert_eq!(
-                            issued.selected_native_groups(),
-                            catalog
-                                .closure(
-                                    ORDINALS
-                                        .into_iter()
-                                        .map(|ordinal| (module, version, ordinal))
-                                )
-                                .into_iter()
-                                .map(|group| catalog.key(group))
-                                .collect()
+                        entries.push(Arc::clone(&catalog.capture));
+                    }
+                    let inventory = ArtifactInventory::default();
+                    let physical = inventory
+                        .admit_shared_with_demand(
+                            &inventory.empty_view(),
+                            entries.clone(),
+                            NativeArtifactDemand::ScopeInterfaces,
+                        )
+                        .unwrap();
+                    let physical_projection =
+                        CompilerInputProjection::from_issued_entries(&entries).unwrap();
+                    let mut physical_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &physical_projection, &physical.metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    ).unwrap();
+                    let issued = crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                        &mut physical_selection, &inventory.empty_view(), entries,
+                    );
+                    if !published[domain] {
+                        let missing = issued.expect_err(
+                            "physical issuance requires group 11's actual captured value owner",
                         );
-                        selection
-                            .with_new_product_dependencies(
-                                &custody.metadata_snapshot(),
-                                &[NativeOriginalRequirement {
-                                    original: catalog.original(module, version).descriptor.id,
-                                    selection: ExactArtifactSelection::capture(&issued),
-                                }],
+                        let CompileError::ArtifactInventory(error) = missing else {
+                            panic!("missing capture must reach its native dependency: {missing:?}");
+                        };
+                        let ArtifactInventoryFailure::MissingDependency {
+                            artifact,
+                            required,
+                            dependency,
+                            ..
+                        } = error.failure
+                        else {
+                            panic!("missing capture must retain its exact dependency: {error:?}");
+                        };
+                        assert_eq!(required, catalog.capture.descriptor.owner);
+                        assert!(
+                            cohort.iter().any(|(module, version)| artifact
+                                == catalog.original(*module, *version).descriptor.id
+                                && dependency
+                                    == ArtifactDependency::NativeBinding {
+                                        dependent_ordinal: 11,
+                                        generation: catalog.generations[version * MODULES + module],
+                                        namespace: "value".into(),
+                                        occurrence: Catalog::capture_identity(*module, *version)
+                                            .occurrence,
+                                        record_parent: None,
+                                    }),
+                            "missing capture must name its actual parent and generation"
+                        );
+                        outcome = Outcome::Refusal;
+                    } else {
+                        let issued = issued.unwrap();
+                        let private =
+                            crate::declaration_context::OriginalCompilerInputs::from_selection(
+                                &physical_selection,
+                                issued.issued_artifacts(),
                             )
                             .unwrap();
-                        let original = selection.selected_original_closure(&custody).unwrap();
+                        let root_id = catalog.original(module, version).descriptor.id;
+                        let offer = private
+                            .native_offers()
+                            .iter()
+                            .find(|offer| offer.original() == root_id)
+                            .unwrap();
+                        let expected_exact = offer
+                            .proof()
+                            .unwrap()
+                            .selection
+                            .graph_selection()
+                            .native_groups
+                            .clone();
+                        let expected_carriers = offer.issued_group_carriers().unwrap();
+                        let expected_canonical = issued
+                            .issued_artifacts()
+                            .binding_dependencies()
+                            .into_iter()
+                            .filter(|(source, _, edge)| {
+                                expected_carriers.values().any(|carrier| {
+                                    *source == ArtifactBindingNode::Artifact(*carrier)
+                                }) && *edge == ArtifactDependency::Interface
+                            })
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(
+                            expected_canonical.len(),
+                            expected_carriers.values().collect::<BTreeSet<_>>().len(),
+                            "each issuing carrier records its canonical binding"
+                        );
+                        let selected = physical_selection
+                            .selected_authored_original_closure(
+                                issued.issued_artifacts(),
+                                &owner(module).unit,
+                                &owner(module).module,
+                            )
+                            .unwrap();
+                        let receive =
+                            |private: crate::declaration_context::OriginalCompilerInputs| {
+                                let support =
+                                    CompilerSourceSupport::close_complete_output(&private)
+                                        .unwrap()
+                                        .source_support(&BTreeSet::from([owner(module)]))
+                                        .unwrap();
+                                let private = crate::declaration_context::OriginalCompilerInputs::from_issued_support(&support);
+                                let root = tempfile::tempdir().unwrap();
+                                let context =
+                                    ExactDeclarationContext::from_authenticated_interfaces(
+                                        Sha256::digest(PRODUCER).into(),
+                                        &inventory.empty_view(),
+                                        CompilerInputProjection::default(),
+                                    )
+                                    .unwrap();
+                                let request = crate::declaration_context::ExactCompileContext::new(
+                                    Arc::new(context),
+                                )
+                                .prepare_compilation_with_private_input(
+                                    root.path(),
+                                    PRODUCER,
+                                    None,
+                                    Some(private),
+                                )
+                                .unwrap();
+                                let inputs = request.compiler_inputs();
+                                let continued = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                            inputs, &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                        ).unwrap();
+                                continued.selected_original_closure(inputs.artifacts())
+                            };
+                        let empty = receive(private).expect_err("Full availability with empty executable roots must refuse direct Original demand");
+                        let crate::certified_products::CertificationError::OriginalClosure(error) =
+                            empty
+                        else {
+                            panic!(
+                                "empty continuation must reach its root-choice refusal: {empty:?}"
+                            );
+                        };
+                        let CompileError::ArtifactInventory(error) = *error else {
+                            panic!("empty continuation must reach the native owner: {error:?}");
+                        };
+                        assert!(
+                            matches!(
+                                error.native_refusal,
+                                Some(NativeAdmissionRefusal::RootChoiceExplicitEmpty { .. })
+                            ),
+                            "the empty continuation must keep its typed root-choice refusal"
+                        );
+                        let private =
+                            crate::declaration_context::OriginalCompilerInputs::from_selection(
+                                &physical_selection,
+                                selected.native_closure(),
+                            )
+                            .unwrap();
+                        let original = receive(private).unwrap();
                         assert_original(&original);
-                    } else {
-                        outcome = Outcome::Refusal;
+                        let actual = original.native_closure();
+                        assert_eq!(
+                            actual.capture_graph_selection().native_groups,
+                            expected_exact,
+                            "request continuation preserves the issuing exact groups"
+                        );
+                        let actual_edges = actual
+                            .binding_dependencies()
+                            .into_iter()
+                            .collect::<BTreeSet<_>>();
+                        for (group, carrier) in expected_carriers {
+                            assert!(
+                                actual_edges.contains(&(
+                                    ArtifactBindingNode::Group(group),
+                                    ArtifactBindingNode::Artifact(carrier),
+                                    ArtifactDependency::Interface
+                                )),
+                                "request continuation preserves each issuing carrier"
+                            );
+                        }
+                        assert!(
+                            expected_canonical.is_subset(&actual_edges),
+                            "request continuation preserves each issuing canonical binding"
+                        );
                     }
                 } else {
                     outcome = Outcome::Absent;
@@ -1461,7 +1600,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
     );
     assert!(
         successes[12] > 0,
-        "the complete-original consumer must accept an earned native requirement"
+        "the complete-original consumer must accept an issued native continuation"
     );
     for kind in [8, 9, 10, 11, 12] {
         assert!(
@@ -1632,8 +1771,8 @@ fn compiler_domains_and_target_roots_match_independent_variant_histories() {
                     mutation: 2,
                 },
                 Op::ReleaseSegment { domain: 3 },
-                // Capture without demand, and then independent group 29, must
-                // not select the hidden helper SCC for a complete original.
+                // Capture and independent group 29 do not turn logical target
+                // choices into a complete Original's issued continuation.
                 Op::IssueSegment { domain: 3 },
                 Op::PublishPrefix { domain: 3 },
                 Op::DeclarationOriginal {
@@ -1653,8 +1792,8 @@ fn compiler_domains_and_target_roots_match_independent_variant_histories() {
                     module: 0,
                     version: 0,
                 },
-                // An opposite-version helper choice cannot satisfy version 0.
-                // The same earned choice does satisfy its own version 1.
+                // Each version's real producer must retain its own exact
+                // helpers, independently of prior opposite-version demand.
                 Op::Demand {
                     domain: 3,
                     module: 0,

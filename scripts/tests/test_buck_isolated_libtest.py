@@ -637,6 +637,31 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertFalse(root.exists())
         self.assertTrue(record['artifacts_removed_after_success'])
 
+    def test_concurrent_empty_root_observations_admit_only_one_runner(self):
+        root = Path(self.tmp.name) / 'contended-results'
+        root.mkdir()
+        observed = threading.Barrier(2)
+        iterdir = Path.iterdir
+
+        def simultaneous_empty_observation(path):
+            entries = list(iterdir(path))
+            self.assertEqual(path, root)
+            self.assertEqual(entries, [])
+            observed.wait(timeout=2)
+            return iter(entries)
+
+        def claim():
+            try:
+                runner.claim_output_directory(root)
+                return True
+            except FileExistsError:
+                return False
+
+        with patch.object(Path, 'iterdir', simultaneous_empty_observation), \
+             runner.concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(lambda _: claim(), range(2)))
+        self.assertEqual(sorted(outcomes), [False, True])
+
     def test_retain_artifacts_option_controls_passing_case_cleanup(self):
         self.binary.write_text(
             '#!' + sys.executable + '\n'
@@ -1165,9 +1190,12 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_actor_layout_diagnostics_cross_delegation_explicitly(self):
         command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
             environment={'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS': '1',
-                         'TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC': '1', 'UNDECLARED_TRACE': '1'})
+                         'TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC': '1',
+                         'TIDEPOOL_FINALIZED_OWNER_TRACE': 'main:Tidepool.Aeson.Scientific',
+                         'UNDECLARED_TRACE': '1'})
         self.assertIn('--setenv=TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS=1', command)
         self.assertIn('--setenv=TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC=1', command)
+        self.assertIn('--setenv=TIDEPOOL_FINALIZED_OWNER_TRACE=main:Tidepool.Aeson.Scientific', command)
         self.assertFalse(any('UNDECLARED_TRACE' in word for word in command))
 
     def test_success_retains_physical_timing_and_outcome_before_scratch_deletion(self):
@@ -1911,6 +1939,8 @@ class IsolatedLibtestTests(unittest.TestCase):
             'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600',
             'TIDEPOOL_TIMING': '1',
             'TIDEPOOL_MEMO_TRACE': '1',
+            'RUST_LOG': 'tidepool::artifact_inventory::ambiguity_trace=debug',
+            'RUST_BACKTRACE': '1',
             'UNRELATED_VARIABLE': 'not-forwarded',
         }
         record = {}
@@ -2618,7 +2648,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             with self.subTest(global_mode=global_mode):
                 arguments = ['--exact', 'suite::works', '--expected-count', '1',
                              '--case-compiler-mode', 'suite::works=owned-resident',
-                             '--output-dir', str(Path(self.tmp.name) / 'modes'),
+                             '--output-dir', str(Path(self.tmp.name) / f'modes-{global_mode}'),
                              '--resource-env', 'TIDEPOOL_EXTRACT']
                 if global_mode:
                     arguments += ['--compiler-mode', global_mode]

@@ -6,7 +6,7 @@ module Tidepool.HomeProducts
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
   , validateCandidateCompilerViewProfile, materializeCandidateCompilerView, materializeAdmittedCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
-  , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal
+  , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal, admitCompiledCanonicalOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
   , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionLookup, originalVersionSeal
   , OriginalRecoveryScope, admitOriginalRecoveryScope, originalVersionInRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
@@ -20,7 +20,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Tidepool.ArtifactBytes (ArtifactBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.ExtractUtil (shaHex)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
@@ -79,9 +79,11 @@ import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody )
-import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore)
-import Tidepool.FinalizedModule (FinalizedModule)
+  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
+  , canonicalInterfaceInput, canonicalProofInterfaceBody, canonicalProofOriginalBody )
+import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore, captureFinalizedCore)
+import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface)
+import Tidepool.PackageWitness (PackageImportEvidence, encodePackageImports)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
@@ -92,6 +94,11 @@ data CandidateCoreFailure
   | CandidateCoreDecodeFailure FinalizedCoreFailure
   | CandidateCoreHomeMissing
   | CandidateCompilerViewUnsupportedProfile
+  | CandidateOriginalOwnerMismatch
+  | CandidateOriginalInterfaceMismatch
+  | CandidateOriginalCoreMismatch
+  | CandidateOriginalPackagesMismatch
+  | CandidateOriginalAuthorityMissing String String
   deriving (Eq, Show)
 instance Exception CandidateCoreFailure
 
@@ -111,6 +118,33 @@ admittedOriginalInterface (AdmittedFinalizedOriginal _ _ row _) = row
 
 admittedOriginalLocation :: AdmittedFinalizedOriginal -> ModLocation
 admittedOriginalLocation (AdmittedFinalizedOriginal _ _ _ location) = location
+
+-- A current compiler finalization can reuse a selected canonical original
+-- only when it is the exact interface/Core/package pair already admitted.
+-- This grants no fresh source selection and never manufactures a scope.
+admitCompiledCanonicalOriginal
+  :: HscEnv -> CanonicalInterfaceProof -> FinalizedModule -> PackageImportEvidence
+  -> IO AdmittedFinalizedOriginal
+admitCompiledCanonicalOriginal env proof original packages = do
+  let row@(artifact,packagePath,packageSha) = canonicalInterfaceInput proof
+      owner = mi_module (hm_iface (finalizedHomeModInfo original))
+  unless (isSourceOriginal (canonicalOrigin proof)
+      && originalOwnerKey owner == (exactUnit artifact,exactModule artifact))
+    (throwIO CandidateOriginalOwnerMismatch)
+  interface <- captureFinalizedInterface original
+  expectedInterface <- canonicalProofInterfaceBody proof artifact
+  unless (interface == expectedInterface) (throwIO CandidateOriginalInterfaceMismatch)
+  either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface (finalizedHomeModInfo original)))
+  -- The compiler owns this current Core body. Its admitted canonical seal
+  -- verifies identity without acquiring an old Core payload from metadata.
+  core <- captureFinalizedCore original >>= either (throwIO . CandidateCoreDecodeFailure) pure
+  expectedCore <- maybe (throwIO CandidateCoreMissing) pure (canonicalCoreArtifact proof)
+  unless (artifactSha256 core == canonicalCoreSha256 expectedCore)
+    (throwIO CandidateOriginalCoreMismatch)
+  expectedPackages <- canonicalProofOriginalBody proof packagePath packageSha
+  unless (encodePackageImports artifact packages == artifactBytes expectedPackages)
+    (throwIO CandidateOriginalPackagesMismatch)
+  pure (AdmittedFinalizedOriginal original proof row (ms_location (exactInterfaceSummary env artifact)))
 
 -- Content identity includes the compiler producer, complete original Core,
 -- interface and package witness. Paths and request purposes do not identify a

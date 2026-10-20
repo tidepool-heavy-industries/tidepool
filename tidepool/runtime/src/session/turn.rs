@@ -1669,6 +1669,73 @@ pub struct TurnCertification {
     purpose: TurnPurpose,
 }
 
+/// An operation-local borrow of the actual runtime producer and sealed output.
+pub(super) struct CurrentNativeSources<'a> {
+    products: tidepool_toolchain::artifacts::ResolvedNativeSourceProducts<'a>,
+    source: std::borrow::Cow<'a, super::resident::CapturedSourceOrigin>,
+}
+
+impl<'a> CurrentNativeSources<'a> {
+    pub(super) fn from_targets(
+        targets: &'a crate::RuntimePreparedTargets,
+        name: &str,
+    ) -> Result<Option<Self>, CompileError> {
+        targets
+            .artifacts
+            .native_source_products(name)
+            .map(|products| {
+                products.map(|products| Self {
+                    products,
+                    source: std::borrow::Cow::Owned(
+                        super::resident::CapturedSourceOrigin::from_runtime_targets(targets),
+                    ),
+                })
+            })
+    }
+
+    pub(super) fn target(&self) -> super::resident::NativeSourceCustody {
+        self.source.for_current_target(self.products.target())
+    }
+
+    pub(super) fn group(
+        &self,
+        pending: &PendingCertifiedGroup,
+    ) -> super::resident::NativeSourceCustody {
+        let mut sources = super::resident::NativeSourceCustody::default();
+        let mut found = false;
+        for row in self
+            .products
+            .groups()
+            .filter(|row| row.matches_group(pending))
+        {
+            found = true;
+            let contribution = match row.physical_current() {
+                Some(current) => self.source.for_current_group(current),
+                None => super::resident::NativeSourceCustody::unknown(
+                    pending
+                        .group()
+                        .definitions()
+                        .sites()
+                        .iter()
+                        .map(|site| site.site),
+                ),
+            };
+            sources.merge(&contribution);
+        }
+        if !found {
+            sources = super::resident::NativeSourceCustody::unknown(
+                pending
+                    .group()
+                    .definitions()
+                    .sites()
+                    .iter()
+                    .map(|site| site.site),
+            );
+        }
+        sources
+    }
+}
+
 /// Checked runtime output is ready only with its original prefix owner.
 /// Compiler bundle identity remains independent of this execution purpose.
 #[derive(Clone, Debug)]
@@ -1757,6 +1824,39 @@ impl Default for TurnCertification {
 }
 
 impl TurnCertification {
+    pub(super) fn current_native_sources(
+        &self,
+        prepared: &PreparedProgram,
+    ) -> Result<Option<CurrentNativeSources<'_>>, CompileError> {
+        let TurnPurpose::Execution { execution, prefix } = &self.purpose else {
+            return Ok(None);
+        };
+        if !execution.matches_target(prepared) {
+            return Err(CompileError::ExtractFailed(
+                "runtime source target differs from its checked issuer".into(),
+            ));
+        }
+        let item = prefix
+            .cell_program()
+            .items()
+            .iter()
+            .find(|item| {
+                item.native()
+                    .is_some_and(|native| Arc::ptr_eq(native, execution))
+            })
+            .ok_or_else(|| {
+                CompileError::ExtractFailed(
+                    "runtime source output lacks its actual settled item".into(),
+                )
+            })?;
+        let products = item.native_products().ok_or_else(|| {
+            CompileError::ExtractFailed("runtime source item lacks sealed native products".into())
+        })?;
+        Ok(Some(CurrentNativeSources {
+            products: products.native_source_products()?,
+            source: std::borrow::Cow::Borrowed(prefix.captured_source_origin()),
+        }))
+    }
     /// Carry an ordinary compiler target's complete certified import closure.
     pub(crate) fn from_artifacts(
         artifacts: &crate::CompiledArtifacts,
@@ -5202,6 +5302,9 @@ fn decode_export_item(v: &CborValue) -> Result<ExportItem, CompileError> {
         ("EValue", 2) => Ok(ExportItem::Value {
             name: cbor_expect_text(&arr[1], "EValue name")?.to_string(),
         }),
+        ("EPattern", 2) => Ok(ExportItem::Pattern {
+            name: cbor_expect_text(&arr[1], "EPattern name")?.to_string(),
+        }),
         ("EType", 3) => Ok(ExportItem::Type {
             name: cbor_expect_text(&arr[1], "EType name")?.to_string(),
             cons: decode_string_array(&arr[2], "EType cons")?,
@@ -5784,6 +5887,7 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
     };
     match (tag, fields.len()) {
         ("EValue", 2) => Ok(ExportItem::Value { name: name()? }),
+        ("EPattern", 2) => Ok(ExportItem::Pattern { name: name()? }),
         ("EType", 3) => Ok(ExportItem::Type {
             name: name()?,
             cons: children()?,
@@ -10879,6 +10983,20 @@ mod tests {
         .unwrap();
         assert_eq!(cs[0].kind, TurnKind::Expr);
         assert!(cs[0].binders.is_empty());
+    }
+
+    #[test]
+    fn pattern_export_wire_preserves_constructor_namespace() {
+        let classified = parse_classify_json(
+            r#"{"verdicts":[{"kind":"decl","binders":["PublishedPattern"],"items":[["EPattern","PublishedPattern"]]}]}"#,
+            1,
+        ).unwrap();
+        let expected = ExportItem::Pattern { name: "PublishedPattern".into() };
+        assert_eq!(classified[0].items, vec![expected.clone()]);
+        let value = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into())]);
+        assert_eq!(decode_export_item(&value).unwrap(), expected);
+        let extra = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into()), CborValue::Null]);
+        assert!(decode_export_item(&extra).is_err());
     }
 
     #[test]

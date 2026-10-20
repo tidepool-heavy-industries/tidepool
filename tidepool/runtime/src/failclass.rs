@@ -80,6 +80,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::SourceAdmission(_)
         | SessionError::GenerationExhausted(_)
         | SessionError::DeadScope(_)
+        | SessionError::HostBindingNameCollision { .. }
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
         | SessionError::UnsupportedCompilerWorldBinding { .. }
@@ -89,7 +90,6 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::WorldCellExpressionReservationUnsupported { .. }
         | SessionError::WorldCellCheckedProgramCapabilityMissing
         | SessionError::WorldCellSuccessorCapabilityMissing { .. }
-        | SessionError::WorldCellDeclarationPublicationCapabilityMissing
         | SessionError::WorldCellPublicationBaseStale
         | SessionError::WrongPublicManifestTicket
         | SessionError::InvalidDurablePublicAdmission { .. }

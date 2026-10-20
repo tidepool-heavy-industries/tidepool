@@ -116,7 +116,7 @@ import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest
   ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag, admitRequestOperation
-  , WorldPublicModuleRequest(..), WorldCellPlanRequest(..) )
+  , WorldQueryRequest(..), WorldCellPlanRequest(..) )
 import Tidepool.Introspection
   ( encodeInspectionResults, runInspectionGhc, withInspectionWork
   , inspectionCompilationWork )
@@ -246,7 +246,7 @@ dispatch timing bound =
       bytes <- runBoundWorldCellPlan bound
       BS.writeFile (worldCellPlanOutput question) bytes
       pure []
-    WorldPublicModuleOperation question -> do
+    WorldQueryOperation question -> do
       bytes <- runBoundWorldQuery bound
       BS.writeFile (worldQueryOutput question) bytes
       pure []
@@ -258,7 +258,7 @@ dispatch timing bound =
           -> fail "inspection type batch requires at least two type queries and no other query kinds"
         | otherwise -> case boundRequestOperation bound of
             EnsureExactInputsOperation _ -> fail "source-free exact input acquisition entered source dispatch"
-            WorldPublicModuleOperation _ -> fail "held world query entered source dispatch"
+            WorldQueryOperation _ -> fail "held world query entered source dispatch"
             ActivationPreviewOperation -> runActivationPreviewMode bound file
             SourceCheckOperation -> runSourceCheckMode bound file
             CellPlanOperation -> runCellPlanMode (boundParserFlags bound) args file

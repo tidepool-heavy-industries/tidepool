@@ -686,7 +686,7 @@ fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, Da
                 _ => {
                     return Err(DaemonError::Protocol(
                         "invalid retirement termination tag".into(),
-                    ))
+                    ));
                 }
             };
             let worker = match read_exact_or_crash(reader, 1)?[0] {
@@ -699,7 +699,7 @@ fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, Da
                 _ => {
                     return Err(DaemonError::Protocol(
                         "invalid worker retirement tag".into(),
-                    ))
+                    ));
                 }
             };
             let failure = read_retirement_cause(reader).map_err(DaemonError::Io)?;
@@ -927,16 +927,28 @@ impl std::fmt::Display for DaemonError {
         match self {
             DaemonError::Connect(e) => write!(f, "daemon connect failed: {e}"),
             DaemonError::Io(e) => write!(f, "daemon I/O error: {e}"),
-            DaemonError::IncompleteResponse => write!(f, "compiler response ended before a complete reply"),
+            DaemonError::IncompleteResponse => {
+                write!(f, "compiler response ended before a complete reply")
+            }
             DaemonError::NotAccepted(message) => {
                 write!(f, "daemon did not accept request: {message}")
             }
             DaemonError::Busy => {
                 write!(f, "compiler daemon remained busy until admission deadline")
             }
-            DaemonError::CapacityRefusal(CapacityRefusal::PreparationUnsupported) => write!(f, "compiler daemon has no separate preparation capacity; foreground work remains available"),
-            DaemonError::CapacityRefusal(CapacityRefusal::MemoryUnavailable) => write!(f, "compiler daemon cannot admit the retained worker footprint within current memory headroom"),
-            DaemonError::RequestRetired(cause) => write!(f, "compiler request retired after failure: {}", cause.message),
+            DaemonError::CapacityRefusal(CapacityRefusal::PreparationUnsupported) => write!(
+                f,
+                "compiler daemon has no separate preparation capacity; foreground work remains available"
+            ),
+            DaemonError::CapacityRefusal(CapacityRefusal::MemoryUnavailable) => write!(
+                f,
+                "compiler daemon cannot admit the retained worker footprint within current memory headroom"
+            ),
+            DaemonError::RequestRetired(cause) => write!(
+                f,
+                "compiler request retired after failure: {}",
+                cause.message
+            ),
             DaemonError::Cancelled => write!(f, "compiler daemon admission was cancelled"),
             DaemonError::AfterAcceptance(error) => {
                 write!(f, "daemon response failed after acceptance: {error}")
@@ -947,7 +959,10 @@ impl std::fmt::Display for DaemonError {
                 failure.end_cause()
             ),
             DaemonError::Protocol(message) => write!(f, "daemon protocol error: {message}"),
-            DaemonError::ResponseTooLarge { declared, remaining } => write!(
+            DaemonError::ResponseTooLarge {
+                declared,
+                remaining,
+            } => write!(
                 f,
                 "compiler response frame is {declared} bytes; remaining response payload budget is {remaining}"
             ),
@@ -1342,7 +1357,7 @@ pub(crate) fn end_transaction(
                         epoch: transaction.epoch.0,
                         admission_id: transaction.admission_id.0,
                     },
-                ))
+                ));
             }
             _ => {
                 transaction.framing_known = false;
@@ -1979,7 +1994,8 @@ fn validate_worker_footprint(workers: usize, budget_mb: u64) -> Result<(), Front
     let footprint = (workers as u64).saturating_mul(WARM_WORKER_MB);
     if footprint > budget_mb {
         return Err(FrontendError::Daemon(format!(
-            "configured compiler pool needs {footprint} MiB of retained worker capacity; actual admitted memory budget is {budget_mb} MiB")));
+            "configured compiler pool needs {footprint} MiB of retained worker capacity; actual admitted memory budget is {budget_mb} MiB"
+        )));
     }
     Ok(())
 }
@@ -3353,7 +3369,7 @@ impl OwnedSocket {
                 return Err(FrontendError::Daemon(format!(
                     "compiler socket {} is live without the endpoint lock; stop its owner before starting",
                     path.display()
-                )))
+                )));
             }
         }
         let current = fs::symlink_metadata(path).map_err(FrontendError::Io)?;
@@ -5773,12 +5789,12 @@ mod tests {
         // new grant-normalized encoder. These cover query, plan, prepare and
         // resident-acquisition modes, including source/template/receipt bodies.
         let packets = [
-            "5450524551303236000100000001000000010000000107000000457870722e6873",
-            "5450524551303236000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e",
-            "5450524551303236000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72",
-            "5450524551303236000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72",
-            "54505245513032360001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564",
-];
+            "5450524551303237000100000001000000010000000107000000457870722e6873",
+            "5450524551303237000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e",
+            "5450524551303237000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72",
+            "5450524551303237000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72",
+            "54505245513032370001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564",
+        ];
         for payload in packets.into_iter().flat_map(|payload| {
             [
                 payload.to_owned(),
@@ -5792,7 +5808,7 @@ mod tests {
                     old_frame.extend_from_slice(bytes);
                 }
                 old_frame.extend_from_slice(&2u32.to_le_bytes());
-                for bytes in [b"--worker-request-v26".as_slice(), payload.as_bytes()] {
+                for bytes in [b"--worker-request-v27".as_slice(), payload.as_bytes()] {
                     old_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                     old_frame.extend_from_slice(bytes);
                 }
@@ -6188,7 +6204,10 @@ tidepool-reuse-error: witness failed\n";
     fn machine_stderr_is_kept_in_daemon_log_but_removed_from_diagnostics() {
         let stderr = b"ghc: panic!\ntidepool-timing phase=load ms=12\n  tidepool-meta-execution request=7 unit=\"main\" module=\"Original\"\n  tidepool-checked module=Foo target=True\ntidepool-dependency-witness nodes=3\n  tidepool-reuse {\"schema\":1}\ntidepool-reuse-error: witness failed\nOriginal.hs:1: error: tidepool-reuse is not in scope\nuseful detail\n";
         let diagnostic = String::from_utf8(diagnostic_stderr(stderr)).unwrap();
-        assert_eq!(diagnostic, "ghc: panic!\ntidepool-reuse-error: witness failed\nOriginal.hs:1: error: tidepool-reuse is not in scope\nuseful detail");
+        assert_eq!(
+            diagnostic,
+            "ghc: panic!\ntidepool-reuse-error: witness failed\nOriginal.hs:1: error: tidepool-reuse is not in scope\nuseful detail"
+        );
         let filtered = String::from_utf8_lossy(stderr);
         assert!(filtered.contains("tidepool-timing"));
         assert!(filtered.contains("tidepool-checked"));

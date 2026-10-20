@@ -715,6 +715,31 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.assertNotIn(generic_loader, service["resource_env"])
             self.assertNotIn(generic_loader, service["env"])
 
+    def test_host_binding_controls_use_the_declared_compiler_service(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        service = self.rule("tidepool/runtime", "runtime_host_binding_tests", "tidepool_rust_test_cases")
+        tests = ["session::resident::activation_input_tests::" + name for name in (
+            "activation_input_reservation_refuses_visible_names_without_recompiling",
+            "activation_input_committed_binding_owns_interface_and_scope_releases_root_once",
+            "activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservations",
+        )]
+        self.assertEqual(service["binary"], ":tidepool_runtime_unit_tests")
+        self.assertEqual(service["exact_tests"], tests)
+        self.assertEqual(service["expected_count"], 3)
+        self.assertEqual(service["jobs"], 1)
+        self.assertEqual(service["case_compiler_modes"], {name: "owned-resident" for name in tests})
+        self.assertEqual(service["resource_env"]["TIDEPOOL_COMPILER_DEPLOYMENT"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-deployment.json")
+        self.assertEqual(service["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+        self.assertIn("//build/package:compiler_service_deployment", service["resources"])
+        self.assertNotIn("//build/package:compiler_deployment", service["resources"])
+        self.assertNotIn("//build/package:tidepool_extract_runtime_libraries", service["resources"])
+        for generic_loader in ("LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES"):
+            self.assertNotIn(generic_loader, service["resource_env"])
+            self.assertNotIn(generic_loader, service["env"])
+
     def test_registered_inline_toolchain_fixture_stays_in_unit_inputs(self):
         self.write("tidepool/toolchain/src/declaration_join.rs",
                    '#[cfg(test)]\nmod authored_tests {\n'
@@ -1127,6 +1152,34 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(capture['case_compiler_modes'], {
             name: 'owned-resident' for name in capture['exact_tests']
         })
+        publication = self.rule('exomonad/actor', 'actor_world_declaration_publication_test',
+                                'tidepool_rust_test_cases')
+        self.assertEqual(publication['binary'], rooted['binary'])
+        self.assertEqual(publication['exact_tests'], [
+            'resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell',
+        ])
+        self.assertEqual(publication['expected_count'], 1)
+        self.assertTrue(publication['ignored'])
+        self.assertEqual(publication['case_compiler_modes'], {
+            publication['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(publication['resource_env'], rooted['resource_env'])
+        self.assertEqual(publication['resources'], rooted['resources'])
+        self.assertTrue(publication['haskell_worker'])
+        durable = self.rule('exomonad/actor', 'actor_world_durable_generation_history_test',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(durable['binary'], rooted['binary'])
+        self.assertEqual(durable['exact_tests'], [
+            'resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement',
+        ])
+        self.assertEqual(durable['expected_count'], 1)
+        self.assertTrue(durable['ignored'])
+        self.assertEqual(durable['case_compiler_modes'], {
+            durable['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(durable['resource_env'], rooted['resource_env'])
+        self.assertEqual(durable['resources'], rooted['resources'])
+        self.assertTrue(durable['haskell_worker'])
         self.assertEqual(capture['resource_env'], rooted['resource_env'])
         self.assertEqual(capture['resources'], rooted['resources'])
         worker = self.rule('exomonad/actor', 'actor_generation_retirement_worker_tests',
@@ -1144,7 +1197,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(worker['resource_env'], rooted['resource_env'])
         self.assertEqual(worker['resources'], rooted['resources'])
 
-    def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
+    def test_actor_notebook_cohort_declares_rooted_world_resources_for_all_four_cases(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
             ('exomonad_actor', 'lib', 'src/lib.rs'),
             ('actor', 'test', 'tests/suites/actor.rs'),
@@ -1159,14 +1212,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.write('exomonad/actor/tests/suites/actor.rs', '#[test] fn integration() {}\n')
         result = self.generate('--package', 'exomonad-actor')
         self.assertEqual(result.returncode, 0, result.stderr)
-        broad = self.rule('exomonad/actor', 'actor', 'tidepool_rust_isolated_test')
         cohort = self.rule('exomonad/actor', 'actor_notebook_contract_tests',
                            'tidepool_rust_test_cases')
         self.assertEqual(cohort['binary'], ':actor_binary')
         self.assertEqual(cohort['expected_count'], 4)
         self.assertEqual(len(set(cohort['exact_tests'])), 4)
+        rooted = self.rule('exomonad/actor', 'actor_world_cell_input_test',
+                           'tidepool_rust_test_cases')
+        self.assertTrue(cohort['ignored'])
+        self.assertEqual(cohort['case_compiler_modes'], {
+            name: 'owned-resident' for name in cohort['exact_tests']
+        })
         for field in ('env', 'resource_env', 'resources', 'haskell_worker'):
-            self.assertEqual(cohort[field], broad[field], field)
+            self.assertEqual(cohort[field], rooted[field], field)
         self.assertIs(cohort['haskell_worker'], True)
         self.assertEqual(cohort['jobs'], 1)
         self.assertEqual(cohort['timeout'], 600)

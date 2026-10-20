@@ -5,7 +5,7 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use tidepool_codegen::binding_table::{
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    DemandedImage, ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
+    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
     ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
@@ -34,7 +34,8 @@ use tidepool_repr::execution_schema::{
 use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{InstallSnapshot, PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
+use super::prepared::{PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
+use super::resident::NativeSourceCustody;
 use super::turn::TurnCertification;
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, PublicManifestBase,
@@ -57,13 +58,87 @@ type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId,
 /// installation rechecks the handles under the final checkout; this record
 /// carries no permission to publish a binding.
 pub(crate) struct ResolvedCertifiedTurn {
-    pub groups: Vec<tidepool_codegen::prepared_program::ScopedCertifiedGroup>,
+    pub groups: Vec<ResolvedSourceGroup>,
+    pub target_sources: NativeSourceCustody,
     pub target_owners: Vec<ImportOwner>,
     pub package_interfaces:
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
     pub inherited_needed: Vec<InheritedSourceDemand>,
     pub source_plan: ResolvedSourceDomainPlan,
+}
+
+/// A selected source plan and its own physical runtime source contribution.
+#[derive(Clone)]
+pub(crate) struct ResolvedSourceGroup {
+    group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
+    sources: NativeSourceCustody,
+}
+
+impl ResolvedSourceGroup {
+    #[cfg(test)]
+    pub(crate) fn unqualified(
+        group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
+    ) -> Self {
+        let sources = NativeSourceCustody::unknown(
+            group
+                .original()
+                .definitions()
+                .sites()
+                .iter()
+                .map(|site| site.site),
+        );
+        Self { group, sources }
+    }
+    pub(crate) fn group(&self) -> &tidepool_codegen::prepared_program::ScopedCertifiedGroup {
+        &self.group
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        tidepool_codegen::prepared_program::ScopedCertifiedGroup,
+        NativeSourceCustody,
+    ) {
+        (self.group, self.sources)
+    }
+}
+
+/// One successful native installation and its exact source contribution.
+pub(crate) struct InstalledCertifiedTurn {
+    program: ProgramId,
+    source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
+    native_sources: NativeSourceCustody,
+}
+
+impl InstalledCertifiedTurn {
+    pub(crate) fn source_keys(&self) -> &tidepool_codegen::binding_table::SourceScopeAdmission {
+        &self.source_keys
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ProgramId,
+        tidepool_codegen::binding_table::SourceScopeAdmission,
+        NativeSourceCustody,
+    ) {
+        (self.program, self.source_keys, self.native_sources)
+    }
+}
+
+/// Borrowed only after the actual scoped binding identity and generation match.
+pub(crate) struct ValidatedRetainedSourceRef<'a> {
+    entry: &'a BindingEntry,
+}
+
+impl ValidatedRetainedSourceRef<'_> {
+    pub(crate) fn id(&self) -> SessionVarId {
+        self.entry.id
+    }
+    pub(crate) fn handle(&self) -> tidepool_codegen::prepared_program::PreparedHandle {
+        self.entry.value.handle
+    }
 }
 
 #[derive(Clone)]
@@ -304,6 +379,13 @@ pub struct PersistentSession {
     /// silently compiling the stub's own self-referential body — see
     /// `mount_carrier_in`'s doc comment for why that body must never run.
     retired_stub_sources: Vec<Generation>,
+}
+
+pub(super) struct WorldDeclarationVisibleBinding {
+    pub(super) identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub(super) id: SessionVarId,
+    pub(super) defining_scope: u64,
+    pub(super) row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -779,6 +861,41 @@ impl PersistentSession {
         prepared: &PreparedProgram,
         certification: &TurnCertification,
     ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        let current = certification
+            .current_native_sources(prepared)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
+        self.resolve_certification_with_sources(scope, prepared, certification, current.as_ref())
+    }
+
+    pub(crate) fn resolve_runtime_target_in(
+        &self,
+        scope: ScopeId,
+        targets: &crate::RuntimePreparedTargets,
+        name: &str,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        let target = targets
+            .artifacts
+            .targets
+            .get(name)
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        let certification = TurnCertification::from_artifacts(&targets.artifacts, target);
+        let current = super::turn::CurrentNativeSources::from_targets(targets, name)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
+        self.resolve_certification_with_sources(
+            scope,
+            target.prepared.prepared(),
+            &certification,
+            current.as_ref(),
+        )
+    }
+
+    fn resolve_certification_with_sources(
+        &self,
+        scope: ScopeId,
+        prepared: &PreparedProgram,
+        certification: &TurnCertification,
+        current: Option<&super::turn::CurrentNativeSources<'_>>,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
@@ -959,8 +1076,20 @@ impl PersistentSession {
         for plan in plans {
             let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
-            groups.push(
-                tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
+            groups.push(ResolvedSourceGroup {
+                sources: current
+                    .map(|current| current.group(pending))
+                    .unwrap_or_else(|| {
+                        NativeSourceCustody::unknown(
+                            pending
+                                .group()
+                                .definitions()
+                                .sites()
+                                .iter()
+                                .map(|site| site.site),
+                        )
+                    }),
+                group: tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
                     CertifiedGroup::admit(
                         pending.owner().clone(),
                         pending.group().clone(),
@@ -968,10 +1097,15 @@ impl PersistentSession {
                     )?,
                     plan,
                 )?,
-            );
+            });
         }
         Ok(ResolvedCertifiedTurn {
             groups,
+            target_sources: current
+                .map(super::turn::CurrentNativeSources::target)
+                .unwrap_or_else(|| {
+                    NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
+                }),
             target_owners,
             package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
@@ -1002,16 +1136,11 @@ impl PersistentSession {
         metadata: &DataConTable,
         target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
-    ) -> Result<
-        (
-            ProgramId,
-            tidepool_codegen::binding_table::SourceScopeAdmission,
-        ),
-        PreparedRuntimeError,
-    > {
+        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
         let plan = target.source_plan();
+        let demanded = target.demanded();
         self.admit_source_work_in(scope)?;
 
         if !self.scopes.is_live(scope) {
@@ -1036,6 +1165,7 @@ impl PersistentSession {
             plan.selection.inherited().clone()
         };
         let mut exact_external = HashMap::new();
+        let mut exact_sources = HashMap::new();
         let retained = std::cell::OnceCell::new();
         for (globals, owners) in std::iter::once((target.globals(), target.owners())).chain(
             demanded.iter().map(|selected| {
@@ -1060,7 +1190,13 @@ impl PersistentSession {
                     ))
                     .filter(|entry| entry.id == *id)
                     .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
-                exact_external.insert(owner.clone(), entry.value.handle);
+                if !exact_external.contains_key(owner) {
+                    let witness = ValidatedRetainedSourceRef { entry };
+                    let sources = retained_sources(witness)
+                        .ok_or(PreparedRuntimeError::MissingRetainedSource { id: *id })?;
+                    exact_sources.insert(owner.clone(), sources);
+                    exact_external.insert(owner.clone(), entry.value.handle);
+                }
             }
         }
         drop(retained);
@@ -1080,11 +1216,11 @@ impl PersistentSession {
         let mut staged = engine.install_certified_turn(
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             &inherited,
             &exact_external,
             &self.bindings,
+            &exact_sources,
         )?;
         let tokens = std::mem::take(&mut staged.leases);
         let admitted = engine
@@ -1101,6 +1237,7 @@ impl PersistentSession {
                     .as_mut()
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
+                let native_sources = staged.native_sources.clone();
                 let target = engine.commit_certified_turn(staged);
                 self.session_table = admitted_metadata;
                 if let Some(engine) = bootstrap {
@@ -1110,7 +1247,11 @@ impl PersistentSession {
                 if !keys.is_empty() {
                     self.advance_public_visibility(scope);
                 }
-                Ok((target, keys))
+                Ok(InstalledCertifiedTurn {
+                    program: target,
+                    source_keys: keys,
+                    native_sources,
+                })
             }
             Err(tokens) => {
                 let engine = bootstrap
@@ -1502,6 +1643,16 @@ impl PersistentSession {
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
+        self.install_prepared_with_sources(prepared, metadata, &|_| None)
+            .map(|(program, _)| program)
+    }
+
+    pub(crate) fn install_prepared_with_sources(
+        &mut self,
+        prepared: PreparedProgram,
+        metadata: Option<&DataConTable>,
+        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+    ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
         self.admit_source_work_in(ScopeId::ROOT)?;
 
         let admitted_metadata = self.stage_install_metadata(
@@ -1521,10 +1672,20 @@ impl PersistentSession {
                 self.ensure_machine_incarnation();
                 program
             }
-            Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index)?,
+            Some(engine) => {
+                engine.install(prepared, &self.bindings, &self.binding_index, &|entry| {
+                    retained_sources(ValidatedRetainedSourceRef { entry })
+                })?
+            }
         };
         self.session_table = admitted_metadata;
-        Ok(program)
+        let sources = self
+            .machine
+            .as_ref()
+            .expect("successful install owns its engine")
+            .installed_program_sources(program)
+            .clone();
+        Ok((program, sources))
     }
 
     fn stage_install_metadata<'a>(
@@ -1546,57 +1707,6 @@ impl PersistentSession {
     pub(crate) fn ensure_machine_incarnation(&mut self) {
         self.machine_incarnation
             .get_or_insert_with(super::registry::fresh_session_id);
-    }
-
-    /// Step (a) of the off-checkout split install (see
-    /// `PreparedEngine::snapshot_install`): `None` when this is the
-    /// session's first turn (the machine does not exist yet to snapshot,
-    /// so bootstrapping -- and its one inline compile -- is the caller's
-    /// only option; `install_prepared` remains correct for that case).
-    pub(crate) fn snapshot_install_prepared(
-        &mut self,
-        prepared: PreparedProgram,
-    ) -> Result<Option<InstallSnapshot>, PreparedRuntimeError> {
-        match self.machine.as_mut() {
-            None => Ok(None),
-            Some(engine) => engine
-                .snapshot_install(prepared, &self.bindings, &self.binding_index)
-                .map(Some),
-        }
-    }
-
-    /// Step (c) of the off-checkout split install: revalidate `snapshot`'s
-    /// imports and, if still current, install `compiled` (see
-    /// `PreparedEngine::revalidate_and_install`). `None` both when the
-    /// machine went away since the snapshot was taken (caller falls back to
-    /// [`Self::install_prepared`]) and when revalidation finds a stale
-    /// import (caller recompiles from a fresh snapshot, or falls back).
-    pub(crate) fn revalidate_and_install_prepared(
-        &mut self,
-        scope: ScopeId,
-        snapshot: InstallSnapshot,
-        compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
-        metadata: Option<&DataConTable>,
-    ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
-        self.admit_source_work_in(scope)?;
-        let admitted_metadata = self.stage_install_metadata(
-            metadata,
-            compiled.constructor_declarations(),
-            std::iter::empty(),
-        )?;
-        let installed = match self.machine.as_mut() {
-            None => None,
-            Some(engine) => engine.revalidate_and_install(
-                snapshot,
-                compiled,
-                &self.bindings,
-                &self.binding_index,
-            )?,
-        };
-        if installed.is_some() {
-            self.session_table = admitted_metadata;
-        }
-        Ok(installed)
     }
 
     /// The live prepared bindings a later turn compiles against: each one's
@@ -1923,9 +2033,9 @@ impl PersistentSession {
             && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
     }
 
-    pub(super) fn install_inspection_world_if_current(
+    pub(super) fn install_inspection_world_if_current<A>(
         &mut self,
-        completed: &super::inspection::CompletedInspectionWorld,
+        completed: &super::inspection::CompletedInspectionWorld<A>,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
@@ -2360,12 +2470,14 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| Ok(|| {}))
+        self.adopt_staged_declaration_prepared(staged, None, |_, _, _, _, _| {
+            Ok(|_: &mut super::SessionLib| {})
+        })
     }
 
     /// Prepare an exact checked-prefix successor before durable adoption. The
     /// returned activation owns its snapshot and only installs it after COMMIT.
-    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce()>(
+    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
         prepare: impl FnOnce(
@@ -2378,6 +2490,7 @@ impl PersistentSession {
         let mut successor = None;
         let committed = self.adopt_staged_declaration_prepared(
             staged,
+            None,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
@@ -2397,9 +2510,97 @@ impl PersistentSession {
         committed
     }
 
-    fn adopt_staged_declaration_prepared<A: FnOnce()>(
+    /// Prepare the immutable World and runtime witness from the same binding
+    /// delta that the declaration commit consumes. No compiler view is rebuilt.
+    pub(super) fn adopt_staged_declaration_with_world_activation<
+        A: FnOnce(&mut super::SessionLib),
+    >(
         &mut self,
         staged: super::StagedDeclaration,
+        prior: &super::PublicVisibilitySnapshot,
+        retained_ids: &[SessionVarId],
+        prepare: impl FnOnce(
+            CompileViewKey,
+            super::PublicVisibilitySnapshot,
+            Vec<(String, Option<WorldDeclarationVisibleBinding>)>,
+        ) -> Result<A, SessionError>,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.adopt_staged_declaration_prepared(
+            staged,
+            Some(retained_ids),
+            |session, staged, origin, changes, next_epoch| {
+                let scope = staged.scope();
+                if prior.scope != scope
+                    || session.public_visibility_snapshot_in(scope).as_ref() != Some(prior)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let projected = session
+                    .bindings
+                    .prepared_declaration_projection(&session.scopes, origin, changes)
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?;
+                let mut key = session
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::DeadScope(scope))?;
+                key.tip = staged.generation;
+                key.bindings = projected.scope_witness().clone();
+                key.public_epoch = next_epoch;
+                let delta = projected
+                    .visible_changes()
+                    .map(|(name, entry)| {
+                        let binding = entry
+                            .map(|entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
+                                let row = session
+                                    .retained_checked_value_artifact(entry.module)
+                                    .ok_or(SessionError::MissingRetainedValueInterface(
+                                        entry.module,
+                                    ))?;
+                                Ok(WorldDeclarationVisibleBinding {
+                                    identity: entry.value.identity.clone(),
+                                    id: entry.id,
+                                    defining_scope: entry.scope.0,
+                                    row: row.clone(),
+                                })
+                            })
+                            .transpose()?;
+                        Ok((name.0.clone(), binding))
+                    })
+                    .collect::<Result<Vec<_>, SessionError>>()?;
+                let mut visibility = prior.clone();
+                visibility.epoch = next_epoch;
+                visibility.declaration_tip = staged.generation;
+                for (name, entry) in &delta {
+                    match (
+                        visibility
+                            .bindings
+                            .binary_search_by(|(existing, _)| existing.cmp(name)),
+                        entry,
+                    ) {
+                        (Ok(index), Some(binding)) => visibility.bindings[index].1 = binding.id,
+                        (Err(index), Some(binding)) => visibility
+                            .bindings
+                            .insert(index, (name.clone(), binding.id)),
+                        (Ok(index), None) => {
+                            visibility.bindings.remove(index);
+                        }
+                        (Err(_), None) => {}
+                    }
+                }
+                // This existing owner validates the prospective source selection
+                // and removed observation edges at the actual join boundary.
+                visibility.source_selection = session
+                    .bindings
+                    .prepared_scope_snapshot_in(&session.scopes, scope, origin, Some(changes))
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?;
+                prepare(key, visibility, delta)
+            },
+        )
+    }
+
+    fn adopt_staged_declaration_prepared<A: FnOnce(&mut super::SessionLib)>(
+        &mut self,
+        staged: super::StagedDeclaration,
+        retained_ids: Option<&[SessionVarId]>,
         prepare: impl FnOnce(
             &mut Self,
             &super::StagedDeclaration,
@@ -2434,7 +2635,7 @@ impl PersistentSession {
             .map(|(id, _)| id.var())
             .collect::<Vec<_>>();
         let items = staged.items().to_vec();
-        let source_origin = staged
+        let mut source_origin = staged
             .certified_authored
             .as_ref()
             .map(|certificate| {
@@ -2446,10 +2647,41 @@ impl PersistentSession {
             })
             .transpose()
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let binding_changes = self
-            .bindings
-            .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let legacy_retained;
+        let retained_ids = match retained_ids {
+            Some(ids) => ids,
+            None => {
+                legacy_retained = staged
+                    .certified_authored
+                    .as_ref()
+                    .map(|certificate| {
+                        let requirements = certificate
+                            .projection
+                            .receipt()
+                            .native_binding_custody_requirements()?;
+                        self.resolve_native_binding_custody(scope, &requirements)
+                    })
+                    .transpose()?;
+                legacy_retained.as_deref().unwrap_or(&[])
+            }
+        };
+        let binding_changes = match source_origin.as_mut() {
+            Some(origin) => self
+                .bindings
+                .prepare_declaration_binding_changes_with_custody_in(
+                    &self.scopes,
+                    scope,
+                    origin,
+                    &captured_values,
+                    &replaced_names,
+                    retained_ids,
+                ),
+            None if retained_ids.is_empty() => self
+                .bindings
+                .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names),
+            None => return Err(SessionError::StaleStagedDeclaration),
+        }
+        .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -2468,13 +2700,13 @@ impl PersistentSession {
         self.lib
             .as_mut()
             .ok_or(SessionError::StaleStagedDeclaration)?
-            .admit_staged_declaration_in(staged, &visible_values, |generation| {
+            .admit_staged_declaration_in(staged, &visible_values, |lib, generation| {
                 if let Some(source_origin) = source_origin {
                     bindings.commit_source_owner_origin(source_origin);
                 }
                 bindings.commit_declaration_binding_changes(binding_changes);
                 epochs.insert(scope, next_epoch);
-                activate();
+                activate(lib);
                 DeclarationPlaneCommit {
                     generation,
                     module: SessionModule::lib(generation),
@@ -2483,7 +2715,6 @@ impl PersistentSession {
                 }
             })
     }
-
     fn prepare_declaration_successor(
         &mut self,
         staged: &super::StagedDeclaration,
@@ -2517,6 +2748,17 @@ impl PersistentSession {
                 changes,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let entries = self
+            .bindings
+            .prepared_iter_current_in(&self.scopes, scope, Some(origin), changes)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?
+            .into_iter()
+            .map(|(name, entry)| (name, entry.id, entry.module))
+            .collect::<Vec<_>>();
+        let source_selection = self
+            .bindings
+            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.bindings.commit_prepared_detached_scope(capture);
         let lib = self
             .lib
@@ -2533,10 +2775,6 @@ impl PersistentSession {
         ));
         lib.tips.insert(child, tip);
 
-        let entries = self
-            .bindings
-            .prepared_iter_current_in(&self.scopes, scope, changes)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let mut view = self.build_scoped_compile_view(scope, self.lib());
         let projection = Arc::make_mut(&mut view.projection);
         projection.library = Some(super::view::CompileLibrary::Certified {
@@ -2547,10 +2785,10 @@ impl PersistentSession {
         projection
             .persistent_imports
             .extend(&staged.turn.workbench_imports);
-        projection.visible_values = entries.iter().map(|(_, entry)| entry.module).collect();
+        projection.visible_values = entries.iter().map(|(_, _, module)| *module).collect();
         let mut names = HashMap::<SessionModule, Vec<String>>::new();
-        for (name, entry) in &entries {
-            names.entry(entry.module).or_default().push(name.0.clone());
+        for (name, _, module) in &entries {
+            names.entry(*module).or_default().push(name.0.clone());
         }
         projection.visible_value_names = names.into_iter().collect();
         projection.reachable_values = self
@@ -2564,7 +2802,7 @@ impl PersistentSession {
             .current_items_with_turn(staged.base_tip, &staged.turn);
         projection
             .shadowing
-            .extend(entries.iter().map(|(name, _)| super::ExportItem::Value {
+            .extend(entries.iter().map(|(name, _, _)| super::ExportItem::Value {
                 name: name.0.clone(),
             }));
         view.injected_values = self
@@ -2574,7 +2812,7 @@ impl PersistentSession {
             .collect();
         let mut bindings = entries
             .into_iter()
-            .map(|(name, entry)| (name.0, entry.id))
+            .map(|(name, id, _)| (name.0, id))
             .collect::<Vec<_>>();
         bindings.sort_by(|a, b| a.0.cmp(&b.0));
         let mut source_instances = self
@@ -2583,10 +2821,6 @@ impl PersistentSession {
             .into_iter()
             .collect::<Vec<_>>();
         source_instances.sort();
-        let source_selection = self
-            .bindings
-            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let visibility = super::PublicVisibilitySnapshot {
             scope,
             epoch: next_epoch,
@@ -4071,10 +4305,6 @@ impl PersistentSession {
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = if let Some(declaration) = &ticket.declaration {
-            let binding_custody = self.resolve_native_binding_custody(
-                ticket.private_scope,
-                &declaration.binding_custody,
-            )?;
             self.bindings.prepare_authored_source_publication_in(
                 &self.scopes,
                 ticket.private_scope,
@@ -4082,7 +4312,6 @@ impl PersistentSession {
                 &ticket.write_ids,
                 &ticket.source_keys,
                 &declaration.source_domain_owners,
-                &binding_custody,
             )
         } else {
             self.bindings.prepare_exact_publication_in(
@@ -4103,12 +4332,28 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        {
+            let projection = self
+                .bindings
+                .prepared_promotion_projection(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            for entry in projection.retained_bindings() {
+                let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
+                let handle = entry.value.handle;
+                if self
+                    .prepared()
+                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                    != Some(handle)
+                {
+                    return Err(SessionError::InvalidPublicBindingPromotion(
+                        tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                    ));
+                }
+            }
+        }
         // The final promotion witness must be taken from the SAME prepared
         // promotion that would commit. It is only meaningful after removals.
         let promoted_world = if let Some(intent) = &world_execution {
-            if ticket.declaration.is_some() {
-                return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
-            }
             let world = intent.world().expect("World execution was selected");
             let public = self
                 .lib()
@@ -4132,10 +4377,34 @@ impl PersistentSession {
             if projection.target_scope() != ticket.public_scope {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
+            let declaration = ticket
+                .declaration
+                .as_ref()
+                .map(|declaration| {
+                    if !declaration
+                        .joined
+                        .evidence
+                        .matches_generation(declaration.generation)
+                    {
+                        return Err(SessionError::StaleStagedDeclaration);
+                    }
+                    let mut imports = self.lib().workbench_imports_in(ticket.public_scope);
+                    imports.extend(&declaration.joined.turn.workbench_imports);
+                    public
+                        .world
+                        .prepare_declaration_publication(
+                            declaration.joined.evidence.receipt(),
+                            &declaration.joined.context,
+                            imports.into_specs(),
+                        )
+                        .map_err(SessionError::from)
+                })
+                .transpose()?;
             let successor = public.world.promote_private_bindings(
                 &world.association.world,
                 &world.private.world,
                 ticket.public_scope.0,
+                declaration,
                 projection.visible_changes().map(|(name, entry)| {
                     (
                         name.0.as_str(),
@@ -4152,7 +4421,10 @@ impl PersistentSession {
                     scope: ticket.public_scope,
                     key: CompileViewKey {
                         library: self.lib().compile_view_identity,
-                        tip: self.lib().scope_tip(ticket.public_scope),
+                        tip: ticket.declaration.as_ref().map_or_else(
+                            || self.lib().scope_tip(ticket.public_scope),
+                            |declaration| declaration.generation,
+                        ),
                         bindings,
                         compiler_inputs: self.compiler_input_revision,
                         public_epoch: next_epoch,
@@ -6334,11 +6606,32 @@ mod checkpoint_scope_tests {
         scope: ScopeId,
         owner: CachedHomeOwner,
     ) {
-        let origin = session
+        mint_fixture_origin_with_custody(session, scope, owner, &[]);
+    }
+
+    fn mint_fixture_origin_with_custody(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        owner: CachedHomeOwner,
+        retained: &[SessionVarId],
+    ) {
+        let mut origin = session
             .bindings
             .prepare_source_owner_origin_in(&session.scopes, scope, owner)
             .unwrap();
+        let changes = session
+            .bindings
+            .prepare_declaration_binding_changes_with_custody_in(
+                &session.scopes,
+                scope,
+                &mut origin,
+                &[],
+                &[],
+                retained,
+            )
+            .unwrap();
         session.bindings.commit_source_owner_origin(origin);
+        session.bindings.commit_declaration_binding_changes(changes);
     }
 
     fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
@@ -6354,19 +6647,20 @@ mod checkpoint_scope_tests {
             .resolve_certification_in(scope, &prepared, &TurnCertification::default())
             .unwrap();
         assert!(resolved.groups.is_empty());
-        let (target, demanded) =
+        let target =
             ScopedTargetImage::compile_scoped(prepared, &resolved, &ImageRegistry::new()).unwrap();
-        assert!(demanded.is_empty());
-        let (program, keys) = session
+        assert!(target.demanded().is_empty());
+        let (program, keys, _) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
                 target,
                 &BTreeMap::new(),
-                demanded,
                 &[],
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         assert!(keys.is_empty());
         assert!(session.prepared_mut().unwrap().unpin(program));
     }
@@ -6491,9 +6785,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &authored_custody,
-                &[owner],
-                &[],
-            )
+                &[owner])
             .unwrap();
         session
             .bindings
@@ -6558,9 +6850,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_a,
-                &[owner.clone()],
-                &[],
-            )
+                &[owner.clone()])
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
         let before = session.residency().unwrap();
@@ -6572,9 +6862,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_b,
-                &[owner],
-                &[],
-            ),
+                &[owner]),
             Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(session.residency().unwrap(), before);
@@ -6607,7 +6895,6 @@ mod checkpoint_scope_tests {
         let sibling = session.mint_detached_scope(public).unwrap();
         let (target, keys) = install_selected_source_fixture(&mut session, private, "a");
         let owner = selected_sources(&session, private)[0].owner().clone();
-        mint_fixture_origin(&mut session, private, owner.clone());
         let old = rooted_publication_fixture(&mut session, "captured", 826);
         let (old_id, old_handle) = (old.id, old.value.handle);
         let requirement = NativeBindingRequirement {
@@ -6652,19 +6939,26 @@ mod checkpoint_scope_tests {
         assert!(session
             .resolve_native_binding_custody(public, std::slice::from_ref(&requirement))
             .is_err());
+        let mut foreign_origin = session
+            .bindings
+            .prepare_source_owner_origin_in(&session.scopes, private, owner.clone())
+            .unwrap();
         assert!(matches!(
-            session.bindings.prepare_authored_source_publication_in(
-                &session.scopes,
-                private,
-                public,
-                &[shadow_id],
-                &keys,
-                std::slice::from_ref(&owner),
-                &[foreign_id]
-            ),
+            session
+                .bindings
+                .prepare_declaration_binding_changes_with_custody_in(
+                    &session.scopes,
+                    private,
+                    &mut foreign_origin,
+                    &[],
+                    &[],
+                    &[foreign_id],
+                ),
             Err(tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding)
         ));
         assert_eq!(session.bindings.mutation_revision(), before);
+        mint_fixture_origin_with_custody(&mut session, private, owner.clone(), &[old_id]);
+        let publication_revision = session.bindings.mutation_revision();
         let custody = session
             .resolve_native_binding_custody(private, std::slice::from_ref(&requirement))
             .unwrap();
@@ -6678,10 +6972,9 @@ mod checkpoint_scope_tests {
                 &[shadow_id],
                 &keys,
                 &[owner],
-                &custody,
             )
             .unwrap();
-        assert_eq!(session.bindings.mutation_revision(), before);
+        assert_eq!(session.bindings.mutation_revision(), publication_revision);
         session.bindings.commit_exact_binding_promotion(prepared);
         assert_eq!(
             session
@@ -6775,9 +7068,7 @@ mod checkpoint_scope_tests {
                     public,
                     &[],
                     keys,
-                    &[owner],
-                    &[],
-                )
+                    &[owner])
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
@@ -6857,9 +7148,7 @@ mod checkpoint_scope_tests {
                         public,
                         &[],
                         keys,
-                        &[owner.clone()],
-                        &[],
-                    )
+                        &[owner.clone()])
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);
             }
@@ -6869,7 +7158,7 @@ mod checkpoint_scope_tests {
             session.retire_scope(d);
             session.retire_scope(e);
             let later = session.mint_detached_scope(public).unwrap();
-            let (target, evidence, demanded, inherited) = prepare_selected_groups_fixture(
+            let (target, evidence, inherited) = prepare_selected_groups_fixture(
                 &session,
                 later,
                 &groups,
@@ -6878,7 +7167,7 @@ mod checkpoint_scope_tests {
             let root_domain = target.source_plan().target[&source("D", "d2")].domain;
             let e_domain = target.source_plan().target[&source("E", "e2")].domain;
             assert_ne!(root_domain, e_domain);
-            let d2: Vec<_> = demanded
+            let d2: Vec<_> = target.demanded()
                 .iter()
                 .filter(|image| image.group().owner().module == "D")
                 .collect();
@@ -6905,16 +7194,17 @@ mod checkpoint_scope_tests {
                     }
                 );
             }
-            let (mixed, _) = session
+            let (mixed, _, _) = session
                 .install_certified_turn_in(
                     later,
                     &target.fixture_constructor_metadata(),
                     target,
                     &evidence,
-                    demanded,
-                    &inherited,
+                        &inherited,
+                    &|_| None,
                 )
-                .unwrap();
+                .unwrap()
+                .into_parts();
             let d2_leases: Vec<_> = selected_sources(&session, later)
                 .into_iter()
                 .filter(|lease| lease.owner().module == "D" && lease.original_ordinal() == 2)
@@ -6957,7 +7247,7 @@ mod checkpoint_scope_tests {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("D", "d1"),
         };
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
         let admitted = session.public_visibility_snapshot_in(scope).unwrap();
         let cache = session
@@ -6984,16 +7274,17 @@ mod checkpoint_scope_tests {
             session.public_visibility_snapshot_in(scope).unwrap(),
             admitted
         );
-        let (program, _) = session
+        let (program, _, _) = session
             .install_certified_turn_in(
                 scope,
                 &target.fixture_constructor_metadata(),
                 target,
                 &evidence,
-                demanded,
                 &inherited,
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         assert!(session.prepared_mut().unwrap().unpin(program));
     }
 
@@ -7012,7 +7303,7 @@ mod checkpoint_scope_tests {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("D", "d1"),
         };
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
         let mut metadata = target.fixture_constructor_metadata();
         let staged_only = super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
@@ -7025,7 +7316,12 @@ mod checkpoint_scope_tests {
         assert_ne!(before.source_selection, after.source_selection);
         assert!(matches!(
             session.install_certified_turn_in(
-                scope, &metadata, target, &evidence, demanded, &inherited
+                scope,
+                &metadata,
+                target,
+                &evidence,
+                &inherited,
+                &|_| None,
             ),
             Err(PreparedRuntimeError::SourceScopeAdmission)
         ));
@@ -7123,7 +7419,7 @@ mod checkpoint_scope_tests {
         assert!(session.prepared_mut().unwrap().unpin(old_target));
         assert!(session.retire_failed_turn_source_instances(a, &old_delta));
         assert!(!session.prepared_mut().unwrap().release(stale.handle()));
-        let (target, evidence, demanded, inherited) =
+        let (target, evidence, inherited) =
             prepare_selected_groups_fixture(&session, b, &groups, &[source("b")]);
         assert_eq!(inherited.len(), 1);
         assert!(
@@ -7133,16 +7429,17 @@ mod checkpoint_scope_tests {
                 .is_none(),
             "live anchor cannot issue a stale sibling descriptor"
         );
-        let (fresh, _) = session
+        let (fresh, _, _) = session
             .install_certified_turn_in(
                 b,
                 &target.fixture_constructor_metadata(),
                 target,
                 &evidence,
-                demanded,
                 &inherited,
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         let live = selected_sources(&session, b)
             .into_iter()
             .find(|lease| lease.binder().binder.occurrence == "b")
@@ -7240,18 +7537,19 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert_eq!(resolved.target_owners, vec![expected]);
         let registry = ImageRegistry::new();
-        let (target, demanded) =
+        let target =
             ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
-        let (program, keys) = session
+        let (program, keys, _) = session
             .install_certified_turn_in(
                 ScopeId::ROOT,
                 &target.fixture_constructor_metadata(),
                 target,
                 &resolved.source_evidence,
-                demanded,
                 &resolved.inherited_needed,
+                &|_| None,
             )
-            .unwrap();
+            .unwrap()
+            .into_parts();
         assert!(keys.is_empty());
         assert!(session.machine.as_mut().unwrap().unpin(program));
         session.machine = None;
@@ -8326,15 +8624,10 @@ mod checkpoint_scope_tests {
             &DataConTable,
             ScopedTargetImage,
             &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-            Vec<DemandedImage>,
             &[InheritedSourceDemand],
-        ) -> Result<
-            (
-                ProgramId,
-                tidepool_codegen::binding_table::SourceScopeAdmission,
-            ),
-            PreparedRuntimeError,
-        > = PersistentSession::install_certified_turn_in;
+            &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+        ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> =
+            PersistentSession::install_certified_turn_in;
         let image = super::super::prepared::ImageTarget::compile(
             testing::prepare(testing::wire_program()).unwrap(),
             &ImageRegistry::new(),
@@ -8361,6 +8654,7 @@ mod checkpoint_scope_tests {
                 .unwrap(),
         );
         let resolved = ResolvedCertifiedTurn {
+            target_sources: NativeSourceCustody::default(),
             groups: Vec::new(),
             target_owners: Vec::new(),
             package_interfaces: Default::default(),
@@ -8368,20 +8662,20 @@ mod checkpoint_scope_tests {
             inherited_needed: Vec::new(),
             source_plan: plan,
         };
-        let (target, demanded) = ScopedTargetImage::compile_scoped(
+        let target = ScopedTargetImage::compile_scoped(
             testing::prepare(testing::wire_program()).unwrap(),
             &resolved,
             &registry,
         )
         .unwrap();
-        assert!(demanded.is_empty());
+        assert!(target.demanded().is_empty());
         let refused = session.install_certified_turn_in(
             scope,
             &target.fixture_constructor_metadata(),
             target,
             &BTreeMap::new(),
-            demanded,
             &[],
+            &|_| None,
         );
         assert!(matches!(
             refused,

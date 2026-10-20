@@ -77,6 +77,10 @@ impl BatchLeaseRequest {
 
 pub struct BatchInstallReceipt {
     pub programs: Vec<ProgramId>,
+    /// For each installed program, the exact current-batch programs whose
+    /// executable imports it transitively consumes, including itself. Indices
+    /// refer to the same ordered `programs` receipt.
+    pub causal_members: Vec<BTreeSet<usize>>,
     pub leases: Vec<SourceInstanceLease>,
     pub source_attachments: Vec<super::super::SourceInstanceAttachment>,
 }
@@ -237,6 +241,7 @@ impl PreparedMachine<'_> {
             return if requests.is_empty() {
                 Ok(BatchInstallReceipt {
                     programs: Vec::new(),
+                    causal_members: Vec::new(),
                     leases: Vec::new(),
                     source_attachments: Vec::new(),
                 })
@@ -450,7 +455,11 @@ impl PreparedMachine<'_> {
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
             candidates[index].sites.insert(slot, entry.sites.clone());
         }
+        let mut causal_members: Vec<BTreeSet<usize>> = (0..candidates.len())
+            .map(|index| BTreeSet::from([index]))
+            .collect();
         loop {
+            let previous_members = causal_members.clone();
             let previous = candidates
                 .iter()
                 .map(|candidate| {
@@ -463,12 +472,16 @@ impl PreparedMachine<'_> {
                 })
                 .collect::<Vec<_>>();
             let mut changed = false;
-            for candidate in &mut candidates {
+            for (index, candidate) in candidates.iter_mut().enumerate() {
                 for (slot, origin) in candidate.image.import_slots.iter().zip(&candidate.imports) {
                     if slot.literal.is_some() {
                         continue;
                     }
                     if let BatchImport::Source { group, .. } = origin {
+                        let members = &mut causal_members[index];
+                        let before = members.len();
+                        members.extend(&previous_members[*group]);
+                        changed |= before != members.len();
                         let sites = candidate.sites.entry(slot.slot).or_default();
                         let before = sites.len();
                         sites.extend(&previous[*group]);
@@ -641,6 +654,7 @@ impl PreparedMachine<'_> {
             .collect();
         Ok(BatchInstallReceipt {
             programs: ids,
+            causal_members,
             leases,
             source_attachments,
         })
@@ -1210,31 +1224,43 @@ mod tests {
         let offered_signature = machine.programs[&producer].program.get().top_exports[&ValueId(0)]
             .entry_signature
             .clone();
-        let programs = machine
-            .install_shared_batch(vec![
-                BatchProgram {
-                    image: group("a", 0, "old"),
-                    imports: vec![BatchImport::Existing {
-                        handle: token,
-                        entry_signature: offered_signature,
-                    }],
-                },
-                BatchProgram {
-                    image: group("b", 1, "a"),
-                    imports: vec![BatchImport::Source {
-                        group: 0,
-                        binding: ValueId(0),
-                    }],
-                },
-                BatchProgram {
-                    image: group("c", 2, "a"),
-                    imports: vec![BatchImport::Source {
-                        group: 0,
-                        binding: ValueId(0),
-                    }],
-                },
-            ])
+        let receipt = machine
+            .install_shared_batch_with_leases(
+                vec![
+                    BatchProgram {
+                        image: group("a", 0, "old"),
+                        imports: vec![BatchImport::Existing {
+                            handle: token,
+                            entry_signature: offered_signature,
+                        }],
+                    },
+                    BatchProgram {
+                        image: group("b", 1, "a"),
+                        imports: vec![BatchImport::Source {
+                            group: 0,
+                            binding: ValueId(0),
+                        }],
+                    },
+                    BatchProgram {
+                        image: group("c", 2, "a"),
+                        imports: vec![BatchImport::Source {
+                            group: 0,
+                            binding: ValueId(0),
+                        }],
+                    },
+                ],
+                vec![],
+            )
             .unwrap();
+        assert_eq!(
+            receipt.causal_members,
+            vec![
+                BTreeSet::from([0]),
+                BTreeSet::from([0, 1]),
+                BTreeSet::from([0, 2]),
+            ]
+        );
+        let programs = receipt.programs;
         let retained = machine.retain_top(programs[1], ValueId(0)).unwrap();
         let sibling = machine.retain_top(programs[2], ValueId(0)).unwrap();
         for handle in [retained, sibling] {
@@ -1296,6 +1322,58 @@ mod tests {
         receiver.collect_major(receiver.quiesce().unwrap()).unwrap();
         assert_eq!(receiver.handle_count(), 0);
         assert_eq!(receiver.residency().root_cells, 0);
+    }
+
+    #[test]
+    fn batch_causal_members_exclude_unrelated_instances_and_close_cycles() {
+        let a = group("a", 2, "b");
+        let b = group("b", 7, "a");
+        let c = group("c", 9, "c");
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let batch = || {
+            vec![
+                BatchProgram {
+                    image: Arc::clone(&a),
+                    imports: vec![BatchImport::Source {
+                        group: 1,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: Arc::clone(&b),
+                    imports: vec![BatchImport::Source {
+                        group: 0,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: Arc::clone(&c),
+                    imports: vec![BatchImport::Source {
+                        group: 2,
+                        binding: ValueId(0),
+                    }],
+                },
+            ]
+        };
+        let first = machine
+            .install_shared_batch_with_leases(batch(), vec![])
+            .unwrap();
+        let second = machine
+            .install_shared_batch_with_leases(batch(), vec![])
+            .unwrap();
+        let expected = vec![
+            BTreeSet::from([0, 1]),
+            BTreeSet::from([0, 1]),
+            BTreeSet::from([2]),
+        ];
+        assert_eq!(first.causal_members, expected);
+        assert_eq!(second.causal_members, expected);
+        for (first, second) in first.programs.iter().zip(&second.programs) {
+            assert_ne!(first, second);
+        }
     }
 
     #[test]

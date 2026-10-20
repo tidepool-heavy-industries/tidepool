@@ -439,23 +439,23 @@ pub(crate) struct IssuedInputNativeDecisions {
 /// Live acquisitions of actually selected support are separate from graph facts.
 /// Missing support is sticky even when another selected source supplies a live owner.
 #[derive(Clone, Debug)]
-enum SelectedNativeSupport {
+pub(super) enum SelectedNativeSupport {
     Acquired(Arc<[IssuedNativeOffer]>),
     Missing(Arc<[IssuedNativeOffer]>),
 }
 
 impl SelectedNativeSupport {
-    fn missing() -> Self {
+    pub(super) fn missing() -> Self {
         Self::Missing(Arc::from([]))
     }
 
-    fn acquisitions(&self) -> &[IssuedNativeOffer] {
+    pub(super) fn acquisitions(&self) -> &[IssuedNativeOffer] {
         match self {
             Self::Acquired(offers) | Self::Missing(offers) => offers,
         }
     }
 
-    fn merge(&mut self, other: &Self) -> bool {
+    pub(super) fn merge(&mut self, other: &Self) -> bool {
         let missing = matches!(self, Self::Missing(_)) || matches!(other, Self::Missing(_));
         let mut acquired = self.acquisitions().to_vec();
         let mut changed = false;
@@ -485,6 +485,13 @@ pub(crate) enum InputNativeDecision<'a> {
 }
 
 impl IssuedInputNativeDecisions {
+    pub(super) fn selected_support(
+        &self,
+        group: NativeGroupBinding,
+    ) -> Option<&SelectedNativeSupport> {
+        self.selected.get(&group)
+    }
+
     fn with_recorded_facts(
         &self,
         facts: imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,
@@ -1194,29 +1201,18 @@ impl ArtifactView {
     }
 }
 
-impl CompilerSourceSupport {
-    /// Borrow only demanded roles and their canonical and Original interface
-    /// requirements from this exact cold issuer. This does not select native
-    /// groups, change lexical scope, or replace the issuer's instance proofs.
+impl crate::declaration_context::RequestCompilerInputs {
+    /// Project demand from this request's paired admitted support and metadata.
+    /// This does not select native groups, change lexical scope, or replace
+    /// the issuer's instance proofs.
     pub(crate) fn demanded_compiler_projection(
-        self: &Arc<Self>,
-        retained: &Arc<RetainedArtifactMetadata>,
+        &self,
         roots: &BTreeSet<ExactModuleIdentity>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<DemandCompilerProjection, CompileError> {
         crate::host_work::checkpoint()?;
-        let cold = self
-            .artifacts
-            .reads
-            .read_projection
-            .get()
-            .and_then(|projection| projection.metadata.get())
-            .ok_or_else(|| failure("demanded compiler inputs lack their cold metadata owner"))?;
-        if !Arc::ptr_eq(cold, retained) {
-            return Err(failure(
-                "demanded compiler metadata belongs to another cold issuer",
-            ));
-        }
+        let source = self.shared_compiler_source_support();
+        let retained = &self.metadata().retained;
         let charge = |work: Result<(), tidepool_repr::execution_schema::ParseError>| {
             work.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
         };
@@ -1235,12 +1231,12 @@ impl CompilerSourceSupport {
                 continue;
             }
             work.owner_lookups += 2;
-            let role = self
+            let role = source
                 .projection
                 .roles
                 .get(owner)
                 .ok_or_else(|| failure("demanded compiler owner lacks its issued role"))?;
-            let row = self
+            let row = source
                 .selected
                 .get(owner)
                 .ok_or_else(|| failure("demanded compiler owner lacks its admitted row"))?;
@@ -1288,13 +1284,12 @@ impl CompilerSourceSupport {
             {
                 crate::host_work::checkpoint()?;
                 work.payload_lookups += 1;
-                let acquired = retained
-                    .artifacts
-                    .get(&binding.artifact)
-                    .ok_or_else(|| failure("demanded compiler payload is outside cold custody"))?;
+                let acquired = retained.artifacts.get(&binding.artifact).ok_or_else(|| {
+                    failure("demanded compiler payload is outside request custody")
+                })?;
                 if binding.artifact != entry.descriptor.id || !Arc::ptr_eq(acquired, entry) {
                     return Err(failure(
-                        "demanded compiler row differs from its cold acquired payload",
+                        "demanded compiler row differs from its acquired request payload",
                     ));
                 }
                 if original {
@@ -1313,7 +1308,7 @@ impl CompilerSourceSupport {
                 }
             }
             if let Some((carrier, _)) = &row.original {
-                let state = self
+                let state = source
                     .artifacts
                     .lease
                     .inventory
@@ -1326,7 +1321,7 @@ impl CompilerSourceSupport {
             projection.admit_role(owner.clone(), role.clone())?;
             selected.insert(owner.clone(), row.clone());
         }
-        // The exact row and cold payload handles already own canonical/native
+        // The exact row and acquired payload handles already own canonical/native
         // admission. Rebuilding their descriptors would repeat certificate
         // hashing and encoding without acquiring any additional authority.
         let mut entries = BTreeMap::new();
@@ -1348,7 +1343,7 @@ impl CompilerSourceSupport {
         work.selected_rows = selected.len();
         work.metadata_entries = entries.len();
         Ok(DemandCompilerProjection {
-            source_support: Arc::clone(self),
+            source_support: source,
             projection,
             metadata: CompilerArtifactMetadata {
                 entries: entries.into_iter().collect(),
@@ -1358,7 +1353,9 @@ impl CompilerSourceSupport {
             work,
         })
     }
+}
 
+impl CompilerSourceSupport {
     fn refreshed_native_facts(mut self) -> Result<Self, CompileError> {
         self.native_fact_owner = Some(
             crate::exact_context::PublicationNativeFacts::maintain(
@@ -2697,8 +2694,7 @@ impl CompilerSourceSupport {
         stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
         source: &crate::declaration_context::ExactSourceAdmission,
         source_text: &str,
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        artifacts: &ArtifactView,
+        output: &crate::declaration_context::IssuedOriginalOutput,
     ) -> Result<Self, CompileError> {
         if !source.matches_world_stage(program, stage.index(), source_text)? {
             return Err(failure("program source fragment belongs to another World stage"));
@@ -2706,8 +2702,9 @@ impl CompilerSourceSupport {
         let generated = source.generated_source_owner()?;
         let mut owners = source.home_imports()?.into_keys().collect::<BTreeSet<_>>();
         let executable = matches!(stage.identity(), crate::compiler_world::WorldCellStageIdentity::Executable { .. });
-        let mut projection = selection.compiler_support_projection(artifacts, std::slice::from_ref(source))
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let inputs = output.compiler_inputs();
+        let artifacts = inputs.issued_artifacts();
+        let mut projection = inputs.role_projection().clone();
         if executable {
             owners.remove(&generated);
             projection = projection.project_roles(|owner, role| {
@@ -2721,10 +2718,10 @@ impl CompilerSourceSupport {
                 .chain(row.original.iter()).map(|(_, entry)| entry.as_ref())),
             |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
         )?;
-        let input_decisions = IssuedInputNativeDecisions::from_certified_continuation(selection, &projection)?;
-        let native_availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
-            selection.issued_native_availability().cloned(),
-        )?.for_compiler_roles(&projection, artifacts)?;
+        let input_decisions = inputs.issued_input_decisions().cloned().unwrap_or_default()
+            .for_exact_roles(&projection);
+        let native_availability = inputs.native_availability()
+            .for_compiler_roles(&projection, artifacts)?;
         if executable && native_availability.rows().any(|row| {
             row.original_owner().unit == generated.unit && row.original_owner().module == generated.module
         }) {
@@ -2740,7 +2737,7 @@ impl CompilerSourceSupport {
             }
         }
         Self {
-            projection, artifacts: artifacts.clone(), native_fact_owner: None,
+            projection, artifacts: artifacts.clone(), native_fact_owner: inputs.native_fact_base().cloned(),
             native_offers: offers.into(), native_offer_facts, native_availability,
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)), input_decisions,
         }.refreshed_native_facts()
@@ -3082,6 +3079,22 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let artifacts = self.artifacts.without_value_interface_roots(excluded)?;
         let projection = self.projection.within_view(&artifacts);
+        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
+    }
+
+    /// Initialize one stage's compiler prefix. Future value rows can remain
+    /// private exact dependencies, but cannot remain public compiler roles.
+    pub(super) fn segment_value_prefix(
+        &self,
+        excluded: &BTreeSet<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let artifacts = self.artifacts.without_value_interface_roots(excluded)?;
+        let projection = self
+            .projection
+            .project_roles(|_, role| (!excluded.contains(&role.interface())).then(|| role.clone()));
+        let artifacts = artifacts
+            .with_compiler_projection(&projection)?
+            .into_owned();
         self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
     }
 
@@ -4280,29 +4293,23 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            let support = Arc::new(
-                CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap(),
-            );
+            let context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    [2; 32], &view, projection,
+                )
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs([2; 32])
+                .unwrap();
+            let support = inputs.shared_compiler_source_support();
             let roots = BTreeSet::from([seed.descriptor.owner.clone()]);
-            let uncaptured = inventory.empty_view().metadata_snapshot();
-            let refusal_operation =
-                tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-            assert!(support
-                .demanded_compiler_projection(&uncaptured, &roots, &refusal_operation)
-                .is_err());
-            assert!(support
-                .artifacts
-                .reads
-                .read_projection
-                .get()
-                .is_none_or(|projection| projection.metadata.get().is_none()));
-            let retained = support.artifacts.metadata_snapshot();
+            let retained = Arc::clone(&inputs.metadata().retained);
             let operation =
                 tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
             let before = inventory.metrics();
             type_query_work::take();
-            let demanded = support
-                .demanded_compiler_projection(&retained, &roots, &operation)
+            let demanded = inputs
+                .demanded_compiler_projection(&roots, &operation)
                 .unwrap();
             let work = type_query_work::take();
             let after = inventory.metrics();
@@ -4355,8 +4362,8 @@ mod tests {
                 },
             );
             type_query_work::take();
-            let empty = support
-                .demanded_compiler_projection(&retained, &BTreeSet::new(), &empty_operation)
+            let empty = inputs
+                .demanded_compiler_projection(&BTreeSet::new(), &empty_operation)
                 .unwrap();
             assert_eq!(empty.work(), DemandCompilerProjectionWork::default());
             assert!(empty.metadata().entries.is_empty());
@@ -4372,21 +4379,123 @@ mod tests {
             );
             exhausted.charge(1).unwrap();
             type_query_work::take();
-            assert!(support
-                .demanded_compiler_projection(&retained, &roots, &exhausted)
+            assert!(inputs
+                .demanded_compiler_projection(&roots, &exhausted)
                 .is_err());
             assert_eq!(type_query_work::take(), type_query_work::Counts::default());
             let missing = BTreeSet::from([ExactModuleIdentity {
                 unit: "unit".into(),
                 module: "Missing".into(),
             }]);
-            assert!(support
-                .demanded_compiler_projection(&retained, &missing, &operation)
+            assert!(inputs
+                .demanded_compiler_projection(&missing, &operation)
                 .is_err());
-            let other_retained = inventory.empty_view().metadata_snapshot();
-            assert!(support
-                .demanded_compiler_projection(&other_retained, &roots, &operation)
-                .is_err());
+        }
+    }
+
+    #[test]
+    fn type_delta_demand_uses_paired_metadata_without_a_cold_read() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+        for width in [1, 32, 128] {
+            let inventory = ArtifactInventory::default();
+            let entries = (0..width)
+                .map(|index| {
+                    Arc::new(crate::artifact_inventory::tests::entry(
+                        &format!("Baseline{index}"),
+                        &[],
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let roles = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            let context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    [2; 32], &view, roles,
+                )
+                .unwrap();
+            let original = context
+                .capture_world_primary_compiler_inputs([2; 32])
+                .unwrap();
+            let entry = Arc::new(crate::artifact_inventory::tests::entry("AddedType", &[]));
+            let owner = entry.descriptor.owner.clone();
+            let incoming_inventory = ArtifactInventory::default();
+            let roles =
+                CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap();
+            let incoming_view = incoming_inventory
+                .admit_shared(&incoming_inventory.empty_view(), vec![entry])
+                .unwrap();
+            let incoming = Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    [2; 32],
+                    &incoming_view,
+                    roles,
+                )
+                .unwrap(),
+            );
+            let changed = original.with_type_interfaces(&[incoming]).unwrap();
+            let artifacts = changed.inputs.artifacts();
+            assert!(artifacts.reads.read_projection.get().is_none());
+            let observed_inventory = artifacts.inventory();
+            let before = observed_inventory.metrics();
+            let empty_budget = InventoryOperation::new(InventoryDecodeLimits {
+                max_work: 0,
+                ..Default::default()
+            });
+            let empty = changed
+                .inputs
+                .demanded_compiler_projection(&BTreeSet::new(), &empty_budget)
+                .unwrap();
+            assert!(empty.owners().is_empty());
+            assert_eq!(empty.work(), DemandCompilerProjectionWork::default());
+            let empty_native = changed.inputs
+                .demanded_native_inputs(empty, &BTreeSet::new(), &empty_budget)
+                .unwrap();
+            assert!(empty_native.native_availability().persistent_facts().is_empty());
+            assert_eq!(empty_budget.work_usage().unwrap(), (0, 0));
+            let operation = InventoryOperation::new(Default::default());
+            let demanded = changed
+                .inputs
+                .demanded_compiler_projection(&BTreeSet::from([owner.clone()]), &operation)
+                .unwrap();
+            assert_eq!(demanded.owners(), &BTreeSet::from([owner]));
+            assert_eq!(demanded.work().selected_rows, 1);
+            assert_eq!(demanded.work().payload_lookups, 1);
+            assert!(Arc::ptr_eq(
+                &demanded.metadata().retained,
+                &changed.inputs.metadata().retained
+            ));
+            let selected = changed
+                .inputs
+                .demanded_native_inputs(demanded, &BTreeSet::new(), &operation)
+                .unwrap();
+            assert!(selected.native_availability().persistent_facts().is_empty());
+            let after = observed_inventory.metrics();
+            assert_eq!(before.graph_visits, after.graph_visits);
+            assert_eq!(before.view_queries, after.view_queries);
+            assert_eq!(before.entry_handle_copies, after.entry_handle_copies);
+            assert!(artifacts.reads.read_projection.get().is_none());
+            // Recompute from the actual immutable lease through a fresh read
+            // owner, independently of the maintained metadata and hot demand.
+            let cold = ArtifactView::from_custody(Arc::clone(&artifacts.lease)).metadata_snapshot();
+            let maintained = &changed.inputs.metadata().retained;
+            assert!(!Arc::ptr_eq(&cold, maintained));
+            assert_eq!(cold.entries, maintained.entries);
+            assert_eq!(cold.artifacts, maintained.artifacts);
+            assert_eq!(cold.dependencies, maintained.dependencies);
+            assert_eq!(
+                cold.interface_representatives,
+                maintained.interface_representatives
+            );
+            assert_eq!(
+                cold.selected_native_groups,
+                maintained.selected_native_groups
+            );
+            assert_eq!(
+                cold.ambiguous_native_owners,
+                maintained.ambiguous_native_owners
+            );
         }
     }
 
@@ -4402,10 +4511,34 @@ mod tests {
                 .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            let support =
-                Arc::new(CompilerSourceSupport::from_selected_issuance(projection, view).unwrap());
-            let retained = support.artifacts.metadata_snapshot();
             let root = entries.last().unwrap().descriptor.owner.clone();
+            let lexical = entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.descriptor.owner.clone(),
+                        crate::declaration_join::ExactLexicalNode {
+                            owner: entry.descriptor.owner.clone(),
+                            imports: entry.requirements.clone(),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let context =
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                    [2; 32],
+                    &view,
+                    projection,
+                    lexical.into_values().collect(),
+                    root.clone(),
+                    &[],
+                )
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs([2; 32])
+                .unwrap();
+            let support = inputs.shared_compiler_source_support();
+            let retained = Arc::clone(&inputs.metadata().retained);
             // Positive control: the original validation path really rebuilds
             // descriptors, so zero below cannot be a disconnected observation.
             type_query_work::take();
@@ -4415,12 +4548,8 @@ mod tests {
             assert!(repeated.descriptor_serializations > 0);
             let operation =
                 tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-            let demanded = support
-                .demanded_compiler_projection(
-                    &retained,
-                    &BTreeSet::from([root.clone()]),
-                    &operation,
-                )
+            let demanded = inputs
+                .demanded_compiler_projection(&BTreeSet::from([root.clone()]), &operation)
                 .unwrap();
             let work = type_query_work::take();
             assert_eq!(work.canonical_checks, 0);

@@ -395,7 +395,7 @@ impl RuntimePreparedTargets {
             |_| {},
             |state, _| {
                 state.admit_source_lease(placement.clone())?;
-                install_compiled_target(state, &self.artifacts, target, placement.scope())
+                install_compiled_target(state, self, target, placement.scope())
             },
         )?;
         let outcome = settled.into_outcome();
@@ -434,16 +434,18 @@ impl RuntimePreparedTargets {
 /// the selected session. Keep the target pinned until its caller finishes.
 fn install_compiled_target(
     state: &mut session::PersistentSession,
-    artifacts: &CompiledArtifacts,
+    targets: &RuntimePreparedTargets,
     target: &str,
     scope: tidepool_codegen::scope::ScopeId,
 ) -> Result<tidepool_codegen::prepared_program::ProgramId, RuntimeError> {
     use session::prepared::ScopedTargetImage;
+    let artifacts = &targets.artifacts;
 
     if artifacts.warnings.has_io {
         return Err(CompileError::IOTypeDetected.into());
     }
-    let target = artifacts.targets.get(target).ok_or_else(|| {
+    let name = target;
+    let target = artifacts.targets.get(name).ok_or_else(|| {
         CompileError::ExtractFailed(format!("compiled artifact has no target {target:?}"))
     })?;
     artifacts
@@ -451,23 +453,23 @@ fn install_compiled_target(
         .validate_program(target.prepared.prepared())
         .map_err(tidepool_repr::serial::ReadError::ConstructorMetadata)
         .map_err(CompileError::from)?;
-    let certification = session::turn::TurnCertification::from_artifacts(artifacts, target);
-    let resolved =
-        state.resolve_certification_in(scope, target.prepared.prepared(), &certification)?;
+    let resolved = state.resolve_runtime_target_in(scope, targets, name)?;
     let registry = state.certified_image_registry();
-    let (target, demanded) = ScopedTargetImage::compile_scoped(
+    let target = ScopedTargetImage::compile_scoped(
         target.prepared.prepared().clone(),
         &resolved,
         &registry,
     )?;
-    let (program, _) = state.install_certified_turn_in(
-        scope,
-        &artifacts.table,
-        target,
-        &resolved.source_evidence,
-        demanded,
-        &resolved.inherited_needed,
-    )?;
+    let (program, _, _) = state
+        .install_certified_turn_in(
+            scope,
+            &artifacts.table,
+            target,
+            &resolved.source_evidence,
+            &resolved.inherited_needed,
+            &|_| None,
+        )?
+        .into_parts();
     Ok(program)
 }
 

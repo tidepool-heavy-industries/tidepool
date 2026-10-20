@@ -17,7 +17,7 @@ module Tidepool.Introspection
     StructuredQueryError (..),
     normalizeInspectionWildcards,
     searchTypeMatches,
-    InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc,
+    InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc, runWorldInspectionGhc,
     encodeInspectionResults,
     inspectPublicModuleExports,
     boundedDistinctNames,
@@ -60,10 +60,10 @@ import GHC.Core.Unify (tcMatchTy)
 import GHC.Iface.Type (AltPpr (..), ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameIsLocalOrFrom, nameModule_maybe, nameOccName)
-import GHC.Types.TypeEnv (lookupTypeEnv)
+import GHC.Types.TypeEnv (lookupTypeEnv, typeEnvIds)
 import GHC.Types.Name (isDataConName, isTyConName, isVarName)
-import GHC.Types.Name.Occurrence (fieldOcc_maybe, isSymOcc, mkTyVarOcc, occNameString)
-import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc)
+import GHC.Types.Name.Occurrence (fieldOcc_maybe, isSymOcc, mkTyVarOcc, mkVarOcc, mkTcOcc, mkDataOcc, occNameString)
+import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc, lookupGRE, LookupGRE(..), WhichGREs(..), FieldsOrSelectors(..))
 import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Unit.Module (moduleUnit)
 import GHC.Unit.Types (unitString)
@@ -111,6 +111,7 @@ instance Show InfoEntry where
 
 data InspectionResult
   = InspectionType String String Availability
+  | InspectionRowFit IdentifierRef Availability
   | InspectionInfo String [InfoEntry]
   | InspectionAmbiguous String [InfoEntry]
   | InspectionNotFound String
@@ -308,16 +309,15 @@ inspectionExecutionRow rdrEnv = do
 inspectionRow :: (GhcMonad m) => Id -> m Type
 inspectionRow identifier = do
   proxy <- lookupProxyTyCon
+  eff <- lookupEffTyCon
   let (_, _, body) = tcSplitSigmaTy (idType identifier)
-  case proxy of
-    Just proxyConstructor -> case splitTyConApp_maybe body of
-      Just (constructor, arguments)
-        | constructor == proxyConstructor,
-          Just row <- listToMaybe (reverse arguments) -> pure row
-      _ -> malformed
-    Nothing -> malformed
+  case splitTyConApp_maybe body of
+    Just (constructor,[row,_]) | Just constructor == eff -> pure row
+    Just (constructor,arguments) | Just constructor == proxy
+        , Just row <- listToMaybe (reverse arguments) -> pure row
+    _ -> malformed
   where
-    malformed = liftIO (ioError (userError "inspection row sentinel has no typed Proxy row"))
+    malformed = liftIO (ioError (userError "inspection row sentinel lacks an exact Proxy or Eff row signature"))
 
 lookupProxyTyCon :: (GhcMonad m) => m (Maybe TyCon)
 lookupProxyTyCon = do
@@ -459,10 +459,16 @@ searchTypeMatches hscEnv tcGblEnv rdrEnv queryBinder query = do
     _ -> pure ()
   searchTypeMatchesWithContext (AvailabilityContext hscEnv tcGblEnv effTyCon row Nothing) rdrEnv queryBinder query
 
+inspectionLookupName :: GhcMonad m => AvailabilityContext -> Name -> m (Maybe TyThing)
+inspectionLookupName context name = case lookupTypeEnv (tcg_type_env checked) name of
+  Just thing | nameIsLocalOrFrom (tcg_mod checked) name -> pure (Just thing)
+  _ -> lookupName name
+  where checked = availabilityTcGblEnv context
+
 searchTypeMatchesWithContext :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
 searchTypeMatchesWithContext context rdrEnv queryBinder query = do
   let entries =
-        filter ((/= queryBinder) . greName) (globalRdrEnvElts rdrEnv)
+        filter (\entry -> greName entry /= queryBinder && visibleInspectionName (greName entry)) (globalRdrEnvElts rdrEnv)
       spellingOwners =
         Map.fromListWith Set.union
           [ (spelling, Set.singleton (greName entry))
@@ -477,7 +483,7 @@ searchTypeMatchesWithContext context rdrEnv queryBinder query = do
             ]
   things <- fmap catMaybes $ forM namedEntries $ \(entry, spelling) -> do
     let name = greName entry
-    found <- lookupName name
+    found <- inspectionLookupName context name
     pure $ case found of
       Just (AnId identifier) -> Just (name, spelling, identifier)
       _ -> Nothing
@@ -570,7 +576,14 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = withInspectionW
 
 runInspectionGhc :: InspectionWork -> HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
   -> [InspectionRequest] -> Ghc [InspectionResult]
-runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
+runInspectionGhc work hscEnv tcGblEnv rdrEnv inspectionProbes =
+  runWorldInspectionGhc work hscEnv tcGblEnv rdrEnv inspectionProbes Map.empty
+
+-- Exact aliases come from the held World's admitted value-interface owner.
+-- They describe original compiler Names; they confer no runtime value access.
+runWorldInspectionGhc :: InspectionWork -> HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
+  -> Map.Map String Id -> [InspectionRequest] -> Ghc [InspectionResult]
+runWorldInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes aliases requests = do
   borrowed <- liftIO (forkExactContext hscEnv)
   setSession borrowed
   effTyCon <- lookupEffTyCon
@@ -581,7 +594,8 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
     (Just _,Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
     _ -> pure ()
   let context = AvailabilityContext borrowed tcGblEnv effTyCon row work
-  reverse . snd <$> foldM (inspect context) (0 :: Int,[]) requests
+  results <- reverse . snd <$> foldM (inspect context) (0 :: Int,[]) requests
+  pure (zipWith finalize requests results)
   where
     inspect context (typeIndex, results) request = case request of
       InspectTypeOf expression ->
@@ -610,15 +624,92 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
       InspectTypeSearch query -> do
         result <- inspectTypeSearch context rdrEnv inspectionProbes Nothing query
         pure (typeIndex, result : results)
-      InspectTypeSearchBounded query budget -> do
-        result <- inspectTypeSearch context rdrEnv inspectionProbes (Just budget) query
+      InspectTypeSearchBounded query _ -> do
+        result <- inspectTypeSearch context rdrEnv inspectionProbes Nothing query
         pure (typeIndex, result : results)
       InspectStructuredInfoOf query -> do
-        result <- inspectStructured rdrEnv StructuredInfo query
+        result <- structured context StructuredInfo query
         pure (typeIndex, result : results)
       InspectStructuredTypeOf query -> do
-        result <- inspectStructured rdrEnv StructuredType query
+        result <- structured context StructuredType query
         pure (typeIndex, result : results)
+      InspectKeyedAvailability query _ | structuredScope query /= StructuredCurrentScope
+          || structuredNamespace query == StructuredAnyName ->
+        pure (typeIndex,InspectionStructuredError (StructuredUnsupported "keyed row fit requires the current scope and a concrete namespace"):results)
+      InspectKeyedAvailability query owner -> do
+        let aliasCandidates = [idName identifier | identifier <- Map.elems aliases
+              , let name = idName identifier
+              , let ref = identifierRef name (AnId identifier)
+              , namespaceMatches (structuredNamespace query) name
+              , identifierModule ref == owner && identifierName ref == structuredName query]
+            -- A canonical reference does not carry its imported spelling.
+            -- Query the existing occurrence bucket, including qualified-only
+            -- imports, then require its exact actual namespace/module below.
+            candidates = boundedDistinctNames Nothing
+              (map canonicalName (aliasCandidates ++ canonicalReferenceNames rdrEnv query))
+        things <- fmap catMaybes $ forM candidates $ \name -> do
+          found <- inspectionLookupName context name
+          pure $ do
+            thing <- found
+            let ref = identifierRef name thing
+            if identifierModule ref == owner && identifierName ref == structuredName query
+                && namespaceMatches (structuredNamespace query) name
+                && exactThingMatches (structuredNamespace query) thing then Just (ref,thing) else Nothing
+        let requested = IdentifierRef owner (structuredName query) (case structuredNamespace query of
+              StructuredTypeName -> TypeIdentifier
+              StructuredConstructorName -> ConstructorIdentifier
+              StructuredFieldName -> FieldIdentifier
+              _ -> ValueIdentifier)
+        -- Candidates are distinct actual canonical Names. Rendering can erase
+        -- unit/field identity, so public IdentifierRefs cannot decide uniqueness.
+        result <- case things of
+          [] -> pure (InspectionRowFit requested Unknown)
+          [(ref,thing)] -> InspectionRowFit ref <$> thingAvailability context thing
+          _ | structuredNamespace query == StructuredFieldName ->
+            pure (InspectionStructuredError (StructuredUnsupported "canonical field reference is ambiguous"))
+          many -> pure (InspectionStructuredError (StructuredAmbiguous query (map fst many)))
+        pure (typeIndex,result:results)
+    structured context mode query = do
+      NameSelection _ selection <- namesInScope rdrEnv
+        (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
+      case selection of
+        Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
+        Right (names,visible) -> do
+          things <- fmap catMaybes $ forM names $ \name -> do
+            -- Projection follows actual namespace/winner selection and consumes
+            -- only an exact checked local alias Name from this target.
+            found <- case Map.lookup name checkedAliases of
+              Just original -> pure (Just (idName original,AnId original))
+              Nothing -> fmap (name,) <$> inspectionLookupName context name
+            pure (found >>= \selected@(_,thing) ->
+              if exactThingMatches (structuredNamespace query) thing then Just selected else Nothing)
+          pure $ case distinctOn fst things of
+            [] -> InspectionStructuredError (StructuredUnknown query)
+            [thing] -> inspectResolved mode query visible thing
+            many -> InspectionStructuredError (StructuredAmbiguous query (map (uncurry identifierRef) many))
+    finalize request result = case canonicalize result of
+      InspectionTypeMatches query matches ->
+        let distinct = distinctOn typeMatchNominalName matches
+        in InspectionTypeMatches query (case request of
+          InspectTypeSearchBounded _ limit -> boundedNames (Just limit) distinct
+          _ -> distinct)
+      answer -> answer
+    checkedAliases = Map.fromList
+      [(idName identifier,original) | identifier <- typeEnvIds (tcg_type_env tcGblEnv)
+        , let name = idName identifier
+        , isVarName name
+        , nameModule_maybe name == Just (tcg_mod tcGblEnv)
+        , Just original <- [Map.lookup (occNameString (nameOccName name)) aliases]]
+    canonicalName name = maybe name idName (Map.lookup name checkedAliases)
+    canonicalize result = case result of
+      InspectionTypeMatches query matches -> InspectionTypeMatches query (map canonicalMatch matches)
+      answer -> answer
+    canonicalMatch match = case Map.lookup (typeMatchNominalName match) checkedAliases of
+      Just identifier ->
+        match { typeMatchNominalName = idName identifier
+              , typeMatchNamespace = if isRecordSelector identifier then FieldIdentifier else ValueIdentifier
+              , typeMatchModule = moduleNameString . moduleName <$> nameModule_maybe (idName identifier) }
+      Nothing -> match
     missing binder = liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
 
 -- The budget bounds the encoded match list, not the search itself. Matching
@@ -636,12 +727,6 @@ inspectTypeSearch context rdrEnv inspectionProbes budget query =
 
 data StructuredMode = StructuredInfo | StructuredType
 
-inspectStructured :: GhcMonad m => GlobalRdrEnv -> StructuredMode -> StructuredInspection -> m InspectionResult
-inspectStructured rdrEnv mode query = do
-  NameSelection _ candidates <- namesInScope rdrEnv (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
-  case candidates of
-    Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
-    Right (names, visibleNames) -> fst <$> inspectStructuredCandidates mode query visibleNames names
 
 -- The service has already resolved the queried module in its held world.
 -- Selection uses that module's public exports; provenance follows the actual
@@ -669,11 +754,28 @@ inspectStructuredCandidates mode query visibleNames names = do
 data NameSelection = NameSelection [StructuredNameScope] (Either String ([Name], [Name]))
 
 namesInScope :: GhcMonad m => GlobalRdrEnv -> ExactNameInspection -> m NameSelection
-namesInScope rdrEnv query = do
-  (scopes, result) <- visibleNamesInScope rdrEnv (exactNameScope query)
-  pure (NameSelection scopes (fmap (\visible -> (filter matches visible, visible)) result))
+namesInScope rdrEnv query = case exactNameScope query of
+  StructuredCurrentScope -> do
+    let entries = globalRdrEnvElts rdrEnv
+        visible = nub (map greName entries)
+        selected = nub [greName entry | entry <- entries
+          , namespaceMatches (exactNameNamespace query) (greName entry)
+          , any (matchesQuery (exactNameQuery query)) (greRdrNames entry)]
+    pure (NameSelection [StructuredCurrentScope] (Right (selected,visible)))
+  scope -> do
+    (scopes, result) <- visibleNamesInScope rdrEnv scope
+    pure (NameSelection scopes (fmap (\visible -> (filter matches visible, visible)) result))
   where matches name = matchesNameQuery (exactNameQuery query) name
           && namespaceMatches (exactNameNamespace query) name
+
+canonicalReferenceNames :: GlobalRdrEnv -> StructuredInspection -> [Name]
+canonicalReferenceNames environment query = map greName (lookupGRE environment lookup)
+  where
+    occurrence constructor = constructor (structuredName query)
+    lookup = case structuredNamespace query of
+      StructuredTypeName -> LookupOccName (occurrence mkTcOcc) SameNameSpace
+      StructuredConstructorName -> LookupOccName (occurrence mkDataOcc) SameNameSpace
+      _ -> LookupOccName (occurrence mkVarOcc) (RelevantGREs WantBoth True True)
 
 -- Scope observation is shared by exact selection and discovery inventory.
 -- It issues the names and actual attempts; selecting a projection grants no
@@ -913,13 +1015,15 @@ boundedNames (Just budget) = take budget
 -- twice; taking the budget first would retain fewer than `budget` distinct
 -- entries and make a truncated answer look shorter than it is.
 boundedDistinctNames :: (Ord a) => Maybe Int -> [a] -> [a]
-boundedDistinctNames budget = boundedNames budget . distinctInOrder
+boundedDistinctNames budget = boundedNames budget . distinctOn id
+
+distinctOn :: Ord key => (value -> key) -> [value] -> [value]
+distinctOn key = go Set.empty
   where
-    distinctInOrder = go Set.empty
     go _ [] = []
-    go seen (x : rest)
-      | x `Set.member` seen = go seen rest
-      | otherwise = x : go (Set.insert x seen) rest
+    go seen (value:rest)
+      | key value `Set.member` seen = go seen rest
+      | otherwise = value : go (Set.insert (key value) seen) rest
 
 inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> Maybe Int -> m InspectionResult
 inspectModule context requested expanded budget
@@ -1059,17 +1163,14 @@ thingAvailability context thing = case thing of
   AConLike constructor -> pure $ if isVanillaConLike constructor then Available else Unknown
   _ -> pure Available
 
+-- Dots may belong to an operator occurrence; compare the actual reader
+-- spelling instead of splitting the caller text into guessed name parts.
 matchesQuery :: String -> RdrName -> Bool
 matchesQuery query reader = case reader of
-  Unqual occurrence -> qualifier == Nothing && occNameString occurrence == wanted
-  Qual alias occurrence -> qualifier == Just (moduleNameString alias) && occNameString occurrence == wanted
+  Unqual occurrence -> query == occNameString occurrence
+  Qual alias occurrence -> query == moduleNameString alias ++ "." ++ occNameString occurrence
   Orig _ _ -> False
   Exact _ -> False
-  where
-    (qualifier, wanted) = case break (== '.') (reverse query) of
-      (reversedOccurrence, []) -> (Nothing, reverse reversedOccurrence)
-      (reversedOccurrence, _ : reversedQualifier) ->
-        (Just (reverse reversedQualifier), reverse reversedOccurrence)
 
 showEverything :: ShowSub
 showEverything = ShowSub ShowIface ShowForAllWhen
@@ -1110,6 +1211,8 @@ inspectionOutput body = toStrictByteString (encodeListLen 2 <> encodeString "TPI
 
 encodeResult :: InspectionResult -> Encoding
 encodeResult inspection = case inspection of
+  InspectionRowFit ref availability ->
+    encodeListLen 3 <> encodeString "RowFit" <> encodeIdentifierRef ref <> encodeAvailability availability
   InspectionType expression display availability ->
     encodeListLen 4 <> encodeString "Type" <> encodeText expression <> encodeText display
       <> encodeAvailability availability

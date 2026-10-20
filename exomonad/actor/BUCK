@@ -39,10 +39,13 @@ rust_filegroup(
         "src/fixtures/captured-replacement-installers-bind.hs": "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
-        "src/fixtures/compiler-query-verbs.hs": "exomonad/actor/src/fixtures/compiler-query-verbs.hs",
         "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
+        "src/fixtures/world-declaration-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-captured-input.hs",
+        "src/fixtures/world-declaration-invoke-after-failure.hs": "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs",
+        "src/fixtures/world-declaration-invoke-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-invoke-captured-input.hs",
+        "src/fixtures/world-declaration-type-failure.hs": "exomonad/actor/src/fixtures/world-declaration-type-failure.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "src/forms.rs": "exomonad/actor/src/forms.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
@@ -280,10 +283,13 @@ rust_filegroup(
         "src/fixtures/captured-replacement-installers-bind.hs": "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
-        "src/fixtures/compiler-query-verbs.hs": "exomonad/actor/src/fixtures/compiler-query-verbs.hs",
         "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
+        "src/fixtures/world-declaration-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-captured-input.hs",
+        "src/fixtures/world-declaration-invoke-after-failure.hs": "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs",
+        "src/fixtures/world-declaration-invoke-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-invoke-captured-input.hs",
+        "src/fixtures/world-declaration-type-failure.hs": "exomonad/actor/src/fixtures/world-declaration-type-failure.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "src/forms.rs": "exomonad/actor/src/forms.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
@@ -684,6 +690,49 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "actor_world_status_test",
+    binary = ":exomonad_actor_unit_tests",
+    exact_tests = [
+        "resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication",
+    ],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1260000,
+    case_compiler_modes = {"resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
+        "//build/rust:workspace_git_bundle",
+        "//build/rust:workspace_gitlink",
+        "//exomonad/examples/workspace:facade_test_sources",
+        "toolchains//:exomonad_runtime_tools",
+        "toolchains//:jev_sources",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_JEV_SOURCE_DIR": "$(location toolchains//:jev_sources)",
+        "TIDEPOOL_JEV_WORKSPACE_DIR": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "actor_world_cell_input_test",
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [
@@ -696,6 +745,92 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 1260000,
     case_compiler_modes = {"resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation": "owned-resident", "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
+        "//build/rust:workspace_git_bundle",
+        "//build/rust:workspace_gitlink",
+        "//exomonad/examples/workspace:facade_test_sources",
+        "toolchains//:exomonad_runtime_tools",
+        "toolchains//:jev_sources",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_JEV_SOURCE_DIR": "$(location toolchains//:jev_sources)",
+        "TIDEPOOL_JEV_WORKSPACE_DIR": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "actor_world_declaration_publication_test",
+    binary = ":exomonad_actor_unit_tests",
+    exact_tests = [
+        "resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell",
+    ],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1260000,
+    case_compiler_modes = {"resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
+        "//build/rust:workspace_git_bundle",
+        "//build/rust:workspace_gitlink",
+        "//exomonad/examples/workspace:facade_test_sources",
+        "toolchains//:exomonad_runtime_tools",
+        "toolchains//:jev_sources",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_JEV_SOURCE_DIR": "$(location toolchains//:jev_sources)",
+        "TIDEPOOL_JEV_WORKSPACE_DIR": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "actor_world_durable_generation_history_test",
+    binary = ":exomonad_actor_unit_tests",
+    exact_tests = [
+        "resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement",
+    ],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1260000,
+    case_compiler_modes = {"resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -1343,27 +1478,37 @@ tidepool_rust_test_cases(
         "resident_local_actor::reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
     ],
     expected_count = 4,
+    ignored = True,
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 2460000,
+    case_compiler_modes = {"resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control": "owned-resident", "resident_local_actor::reload_progress::invalid_authored_reload_arguments_release_the_invocation": "owned-resident", "resident_local_actor::reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent": "owned-resident", "resident_local_actor::reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
         "//bridge/testing:haskell_test_fixtures",
-        "//build/package:compiler_deployment",
-        "//build/package:tidepool_extract_runtime_libraries",
+        "//build/rust:workspace_git_bundle",
+        "//build/rust:workspace_gitlink",
+        "//exomonad/examples/workspace:facade_test_sources",
+        "toolchains//:exomonad_runtime_tools",
+        "toolchains//:jev_sources",
+        "//build/package:compiler_service_deployment",
     ],
     resource_env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_JEV_SOURCE_DIR": "$(location toolchains//:jev_sources)",
+        "TIDEPOOL_JEV_WORKSPACE_DIR": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
     },
     haskell_worker = True,
     visibility = ["PUBLIC"],
@@ -1405,10 +1550,13 @@ filegroup(
         "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs": "src/fixtures/captured-replacement-installers-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "src/fixtures/captured-spec-installer-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer.hs": "src/fixtures/captured-spec-installer.hs",
-        "exomonad/actor/src/fixtures/compiler-query-verbs.hs": "src/fixtures/compiler-query-verbs.hs",
         "exomonad/actor/src/fixtures/compiler-world-info.hs": "src/fixtures/compiler-world-info.hs",
         "exomonad/actor/src/fixtures/host-json-nested.hs": "src/fixtures/host-json-nested.hs",
         "exomonad/actor/src/fixtures/scope-live-result.hs": "src/fixtures/scope-live-result.hs",
+        "exomonad/actor/src/fixtures/world-declaration-captured-input.hs": "src/fixtures/world-declaration-captured-input.hs",
+        "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs": "src/fixtures/world-declaration-invoke-after-failure.hs",
+        "exomonad/actor/src/fixtures/world-declaration-invoke-captured-input.hs": "src/fixtures/world-declaration-invoke-captured-input.hs",
+        "exomonad/actor/src/fixtures/world-declaration-type-failure.hs": "src/fixtures/world-declaration-type-failure.hs",
         "exomonad/actor/src/fork_workspace.rs": "src/fork_workspace.rs",
         "exomonad/actor/src/forms.rs": "src/forms.rs",
         "exomonad/actor/src/hosted_lifecycle.rs": "src/hosted_lifecycle.rs",
@@ -1653,13 +1801,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f66697874757265732f636f6d70696c65722d71756572792d76657262732e6873",
-    src = "src/fixtures/compiler-query-verbs.hs",
-    out = "compiler-query-verbs.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f636f6d70696c65722d776f726c642d696e666f2e6873",
     src = "src/fixtures/compiler-world-info.hs",
     out = "compiler-world-info.hs",
@@ -1754,6 +1895,34 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f73636f70652d6c6976652d726573756c742e6873",
     src = "src/fixtures/scope-live-result.hs",
     out = "scope-live-result.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f776f726c642d6465636c61726174696f6e2d63617074757265642d696e7075742e6873",
+    src = "src/fixtures/world-declaration-captured-input.hs",
+    out = "world-declaration-captured-input.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f776f726c642d6465636c61726174696f6e2d696e766f6b652d61667465722d6661696c7572652e6873",
+    src = "src/fixtures/world-declaration-invoke-after-failure.hs",
+    out = "world-declaration-invoke-after-failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f776f726c642d6465636c61726174696f6e2d696e766f6b652d63617074757265642d696e7075742e6873",
+    src = "src/fixtures/world-declaration-invoke-captured-input.hs",
+    out = "world-declaration-invoke-captured-input.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f776f726c642d6465636c61726174696f6e2d747970652d6661696c7572652e6873",
+    src = "src/fixtures/world-declaration-type-failure.hs",
+    out = "world-declaration-type-failure.hs",
     visibility = ["PUBLIC"],
 )
 
