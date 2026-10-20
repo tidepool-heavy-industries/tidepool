@@ -13278,7 +13278,7 @@ pub(crate) mod tests {
         let physical = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone(), other_entry.clone()])
             .unwrap();
-        let operation = InventoryOperation::new(Default::default());
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
         let mut selected = CertifiedSourceSelection::from_compiler_projection(
             &projection,
             &physical.metadata_snapshot(),
