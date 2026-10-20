@@ -1251,8 +1251,37 @@ impl PreparedSourceEntry {
         })
     }
 
-    pub fn compiled(&self) -> &Arc<super::turn::CompiledTurn> {
+    pub(super) fn compiled(&self) -> &Arc<super::turn::CompiledTurn> {
         &self.compiled
+    }
+
+    pub fn warnings(&self) -> &tidepool_repr::serial::MetaWarnings {
+        &self.compiled.warnings
+    }
+
+    pub fn ordinary_original_compile_input(
+        &self,
+    ) -> &Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput> {
+        self.compiled
+            .ordinary_original_compile_input()
+            .expect("prepared source entry retains its validated original input")
+    }
+
+    pub fn published_source_original_selection(
+        &self,
+        revision: &str,
+        public_root: &tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    ) -> Result<
+        Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+        crate::CompileError,
+    > {
+        self.compiled
+            .published_source_original_selection(revision, public_root)
+    }
+
+    /// Compare immutable code without exposing an ordinary installation path.
+    pub fn has_same_prepared_code(&self, other: &Self) -> bool {
+        self.compiled.prepared() == other.compiled.prepared()
     }
 
     pub fn image_registry(&self) -> &Arc<ImageRegistry> {
