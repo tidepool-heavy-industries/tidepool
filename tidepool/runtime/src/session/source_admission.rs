@@ -366,10 +366,11 @@ impl RuntimeSourceFence {
             settled.await;
         }
     }
-    /// Reopen this own fence while holding the canonical lease that issued it.
-    /// The settle is unconditional, but it still runs through
-    /// [`Self::reopen_with`] so the lease's issuing epoch and this gate's phase
-    /// are both validated instead of being skipped.
+    /// Test-only convenience for an unconditional reopen under the issuing
+    /// lease. Production reopening must present its publication compare through
+    /// [`Self::reopen_with`]; this wrapper exists so tests can settle without a
+    /// compare while still running the canonical custody checks.
+    #[cfg(test)]
     pub fn reopen(
         self,
         lease: &Arc<super::RuntimeLexicalScopeLease>,

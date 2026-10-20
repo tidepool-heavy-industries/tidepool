@@ -17279,7 +17279,13 @@ pub(crate) mod request_tests {
                         tidepool_runtime::RuntimeError::SourceAdmission(tidepool_runtime::session::SourceAdmissionError::Closed { .. }))))));
                 }
                 assert_world_hot_work(&refusal.snapshot(), WorldEnsureExpectation::RefusedBeforeEnsure);
-                fence.reopen(lease).unwrap();
+                fence
+                    .reopen_with(lease, |reopen| {
+                        reopen.commit();
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
             }
             let checked = HostWorkObservation::new();
             let check_observation = checked.clone();

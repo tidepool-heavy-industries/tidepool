@@ -3698,7 +3698,13 @@ mod form_source_admission {
             .unwrap();
         assert_eq!(host.opens.load(Ordering::SeqCst), 2);
         second.close().unwrap();
-        fence.reopen(&scope).unwrap();
+        fence
+            .reopen_with(&scope, |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
         let (_child, child) = source(Some(scope.clone()));
         let pending =
             FormCleanup::new(actor, "external-stale".into(), host.clone(), child).unwrap();
