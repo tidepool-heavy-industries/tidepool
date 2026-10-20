@@ -12914,7 +12914,7 @@ mod authored_publication_tests {
         };
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
         let templates = vec![TurnTemplate {
             kind: TemplateSelector::Expr,
             source: assemble_expression_module(
@@ -12922,7 +12922,7 @@ mod authored_publication_tests {
                 "__result",
                 effects.row(),
                 "{{TURN}}",
-                ExpressionLift::Pure,
+                ExpressionLift::Effectful,
             ),
         }];
         let root = tempfile::tempdir().unwrap();
@@ -12934,7 +12934,7 @@ mod authored_publication_tests {
                 TurnRequest {
                     exact_context: None,
                     session_id: None,
-                    turn_text: "(42 :: Int)",
+                    turn_text: "send (AgentToolsPublishResultWith (T.pack \"closed\")) >> pure (42 :: Int)",
                     templates: &templates,
                     include: &includes,
                     session_root: root.path(),
@@ -12963,10 +12963,14 @@ mod authored_publication_tests {
         let candidate = session.mint_unpublished_notebook_scope(None).unwrap();
         let source = candidate.lease().original_source().clone();
         session
-            .set_run_context(SessionRunContext {
-                lexical_scope: candidate.lease().scope(),
-                ..SessionRunContext::ROOT
-            })
+            .set_actor_execution(
+                SessionRunContext {
+                    lexical_scope: candidate.lease().scope(),
+                    ..SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
             .unwrap();
         let prepare = |session: &mut TestSession| {
             session
@@ -13067,6 +13071,10 @@ mod authored_publication_tests {
         session.settle_dropped_custody();
         let entry = prepare(&mut session);
         let sites = entry.entry.provenance.original_sources.sites.len();
+        assert!(
+            sites > 0,
+            "actual effect site must exercise closed-source origin issuance"
+        );
         for site in entry.entry.provenance.original_sources.sites.keys() {
             assert!(Arc::ptr_eq(
                 &entry
@@ -13092,7 +13100,7 @@ mod authored_publication_tests {
             .unwrap();
         let completed = session
             .with_source_compiler_transaction(
-                source,
+                source.clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -13103,8 +13111,23 @@ mod authored_publication_tests {
             .into_outcome()
             .action
             .unwrap();
+        let ResidentOutcome::Suspended { hole, .. } = completed else {
+            panic!("closed B reaches its actual effect site after A cutoff");
+        };
+        let completed = session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.resume_classified(hole, (), settlement).unwrap(),
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
         let ResidentOutcome::Completed { result, .. } = completed else {
-            panic!("closed B source completes after A cutoff");
+            panic!("the actual accepted effect continuation completes once");
         };
         assert_eq!(result.to_json(), serde_json::json!(42));
         eprintln!(
