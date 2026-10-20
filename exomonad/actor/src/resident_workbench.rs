@@ -25324,6 +25324,10 @@ pub(crate) mod request_tests {
                     .prepared()
                     .expect("source-prepared installation")
             ));
+            assert!(
+                !Arc::ptr_eq(&first.dispatch, &second.dispatch),
+                "separate installations own separate actual dispatch custody"
+            );
             assert_ne!(
                 first._installation_scope.scope(),
                 second._installation_scope.scope()
