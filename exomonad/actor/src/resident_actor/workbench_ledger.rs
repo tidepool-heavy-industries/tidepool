@@ -28,7 +28,7 @@ impl RetirementDiagnosticEvidence {
     ) -> Self {
         let (detail, diagnostic) = match refusal.outcome().as_ref() {
             Ok(crate::resident_workbench::ActorGenerationCommit::Refused(detail)) => {
-                (detail.clone(), None)
+                (detail.to_string(), detail.failure_diagnostic())
             }
             Err(error) => (error.to_string(), error.failure_diagnostic()),
             _ => unreachable!("an unpublished refusal retains its original refusal or error"),

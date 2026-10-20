@@ -1399,6 +1399,7 @@ mod tests {
         let mut original = capture_original(&mut guard);
         let completion = super::super::PublicationBodyCompletion::Observed {
             guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
         }
         .for_retirement();
@@ -1457,6 +1458,7 @@ mod tests {
             ));
             let completion = super::super::PublicationBodyCompletion::Observed {
                 guard,
+                obligations: super::super::PublicationBodyObligations::Retained,
                 outcome: Err(error),
             }
             .for_retirement();
@@ -1493,7 +1495,68 @@ mod tests {
             assert!(primary_error
                 .to_string()
                 .contains("retained storage evidence"));
+            let refusal = refusal.into_settled_diagnostic().err().expect(
+                "source restoration cannot settle unassessed storage work",
+            );
+            assert!(Arc::ptr_eq(&primary, refusal.outcome()));
         }
+    }
+
+    #[test]
+    fn typed_durable_refusal_keeps_refusal_control_and_unassessed_obligations() {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationRefusalObservation as Observation,
+            ActorGenerationRefusal, ActorPublicationFailureCause as Cause,
+        };
+        use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let mut original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
+            outcome: Ok(ActorGenerationCommit::Refused(
+                ActorGenerationRefusal::Durable(Box::new(SessionError::RecoveryStore(Box::new(
+                    StoreError {
+                        path: "typed-refusal-control.db".into(),
+                        kind: StoreErrorKind::Storage,
+                        detail: "actual typed storage cause".into(),
+                    },
+                )))),
+            )),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+            completion
+        else {
+            panic!("a typed durable refusal retains the same unpublished owner");
+        };
+        let primary = refusal.outcome().clone();
+        assert!(matches!(
+            primary.as_ref(),
+            Ok(ActorGenerationCommit::Refused(
+                ActorGenerationRefusal::Durable(_)
+            ))
+        ));
+        assert_eq!(
+            refusal.observation(),
+            Observation::Failed {
+                cause: Cause::RecoveryStore(StoreErrorKind::Storage),
+                execution: None,
+                requires_recovery: false,
+            }
+        );
+        refusal.refuse_retirement(&mut original).unwrap();
+        let refusal = refusal
+            .into_settled_diagnostic()
+            .err()
+            .expect("a typed refusal is not a storage settlement receipt");
+        assert!(Arc::ptr_eq(&primary, refusal.outcome()));
+        let Ok(ActorGenerationCommit::Refused(reason)) = primary.as_ref() else {
+            unreachable!()
+        };
+        assert!(reason.to_string().contains("actual typed storage cause"));
+        assert!(reason.failure_diagnostic().is_some());
     }
 
     #[test]
@@ -1604,6 +1667,7 @@ mod tests {
         let mut original = capture_original(&mut guard);
         let completion = super::super::PublicationBodyCompletion::Observed {
             guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
         }
         .for_retirement();
@@ -1662,6 +1726,7 @@ mod tests {
         let _original = capture_original(&mut guard);
         let completion = super::super::PublicationBodyCompletion::Observed {
             guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Ok(super::super::ActorGenerationCommit::Unconfirmed(
                 "actual commit observation was lost".into(),
             )),
@@ -1702,6 +1767,7 @@ mod tests {
                 };
                 let completion = super::super::PublicationBodyCompletion::Observed {
                     guard,
+                    obligations: super::super::PublicationBodyObligations::Retained,
                     outcome: primary,
                 }
                 .for_retirement();
@@ -2821,6 +2887,10 @@ mod tests {
             primary.as_ref(),
             Ok(ActorGenerationCommit::Refused(_))
         ));
+        refusal = refusal.into_settled_diagnostic().err().expect(
+            "a pre-effect body still cannot release its armed source owner",
+        );
+        assert!(Arc::ptr_eq(refusal.outcome(), &primary));
         assert!(matches!(&state.0.lock().availability,
             InstalledToolsAvailability::PublicationInProgress(attempt)
                 if Arc::ptr_eq(attempt, &observer.0)));
@@ -2848,6 +2918,12 @@ mod tests {
             tidepool_extract_cmd::extract_spawn_count(),
             compiler_calls,
             "observed cancellation and source settlement never replay the compiler"
+        );
+        assert_eq!(
+            refusal.into_settled_diagnostic().ok().expect(
+                "the actual cancelled Ephemeral body issued diagnostic-only settlement",
+            ),
+            super::super::ActorGenerationPublicationRefusalObservation::Refused,
         );
     }
 
