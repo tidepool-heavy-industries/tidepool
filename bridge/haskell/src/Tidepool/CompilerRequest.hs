@@ -528,7 +528,7 @@ prepareArtifactsWithProjectionIntent
 prepareArtifactsWithProjectionIntent _ _ _ _ _ completion [] _ _ _ =
   withPreparedCompilation completion (\_ _ _ _ -> pure ([], Nothing))
 prepareArtifactsWithProjectionIntent prior intent project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
-  withPreparedCompilation completion $ \prepared _ _ _ -> do
+  withPreparedCompilation completion $ \prepared recoveryCaches executor _ -> do
     timing <- readTimingEnabled
     let result = pprPipelineResult prepared
         hscEnv = prHscEnv result
