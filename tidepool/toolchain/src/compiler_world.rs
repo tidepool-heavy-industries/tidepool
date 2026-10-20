@@ -2452,15 +2452,15 @@ impl CompilerWorldOpenInputs {
     }
 
     fn prepare_for(mut self, producer: [u8; 32], profile: [u8; 32]) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
-        let (primary_context, primary_root, primary_blocks) =
-            self.materialize_primary(producer)?;
+        // Capture the cold primary once, then apply the same exact TYPE-role
+        // owner used by warm derivation before any logical root is encoded.
+        self.primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
+        let primary_compiler_inputs = self.primary_context.capture_world_primary_compiler_inputs(producer)?;
+        let type_advance = primary_compiler_inputs.with_type_interfaces(self.lexical.observation_type_contexts())?;
+        self.primary_context = type_advance.context;
+        let primary_compiler_inputs = type_advance.inputs;
+        let (primary_context, primary_root, primary_blocks) = self.materialize_primary(producer)?;
         self.primary_context = primary_context;
-        // This cold issuer preserves the actual primary selection and native
-        // lineage. Visible checked rows keep their independent issuing support;
-        // ordinary operations select demanded closures from these owners.
-        let primary_compiler_inputs = self
-            .primary_context
-            .capture_world_primary_compiler_inputs(producer)?;
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
             1,
