@@ -1212,7 +1212,8 @@ fn try_check_fixture_cell(
         let mut edited = checked.clone();
         edited.checked_source.push('\n');
         assert!(
-            edited.checked_item(0).is_err(),
+            matches!(edited.checked_item(0), Err(CompileError::ExtractFailed(detail))
+                if detail == "checked module observation was edited"),
             "changed checking-source observations cannot retain item authority"
         );
     }
