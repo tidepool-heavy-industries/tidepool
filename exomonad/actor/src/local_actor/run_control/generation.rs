@@ -333,7 +333,7 @@ impl GenerationPublicationCustody {
                 settlement_error,
             } if settlement_error.is_none() => {
                 match reserved.refuse_retirement(fence, "publication worker did not execute") {
-                    Ok(())
+                    Ok(_source_settlement)
                         if matches!(reason, preparation::PublicationNonStart::SpawnFailed(_)) =>
                     {
                         let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
@@ -348,7 +348,7 @@ impl GenerationPublicationCustody {
                         );
                         None
                     }
-                    Ok(()) => Some(GenerationRetirementCompletion::AReopened {
+                    Ok(_source_settlement) => Some(GenerationRetirementCompletion::AReopened {
                         outcome: ActorGenerationPublicationRefusalObservation::Refused,
                         nonstart: Some(reason.kind()),
                     }),

@@ -2005,6 +2005,8 @@ struct PreparingActorGeneration {
 
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(PreparedActorGeneration: Clone, Copy);
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(UnstartedRetirementSourceSettlement: Clone, Copy);
 
 /// Immutable rendering evidence, never publication authority.
 #[derive(Clone)]
@@ -2027,6 +2029,13 @@ pub(crate) struct ReservedActorGeneration {
     prepared: PreparedActorGeneration,
     guard: ActorPublicationGuard,
     publication_kind: ActorGenerationPublication,
+}
+
+/// Witnesses this reservation's actual B-then-A refusal transition. It grants
+/// no authority and says nothing about compiler, storage, or physical cleanup.
+#[must_use]
+pub(crate) struct UnstartedRetirementSourceSettlement {
+    attempt: std::sync::Weak<ActorPublicationAttempt>,
 }
 
 pub(crate) enum ActorGenerationReservation {
@@ -2086,9 +2095,12 @@ impl ReservedActorGeneration {
         &mut self,
         original: &mut generation_admission::GenerationRetirementFence,
         detail: &str,
-    ) -> Result<(), ResidentActorWorkbenchError> {
+    ) -> Result<UnstartedRetirementSourceSettlement, ResidentActorWorkbenchError> {
         self.guard
             .refuse_retirement(original)
+            .map(|()| UnstartedRetirementSourceSettlement {
+                attempt: Arc::downgrade(&self.guard.attempt),
+            })
             .map_err(
                 |settlement| ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
@@ -2097,6 +2109,21 @@ impl ReservedActorGeneration {
                     }),
                 },
             )
+    }
+
+    /// Consumes the same never-executed reservation and its source settlement.
+    /// The retirement record retains candidate and physical custody separately.
+    pub(crate) fn into_settled_unstarted(
+        self,
+        settlement: UnstartedRetirementSourceSettlement,
+    ) -> Result<(), (Self, UnstartedRetirementSourceSettlement)> {
+        if matches!(self.guard.settlement, ActorPublicationState::Settled)
+            && settlement.attempt.ptr_eq(&Arc::downgrade(&self.guard.attempt))
+        {
+            Ok(())
+        } else {
+            Err((self, settlement))
+        }
     }
 }
 
