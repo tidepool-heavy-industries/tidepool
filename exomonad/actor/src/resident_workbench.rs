@@ -21857,25 +21857,23 @@ pub(crate) mod request_tests {
                 public_selection.public_root()
             );
             assert_eq!(initial_originals[0].revision(), public_selection.revision());
-            if initial_originals[0].context().semantic_sha256()
-                != public_selection.context().semantic_sha256()
-            {
-                let installed = initial_originals[0].context().snapshot();
-                let issued = public_selection.context().snapshot();
-                let installed_roles = serde_json::to_value(installed.compiler_roles()).unwrap();
-                let issued_roles = serde_json::to_value(issued.compiler_roles()).unwrap();
-                eprintln!("quoted initial original context comparison: producer={} lexical={} roles={} graph={} dependencies={}",
-                    installed.producer_sha256() == issued.producer_sha256(),
-                    installed.lexical() == issued.lexical(),
-                    installed_roles == issued_roles,
-                    installed.graph_selection().unwrap() == issued.graph_selection().unwrap(),
-                    installed.binding_dependencies().unwrap() == issued.binding_dependencies().unwrap());
-                eprintln!("installed source roles: {installed_roles}\nissued source roles: {issued_roles}");
-                eprintln!(
-                    "installed source graph: {:?}\nissued source graph: {:?}",
-                    installed.graph_selection().unwrap(),
-                    issued.graph_selection().unwrap()
-                );
+            if initial_originals[0].context().semantic_sha256() != public_selection.context().semantic_sha256() {
+                let source_identity = |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+                    let roles = context.compiler_input_projection().snapshot_roles();
+                    let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
+                        interface, original, source_revision, original_input_identity, selection_sha256, ..
+                    } = roles.get(public_selection.public_root()).unwrap() else {
+                        panic!("actual selected source must retain its published original role");
+                    };
+                    (*interface, *original, source_revision.clone(), original_input_identity.clone(), *selection_sha256)
+                };
+                let installed = initial_originals[0].context();
+                let issued = public_selection.context();
+                let installed_groups = installed.artifact_view().selected_native_groups();
+                let issued_groups = issued.artifact_view().selected_native_groups();
+                eprintln!("quoted initial original context comparison: source_identity={} installed_groups={} issued_groups={} issued_subset={} gained_first16={:?}",
+                    source_identity(installed) == source_identity(issued), installed_groups.len(), issued_groups.len(),
+                    issued_groups.is_subset(&installed_groups), installed_groups.difference(&issued_groups).take(16).collect::<Vec<_>>());
             }
             assert_eq!(
                 initial_originals[0].context().semantic_sha256(),
