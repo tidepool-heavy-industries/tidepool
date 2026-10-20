@@ -34,7 +34,7 @@ import GHC.Unit.Module.ModIface (mi_module, mi_src_hash, mi_iface_hash, mi_final
 import GHC.Unit.Types (unitString)
 import GHC.Utils.Fingerprint (Fingerprint, fingerprintByteString)
 import GHC.Types.Name.Occurrence
-  ( isSymOcc, mkTcOcc, mkVarOcc )
+  ( isSymOcc, mkTcOcc, mkVarOcc, mkDataOcc )
 import Tidepool.CheckedPrefixImports
   ( CompletedValueImports, refineOriginalDeclarationImports
   , refineOriginalDeclarationImportsWithCompleted, refineProgramDeclarationImports )
@@ -43,7 +43,7 @@ import Tidepool.Binders
   , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..), ImportIntent(..)
   , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplate )
 import Tidepool.DeclarationJoin
-  ( DeclarationExport(..), DeclarationKind(..), ExportIdentity(..), exportIdentity
+  ( DeclarationExport(..), DeclarationKind(..), ExportNamespace(..), ExportIdentity(..), exportIdentity
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
   , interfaceExports, interfaceInventory, validateRetainedFamilyInstances
   , renderDeclarationSelection )
@@ -60,7 +60,7 @@ data PlannedDeclaration = PlannedDeclaration
   { plannedModule :: String
   , plannedSource :: String
   , plannedCheckPlan :: CellSourcePlan
-  , authoredHeads :: [(DeclarationKind, String)]
+  , authoredHeads :: [(DeclarationKind, ExportNamespace, String, Maybe String)]
   } deriving (Eq, Show)
 
 data PlannedDeclarationRejection
@@ -164,7 +164,7 @@ preparePlannedDeclaration reserved wrapper plan = do
     (Left InvalidTurnPlaceholder)
   let exports = nub (sbDeclItems (cellAnalysisVerdict declaration))
       heads = nub (map exportHead exports)
-  unless (all ((/= scaffoldTargetName) . snd) heads)
+  unless (all (\(_,_,name,_) -> name /= scaffoldTargetName) heads)
     (Left ReservedResultDeclaration)
   let header = "module " ++ reserved ++ " (" ++ intercalate ", " (map renderExport exports) ++ ") where"
   originalWrapper <- either (Left . InvalidOriginalHeader) Right
@@ -189,10 +189,12 @@ preparePlannedDeclaration reserved wrapper plan = do
   pure (PlannedDeclaration reserved source check heads)
   where
     occurrences needle = length . filter (needle `isPrefixOf`) . tails
-    exportHead (EValue name) = (ValueDeclaration, name)
-    exportHead (EType name _) = (TypeDeclaration, name)
-    exportHead (EClass name _) = (ClassDeclaration, name)
+    exportHead (EValue name) = (ValueDeclaration, ValueNamespace, name, Nothing)
+    exportHead (EPattern name) = (ValueDeclaration, ConstructorNamespace, name, Nothing)
+    exportHead (EType name _) = (TypeDeclaration, TypeNamespace, name, Nothing)
+    exportHead (EClass name _) = (ClassDeclaration, TypeNamespace, name, Nothing)
     renderExport (EValue name) = renderName mkVarOcc name
+    renderExport (EPattern name) = "pattern " ++ renderName mkDataOcc name
     renderExport (EType name children) = renderName mkTcOcc name
       ++ if null children then "" else "(..)"
     renderExport (EClass name _) = renderName mkTcOcc name ++ "(..)"
@@ -231,7 +233,8 @@ certifyPlannedDeclaration planned env = case
         result <- readPlannedDeclarationInventory env original
         pure $ do
           inventory <- result
-          let heads = nub [(exportKind item, exportOccurrence (exportHead item))
+          let heads = nub [(exportKind item, exportNamespace (exportHead item)
+                ,exportOccurrence (exportHead item), exportRecordParent (exportHead item))
                 | item <- plannedExports inventory]
           unless (length heads == length (authoredHeads planned)
               && all (`elem` authoredHeads planned) heads)
