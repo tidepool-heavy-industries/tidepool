@@ -1722,7 +1722,13 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                 let stagePath = heldWorldCellStagePath stage
                 issuedBytes <- BS.readFile stagePath
                 changed <- (do
-                    BS.writeFile stagePath (issuedBytes <> "\nunauthorizedStageValue = ()\n")
+                    let modifiedBytes = issuedBytes <> "\nunauthorizedStageValue = ()\n"
+                    BS.writeFile stagePath modifiedBytes
+                    cached <- scopedPrepareWorldCellStage compiler admitted >>= maybe
+                      (fail "cached World rendering disappeared after a file change") pure
+                    observedBytes <- BS.readFile stagePath
+                    unless (heldWorldCellStagePath cached == stagePath && observedBytes == modifiedBytes)
+                      (fail "repeated World stage lookup regenerated its issued file")
                     try (void (scopedCompileWorldCell compiler admitted
                       (PreparedSegmentProducts (preparedTypedSegmentPlan issued) Nothing) Set.empty)))
                   `finally` BS.writeFile stagePath issuedBytes
