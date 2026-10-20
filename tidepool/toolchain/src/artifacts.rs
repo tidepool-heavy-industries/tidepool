@@ -8305,151 +8305,167 @@ mod module_product_tests {
             settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionOrigin,
         };
-        let cancellation = CompilerTransactionCancellation::new();
-        let mut observed_close = None;
-        let settled = settle_compiler_transaction_cancellable(
-            cancellation,
-            |close| observed_close = Some(close),
-            || {
-                let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
-                    .expect("declared compiler deployment");
-                let (endpoint, _, _) =
-                    crate::toolchain::bind_admitted_extract_endpoint(&configured)
-                        .expect("configured compiler endpoint");
-                let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
-                    .expect("admitted compiler endpoint");
-                let root = Arc::new(tempfile::tempdir()?);
-                let source_path = root.path().join("Module.hs");
-                std::fs::write(&source_path, "module Module where\n")?;
-                let body = std::fs::read(source_path)?;
-                let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
-                    vec![CapturedCompilerSourceRoot {
-                        manifest: crate::cache::SourceRootManifest::from_file_digests([(
-                            PathBuf::from("Module.hs"),
-                            blake3::hash(&body).to_hex().to_string(),
-                        )])
-                        .expect("actual captured source manifest"),
-                        bodies: BTreeMap::from([(
-                            PathBuf::from("Module.hs"),
-                            Arc::<[u8]>::from(body),
-                        )]),
-                    }],
-                    Arc::from(&b"native-world-source"[..]),
-                    root,
-                )?);
-                let source = WorldSourceSelection::new(*sources.seal(), "native-world-source")?;
-                let inputs = ModuleCandidateOffer::compiler_world_inputs(
-                    None,
-                    CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
-                    sources,
-                    crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
-                        Vec::new(),
+        for cancel_after_end in [false, true] {
+            let cancellation = CompilerTransactionCancellation::new();
+            let mut observed_close = None;
+            let settled = settle_compiler_transaction_cancellable(
+                cancellation.clone(),
+                |close| observed_close = Some(close),
+                || {
+                    let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+                        .expect("declared compiler deployment");
+                    let (endpoint, _, _) =
+                        crate::toolchain::bind_admitted_extract_endpoint(&configured)
+                            .expect("configured compiler endpoint");
+                    let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+                        .expect("admitted compiler endpoint");
+                    let root = Arc::new(tempfile::tempdir()?);
+                    let source_path = root.path().join("Module.hs");
+                    std::fs::write(&source_path, "module Module where\n")?;
+                    let body = std::fs::read(source_path)?;
+                    let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
+                        vec![CapturedCompilerSourceRoot {
+                            manifest: crate::cache::SourceRootManifest::from_file_digests([(
+                                PathBuf::from("Module.hs"),
+                                blake3::hash(&body).to_hex().to_string(),
+                            )])
+                            .expect("actual captured source manifest"),
+                            bodies: BTreeMap::from([(
+                                PathBuf::from("Module.hs"),
+                                Arc::<[u8]>::from(body),
+                            )]),
+                        }],
+                        Arc::from(&b"native-world-source"[..]),
+                        root,
+                    )?);
+                    let source = WorldSourceSelection::new(*sources.seal(), "native-world-source")?;
+                    let inputs = ModuleCandidateOffer::compiler_world_inputs(
                         None,
-                    )?,
-                )?;
-                let world = crate::compiler_world::open_world(inputs, &endpoint)?;
-                let plan = crate::compiler_world::plan_cell(
-                    &endpoint,
-                    &world,
-                    Arc::new(tidepool_extract_cmd::WorldCellRecipe {
-                        source: "let answer = (1 :: Int)".into(),
-                        template: include_str!("../tests/fixtures/world-native/CellTemplate.hs")
-                            .into(),
-                        turn_templates: Vec::new(),
-                    }),
-                )?;
-                assert_eq!(plan.items().len(), 1);
-                let origin =
-                    CompilerTransactionOrigin::current().expect("actual compiler operation");
-                let subject = WorldCellAdmissionSubject::for_source_transaction(
-                    &origin,
-                    [1; 16],
-                    0,
-                    1,
-                    1,
-                    [b"compiler-only native output control".to_vec()],
-                )?;
-                let token = plan.issue_admission_token(
-                    subject,
-                    vec![CheckedPlannedCellSlot::Bind { value: 1 }],
-                    vec![vec![(
-                        "answer".into(),
-                        tidepool_repr::SessionVarId::from_extract(
-                            tidepool_codegen::prepared_program::session_var_id(
-                                &tidepool_repr::SessionModule::val(tidepool_repr::Generation(1))
-                                    .module_name(),
-                                "answer",
-                            ),
-                        ),
-                    )]],
-                )?;
-                let reservation = plan.reserve(token)?;
-                let checked = crate::compiler_world::admit_world_cell_program(
-                    &endpoint,
-                    reservation,
-                    source.clone(),
-                    source,
-                    &origin,
-                )?
-                .map_err(|refusal| {
-                    CompileError::ExtractFailed(format!(
-                        "actual World producer refused: {refusal:?}"
-                    ))
-                })?;
-                let binding =
-                    crate::declaration_context::WorldSourceCompilationBinding::from_output(
-                        &checked, 0,
+                        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+                        sources,
+                        crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
+                            Vec::new(),
+                            None,
+                        )?,
                     )?;
-                let identity =
-                    crate::declaration_context::WorldCompilationIdentity::from_binding(&binding);
-                let base = checked.reservation().plan().world();
-                let domain = base.restoration().captured_source_domain();
-                assert!(identity.matches_source_recipe(base.logical_id(), domain));
-                let mut wrong_base = *base.logical_id();
-                wrong_base[0] ^= 1;
-                let mut wrong_domain = *domain;
-                wrong_domain[0] ^= 1;
-                assert!(!identity.matches_source_recipe(&wrong_base, domain));
-                assert!(!identity.matches_source_recipe(base.logical_id(), &wrong_domain));
-                let prepared = prepare_world_cell_program(checked)?;
-                Ok::<_, CompileError>((prepared, origin))
-            },
-        );
-        assert_eq!(observed_close.as_ref(), Some(settled.close()));
-        if let Err(error) = settled.action() {
-            panic!(
-                "actual World native preparation failed: {error:?}; compiler close: {:?}",
-                settled.close()
+                    let world = crate::compiler_world::open_world(inputs, &endpoint)?;
+                    let plan = crate::compiler_world::plan_cell(
+                        &endpoint,
+                        &world,
+                        Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                            source: "let answer = (1 :: Int)".into(),
+                            template: include_str!(
+                                "../tests/fixtures/world-native/CellTemplate.hs"
+                            )
+                            .into(),
+                            turn_templates: Vec::new(),
+                        }),
+                    )?;
+                    assert_eq!(plan.items().len(), 1);
+                    let origin =
+                        CompilerTransactionOrigin::current().expect("actual compiler operation");
+                    let subject = WorldCellAdmissionSubject::for_source_transaction(
+                        &origin,
+                        [1; 16],
+                        0,
+                        1,
+                        1,
+                        [b"compiler-only native output control".to_vec()],
+                    )?;
+                    let token = plan.issue_admission_token(
+                        subject,
+                        vec![CheckedPlannedCellSlot::Bind { value: 1 }],
+                        vec![vec![(
+                            "answer".into(),
+                            tidepool_repr::SessionVarId::from_extract(
+                                tidepool_codegen::prepared_program::session_var_id(
+                                    &tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                                        1,
+                                    ))
+                                    .module_name(),
+                                    "answer",
+                                ),
+                            ),
+                        )]],
+                    )?;
+                    let reservation = plan.reserve(token)?;
+                    let checked = crate::compiler_world::admit_world_cell_program(
+                        &endpoint,
+                        reservation,
+                        source.clone(),
+                        source,
+                        &origin,
+                    )?
+                    .map_err(|refusal| {
+                        CompileError::ExtractFailed(format!(
+                            "actual World producer refused: {refusal:?}"
+                        ))
+                    })?;
+                    let binding =
+                        crate::declaration_context::WorldSourceCompilationBinding::from_output(
+                            &checked, 0,
+                        )?;
+                    let identity =
+                        crate::declaration_context::WorldCompilationIdentity::from_binding(
+                            &binding,
+                        );
+                    let base = checked.reservation().plan().world();
+                    let domain = base.restoration().captured_source_domain();
+                    assert!(identity.matches_source_recipe(base.logical_id(), domain));
+                    let mut wrong_base = *base.logical_id();
+                    wrong_base[0] ^= 1;
+                    let mut wrong_domain = *domain;
+                    wrong_domain[0] ^= 1;
+                    assert!(!identity.matches_source_recipe(&wrong_base, domain));
+                    assert!(!identity.matches_source_recipe(base.logical_id(), &wrong_domain));
+                    let prepared = prepare_world_cell_program(checked)?;
+                    Ok::<_, CompileError>((prepared, origin))
+                },
             );
+            assert_eq!(observed_close.as_ref(), Some(settled.close()));
+            if let Err(error) = settled.action() {
+                panic!(
+                    "actual World native preparation failed: {error:?}; compiler close: {:?}",
+                    settled.close()
+                );
+            }
+            assert!(matches!(
+                settled.close(),
+                tidepool_extract_cmd::CompilerTransactionClose::Clean
+            ));
+            let admission = settled
+                .host_admission_cancellation()
+                .expect("owner-issued post-END admission")
+                .clone();
+            if let Ok((_, origin)) = settled.action() {
+                assert!(settled.belongs_to(origin));
+            }
+            let (prepared, _) = settled
+                .into_outcome()
+                .action
+                .expect("actual World native preparation");
+            if cancel_after_end {
+                cancellation.cancel_host_admission();
+                let Err(CompileError::Io(error)) = prepared.seal(&admission) else {
+                    panic!("cancelled compiler admission must refuse native sealing");
+                };
+                assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+                continue;
+            }
+            let program = prepared
+                .seal(&admission)
+                .expect("same actual output after END");
+            assert!(matches!(program.basis(), CellProgramBasis::World(_)));
+            assert_eq!(program.items().len(), 1);
+            let native = program.items()[0]
+                .native()
+                .expect("actual binding native program");
+            assert_eq!(native.item().binders(), &["answer"]);
+            assert!(native.value_interface().is_some());
+            program
+                .validate_typed_entries()
+                .expect("actual native entry belongs to normalized item");
         }
-        assert!(matches!(
-            settled.close(),
-            tidepool_extract_cmd::CompilerTransactionClose::Clean
-        ));
-        let admission = settled
-            .host_admission_cancellation()
-            .expect("owner-issued post-END admission")
-            .clone();
-        if let Ok((_, origin)) = settled.action() {
-            assert!(settled.belongs_to(origin));
-        }
-        let (prepared, _) = settled
-            .into_outcome()
-            .action
-            .expect("actual World native preparation");
-        let program = prepared
-            .seal(&admission)
-            .expect("same actual output after END");
-        assert!(matches!(program.basis(), CellProgramBasis::World(_)));
-        assert_eq!(program.items().len(), 1);
-        let native = program.items()[0]
-            .native()
-            .expect("actual binding native program");
-        assert_eq!(native.item().binders(), &["answer"]);
-        assert!(native.value_interface().is_some());
-        program
-            .validate_typed_entries()
-            .expect("actual native entry belongs to normalized item");
     }
 
     #[test]
