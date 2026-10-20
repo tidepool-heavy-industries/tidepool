@@ -2763,7 +2763,7 @@ impl<'a> CurrentProductRef<'a> {
     ) -> Option<CertifiedNativeGroupSupport<'a>> {
         match &self.native.availability {
             ReceiptNativeAvailability::Completed(receipt) => receipt
-                .support(group)
+                .support(self.key(), group)
                 .map(CertifiedNativeGroupSupport::Issued),
             ReceiptNativeAvailability::Issued(_) => None,
             ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
@@ -3389,6 +3389,11 @@ impl CertifiedSourceSelection {
         owner: &CachedHomeOwner,
         group: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<CertifiedNativeGroupSupport<'_>> {
+        if let Some(native) = self.native_selections().find(|native| &native.owner == owner) {
+            if let ReceiptNativeAvailability::Completed(receipt) = &native.availability {
+                return receipt.support(key, group).map(CertifiedNativeGroupSupport::Issued);
+            }
+        }
         self.issued_native_availability()
             .find_map(|row| row.dependency_support(key, owner)?.offer_for_group(group))
             .map(CertifiedNativeGroupSupport::Issued)
