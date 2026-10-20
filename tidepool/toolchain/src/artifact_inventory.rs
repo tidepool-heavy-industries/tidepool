@@ -18914,13 +18914,10 @@ mod tests {
             selection: ExactArtifactSelection::from_recovered_graph_selection(
                 ArtifactGraphSelection {
                     selections: vec![],
-                    bindings: vec![
-                        ArtifactBinding {
-                            artifact: ArtifactId([4; 32]),
-                            selection: ArtifactSelectionId([6; 32])
-                        };
-                        10_000
-                    ],
+                    bindings: vec![ArtifactBinding {
+                        artifact: ArtifactId([4; 32]),
+                        selection: ArtifactSelectionId([6; 32]),
+                    }],
                     namespace: vec![],
                     roots: vec![],
                     native_groups: vec![],
