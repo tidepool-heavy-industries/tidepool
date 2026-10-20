@@ -12853,6 +12853,105 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn selected_source_edges_keep_the_exact_child_amid_equal_owner_custody() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+        let child = full_native_fixture("SelectedExactChild", vec![(7, vec![])], 1);
+        let root = full_native_fixture(
+            "SelectedExactRoot",
+            vec![(
+                11,
+                vec![PendingImportOwner::Source {
+                    owner: child.owner().clone(),
+                    original_ordinal: 7,
+                    binder: testing::identity("SelectedExactChild", "entry"),
+                }],
+            )],
+            1,
+        );
+        let producer = child.module_interface().unwrap().producer_sha256();
+        let child_entry = Arc::new(ArtifactEntry::original(producer, child.clone()).unwrap());
+        let root_entry = Arc::new(ArtifactEntry::original(producer, root).unwrap());
+        let other_entry = Arc::new(
+            ArtifactEntry::original([3; 32], fixture_finalized_product(child, [3; 32])).unwrap(),
+        );
+        let inventory = ArtifactInventory::default();
+        let selected = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![child_entry.clone(), root_entry.clone()],
+            )
+            .unwrap();
+        let other = inventory
+            .admit_shared(&inventory.empty_view(), vec![other_entry.clone()])
+            .unwrap();
+        let broad = selected.retain_custody(&other).unwrap();
+        let metadata = broad.metadata_snapshot();
+        let available = metadata
+            .artifacts
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+            .collect();
+        let mut validation = PackageInterfaceValidation::default();
+        let mut checker =
+            OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
+        let rows = checker
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let root_binding = rows
+            .iter()
+            .find(|(binding, _)| binding.binding.artifact() == root_entry.descriptor.id)
+            .unwrap()
+            .0;
+        let child_binding = rows
+            .iter()
+            .find(|(binding, _)| binding.binding.artifact() == child_entry.descriptor.id)
+            .unwrap()
+            .0;
+        assert_eq!(
+            broad
+                .original_group_children(root_binding, &validation.inventory)
+                .unwrap(),
+            vec![child_binding]
+        );
+        assert!(rows
+            .iter()
+            .all(|(binding, _)| binding.binding.artifact() != other_entry.descriptor.id));
+        let baseline = rows.iter().map(|(binding, row)| (*binding, row)).collect();
+        assert!(checker
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &baseline,
+                &mut validation
+            )
+            .unwrap()
+            .is_empty());
+        let wrong = other
+            .original_group_bindings(&validation.inventory)
+            .unwrap()[0];
+        let mut substituted = baseline;
+        let child_row = substituted.remove(&child_binding).unwrap();
+        substituted.insert(wrong, child_row);
+        assert!(matches!(
+            checker.certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &substituted,
+                &mut validation
+            ),
+            Err(CertificationError::Mismatch(
+                "current group outside selected binding closure"
+            ))
+        ));
+    }
+
+    #[test]
     fn receipt_original_identity_selects_exact_issued_artifact_among_equal_owners() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
