@@ -96,7 +96,7 @@ import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache, addHomeModuleToFinder)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
-import GHC.Unit.Module.Deps (imp_mods)
+import GHC.Unit.Module.Deps (imp_mods, dep_direct_mods, dep_orphs, dep_finsts)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import Codec.CBOR.Encoding qualified as WorldEncoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -2240,7 +2240,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         WorldCellSource _ _ prefix _ _ _ -> worldCellPrefixOriginalBindings prefix
         WorldObservationSource {} -> Map.empty
       inventories = case operation of
-        WorldCellSource _ _ (WorldCellPrefix _ _ values _ _ _) _ _ _ -> values
+        WorldCellSource _ _ (WorldCellPrefix _ _ _ values _ _ _) _ _ _ -> values
         WorldObservationSource {} -> []
   -- Dependency completions use one closed compiler route. Caller-composed
   -- purpose wrappers cannot silently widen the retained dependency policy.
@@ -2300,7 +2300,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             pure (Just value)
   initialBase <- getSession
   initial <- liftIO $ case operation of
-    WorldCellSource _ _ prefix _ _ _ -> hydrateWorldCellPrefix initialBase prefix
+    WorldCellSource _ _ prefix _ _ _ -> restoreWorldCellPrefixHomes initialBase prefix
     WorldObservationSource {} -> pure initialBase
   (withOperand,operandProjection) <- liftIO (hydrateWorldCellOperand initial operand)
   let operandInterfaces = maybe [] (\(WorldCellOperandProjection value iface _ _) ->
@@ -2325,7 +2325,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             pure (ready,resolved)
           Nothing -> do
             let baseScope = case operation of
-                  WorldCellSource _ _ (WorldCellPrefix _ _ _ scope _ _) _ _ _ -> scope
+                  WorldCellSource _ _ (WorldCellPrefix _ _ _ _ scope _ _) _ _ _ -> scope
                   WorldObservationSource _ (WorldObservationStage _ _ _ _ _ _ _ _ scope) -> scope
             demandScope <- case operandProjection of
               Just projection@(WorldCellOperandProjection value _ _ name) -> either (const (throwIO WorldCellCorrupt)) pure $
@@ -2361,6 +2361,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
         , pvDownsweepExcludes=maybe [] (pure . mkModuleName . exactModule . worldCellOperandInterface) operand
+            ++ case operation of
+              WorldCellSource _ _ prefix _ _ _ -> map ms_mod_name (worldCellPrefixOriginalSummaries prefix)
+              WorldObservationSource {} -> []
         , pvWorldOriginalBindings=originalBindings
         , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces)
         , pvTransformParsed = \target environment summary parsed -> do
@@ -2394,6 +2397,12 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             pure planned
               { cpBeforeModule = \summary -> do
                   cpBeforeModule planned summary
+                  case operation of
+                    WorldCellSource _ _ prefix _ _ _ -> do
+                      environment <- getSession
+                      ready <- liftIO (restoreWorldCellPrefixFor summary environment prefix)
+                      setSession ready
+                    WorldObservationSource {} -> pure ()
                   when (ms_mod_name summary == target) $ do
                     environment <- getSession
                     (ready,resolved) <- liftIO (resolveInputs environment sourceOwners)
@@ -2551,20 +2560,99 @@ worldPurposeMatchesStage question offset plan purpose = case (typedPurposePlan p
     slotGeneration (PlannedBind value) = value
     slotGeneration (PlannedExpression value _) = value
 
--- A selected projection is forced before retention; its thunk cannot retain
--- the completed attempt's entire HscEnv or HPT.
-hydrateWorldCellPrefix :: HscEnv -> WorldCellPrefix -> IO HscEnv
-hydrateWorldCellPrefix environment (WorldCellPrefix _ homes _ _ _ _) = do
-  let selected = eltsHpt homes
-  foldM (\current home -> do
-    let iface = hm_iface home
-        owner = mi_module iface
-        artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
-          ("<private-world-prefix>/" ++ moduleNameString (moduleName owner) ++ ".hi") "" []
-    hydrateExactScope current [(artifact,iface)]) environment selected
+worldCellPrefixOriginalSummaries :: WorldCellPrefix -> [ModSummary]
+worldCellPrefixOriginalSummaries (WorldCellPrefix _ _ graph _ _ _ _) =
+  [summary | ModuleNode _ summary <- mgModSummaries' graph]
+
+-- Keep the actual successful compiler homes. Re-typechecking their interfaces
+-- would construct another details knot and lose the completed stage's Names.
+-- Value homes remain with the demand scope until an importer selects them.
+restoreWorldCellPrefixHomes :: HscEnv -> WorldCellPrefix -> IO HscEnv
+restoreWorldCellPrefixHomes environment (WorldCellPrefix _ homes graph _ _ _ _) =
+  foldM restore environment [summary | ModuleNode _ summary <- mgModSummaries' graph]
+  where
+    restore current summary = do
+      let owner = ms_mod summary
+      home <- maybe (throwIO WorldCellCorrupt) pure (lookupHpt homes (moduleName owner))
+      unless (mi_module (hm_iface home) == owner) (throwIO WorldCellCorrupt)
+      selected <- case lookupHpt (hsc_HPT current) (moduleName owner) of
+        Nothing -> pure home
+        Just existing -> do
+          unless (sameWorldCellHome existing home) (throwIO WorldCellCorrupt)
+          pure existing
+      _ <- addHomeModuleToFinder (hsc_FC current) (hsc_home_unit current)
+        (GWIB (moduleName owner) NotBoot) (ms_location summary)
+      pure (hscUpdateHPT (\table -> addToHpt table (moduleName owner) selected) current)
+
+sameWorldCellHome :: HomeModInfo -> HomeModInfo -> Bool
+sameWorldCellHome left right = mi_module (hm_iface left) == mi_module (hm_iface right)
+  && mi_iface_hash (mi_final_exts (hm_iface left)) == mi_iface_hash (mi_final_exts (hm_iface right))
+
+-- Make supplies a phase-specific dependency environment. Restore the justified
+-- lexical graph there, before rnImports and instance/family lookup, while
+-- retaining every fresh phase node and its current compiler state.
+restoreWorldCellPrefixFor :: ModSummary -> HscEnv -> WorldCellPrefix -> IO HscEnv
+restoreWorldCellPrefixFor summary environment prefix@(WorldCellPrefix _ _ graph _ _ _ _)
+  | Set.null (sourceImportOwners summary `Set.intersection` owners) = pure environment
+  | otherwise = do
+      ready <- restoreWorldCellPrefixHomes environment prefix
+      let retained = mgModSummaries' graph
+          present = Set.fromList (map mkNodeKey (mgModSummaries' (hsc_mod_graph ready)))
+          addEdges (ModuleNode edges current) =
+            let imported = [mkNodeKey retainedNode | retainedNode@(ModuleNode _ retainedSummary) <- retained
+                  , ms_mod retainedSummary `Set.member` sourceImportOwners current]
+                inherited = [dependency | ModuleNode dependencies retainedSummary <- retained
+                  , ms_mod retainedSummary == ms_mod current, dependency <- dependencies]
+            in ModuleNode (Set.toList (Set.fromList (edges ++ imported ++ inherited))) current
+          addEdges node = node
+          current = map addEdges (mgModSummaries' (hsc_mod_graph ready))
+          missing = [node | node <- retained, mkNodeKey node `Set.notMember` present]
+      pure ready {hsc_mod_graph=mkModuleGraph (current ++ missing)}
+  where owners = Set.fromList [ms_mod retained | ModuleNode _ retained <- mgModSummaries' graph]
+
+-- Extend only the new Original's actual lexical/interface-instance closure.
+-- Existing nodes and homes stay owned; unrelated inventory modules are never
+-- copied into the private prefix.
+retainWorldCellOriginal :: HscEnv -> HomePackageTable -> ModuleGraph -> HomeModInfo
+  -> IO (HomePackageTable,ModuleGraph)
+retainWorldCellOriginal environment homes graph original = do
+  (retained,_,added) <- visit homes known [] (mi_module (hm_iface original))
+  pure (retained,mkModuleGraph (mgModSummaries' graph ++ reverse added))
+  where
+    known = Set.fromList [ms_mod summary | ModuleNode _ summary <- mgModSummaries' graph]
+    homeUnit = homeUnitAsUnit (hsc_home_unit environment)
+    visit table seen added owner
+      | owner `Set.member` seen = pure (table,seen,added)
+      | otherwise = do
+          home <- if owner == mi_module (hm_iface original) then pure original
+            else maybe (throwIO WorldCellCorrupt) pure
+              (lookupHpt (hsc_HPT environment) (moduleName owner))
+          unless (mi_module (hm_iface home) == owner) (throwIO WorldCellCorrupt)
+          forM_ (lookupHpt table (moduleName owner)) $ \previous ->
+            unless (sameWorldCellHome previous home) (throwIO WorldCellCorrupt)
+          let iface = hm_iface home
+              dependencies = Set.toAscList (Set.fromList
+                ([mkModule (stringToUnit (unitIdString unit)) (gwib_mod name)
+                  | (unit,name) <- Set.toList (dep_direct_mods (mi_deps iface))]
+                  ++ dep_orphs (mi_deps iface) ++ dep_finsts (mi_deps iface)))
+              lexical dependency = moduleUnit dependency == homeUnit && case
+                  parseSessionModule (moduleNameString (moduleName dependency)) of
+                Just selected -> smKind selected /= ValMod
+                Nothing -> True
+              selected = filter lexical dependencies
+              artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
+                (moduleNameString (moduleName owner))
+                ("<private-world-prefix>/" ++ moduleNameString (moduleName owner) ++ ".hi") "" []
+              summary = exactInterfaceSummary environment artifact
+              edge dependency = NodeKey_Module (ModNodeKeyWithUid
+                (GWIB (moduleName dependency) NotBoot) (toUnitId (moduleUnit dependency)))
+              node = ModuleNode (map edge selected) summary
+              withHome = addToHpt table (moduleName owner) home
+          foldM (\(current,visited,nodes) dependency -> visit current visited nodes dependency)
+            (withHome,Set.insert owner seen,node:added) selected
 
 worldCellPrefixOriginalBindings :: WorldCellPrefix -> Map.Map Name SymbolIdentity
-worldCellPrefixOriginalBindings (WorldCellPrefix _ homes _ _ _ _) = Map.fromList
+worldCellPrefixOriginalBindings (WorldCellPrefix _ homes _ _ _ _ _) = Map.fromList
   [(idName identifier,preparedRootIdentity identifier)
   | home <- eltsHpt homes, let owner = mi_module (hm_iface home)
   , Just selected <- [parseSessionModule (moduleNameString (moduleName owner))], smKind selected == LibMod
@@ -2573,7 +2661,7 @@ worldCellPrefixOriginalBindings (WorldCellPrefix _ homes _ _ _ _) = Map.fromList
 advanceWorldCellPrefix :: WorldInputFacts -> WorldCellPrepareRequest -> Int -> CellSourcePlan -> CompilePurpose
   -> PipelineSelection result -> CompletedCompilerResult result -> HscEnv -> WorldCellPrefix -> IO WorldCellPrefix
 advanceWorldCellPrefix _ question offset current _ selection completed environment
-    (WorldCellPrefix cursor homes inventories scope inherited _) = do
+    (WorldCellPrefix cursor homes graph inventories scope inherited _) = do
   result <- maybe (throwIO WorldCellCorrupt) pure (worldPreparedResult selection (completedCompilerResult completed))
   let captures = prProducedSessionInterfaces (pprPipelineResult result)
       slotByGeneration = Map.fromList
@@ -2601,13 +2689,14 @@ advanceWorldCellPrefix _ question offset current _ selection completed environme
       pure (alias,WorldStagedValue ordinal symbol (stableVarId name) (worldCellPrepareDefiningScope question) generation
         artifact (hm_iface selected) capture selected)
   let homesWithValues = foldl' (\table (_,WorldStagedValue _ _ _ _ _ _ _ _ home) -> addToHpt table (moduleName (mi_module (hm_iface home))) home) homes additions
-  (nextHomes,nextInventories) <- case completedCompilerWorldCompletion completed >>= worldCompilerCompletionPlannedDeclaration of
-    Nothing -> pure (homesWithValues,inventories)
+  (nextHomes,nextGraph,nextInventories) <- case completedCompilerWorldCompletion completed >>= worldCompilerCompletionPlannedDeclaration of
+    Nothing -> pure (homesWithValues,graph,inventories)
     Just (planned,inventory) -> do
       home <- evaluate (lookupHpt (hsc_HPT environment) (mkModuleName (plannedModule planned))) >>= maybe (throwIO WorldCellCorrupt) evaluate
-      pure (addToHpt homesWithValues (moduleName (mi_module (hm_iface home))) home,inventories ++ [inventory])
+      (retained,extended) <- retainWorldCellOriginal environment homesWithValues graph home
+      pure (retained,extended,inventories ++ [inventory])
   nextScope <- updateSegmentDemandScope environment [(alias,Just (WorldPriorBinding value)) | (alias,value) <- additions] scope
-  pure (WorldCellPrefix (cursor+1) nextHomes nextInventories nextScope inherited WorldStagePending)
+  pure (WorldCellPrefix (cursor+1) nextHomes nextGraph nextInventories nextScope inherited WorldStagePending)
 
 worldPreparedResult :: PipelineSelection result -> result -> Maybe PreparedPipelineResult
 worldPreparedResult PreparedStg result = Just result
@@ -6599,7 +6688,7 @@ data HeldWorldCellAdmission = HeldWorldCellAdmission (IORef CompilerPhase)
 
 -- Private compiler facts from successfully completed earlier stages. They grant
 -- neither runtime values nor permission to publish a partial cell.
-data WorldCellPrefix = WorldCellPrefix !Int HomePackageTable
+data WorldCellPrefix = WorldCellPrefix !Int HomePackageTable ModuleGraph
   [PlannedDeclarationInventory] (SegmentDemandScope WorldDemandBinding) [LocatedImport] WorldCellStageState
 
 data WorldCellStageState = WorldStagePending | WorldStageRendered HeldWorldCellStage | WorldStageRetry CellSourcePlan
@@ -7186,7 +7275,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                       [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ exactModule artifact)
                                         RetainedGeneratedImport [mkModuleName (exactModule artifact)]]
                                   inherited = prologueImports (cellPlanPrologue lexical) ++ selectedDeclaration
-                              prefix <- newIORef (WorldCellPrefix 0 emptyHomePackageTable [] basis inherited WorldStagePending)
+                              prefix <- newIORef (WorldCellPrefix 0 emptyHomePackageTable (mkModuleGraph []) [] basis inherited WorldStagePending)
                               operand <- newIORef Nothing
                               pure (Right (HeldWorldCellAdmission phase
                                 (HeldWorldQueryBinding (worldInputsIdentity facts) issued) question plan grant executor prefix operand))
@@ -7198,7 +7287,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   case (expected,held) of
                     (HeldWorldQueryBinding identity reference,Just (HeldCompilerWorld facts issued _ _))
                       | identity == worldInputsIdentity facts && reference == issued -> do
-                          WorldCellPrefix cursor homes inventories scope inherited state <- readIORef prefixRef
+                          WorldCellPrefix cursor homes graph inventories scope inherited state <- readIORef prefixRef
                           let stages = cellInferenceSegments plan
                               offset = sum (map (length . cellPlanItems) (take cursor stages))
                           case (state,drop cursor stages) of
@@ -7221,7 +7310,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               unless (length slots == count && length authored == count)
                                 (throwIO WorldCellCorrupt)
                               stage <- renderHeldWorldCellStage parserFlags question selected items offset
-                              writeIORef prefixRef (WorldCellPrefix cursor homes inventories scope inherited (WorldStageRendered stage))
+                              writeIORef prefixRef (WorldCellPrefix cursor homes graph inventories scope inherited (WorldStageRendered stage))
                               pure (Just stage)
                     _ -> throwIO WorldCellUnavailable
                 compileWorldCell :: forall result. HeldWorldCellAdmission
@@ -7240,7 +7329,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                           -- Request binding already parsed and admitted this
                           -- immutable recipe. Consumption rechecks held-world
                           -- liveness but does not reparse the same plan.
-                          prefix@(WorldCellPrefix cursor homes inventories scope inherited state) <- readIORef prefixRef
+                          prefix@(WorldCellPrefix cursor homes graph inventories scope inherited state) <- readIORef prefixRef
                           stage <- case state of
                             WorldStageRendered value -> pure value
                             _ -> throwIO CheckedPurposeMismatch
@@ -7255,7 +7344,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               `catch` \failure@(GeneratedInstanceRejection _ rejected) -> do
                                 let retry = retryCellInstancePlan rejected current
                                 when (retry /= current) $
-                                  writeIORef prefixRef (WorldCellPrefix cursor homes inventories scope inherited (WorldStageRetry retry))
+                                  writeIORef prefixRef (WorldCellPrefix cursor homes graph inventories scope inherited (WorldStageRetry retry))
                                 throwIO failure
                             final <- reflectGhc getSession session
                             advanced <- advanceWorldCellPrefix facts question offset current purpose selection result final prefix
