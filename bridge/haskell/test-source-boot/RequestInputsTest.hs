@@ -1790,7 +1790,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
 worldResidencyBoundaries :: IO ()
 worldResidencyBoundaries = withCapturedWorldContext $ \handles work producer profile contextParcel scopePath -> do
   ownedScope <- ownedFixtureScope handles scopePath
-  continued <- readScopeCodecFixture ownedScope
+  (_,continued) <- readScopeCodecFixture ownedScope
   case scopeCodecAcquisition continued of
     Just (ContinueCodecOriginals _ (TList images)) | not (null images) -> pure ()
     _ -> fail "World/image interleave requires actual continued original images"
