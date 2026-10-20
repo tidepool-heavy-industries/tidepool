@@ -19465,6 +19465,28 @@ pub(crate) mod tests {
             .unwrap();
         assert_ne!(independent_binding, binding);
         assert!(owner.get(independent_binding).is_none());
+        let independent_owner = Arc::new(
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                independent.artifacts(),
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap(),
+        );
+        let other_binding = *independent_bindings
+            .iter()
+            .find(|group| group.binding.artifact() != binding.binding.artifact())
+            .unwrap();
+        assert!(independent_owner.get(other_binding).is_some());
+        let narrowed = independent
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(independent_owner)
+            .unwrap();
+        let narrowed_rows = narrowed.resolve_sources().unwrap();
+        assert!(narrowed_rows.group(independent_binding).is_ok());
+        assert!(narrowed_rows.group(other_binding).is_err());
 
         let joined = admitted
             .artifacts()
