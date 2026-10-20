@@ -1205,7 +1205,7 @@ impl ProjectedGroup {
 
     // Certified admission proves that exported binders form this exact suffix.
     // Locate its first slice from group lengths, then visit each export once.
-    fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
         let bindings = &self.definitions.bindings;
         let mut remaining = self.binders.len();
         let mut first = bindings.len();
@@ -1335,6 +1335,9 @@ impl PackageGroupCode {
     }
     pub fn definitions(&self) -> DefinitionsView<'_> {
         self.group.definitions()
+    }
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        self.group.exported_values()
     }
 }
 
