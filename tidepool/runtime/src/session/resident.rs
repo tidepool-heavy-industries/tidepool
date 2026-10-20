@@ -175,6 +175,20 @@ impl CapturedSourceOrigin {
         source.admitted_original_source().map(Self)
     }
 
+    pub(super) fn for_current_target(
+        &self,
+        target: tidepool_toolchain::artifacts::PhysicalCurrentNativeTarget<'_>,
+    ) -> NativeSourceCustody {
+        NativeSourceCustody {
+            sites: Arc::new(
+                target
+                    .sites()
+                    .map(|site| (site, RuntimeSourceOrigin::Known(self.0.clone())))
+                    .collect(),
+            ),
+        }
+    }
+
     pub(super) fn for_current_group(
         &self,
         group: tidepool_toolchain::artifacts::PhysicalCurrentNativeGroup<'_>,
