@@ -40,9 +40,11 @@ import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, CompilerExecutor, compilerExecutionGrant
   , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
-  ( newPreparedOriginalInterfaceArtifacts, writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
+  ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
+  , StagedOriginalProducts, stagedOriginalBinders, withPriorStagedOriginalProducts
+  , newPreparedOriginalInterfaceArtifactsWithPrior
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
   , prepareOriginalProductsWithCacheAndReuse, prepareOriginalProductsWithWorklist
   , prepareCompilerProjectionContext, requireOriginalExecutableGlobals, admitCurrentOriginalProducts
@@ -468,7 +470,7 @@ data PreparedArtifact = PreparedArtifact
 prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifacts = prepareArtifactsWithProjectionIntent NativeOriginals requireProjection
+prepareArtifacts = prepareArtifactsWithProjectionIntent Nothing NativeOriginals requireProjection
 
 data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
 
@@ -488,7 +490,7 @@ prepareArtifactsWithIntent :: PreparedOutputIntent -> OriginalInterfaceArtifacts
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO PreparedArtifactOutput
 prepareArtifactsWithIntent intent interfaces directory completion targets auxiliary retained hostBindings = do
-  (artifacts,products) <- prepareArtifactsWithProjectionIntent intent requireProjection
+  (artifacts,products) <- prepareArtifactsWithProjectionIntent Nothing intent requireProjection
     interfaces directory completion targets auxiliary retained hostBindings
   pure $ case intent of
     NativeOriginals -> NativeOutputs artifacts products
@@ -499,16 +501,16 @@ prepareArtifactsWithProjection
   -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent NativeOriginals
+prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent Nothing NativeOriginals
 
 prepareArtifactsWithProjectionIntent
-  :: PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
+  :: Maybe StagedOriginalProducts -> PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
   -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjectionIntent _ _ _ _ completion [] _ _ _ =
+prepareArtifactsWithProjectionIntent _ _ _ _ _ completion [] _ _ _ =
   withPreparedCompilation completion (\_ _ _ _ -> pure ([], Nothing))
-prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
+prepareArtifactsWithProjectionIntent prior intent project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
   withPreparedCompilation completion $ \prepared recoveryCaches executor _ -> do
     timing <- readTimingEnabled
     let result = pprPipelineResult prepared
@@ -529,7 +531,7 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
     let contextFor target = firstContext
           { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
     let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
-        externalOriginalBinders = Set.fromList
+        externalOriginalBinders = Set.union (maybe Set.empty stagedOriginalBinders prior) $ Set.fromList
           ([binder | exactProduct <- exactProducts, group <- originalGroups exactProduct
             , binder <- originalBinders group]
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
@@ -544,7 +546,8 @@ prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir co
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion (contextFor firstTarget) externalOriginalBinders
-        productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared rawProductContext
+        productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared
+          (withPriorStagedOriginalProducts prior rawProductContext)
         inventory <- maybe (fail "current original admission did not issue its inventory") pure
           (preparedCurrentOriginalInventory productContext)
         originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
@@ -754,6 +757,7 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   , preparedWorldStageTypedPlans :: [TypedSegmentPlan]
   , preparedWorldStageReceipt :: Encoding
   , preparedWorldStageCompletion :: PreparedCompilation
+  , preparedWorldStageNative :: StagedOriginalProducts
   }
 
 correlateWorldCellItems
@@ -816,7 +820,7 @@ prepareWorldCellQuestion bound question = do
       , null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] [] [] >> pure (Right [])
       | otherwise -> do
           let initial = heldWorldCellPlan preparation
-          attempted <- trySynchronous (prepareStages preparation [])
+          attempted <- trySynchronous (prepareStages preparation Nothing [])
           case attempted of
             Right stages -> do
               let items = concatMap preparedWorldStageItems stages
@@ -841,7 +845,7 @@ prepareWorldCellQuestion bound question = do
                 Nothing -> throwIO failure
   where
     rejected refusal = writeResult (Left refusal) BS.empty [] [] [] [] >> pure (Left refusal)
-    prepareStages preparation reversed = do
+    prepareStages preparation prior reversed = do
       next <- case bound of
         BoundCompilerRequest scope _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
       case next of
@@ -853,9 +857,9 @@ prepareWorldCellQuestion bound question = do
               stageDirectory = directory </> "stage-" ++ show offset
           output <- case cellPlanItems initial of
             [item] | sbKind (cellAnalysisVerdict item) == KDecl ->
-              prepareDeclaration stageDirectory initial slots
-            _ -> prepareSegment stageDirectory offset initial slots
-          prepareStages preparation (output:reversed)
+              prepareDeclaration prior stageDirectory initial slots
+            _ -> prepareSegment prior stageDirectory offset initial slots
+          prepareStages preparation (Just (preparedWorldStageNative output)) (output:reversed)
     recipe = worldCellPrepareRecipe question
     directory = worldCellPrepareDirectory question
     parserFlags = boundParserFlags bound
@@ -885,7 +889,7 @@ prepareWorldCellQuestion bound question = do
         <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
         <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans
         <> encodeListLen (fromIntegral (length stages)) <> mconcat stages)
-    prepareSegment stageDirectory offset initial matchedSlots = do
+    prepareSegment prior stageDirectory offset initial matchedSlots = do
       createDirectoryIfMissing True stageDirectory
       preparedBatch <- newIORef Nothing
       attempt <- newIORef (0 :: Int)
@@ -949,14 +953,16 @@ prepareWorldCellQuestion bound question = do
               (plannedItemEntry (typedItemPlan item) ++ ":"
                 ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture)))) (typedCaptureType capture)
           pure (plannedItemOrdinal (typedItemPlan item),signatures)
-        originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared stageDirectory
+        originalInterfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
+          (maybe [] worldCellTypeInterfaces (preparedCompilationWorldInputs completion)) prior stageDirectory
         let producedGenerations = Map.fromList [(preparedRootIdentity global,generation)
               | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
             retainedGenerations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         unless (Map.null (Map.intersection producedGenerations retainedGenerations))
           (throwIO WorldCellCorrupt)
         let generations = Map.union producedGenerations retainedGenerations
-        (artifacts,context) <- prepareArtifacts originalInterfaces stageDirectory completion targets (standardAuxiliaryRoots binds)
+        (artifacts,context) <- prepareArtifactsWithProjectionIntent prior NativeOriginals requireProjection
+          originalInterfaces stageDirectory completion targets (standardAuxiliaryRoots binds)
           generations (typedSegmentSessionBindingRepresentations batch)
         correlated <- correlateWorldCellItems items artifacts (zip [offset..] (cellPlanItems finalized)) captures
           signaturesByItem
@@ -1017,7 +1023,7 @@ prepareWorldCellQuestion bound question = do
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
           finalized rendered preparedItems [typedPlan] completion prepared staged
-    prepareDeclaration stageDirectory initial matchedSlots = do
+    prepareDeclaration prior stageDirectory initial matchedSlots = do
       (ordinal,generation,kind,sourceItem) <- case (matchedSlots,cellPlanItems initial) of
         ([(ordinal,PlannedDeclaration generation)],[item]) -> pure (ordinal,generation,"declaration",item)
         ([(ordinal,PlannedPrologue generation)],[item]) -> pure (ordinal,generation,"prologue",item)
@@ -1049,11 +1055,13 @@ prepareWorldCellQuestion bound question = do
           (preparedCompilationPlannedDeclaration completion)
         unless (plannedModule original == reserved && plannedSource original == plannedSource submitted)
           (throwIO WorldCellCorrupt)
-        interfaces <- newPreparedOriginalInterfaceArtifacts prepared stageDirectory
+        interfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
+          (maybe [] worldCellTypeInterfaces (preparedCompilationWorldInputs completion)) prior stageDirectory
         let generations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         -- The existing original writer uses its real checking root to obtain
         -- the native inventory. No executable item or target packet is emitted.
-        (_,context) <- prepareArtifacts interfaces stageDirectory completion [scaffoldTargetName] [] generations []
+        (_,context) <- prepareArtifactsWithProjectionIntent prior NativeOriginals requireProjection
+          interfaces stageDirectory completion [scaffoldTargetName] [] generations []
         products <- maybe (fail "world declaration has no actual original inventory") pure context
         staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result)))
           interfaces stageDirectory prepared products
@@ -1138,6 +1146,7 @@ prepareWorldCellQuestion bound question = do
           , preparedWorldStageTypedPlans = plans
           , preparedWorldStageReceipt = stageReceipt
           , preparedWorldStageCompletion = completion
+          , preparedWorldStageNative = staged
           }
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)
