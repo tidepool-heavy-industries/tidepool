@@ -76,6 +76,7 @@ import Tidepool.ExactScope
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration
+  , worldInputsSources, worldSourceDomainSha256
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation
@@ -1508,6 +1509,14 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                   [value] -> pure value
                   _ -> fail "real world preparation did not emit exactly one compiler completion"
                 output <- BS.readFile (worldCellPrepareOutput prepareRequest)
+                certificate <- BS.readFile (directory </> "certified-products.cbor")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
+                  Right (remaining,TList [TString "TPCERT",TInt 10,TList
+                    [TString "segment-originals",_,_,_,_,TList
+                      [TString "world-unavailable",TBytes base,TBytes domain,TString "unsupported-source-recipe"],_]])
+                    | BL.null remaining,base == worldInputsIdentityBytes facts
+                    , domain == worldSourceDomainSha256 (worldInputsSources facts) -> pure ()
+                  _ -> fail "World native certificate lost its actual base/source-domain recipe provenance"
                 itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
                   Right (remaining,TList [TString "TPCWPREP3",_,_,_
                     ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
