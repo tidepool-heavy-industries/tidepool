@@ -4328,6 +4328,127 @@ fn validate_world_native_entry_observation(
     Ok(())
 }
 
+/// The origin is part of the correlation key. A prior row may be demanded by
+/// more than one later stage, and an authored alias may shadow a base binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WorldInputRefOrigin {
+    BaseWorld,
+    PriorStage { producer: usize, consumer: usize },
+    CellOperand,
+}
+
+impl WorldInputRefOrigin {
+    fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
+        let ciborium::value::Value::Array(fields) = value else {
+            return Err(world_response_error(false));
+        };
+        match fields.as_slice() {
+            [tag] if answer_u64(tag)? == 0 => Ok(Self::BaseWorld),
+            [tag, producer, consumer] if answer_u64(tag)? == 1 => Ok(Self::PriorStage {
+                producer: usize::try_from(answer_u64(producer)?)
+                    .map_err(|_| world_response_error(false))?,
+                consumer: usize::try_from(answer_u64(consumer)?)
+                    .map_err(|_| world_response_error(false))?,
+            }),
+            [tag] if answer_u64(tag)? == 2 => Ok(Self::CellOperand),
+            _ => Err(world_response_error(false)),
+        }
+    }
+}
+
+/// Parsed transport observations; none of these values supplies its own row or
+/// runtime authority. Each origin is matched to the issuing owner below.
+struct WorldInputRef<'a> {
+    origin: WorldInputRefOrigin,
+    occurrence: &'a str,
+    symbol: tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: u64,
+    defining_scope: u64,
+    generation: u64,
+    seal: &'a [u8],
+}
+
+impl<'a> WorldInputRef<'a> {
+    fn decode(value: &'a ciborium::value::Value) -> Result<Self, CompileError> {
+        let fields = answer_array(value, 7)?;
+        Ok(Self {
+            origin: WorldInputRefOrigin::decode(&fields[0])?,
+            occurrence: answer_text(&fields[1])?,
+            symbol: world_output_symbol(&fields[2])?,
+            session_var: answer_u64(&fields[3])?,
+            defining_scope: answer_u64(&fields[4])?,
+            generation: answer_u64(&fields[5])?,
+            seal: answer_blob(&fields[6])?,
+        })
+    }
+    fn matches(
+        &self,
+        symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        generation: u64,
+    ) -> bool {
+        self.symbol == *symbol
+            && self.session_var == session_var.raw()
+            && self.defining_scope == defining_scope
+            && self.generation == generation
+    }
+}
+
+fn validate_world_prior_input(
+    input: &WorldInputRef<'_>,
+    producer: &WorldItemProof,
+    consumer: &CheckedWorldCellStage,
+    defining_scope: u64,
+    captured_files: &BTreeMap<PathBuf, WorldOutputFile>,
+) -> Result<(), CompileError> {
+    let WorldInputRefOrigin::PriorStage {
+        producer: ordinal,
+        consumer: consumer_ordinal,
+    } = input.origin
+    else {
+        return Err(world_response_error(true));
+    };
+    let executable = producer
+        .executable()
+        .ok_or_else(|| world_response_error(true))?;
+    if producer.index() != ordinal
+        || consumer.ordinals().first() != Some(&consumer_ordinal)
+        || producer.stage().index() >= consumer.index()
+        || input.defining_scope != defining_scope
+        || input.generation != producer.generation()
+    {
+        return Err(world_response_error(true));
+    }
+    let binder = executable
+        .binders()
+        .iter()
+        .find(|binder| binder.name() == input.occurrence)
+        .ok_or_else(|| world_response_error(true))?;
+    // The reserved ID was checked by the binder decoder. Compare the exact
+    // reserved Val owner too; native/interface admission still consumes the
+    // same captured bytes through the existing product issuer.
+    if binder.module()
+        != tidepool_repr::SessionModule::val(tidepool_repr::Generation(producer.generation()))
+            .module_name()
+        || input.session_var != binder.varid()
+        || input.symbol.unit != "main"
+        || input.symbol.module != binder.module()
+        || input.symbol.namespace != "value"
+        || input.symbol.occurrence != binder.name()
+        || input.symbol.record_parent.is_some()
+    {
+        return Err(world_response_error(true));
+    }
+    let interface = captured_files
+        .get(&PathBuf::from(format!("item-{ordinal}/value.hi")))
+        .ok_or_else(|| world_response_error(true))?;
+    if input.seal != interface.sha256() {
+        return Err(world_response_error(true));
+    }
+    Ok(())
+}
+
 fn admit_world_preparation_response(
     origin: tidepool_extract_cmd::CompilerTransactionOrigin,
     request_correlation: String,
@@ -4616,7 +4737,11 @@ fn admit_world_preparation_response(
                 .inventory
                 .reserve::<(String, Arc<CheckedValueArtifact>)>(input_refs.len())
         })
-        .and_then(|_| validation.inventory.reserve::<&str>(input_refs.len()))
+        .and_then(|_| {
+            validation
+                .inventory
+                .reserve::<(WorldInputRefOrigin, &str)>(input_refs.len())
+        })
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let mut demanded = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
     let mut occurrences = std::collections::BTreeSet::new();
@@ -4627,54 +4752,97 @@ fn admit_world_preparation_response(
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     for input in input_refs {
         crate::host_work::checkpoint()?;
-        let input = answer_array(input, 6)?;
-        let occurrence = answer_text(&input[0])?;
-        if !occurrences.insert(occurrence) {
+        let input = WorldInputRef::decode(input)?;
+        if !occurrences.insert((input.origin, input.occurrence)) {
             return Err(world_response_error(true));
         }
-        let actual = world
-            .restoration
-            .inputs
-            .bindings
-            .entries
-            .get(occurrence)
-            .ok_or_else(|| world_response_error(true))?;
-        if world_output_symbol(&input[1])? != actual.symbol
-            || answer_u64(&input[2])? != actual.session_var.raw()
-            || answer_u64(&input[3])? != actual.defining_scope
-            || answer_u64(&input[4])? != actual.row.owner().gen.0
-        {
-            return Err(world_response_error(true));
-        }
-        demanded_session_bindings.insert(actual.session_var.raw());
-        // The service returns the exact root-bound row fact, not a caller's
-        // module/image guess or a fresh certificate.
-        let row =
-            cid::Cid::try_from(answer_blob(&input[5])?).map_err(|_| world_response_error(false))?;
-        let expected = world
-            .restoration
-            .bindings
-            .facts()
-            .get(occurrence)
-            .ok_or_else(|| world_response_error(true))?;
-        if row != expected.4 {
-            return Err(world_response_error(true));
-        }
+        let row = match input.origin {
+            WorldInputRefOrigin::BaseWorld => {
+                let actual = world
+                    .restoration
+                    .inputs
+                    .bindings
+                    .entries
+                    .get(input.occurrence)
+                    .ok_or_else(|| world_response_error(true))?;
+                if !input.matches(
+                    &actual.symbol,
+                    actual.session_var,
+                    actual.defining_scope,
+                    actual.row.owner().gen.0,
+                ) {
+                    return Err(world_response_error(true));
+                }
+                let observed =
+                    cid::Cid::try_from(input.seal).map_err(|_| world_response_error(false))?;
+                let expected = world
+                    .restoration
+                    .bindings
+                    .facts()
+                    .get(input.occurrence)
+                    .ok_or_else(|| world_response_error(true))?;
+                if observed != expected.4 {
+                    return Err(world_response_error(true));
+                }
+                &actual.row
+            }
+            WorldInputRefOrigin::CellOperand => {
+                let operand = plan.operand().ok_or_else(|| world_response_error(true))?;
+                let alias = match operand.exposure() {
+                    WorldCellOperandExposure::Input => "input",
+                    WorldCellOperandExposure::SessionInput => "sessionInput",
+                };
+                if input.occurrence != alias
+                    || !input.matches(
+                        operand.symbol(),
+                        operand.session_var(),
+                        operand.defining_scope(),
+                        operand.generation(),
+                    )
+                {
+                    return Err(world_response_error(true));
+                }
+                let observed =
+                    cid::Cid::try_from(input.seal).map_err(|_| world_response_error(false))?;
+                if observed != *operand.row_fact_cid() {
+                    return Err(world_response_error(true));
+                }
+                operand.checked_row()
+            }
+            WorldInputRefOrigin::PriorStage { producer, consumer } => {
+                let produced = item_proofs
+                    .get(producer)
+                    .ok_or_else(|| world_response_error(true))?;
+                let consuming = stages_by_ordinal
+                    .get(consumer)
+                    .ok_or_else(|| world_response_error(true))?;
+                validate_world_prior_input(
+                    &input,
+                    produced,
+                    consuming,
+                    reservation.defining_scope(),
+                    &captured_files,
+                )?;
+                demanded_session_bindings.insert(input.session_var);
+                continue;
+            }
+        };
+        demanded_session_bindings.insert(input.session_var);
         // The canonical session module renderer uses a fixed prefix and at
         // most twenty decimal generation digits.
         validation
             .inventory
             .charge(64)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        match demanded.entry(actual.row.owner().module_name()) {
+        match demanded.entry(row.owner().module_name()) {
             std::collections::btree_map::Entry::Occupied(old)
-                if !old.get().same_world_type_row(&actual.row) =>
+                if !old.get().same_world_type_row(row) =>
             {
                 return Err(world_response_error(true))
             }
             std::collections::btree_map::Entry::Occupied(_) => {}
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(Arc::clone(&actual.row));
+                entry.insert(Arc::clone(row));
             }
         }
     }
@@ -5131,6 +5299,161 @@ mod answer_tests {
             },
         }
     }
+    #[test]
+    fn input_refs_keep_closed_origins_and_actual_prior_stage_scope_distinct() {
+        use ciborium::value::Value;
+        let integer = |value: u64| Value::Integer(value.into());
+        let symbol = tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "main".into(),
+            module: "Tidepool.Session.Val.G7".into(),
+            namespace: "value".into(),
+            occurrence: "x".into(),
+            record_parent: None,
+        };
+        let encoded_symbol = world_array(vec![
+            world_text("main"),
+            world_text("Tidepool.Session.Val.G7"),
+            world_text("value"),
+            world_text("x"),
+            world_array(vec![integer(0)]),
+        ]);
+        let packet = world_array(vec![
+            world_array(vec![integer(1), integer(0), integer(2)]),
+            world_text("x"),
+            encoded_symbol,
+            integer(71),
+            integer(900),
+            integer(7),
+            world_blob([5; 32]),
+        ]);
+        let input = WorldInputRef::decode(&packet).unwrap();
+        assert_eq!(
+            input.origin,
+            WorldInputRefOrigin::PriorStage {
+                producer: 0,
+                consumer: 2
+            }
+        );
+        assert!(input.matches(
+            &symbol,
+            tidepool_repr::SessionVarId::from_extract(71),
+            900,
+            7
+        ));
+        assert!(!input.matches(
+            &symbol,
+            tidepool_repr::SessionVarId::from_extract(71),
+            100,
+            7
+        ));
+        let file = |name: &str| WorldStageFileRef {
+            relative: PathBuf::from(name),
+            sha256: [1; 32],
+        };
+        let stage = |index, ordinal| {
+            Arc::new(CheckedWorldCellStage {
+                index,
+                identity: WorldCellStageIdentity::Executable {
+                    typed_digest: "11".repeat(32),
+                },
+                ordinals: vec![ordinal],
+                outputs: WorldStageOutputs {
+                    source_receipt: file("source"),
+                    module_products: file("modules"),
+                    certified_products: file("certified"),
+                },
+            })
+        };
+        let producer_stage = stage(0, 0);
+        let consumer = stage(1, 2);
+        // DATA for the correlation check, without a checked-program issuer or
+        // native/interface authority. Joined producer tests own that evidence.
+        let binders = crate::checked_cell::decode_world_item_binders(
+            &world_array(vec![world_array(vec![
+                world_text("x"),
+                integer(71),
+                world_text("Tidepool.Session.Val.G7"),
+                world_text("ForceData"),
+                world_text("Int"),
+                Value::Null,
+                Value::Null,
+            ])]),
+            &[("x".into(), tidepool_repr::SessionVarId::from_extract(71))],
+        )
+        .unwrap();
+        let producer = WorldItemProof {
+            index: 0,
+            ordinal: 0,
+            generation: 7,
+            stage: producer_stage,
+            kind: WorldItemProofKind::Executable(WorldExecutableItemProof {
+                entry: "entry".into(),
+                native_ordinal: 4,
+                segment_digest: "11".repeat(32),
+                symbol: symbol.clone(),
+                binders,
+                signatures: vec![],
+                manifest: BTreeMap::new(),
+            }),
+        };
+        let files = BTreeMap::from([(
+            PathBuf::from("item-0/value.hi"),
+            WorldOutputFile {
+                bytes: Arc::from(&b"observed"[..]),
+                sha256: [5; 32],
+            },
+        )]);
+        assert!(validate_world_prior_input(&input, &producer, &consumer, 900, &files).is_ok());
+        assert!(
+            validate_world_prior_input(&input, &producer, &consumer, 100, &files).is_err(),
+            "public World scope cannot replace the actual reservation scope"
+        );
+        assert!(validate_world_prior_input(&input, &producer, &stage(0, 2), 900, &files).is_err());
+        assert!(validate_world_prior_input(&input, &producer, &stage(1, 1), 900, &files).is_err());
+        assert!(
+            validate_world_prior_input(&input, &producer, &consumer, 900, &BTreeMap::new())
+                .is_err()
+        );
+        let mut wrong = files;
+        wrong.get_mut(Path::new("item-0/value.hi")).unwrap().sha256 = [6; 32];
+        assert!(validate_world_prior_input(&input, &producer, &consumer, 900, &wrong).is_err());
+        let Value::Array(fields) = &packet else {
+            unreachable!()
+        };
+        let mut old = fields.clone();
+        old.remove(0);
+        assert!(WorldInputRef::decode(&world_array(old)).is_err());
+        for origin in [
+            world_array(vec![integer(3)]),
+            world_array(vec![integer(1), integer(0)]),
+            world_array(vec![integer(0), integer(0)]),
+            world_array(vec![]),
+        ] {
+            let mut changed = fields.clone();
+            changed[0] = origin;
+            assert!(WorldInputRef::decode(&world_array(changed)).is_err());
+        }
+        let a = (
+            WorldInputRefOrigin::PriorStage {
+                producer: 0,
+                consumer: 2,
+            },
+            "x",
+        );
+        let b = (
+            WorldInputRefOrigin::PriorStage {
+                producer: 0,
+                consumer: 4,
+            },
+            "x",
+        );
+        let c = (WorldInputRefOrigin::BaseWorld, "x");
+        let mut seen = std::collections::BTreeSet::from([a]);
+        assert!(seen.insert(b));
+        assert!(seen.insert(c));
+        assert!(!seen.insert(a));
+    }
+
     #[test]
     fn full_language_stage_table_refuses_crossed_ownership_and_incomplete_coverage() {
         fn world_integer(value: u64) -> ciborium::value::Value {
