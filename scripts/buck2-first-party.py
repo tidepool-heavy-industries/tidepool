@@ -1869,6 +1869,8 @@ tidepool_buildscript_run(
         if package_name == "tidepool-toolchain":
             for world_target, world_case in [
                 ("toolchain_world_native_seal_test", "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"),
+                ("toolchain_world_original_seal_test", "artifacts::module_product_tests::real_world_original_output_seals_its_actual_native_declaration"),
+                ("toolchain_world_mixed_seal_test", "artifacts::module_product_tests::real_world_mixed_output_retains_prior_native_stages"),
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
             ]:
                 world_env, world_resources, world_worker = compiler_service_test_inputs(

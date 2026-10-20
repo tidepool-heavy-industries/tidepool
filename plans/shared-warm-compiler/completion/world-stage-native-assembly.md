@@ -425,3 +425,63 @@ not been reached and no policy is weakened here. Exact stderr is retained at
 The original diagnostic files remain present even though the transaction's
 product-file roster excludes its own stderr/report files. An initial hypothesis
 of diagnostic deletion was disproved by direct observation.
+
+## Genuine Original and mixed consumer controls
+
+The two new named targets use the same admitted compiler, captured source owner,
+World recipe and reservation, native issuers, END evidence and cancellation
+control as the existing successful bind target. The declaration-only source
+contains an ADT, a single-method class and its instance. The mixed source binds
+a value, declares an ADT and class instance whose body uses that value, then
+binds the ADT and calls the declared method. The mixed reservation has three
+stages and four execution items. Its assertions distinguish the early item
+context from the later context containing the actual Lib owner. These are
+compiler/native component controls; they do not execute a runtime actor.
+
+The target generator owns their compiler resources and fixture registration.
+The fixture captures the actual declared facade library sources, including the
+renderer, through the existing captured-source constructor. Its template uses
+the canonical effect-row marker and the shipped FlexibleContexts and
+UndecidableInstances extensions. It does not suppress generated renderer work
+or enable Template Haskell.
+
+The earlier Scientific.hs backend refusal was a receiving-base defect: this
+checkout lacked the already reviewed Haskell commit
+`8c9434e4630e47ebcbede4aff5d8fca9cd3ae167`. Receiving it as `b477cf51e3`
+restored the complete quote-free graph backend lowering. No new compiler policy
+change was needed. The following run exposed an auto-display family constraint
+requiring UndecidableInstances; the canonical fixture now supplies that shipped
+extension. The Haskell owner is separately correcting optional auto-display
+generation for minimal recipes that lack it.
+
+The mixed consumer is still red before Rust preparation admission. Run
+`ced2beaa-e60e-4858-b2e0-ab0d8aa18646`, exit 1, reached
+`a prior original was replaced by another finalized capture` in the Haskell
+producer. The actual stage products and interfaces remain under
+`/srv/swarm/evidence/inanna/world-stage-mixed-renderer-types-20261020/171cda3b8d0b174296a588fc09cb6c7cce74ba26a7b587f9b4256a11a719bfa2/artifacts/compiler-transactions/.tmp2524or`.
+The independent observation at
+`/srv/swarm/evidence/inanna/world-stage-prior-finalization-observation-20261020.json`
+establishes that seven retained finalized interface bodies have identical
+SHA-256 hashes across the two stages, while the actual native module-product
+sets differ. It does not establish equality of their entire finalized owners.
+The possible conflation of canonical TYPE admissions, native Originals and
+relocated physical interface aliases is under the compiler-products owner's
+review. Native identity checks remain unchanged.
+
+The independent declaration-only target also remains red before Rust
+preparation admission. Run `c08766f8-3b9e-4244-a298-15ce8f0a3e03`, exit 1,
+compiled and executed one selected case using Rust SHA
+`d55a3d3ef6eb0bc15b35738fa73de294926adda59e95f37c76a662d0d32ca561`.
+It refused native publication for the actual exported binder
+`main / Tidepool.Session.Lib.G21 / value / C:OriginalStageReader`, which lacked
+a certified native owner. The stderr is retained at
+`/srv/swarm/evidence/inanna/world-original-native-seal-20261020/2594a133c5967eaf4c9d9fd193aba077f053226ea0f9347a0642e7087afed50e/artifacts/compiler-transactions/.tmpeQtTd7/compiler.stderr`.
+The single-method dictionary constructor may be structural or erased; that is a
+hypothesis for the owning GHC root classifier. The fixture keeps the class and
+requires an authentic successful declaration packet. No spelling-based skip,
+dummy native group or expected-error acceptance was added.
+
+Actual missing, crossed and later-stage bundle replay controls are supplied by
+the checked receiver owner and will be invoked after matching compiler END.
+They require a genuine completed multi-stage packet, so neither red producer
+run qualifies those controls or the Original native certifier.
