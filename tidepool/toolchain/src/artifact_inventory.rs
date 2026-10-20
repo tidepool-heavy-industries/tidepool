@@ -327,13 +327,11 @@ thread_local! {
 #[derive(Clone, Debug)]
 enum NativeSourceCause {
     Current,
-    Historical(compiler_projection::SelectedNativeSupport),
-}
-
-impl NativeSourceCause {
-    fn missing() -> Self {
-        Self::Historical(compiler_projection::SelectedNativeSupport::missing())
-    }
+    Historical {
+        selected_at: NativeGroupBinding,
+        support: compiler_projection::SelectedNativeSupport,
+    },
+    Unwitnessed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -372,17 +370,23 @@ impl NativeSourceReceipts {
                 }
                 held.push(NativeSourceCause::Current);
             }
-            NativeSourceCause::Historical(incoming) => {
-                if let Some(NativeSourceCause::Historical(prior)) = held
+            NativeSourceCause::Historical { selected_at, support: incoming } => {
+                if let Some(NativeSourceCause::Historical { support: prior, .. }) = held
                     .iter_mut()
-                    .find(|cause| matches!(cause, NativeSourceCause::Historical(_)))
+                    .find(|cause| matches!(cause, NativeSourceCause::Historical { selected_at: prior, .. } if *prior == selected_at))
                 {
                     if !prior.merge(&incoming) {
                         return false;
                     }
                 } else {
-                    held.push(NativeSourceCause::Historical(incoming));
+                    held.push(NativeSourceCause::Historical { selected_at, support: incoming });
                 }
+            }
+            NativeSourceCause::Unwitnessed => {
+                if held.iter().any(|cause| matches!(cause, NativeSourceCause::Unwitnessed)) {
+                    return false;
+                }
+                held.push(NativeSourceCause::Unwitnessed);
             }
         }
         self.0.insert(key, held.into());
@@ -391,8 +395,24 @@ impl NativeSourceReceipts {
 }
 
 struct NativeSourceTraversal<'a> {
-    issued: &'a NativeSourceReceipts,
+    issued: NativeSourceReceiptView<'a>,
     selected: NativeSourceReceipts,
+}
+
+enum NativeSourceReceiptView<'a> {
+    Operation(&'a NativeSourceReceipts),
+    Frozen(&'a native_availability::FrozenNativeSourceReceipts),
+    Unwitnessed,
+}
+
+impl NativeSourceReceiptView<'_> {
+    fn get(&self, key: &NativeSourceUse) -> Option<&Arc<[NativeSourceCause]>> {
+        match self {
+            Self::Operation(sources) => sources.0.get(key),
+            Self::Frozen(sources) => sources.get(key),
+            Self::Unwitnessed => None,
+        }
+    }
 }
 
 /// Exact executable roots remain private to their solver-issued view.
@@ -564,7 +584,7 @@ impl TargetNativeInputs {
                 .expect("validated target contains its one typed entry")
         });
         let mut source_traversal = NativeSourceTraversal {
-            issued: &self.admitted.selection.sources,
+            issued: NativeSourceReceiptView::Operation(&self.admitted.selection.sources),
             selected: NativeSourceReceipts::default(),
         };
         let groups = native_groups_in_custody(
@@ -3817,7 +3837,7 @@ impl ArtifactInventory {
                     .0
                     .contains_key(&NativeSourceUse::Root(binding))
                 {
-                    root_causes.insert(group, NativeSourceCause::missing());
+                    root_causes.insert(group, NativeSourceCause::Unwitnessed);
                 }
                 resolved_groups.insert(group, binding);
                 reused.insert(group);
@@ -5418,15 +5438,15 @@ impl ArtifactInventory {
                 if !source_receipts.0.contains_key(&key) {
                     source_receipts.insert(
                         key,
-                        NativeSourceCause::Historical(
-                            catalog
-                                .input_decisions()
-                                .selected_support(*binding)
-                                .cloned()
-                                .unwrap_or_else(
-                                    compiler_projection::SelectedNativeSupport::missing,
-                                ),
-                        ),
+                        catalog
+                            .input_decisions()
+                            .selected_support(*binding)
+                            .cloned()
+                            .map(|support| NativeSourceCause::Historical {
+                                selected_at: *binding,
+                                support,
+                            })
+                            .unwrap_or(NativeSourceCause::Unwitnessed),
                     );
                 }
             }
@@ -5769,10 +5789,9 @@ fn native_groups_in_custody(
                 .map(|sources| {
                     sources
                         .issued
-                        .0
                         .get(&NativeSourceUse::Root(group))
                         .cloned()
-                        .unwrap_or_else(|| Arc::from([NativeSourceCause::missing()]))
+                        .unwrap_or_else(|| Arc::from([NativeSourceCause::Unwitnessed]))
                 })
                 .unwrap_or_else(|| Arc::from([]));
             (group, causes)
@@ -5822,18 +5841,17 @@ fn native_groups_in_custody(
                         for cause in causes.iter() {
                             match cause {
                                 NativeSourceCause::Current => {
-                                    if let Some(edge) =
-                                        sources.issued.0.get(&NativeSourceUse::Edge {
-                                            parent: key,
-                                            child: required,
-                                        })
-                                    {
+                                    if let Some(edge) = sources.issued.get(&NativeSourceUse::Edge {
+                                        parent: key,
+                                        child: required,
+                                    }) {
                                         child_causes.extend(edge.iter().cloned());
                                     } else {
-                                        child_causes.push(NativeSourceCause::missing());
+                                        child_causes.push(NativeSourceCause::Unwitnessed);
                                     }
                                 }
-                                NativeSourceCause::Historical(_) => {
+                                NativeSourceCause::Historical { .. }
+                                | NativeSourceCause::Unwitnessed => {
                                     child_causes.push(cause.clone())
                                 }
                             }
