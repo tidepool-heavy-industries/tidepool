@@ -2711,15 +2711,12 @@ impl<'a> CurrentProductRef<'a> {
                 self.selection
                     .native_group_candidates(self.key(), &self.native.owner)
             }
-            ReceiptNativeAvailability::Issued(row) => {
-                // Only this product's issued row may select its own binding.
-                // Other private availability remains historical support.
-                let groups = row
-                    .dependency_support(self.key(), &self.native.owner)
-                    .map(|support| support.groups().collect())
-                    .unwrap_or_default();
-                Ok(NativeGroupCandidates::IssuedAvailability(groups))
-            }
+            ReceiptNativeAvailability::Completed(receipt) => Ok(
+                NativeGroupCandidates::IssuedAvailability(receipt.groups(self.key()).collect()),
+            ),
+            ReceiptNativeAvailability::Issued(_) => Err(CertificationError::Mismatch(
+                "current product lacks its own completion receipt",
+            )),
         }
     }
 
@@ -2744,6 +2741,19 @@ impl<'a> CurrentProductRef<'a> {
         key: crate::artifact_inventory::NativeGroupKey,
         entry: &'b Arc<crate::artifact_inventory::ArtifactEntry>,
     ) -> CertResult<Option<CurrentProductRef<'b>>> {
+        let owner = &entry.descriptor.owner;
+        let Some(ReceiptSourceSelection::Native { native, .. }) = self
+            .selection
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))
+        else {
+            return Ok(None);
+        };
+        if !matches!(native.origin, ReceiptNativeOrigin::NewProduct)
+            || !matches!(native.original, ReceiptOriginalIdentity::Bound(id) if id == key.artifact)
+        {
+            return Ok(None);
+        }
         self.selection.current_product(key, entry)
     }
 
@@ -2752,10 +2762,10 @@ impl<'a> CurrentProductRef<'a> {
         group: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<CertifiedNativeGroupSupport<'a>> {
         match &self.native.availability {
-            ReceiptNativeAvailability::Issued(row) => row
-                .dependency_support(self.key(), &self.native.owner)?
-                .offer_for_group(group)
+            ReceiptNativeAvailability::Completed(receipt) => receipt
+                .support(group)
                 .map(CertifiedNativeGroupSupport::Issued),
+            ReceiptNativeAvailability::Issued(_) => None,
             ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
                 .iter()
                 .find(|proof| {
@@ -2846,22 +2856,20 @@ enum ReceiptOriginalIdentity {
 
 impl ReceiptNativeSelection {
     fn original_artifact_id(&self) -> CertResult<crate::artifact_inventory::ArtifactId> {
-        match &self.availability {
-            ReceiptNativeAvailability::Issued(row) => {
-                let actual = row.original_artifact_id();
-                if matches!(self.original, ReceiptOriginalIdentity::Bound(id) if id != actual) {
-                    return Err(CertificationError::Mismatch(
-                        "issued original artifact identity",
-                    ));
-                }
-                Ok(actual)
+        if let Some(row) = self.availability.issued_row() {
+            let actual = row.original_artifact_id();
+            if matches!(self.original, ReceiptOriginalIdentity::Bound(id) if id != actual) {
+                return Err(CertificationError::Mismatch(
+                    "issued original artifact identity",
+                ));
             }
-            ReceiptNativeAvailability::NewProduct { .. } => match self.original {
-                ReceiptOriginalIdentity::Bound(id) => Ok(id),
-                ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
-                    "new product original identity is not bound",
-                )),
-            },
+            return Ok(actual);
+        }
+        match self.original {
+            ReceiptOriginalIdentity::Bound(id) => Ok(id),
+            ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
+                "new product original identity is not bound",
+            )),
         }
     }
 
@@ -2898,7 +2906,7 @@ impl ReceiptNativeSelection {
                 "selected original owner or canonical interface",
             ));
         }
-        if let ReceiptNativeAvailability::Issued(row) = &self.availability {
+        if let Some(row) = self.availability.issued_row() {
             let actual = row
                 .target_original(&self.owner)
                 .ok_or(CertificationError::Mismatch("issued original owner"))?;
@@ -2928,22 +2936,29 @@ enum ReceiptNativeAvailability {
     NewProduct {
         dependencies: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
     },
-    /// An exact request or completed physical product owns these issued offers.
+    /// A carried request owns these available bodies and dependency closures.
     Issued(Arc<crate::declaration_context::NativeTransportAvailability>),
+    /// This physical product owns one producer-issued root census.
+    Completed(Arc<crate::declaration_context::CompletedNativeProductAvailability>),
 }
 
 impl ReceiptNativeAvailability {
+    fn issued_row(&self) -> Option<&Arc<crate::declaration_context::NativeTransportAvailability>> {
+        match self {
+            Self::Issued(row) => Some(row),
+            Self::Completed(receipt) => Some(receipt.row()),
+            Self::NewProduct { .. } => None,
+        }
+    }
+
     fn requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         let dependencies = match self {
             Self::NewProduct { dependencies } => dependencies.as_slice(),
-            Self::Issued(_) => &[],
+            Self::Issued(_) | Self::Completed(_) => &[],
         };
-        let issued = match self {
-            Self::Issued(availability) => Some(availability),
-            Self::NewProduct { .. } => None,
-        };
+        let issued = self.issued_row();
         dependencies.iter().chain(
             issued
                 .into_iter()
@@ -2956,6 +2971,7 @@ impl ReceiptNativeAvailability {
         match self {
             Self::NewProduct { .. } => true,
             Self::Issued(availability) => availability.permits(ordinal),
+            Self::Completed(receipt) => receipt.row().permits(ordinal),
         }
     }
 }
@@ -3175,7 +3191,10 @@ impl CertifiedSourceSelection {
     pub(crate) fn finish_new_product_availability(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
-        issued: &crate::declaration_context::RequestNativeAvailability,
+        issued: &BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            Arc<crate::declaration_context::CompletedNativeProductAvailability>,
+        >,
     ) -> CertResult<()> {
         for selected in Arc::make_mut(&mut self.modules).values_mut() {
             let ReceiptSourceSelection::Native { interface, native } = selected else {
@@ -3188,9 +3207,10 @@ impl CertifiedSourceSelection {
                 continue;
             }
             let id = native.original_artifact_id()?;
-            let original = issued.issued_row(id).ok_or(CertificationError::Mismatch(
+            let completed = issued.get(&id).ok_or(CertificationError::Mismatch(
                 "new product lacks exact issued native availability",
             ))?;
+            let original = completed.row();
             let entry = native.original_entry(*interface, metadata)?;
             let actual =
                 original
@@ -3205,7 +3225,7 @@ impl CertifiedSourceSelection {
                     "new product issued original identity",
                 ));
             }
-            native.availability = ReceiptNativeAvailability::Issued(Arc::clone(original));
+            native.availability = ReceiptNativeAvailability::Completed(Arc::clone(completed));
         }
         Ok(())
     }
@@ -3268,10 +3288,7 @@ impl CertifiedSourceSelection {
         &self,
     ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
         self.native_selections()
-            .filter_map(|native| match &native.availability {
-                ReceiptNativeAvailability::Issued(issued) => Some(issued),
-                ReceiptNativeAvailability::NewProduct { .. } => None,
-            })
+            .filter_map(|native| native.availability.issued_row())
             .chain(self.private_native.issued())
     }
 
@@ -3312,7 +3329,9 @@ impl CertifiedSourceSelection {
         self.native_selections()
             .flat_map(|native| match &native.availability {
                 ReceiptNativeAvailability::NewProduct { dependencies } => dependencies.as_slice(),
-                ReceiptNativeAvailability::Issued(_) => &[],
+                ReceiptNativeAvailability::Issued(_) | ReceiptNativeAvailability::Completed(_) => {
+                    &[]
+                }
             })
     }
 
@@ -3338,10 +3357,7 @@ impl CertifiedSourceSelection {
         };
         let selected = self
             .native_selections()
-            .filter_map(|native| match &native.availability {
-                ReceiptNativeAvailability::Issued(issued) => Some(issued.as_ref()),
-                ReceiptNativeAvailability::NewProduct { .. } => None,
-            });
+            .filter_map(|native| native.availability.issued_row().map(Arc::as_ref));
         for row in selected.chain(direct_private) {
             let Some(entry) = row.target_original(owner) else {
                 continue;
@@ -3727,6 +3743,11 @@ impl CertifiedSourceSelection {
             .native_selections()
             .find(|native| &native.owner == owner);
         if let Some(native) = own {
+            if let ReceiptNativeAvailability::Completed(receipt) = &native.availability {
+                return Ok(NativeGroupCandidates::IssuedAvailability(
+                    receipt.groups(key).collect(),
+                ));
+            }
             if let ReceiptNativeAvailability::NewProduct { dependencies } = &native.availability {
                 let groups = dependencies
                     .iter()
@@ -3820,6 +3841,13 @@ impl CertifiedSourceSelection {
                         owner,
                     )
                     .is_some(),
+                ReceiptNativeAvailability::Completed(receipt) => receipt
+                    .groups(crate::artifact_inventory::NativeGroupKey {
+                        artifact: original,
+                        original_ordinal: ordinal,
+                    })
+                    .next()
+                    .is_some(),
                 ReceiptNativeAvailability::NewProduct { .. } => true,
             };
         }
@@ -3833,6 +3861,10 @@ impl CertifiedSourceSelection {
         self.native_selections()
             .any(|selected| match &selected.availability {
                 ReceiptNativeAvailability::Issued(availability) => availability
+                    .dependency_support(key, owner)
+                    .is_some_and(|support| support.groups().next().is_some()),
+                ReceiptNativeAvailability::Completed(receipt) => receipt
+                    .row()
                     .dependency_support(key, owner)
                     .is_some_and(|support| support.groups().next().is_some()),
                 ReceiptNativeAvailability::NewProduct { dependencies } => {
