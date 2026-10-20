@@ -93,6 +93,11 @@ malformed accepted framing poisons the transaction without replay.
 
 ## Package products and fresh installation
 
+The [package/runtime join contract](package-runtime-join.md) refines the exact
+link recipe and instance lifetime: isolated replacement B is fresh; repeated
+ordinary cells within B reuse its exact scoped package instances. Code identity
+does not collapse distinct issued dependency occurrences.
+
 Use finalized recursive binding groups under exact defining package/compiler
 provenance. Assign full private binder identities BEFORE filtering; selected
 subset ordinals are not stable identities. Product identity includes canonical
