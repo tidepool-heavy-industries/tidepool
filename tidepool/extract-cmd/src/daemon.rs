@@ -2710,7 +2710,8 @@ fn serve_workers(
     let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
     // The accept owner routes to the existing pool's bounded slot queues.
-    // Slot zero retains foreground context and never receives preparation.
+    // The lowest live slot retains the foreground reserve. Idle affinity may
+    // select another eligible slot; preparation never consumes that reserve.
     // Resource permits allow at most one pending foreground job globally.
     let (job_txs, job_rxs): (Vec<_>, Vec<_>) = (0..worker_count)
         .map(|_| std::sync::mpsc::sync_channel::<PendingJob>(1))
