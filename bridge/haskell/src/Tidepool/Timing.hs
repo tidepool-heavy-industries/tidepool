@@ -161,7 +161,7 @@ emitWorldRetention True event world worker reference charge backing cached limit
           ,("source_copy_bytes",maybe "null" (show . fst) backing)
           ,("backing_nodes",maybe "null" (show . snd) backing)
           ,("cache_bytes",show (fst cached)),("cache_entries",show (snd cached))
-          ,("limit_bytes",show (fst limits)),("limit_entries",show (snd limits))
+          ,("limit_bytes",show (fst limits)),("original_image_limit",show (snd limits))
           ,("directory",maybe "null" jsonString directory),("observed_ns",show observed)]
     hPutStrLn stderr ("tidepool-world-retention {" ++ intercalate ","
       [jsonString key ++ ":" ++ value | (key,value) <- fields] ++ "}")

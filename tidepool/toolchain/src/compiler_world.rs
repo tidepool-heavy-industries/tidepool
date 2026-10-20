@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
 
-use crate::artifact_inventory::{ArtifactBinding, CanonicalProducerIdentity};
+use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
@@ -1097,9 +1097,11 @@ pub struct CompilerWorldRestoration {
     logical_id: [u8; 32],
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
+    compiler_input_identity: [u8; 32],
     primary_root: MaterializedContext,
+    runtime_context_blocks: ReachableBlocks,
     primary_blocks: ReachableBlocks,
-    primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
+    primary_associations: MaterializedMap<crate::declaration_join::ExactModuleIdentity, cid::Cid>,
     primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     binding_rows: imbl::OrdMap<String, cid::Cid>,
@@ -1122,6 +1124,7 @@ impl fmt::Debug for CompilerWorldRestoration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CompilerWorldRestoration")
             .field("logical_id", &self.logical_id)
+            .field("compiler_input_identity", &self.compiler_input_identity)
             .field("primary_root", &self.primary_root)
             .field("primary_frontier_work", &self.primary_blocks.work())
             .field("primary_association_root", self.primary_associations.root())
@@ -1138,7 +1141,9 @@ impl CompilerWorldRestoration {
             .inputs
             .clone()
             .prepare_for(self.producer, self.profile)?;
-        if cold.logical_id != self.logical_id {
+        if cold.logical_id != self.logical_id
+            || cold.compiler_input_identity != self.compiler_input_identity
+        {
             return Err(source_failure(
                 "successor cold restoration changed logical product",
             ));
@@ -1175,7 +1180,7 @@ impl CompilerWorldRestoration {
             .ok_or_else(|| source_failure("observation descriptor is not an array"))?;
         let (kind, product, acquisition) = match fields.first().and_then(Value::as_text) {
             Some("TPCWORLD") if fields.len() == 11 => ("cold", &fields[2], &fields[7]),
-            Some("TPCWSUCC4") if fields.len() == 6 => ("successor", &fields[1], &fields[5]),
+            Some("TPCWSUCC5") if fields.len() == 6 => ("successor", &fields[1], &fields[5]),
             _ => return Err(source_failure("observation descriptor format")),
         };
         let product = product
@@ -1809,29 +1814,34 @@ impl CompilerWorld {
             arenas: Default::default(),
             diagnostics: None,
         };
-        let mut materializer = Materializer::new(&prior.primary_blocks);
-        let primary_root = materializer
+        let mut runtime_materializer = Materializer::new(&prior.runtime_context_blocks);
+        let primary_root = runtime_materializer
             .materialize_context(
                 Some(&prior.primary_root),
                 &inputs.primary_context.snapshot(),
             )
             .map_err(|error| source_failure(error.to_string()))?;
+        let runtime_staged = runtime_materializer
+            .finish()
+            .map_err(|error| source_failure(error.to_string()))?;
+        let runtime_context_blocks = prior
+            .runtime_context_blocks
+            .replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
+            .map_err(|error| source_failure(error.to_string()))?;
+        let mut materializer = Materializer::new(&prior.primary_blocks);
         let mut association_facts = prior.primary_associations.facts().clone();
         let mut primary_changes = Vec::new();
         let mut remaining_raw = capture_allowance()?;
         let support = advance.inputs.compiler_source_support();
         for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
             let selected = support
-                .world_primary_type_row(owner)
+                .compiler_primary_input(owner)?
                 .ok_or_else(|| source_failure("TYPE delta omits its issued primary row"))?;
-            if selected.original_binding.is_some() {
+            if selected.original().is_some() {
                 return Err(source_failure("TYPE delta cannot select an implementation"));
             }
             let (row, fact) = materialize_primary_type_row(
-                selected.owner,
-                selected.interface_binding,
-                selected.original_binding,
-                selected.entry,
+                &selected,
                 &prior.producer,
                 directory.path(),
                 ordinal,
@@ -1840,7 +1850,7 @@ impl CompilerWorld {
                 &mut remaining_raw,
             )?;
             if association_facts
-                .insert(*selected.transport_binding, fact)
+                .insert(selected.owner().clone(), fact)
                 .is_some_and(|old| old != fact)
             {
                 return Err(source_failure(
@@ -1871,16 +1881,17 @@ impl CompilerWorld {
             .iter()
             .map(|(cid, bytes)| world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)]))
             .collect();
-        let (roots, primary_blocks) = prior
+        let roots = SemanticRoots {
+            primary: *primary_root.root().cid(),
+            associations: *primary_associations.root().cid(),
+            bindings: *prior.bindings.root().cid(),
+            lexical: lexical_root,
+        };
+        let primary_blocks = prior
             .primary_blocks
-            .replace_semantic_roots(
+            .replace_roots(
                 &staged,
-                SemanticRoots {
-                    primary: *primary_root.root().cid(),
-                    associations: *primary_associations.root().cid(),
-                    bindings: *prior.bindings.root().cid(),
-                    lexical: lexical_root,
-                },
+                vec![roots.associations, roots.bindings, roots.lexical],
             )
             .map_err(|error| source_failure(error.to_string()))?;
         let product = world_restoration_product(
@@ -1891,6 +1902,13 @@ impl CompilerWorld {
             inputs.bindings.query_scope,
         )?;
         let logical_id = world_digest(&product);
+        let compiler_input_identity = compiler_input_identity(
+            &roots,
+            inputs.sources.seal(),
+            &prior.producer,
+            &prior.profile,
+            inputs.bindings.query_scope,
+        )?;
         let files: Vec<_> = rows.files.into_values().collect();
         let acquisition = rows
             .arenas
@@ -1899,7 +1917,7 @@ impl CompilerWorld {
         std::fs::write(
             &descriptor,
             world_bytes(&world_array(vec![
-                world_text("TPCWSUCC4"),
+                world_text("TPCWSUCC5"),
                 world_blob(&product),
                 world_array(changed_blocks),
                 world_array(primary_changes),
@@ -1909,9 +1927,11 @@ impl CompilerWorld {
         )?;
         let restoration = Arc::new(CompilerWorldRestoration {
             logical_id,
+            compiler_input_identity,
             inputs,
             product: product.into(),
             primary_root,
+            runtime_context_blocks,
             primary_blocks,
             primary_associations,
             primary_compiler_inputs: advance.inputs,
@@ -1977,28 +1997,34 @@ impl CompilerWorld {
         };
         let mut materializer = Materializer::new(&prior.primary_blocks);
         let mut primary_root = prior.primary_root.clone();
+        let mut runtime_context_blocks = prior.runtime_context_blocks.clone();
         let mut primary_associations = prior.primary_associations.clone();
         let mut primary_changes = Vec::new();
         let mut lexical_root = prior.lexical_root;
         if let Some((advance, _)) = &declaration {
-            primary_root = materializer
+            let mut runtime_materializer = Materializer::new(&prior.runtime_context_blocks);
+            primary_root = runtime_materializer
                 .materialize_context(
                     Some(&prior.primary_root),
                     &inputs.primary_context.snapshot(),
                 )
                 .map_err(|error| source_failure(error.to_string()))?;
+            let runtime_staged = runtime_materializer
+                .finish()
+                .map_err(|error| source_failure(error.to_string()))?;
+            runtime_context_blocks = prior
+                .runtime_context_blocks
+                .replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
+                .map_err(|error| source_failure(error.to_string()))?;
             let mut associations = prior.primary_associations.facts().clone();
             let mut remaining = capture_allowance()?;
             let support = advance.inputs.compiler_source_support();
             for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
-                let selected = support.world_primary_type_row(owner).ok_or_else(|| {
+                let selected = support.compiler_primary_input(owner)?.ok_or_else(|| {
                     source_failure("declaration delta omits its issued primary row")
                 })?;
                 let (row, fact) = materialize_primary_type_row(
-                    selected.owner,
-                    selected.interface_binding,
-                    selected.original_binding,
-                    selected.entry,
+                    &selected,
                     &prior.producer,
                     directory.path(),
                     ordinal,
@@ -2006,16 +2032,7 @@ impl CompilerWorld {
                     &mut materializer,
                     &mut remaining,
                 )?;
-                if let Some(previous) = prior
-                    .primary_compiler_inputs
-                    .compiler_source_support()
-                    .world_primary_type_row(owner)
-                {
-                    if previous.transport_binding != selected.transport_binding {
-                        associations.remove(previous.transport_binding);
-                    }
-                }
-                associations.insert(*selected.transport_binding, fact);
+                associations.insert(selected.owner().clone(), fact);
                 primary_changes.push(world_array(vec![
                     world_text(&owner.unit),
                     world_text(&owner.module),
@@ -2179,16 +2196,17 @@ impl CompilerWorld {
             .iter()
             .map(|(cid, bytes)| world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)]))
             .collect();
-        let (roots, primary_blocks) = prior
+        let roots = SemanticRoots {
+            primary: *primary_root.root().cid(),
+            associations: *primary_associations.root().cid(),
+            bindings: *bindings.root().cid(),
+            lexical: lexical_root,
+        };
+        let primary_blocks = prior
             .primary_blocks
-            .replace_semantic_roots(
+            .replace_roots(
                 &staged,
-                SemanticRoots {
-                    primary: *primary_root.root().cid(),
-                    associations: *primary_associations.root().cid(),
-                    bindings: *bindings.root().cid(),
-                    lexical: lexical_root,
-                },
+                vec![roots.associations, roots.bindings, roots.lexical],
             )
             .map_err(|error| source_failure(error.to_string()))?;
         let product = world_restoration_product(
@@ -2199,6 +2217,13 @@ impl CompilerWorld {
             query_scope,
         )?;
         let logical_id = world_digest(&product);
+        let compiler_input_identity = compiler_input_identity(
+            &roots,
+            inputs.sources.seal(),
+            &prior.producer,
+            &prior.profile,
+            inputs.bindings.query_scope,
+        )?;
         let files: Vec<_> = rows.files.into_values().collect();
         let acquisition = rows
             .arenas
@@ -2207,7 +2232,7 @@ impl CompilerWorld {
         std::fs::write(
             &descriptor,
             world_bytes(&world_array(vec![
-                world_text("TPCWSUCC4"),
+                world_text("TPCWSUCC5"),
                 world_blob(&product),
                 world_array(changed_blocks),
                 world_array(primary_changes),
@@ -2227,9 +2252,11 @@ impl CompilerWorld {
         let input_files = files.iter().cloned().collect();
         let restoration = Arc::new(CompilerWorldRestoration {
             logical_id,
+            compiler_input_identity,
             inputs,
             product: product.into(),
             primary_root,
+            runtime_context_blocks,
             primary_blocks,
             primary_associations,
             primary_compiler_inputs: declaration.map_or_else(
@@ -2528,7 +2555,7 @@ fn world_restoration_product(
 ) -> Result<Vec<u8>, CompileError> {
     world_bytes(&world_array(vec![
         world_text("TPCWREST"),
-        4u64.into(),
+        5u64.into(),
         world_blob(roots.primary.to_bytes()),
         world_blob(source_seal),
         world_blob(producer),
@@ -2538,6 +2565,25 @@ fn world_restoration_product(
         world_blob(roots.bindings.to_bytes()),
         world_blob(roots.lexical.to_bytes()),
     ]))
+}
+
+fn compiler_input_identity(
+    roots: &SemanticRoots,
+    source_seal: &[u8; 32],
+    producer: &[u8; 32],
+    profile: &[u8; 32],
+    query_scope: u64,
+) -> Result<[u8; 32], CompileError> {
+    Ok(world_digest(&world_bytes(&world_array(vec![
+        world_text("TPCWINPUT1"),
+        world_blob(source_seal),
+        world_blob(producer),
+        world_blob(profile),
+        query_scope.into(),
+        world_blob(roots.associations.to_bytes()),
+        world_blob(roots.bindings.to_bytes()),
+        world_blob(roots.lexical.to_bytes()),
+    ]))?))
 }
 
 fn world_text(value: impl Into<String>) -> ciborium::value::Value {
@@ -2852,20 +2898,34 @@ fn world_semantic_row(
 
 fn materialize_primary_association<BS: fvm_ipld_blockstore::Blockstore>(
     materializer: &mut Materializer<'_, BS>,
-    interface: &ArtifactBinding,
-    original: Option<&ArtifactBinding>,
+    selected: &crate::artifact_inventory::CompilerPrimaryInput<'_>,
     semantic: &ciborium::value::Value,
 ) -> Result<cid::Cid, CompileError> {
+    let binding = match selected.original() {
+        None => world_array(vec![
+            0u64.into(),
+            ciborium::value::Value::serialized(&selected.interface())
+                .map_err(|error| source_failure(error.to_string()))?,
+        ]),
+        Some(original) => world_array(vec![
+            1u64.into(),
+            ciborium::value::Value::serialized(&selected.interface())
+                .map_err(|error| source_failure(error.to_string()))?,
+            ciborium::value::Value::serialized(&original)
+                .map_err(|error| source_failure(error.to_string()))?,
+        ]),
+    };
     materializer
-        .materialize_value(&("TPCWPRIMARY1", interface, original, semantic))
+        .materialize_value(&world_array(vec![
+            world_text("TPCWPRIMARY2"),
+            binding,
+            semantic.clone(),
+        ]))
         .map_err(|error| source_failure(error.to_string()))
 }
 
 fn materialize_primary_type_row<BS: fvm_ipld_blockstore::Blockstore>(
-    owner: &crate::declaration_join::ExactModuleIdentity,
-    interface_binding: &ArtifactBinding,
-    original_binding: Option<&ArtifactBinding>,
-    entry: &Arc<crate::artifact_inventory::ArtifactEntry>,
+    selected: &crate::artifact_inventory::CompilerPrimaryInput<'_>,
     producer: &[u8; 32],
     directory: &Path,
     ordinal: usize,
@@ -2874,6 +2934,8 @@ fn materialize_primary_type_row<BS: fvm_ipld_blockstore::Blockstore>(
     remaining_raw: &mut u64,
 ) -> Result<(ciborium::value::Value, cid::Cid), CompileError> {
     use crate::declaration_context::original_inputs::{OriginalInputKind as K, OriginalInputPart};
+    let owner = selected.owner();
+    let entry = selected.entry();
     if owner != &entry.descriptor.owner {
         return Err(source_failure("primary acquired row has another owner"));
     }
@@ -2927,12 +2989,7 @@ fn materialize_primary_type_row<BS: fvm_ipld_blockstore::Blockstore>(
         .collect::<Result<Vec<_>, CompileError>>()?;
     let row = rows.row(entry, parts)?.0;
     let semantic = world_semantic_row(&row, producer)?;
-    let fact = materialize_primary_association(
-        materializer,
-        interface_binding,
-        original_binding,
-        &semantic,
-    )?;
+    let fact = materialize_primary_association(materializer, selected, &semantic)?;
     Ok((row, fact))
 }
 
@@ -2946,7 +3003,7 @@ fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
 ) -> Result<
     (
         Vec<ciborium::value::Value>,
-        MaterializedMap<ArtifactBinding, cid::Cid>,
+        MaterializedMap<crate::declaration_join::ExactModuleIdentity, cid::Cid>,
     ),
     CompileError,
 > {
@@ -2954,14 +3011,12 @@ fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
     let mut base = Vec::new();
     for (ordinal, selected) in context
         .compiler_source_support()
-        .world_primary_type_rows()
+        .compiler_primary_inputs()
         .enumerate()
     {
+        let selected = selected?;
         let (row, fact) = materialize_primary_type_row(
-            selected.owner,
-            selected.interface_binding,
-            selected.original_binding,
-            selected.entry,
+            &selected,
             producer,
             directory,
             ordinal,
@@ -2970,7 +3025,7 @@ fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
             remaining_raw,
         )?;
         if primary_facts
-            .insert(*selected.transport_binding, fact)
+            .insert(selected.owner().clone(), fact)
             .is_some()
         {
             return Err(source_failure("duplicate primary transport binding"));
@@ -2998,10 +3053,11 @@ pub(crate) fn world_context_fixture(
     let snapshot = context.snapshot();
     let producer = snapshot.producer_sha256();
     let store = fvm_ipld_blockstore::MemoryBlockstore::new();
-    let mut materializer = Materializer::new(&store);
-    let primary = materializer
+    let mut runtime_materializer = Materializer::new(&store);
+    let primary = runtime_materializer
         .materialize_context(None, &snapshot)
         .map_err(|error| source_failure(error.to_string()))?;
+    let mut materializer = Materializer::new(&store);
     let mut rows = WorldColdRows {
         producer,
         files: BTreeMap::new(),
@@ -3027,7 +3083,7 @@ pub(crate) fn world_context_fixture(
     let Value::Array(fields) = &mut acquisition else {
         unreachable!()
     };
-    fields[0] = world_text("TPCWORLDFIXTUREBYTES1");
+    fields[0] = world_text("TPCWORLDFIXTUREBYTES2");
     let Value::Array(arenas) = &mut fields[1] else {
         unreachable!()
     };
@@ -3149,7 +3205,9 @@ impl CompilerWorldOpenInputs {
             .with_type_interfaces(self.lexical.observation_type_contexts())?;
         self.primary_context = type_advance.context;
         let primary_compiler_inputs = type_advance.inputs;
-        let (primary_context, primary_root, primary_blocks) = self.materialize_primary(producer)?;
+        let (primary_context, primary_root, runtime_context_blocks) =
+            self.materialize_primary(producer)?;
+        let primary_blocks = ReachableBlocks::default();
         self.primary_context = primary_context;
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
@@ -3240,15 +3298,20 @@ impl CompilerWorldOpenInputs {
         let staged = binding_materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
-        let (semantic_roots, primary_blocks) = primary_blocks
-            .replace_semantic_roots(
+        let semantic_roots = SemanticRoots {
+            primary: *primary_root.root().cid(),
+            associations: *primary_associations.root().cid(),
+            bindings: *bindings.root().cid(),
+            lexical: lexical_root,
+        };
+        let primary_blocks = primary_blocks
+            .replace_roots(
                 &staged,
-                SemanticRoots {
-                    primary: *primary_root.root().cid(),
-                    associations: *primary_associations.root().cid(),
-                    bindings: *bindings.root().cid(),
-                    lexical: lexical_root,
-                },
+                vec![
+                    semantic_roots.associations,
+                    semantic_roots.bindings,
+                    semantic_roots.lexical,
+                ],
             )
             .map_err(|error| source_failure(error.to_string()))?;
         let work = primary_blocks.work();
@@ -3279,6 +3342,13 @@ impl CompilerWorldOpenInputs {
             self.bindings.query_scope,
         )?;
         let logical_id = world_digest(&product);
+        let compiler_input_identity = compiler_input_identity(
+            &semantic_roots,
+            self.sources.seal(),
+            &producer,
+            &profile,
+            self.bindings.query_scope,
+        )?;
         let source_path = self.directory.path().join("sources.bin");
         std::fs::write(&source_path, self.sources.encoded())?;
         let files = rows.files.into_values().collect();
@@ -3288,7 +3358,7 @@ impl CompilerWorldOpenInputs {
         let descriptor = self.directory.path().join("world.cbor");
         let encoded = world_bytes(&world_array(vec![
             world_text("TPCWORLD"),
-            4u64.into(),
+            5u64.into(),
             world_blob(&product),
             world_path(&source_path)?,
             world_blob(producer),
@@ -3296,15 +3366,17 @@ impl CompilerWorldOpenInputs {
             world_array(vec![world_array(base), world_array(visible)]),
             acquisition,
             world_blob(&visibility),
-            world_blob(primary_root.root().cid().to_bytes()),
+            world_blob(primary_associations.root().cid().to_bytes()),
             world_array(blocks),
         ]))?;
         std::fs::write(&descriptor, encoded)?;
         Ok(Arc::new(CompilerWorldRestoration {
             logical_id,
+            compiler_input_identity,
             inputs: self,
             product: product.into(),
             primary_root,
+            runtime_context_blocks,
             primary_blocks,
             primary_associations,
             primary_compiler_inputs,
@@ -3397,7 +3469,9 @@ fn ensure_world(
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
     let realized = match response {
-        O::Ready { world, realization } if world == root => {
+        O::Ready {
+            world, realization, ..
+        } if world == root => {
             crate::host_work::record_host_work(
                 crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
                 1,
@@ -3490,7 +3564,9 @@ fn ensure_world(
                 (response, _) => response,
             };
             match response {
-                O::Ready { world, realization } if world == root => {
+                O::Ready {
+                    world, realization, ..
+                } if world == root => {
                     crate::host_work::record_host_work(
                         crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
                         1,
@@ -6938,77 +7014,50 @@ mod answer_tests {
         assert!(staged.metrics().staged_bytes <= bound);
     }
     #[test]
-    fn primary_associations_preserve_scoped_bindings_and_bound_actual_staging() {
-        use crate::artifact_inventory::{ArtifactId, ArtifactSelectionId};
-        use fvm_ipld_blockstore::Blockstore;
-        let requires = vec![crate::declaration_join::ExactModuleIdentity {
-            unit: "dependency-unit".repeat(8),
-            module: "Dependency.Module".repeat(8),
-        }];
-        let semantic = world_array(vec![
-            world_text("main"),
-            world_text("Owner"),
-            world_blob([1; 32]),
-            world_blob([2; 32]),
-            world_text("module"),
-            world_array(vec![world_array(vec![
-                world_text(&requires[0].unit),
-                world_text(&requires[0].module),
-            ])]),
-        ]);
-        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
-        let mut materializer = Materializer::new(&store);
-        let mut facts = imbl::OrdMap::new();
-        let mut scoped_roots = Vec::new();
-        let estimate = primary_association_metadata_bound("main", "Owner", &requires).unwrap();
-        for index in 0..128u8 {
-            let interface = ArtifactBinding {
-                artifact: ArtifactId([3; 32]),
-                selection: ArtifactSelectionId([index; 32]),
-            };
-            let original = ArtifactBinding {
-                artifact: ArtifactId([4; 32]),
-                ..interface
-            };
-            let fact = materialize_primary_association(
-                &mut materializer,
-                &interface,
-                Some(&original),
-                &semantic,
+    fn compiler_identity_excludes_only_passive_runtime_commitment() {
+        use cid::multihash::Multihash;
+        let cid = |byte| cid::Cid::new_v1(0x71, Multihash::<64>::wrap(0x12, &[byte; 32]).unwrap());
+        let roots = SemanticRoots {
+            primary: cid(1),
+            associations: cid(2),
+            bindings: cid(3),
+            lexical: cid(4),
+        };
+        let compiler = |roots: &SemanticRoots, source, producer, profile, scope| {
+            compiler_input_identity(roots, &[source; 32], &[producer; 32], &[profile; 32], scope)
+                .unwrap()
+        };
+        let runtime = |roots: &SemanticRoots| {
+            world_digest(
+                &world_restoration_product(roots, &[5; 32], &[6; 32], &[7; 32], 8).unwrap(),
             )
-            .unwrap();
-            facts.insert(original, fact);
-            if index < 2 {
-                let mut one = imbl::OrdMap::new();
-                one.insert(original, fact);
-                scoped_roots.push(
-                    *materializer
-                        .materialize_map(None, &one)
-                        .unwrap()
-                        .root()
-                        .cid(),
-                );
-            }
+        };
+        let initial = compiler(&roots, 5, 6, 7, 8);
+        let passive = SemanticRoots {
+            primary: cid(9),
+            ..roots.clone()
+        };
+        assert_ne!(runtime(&roots), runtime(&passive));
+        assert_eq!(initial, compiler(&passive, 5, 6, 7, 8));
+        for changed in [
+            SemanticRoots {
+                associations: cid(9),
+                ..roots.clone()
+            },
+            SemanticRoots {
+                bindings: cid(9),
+                ..roots.clone()
+            },
+            SemanticRoots {
+                lexical: cid(9),
+                ..roots.clone()
+            },
+        ] {
+            assert_ne!(initial, compiler(&changed, 5, 6, 7, 8));
         }
-        assert_ne!(
-            scoped_roots[0], scoped_roots[1],
-            "equal images cannot erase acquisition scopes"
-        );
-        let root = materializer.materialize_map(None, &facts).unwrap();
-        let staged = materializer.finish().unwrap();
-        assert!(staged.metrics().staged_bytes <= 128 * estimate + 128);
-        for (cid, body) in staged.blocks() {
-            store.put_keyed(cid, body).unwrap();
+        for args in [(9, 6, 7, 8), (5, 9, 7, 8), (5, 6, 9, 8), (5, 6, 7, 9)] {
+            assert_ne!(initial, compiler(&roots, args.0, args.1, args.2, args.3));
         }
-        let bytes = store.get(root.root().cid()).unwrap().unwrap();
-        assert!(!bytes.is_empty());
-        let first = *facts.iter().next().unwrap().1;
-        let value: ciborium::value::Value =
-            ciborium::de::from_reader(store.get(&first).unwrap().unwrap().as_slice()).unwrap();
-        let fields = value.as_array().unwrap();
-        assert_eq!(fields[0].as_text(), Some("TPCWPRIMARY1"));
-        assert_eq!(&fields[3], &semantic);
-        assert!(primary_association_metadata_bound("main", "Owner", &[]).unwrap() < estimate);
     }
 
     #[test]
@@ -7024,7 +7073,13 @@ mod answer_tests {
         assert_eq!(fields.len(), 6);
         assert!(fields[2].as_array().unwrap().is_empty());
         let blocks = fields[4].as_array().unwrap();
-        for root in [&fields[0], &fields[1], &fields[5]] {
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| &block.as_array().unwrap()[0] == &fields[0]),
+            "opaque runtime Context is not exported"
+        );
+        for root in [&fields[1], &fields[5]] {
             assert!(blocks
                 .iter()
                 .any(|block| &block.as_array().unwrap()[0] == root));

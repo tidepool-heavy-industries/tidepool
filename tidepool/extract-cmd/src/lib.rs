@@ -58,7 +58,7 @@ pub use request::{
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
     PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity,
     WorldCellOperandRequest, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,
-    WorldQueryQuestion, WorldQueryRequest,
+    WorldNonRetentionReason, WorldQueryQuestion, WorldQueryRequest, WorldResidency,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.

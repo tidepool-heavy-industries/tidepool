@@ -152,30 +152,27 @@ value permission. The private `TPCWSOURCE3` receipt carries the same closed stag
 identity and the completion's ordered materialized root aliases as transport
 DATA. Their positions map back to the captured source domain;
 they neither identify logical worlds nor authorize later filesystem reads.
-The matched `TPCWORLD` version 3 carrier retains exactly the frontier of three
-roots in Context, primary-association, occurrence order. Its fixed `TPCWREST`
-version 3 product binds those roots, the captured source seal, canonical producer,
-profile and runtime query scope; transfer order and physical aliases do not
-change logical identity. Each base row must match an acquired primary association,
-and every visible value row must be referenced by the occurrence map. The actual
-Context roles, namespace and scope proofs select an association by exact binding;
-passive row presence and module names cannot reconstruct that selection. Immutable
-decoded primary facts and their known backing/record charges stay with the same
-world/input owner. The receiver preserves private Rust artifact/scope receipts as
-provenance, and grants no native execution or completed value from them.
-Context descriptors use version 6. Each published source role requires its
-birth-native-authority descriptor2 and all four typed-role, offer, availability
-and decision HAMTs. An acquisition-local CID memo shares immutable decoded birth
-authorities and refuses active cycles; retained charges count unique decoded
-authorities plus references. It is discarded after cold admission. Those immutable
-facts remain passive Rust provenance under the same world
-owner and retention charge; current-context offers cannot replace birth facts.
-Old Context5, authority descriptor1 and published roles without that link refuse. Genuine source-publication fixtures use the explicit
-`TPSOURCEBOOTPUBLISHED1` intent on the existing OriginalProductsProducer completion:
-its completed target and unique publication roots are separate from ordinary
-candidate/interface/native/lexical selectors. Ordinary fixture delivery never
-implicitly endorses a source original. Haskell controls inspect the genuine
-issued Context and mutate only DATA; the Rust publication owner issues roles.
+The matched `TPCWORLD` version 5 carrier exports three compiler roots:
+selected primary rows, occurrences and lexical surface. Its `TPCWREST` version 5
+commitment binds these roots, the captured source seal, producer, profile and
+runtime query scope to an opaque full runtime Context CID. Rust derives the
+selected-primary map from one actual acquired role owner, checking exact scoped
+Original/canonical pairs. Haskell verifies the projected CID frontier, selected
+row census and physical/semantic TYPE inputs; it does not decode or revalidate
+the hidden native graph. Keep canonical certificates, package facts and required
+Core metadata for SOURCE admission. The compiler projection grants no native
+execution or completed runtime value.
+
+Full World correlation stays on requests, lineage, reservations and settlement.
+Compiler-input identity includes the exact projected scoped pairs and all
+preparation inputs but excludes the opaque full Context CID. Only an actual held
+predecessor can lend prepared owners; equal identities alone do not transfer
+custody or authority. Observation scaffold names use compiler-input identity;
+execution scaffolds retain the full World and plan/reservation correlation.
+Cold and successor readers reject older private wire formats together. Genuine
+source-publication fixtures still use the existing OriginalProductsProducer
+completion with explicit `TPSOURCEBOOTPUBLISHED1` intent; test DATA does not issue
+compiler or runtime authority.
 `TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
 select compiler Originals or native groups. Cold block admission verifies the
@@ -208,8 +205,9 @@ or implicitly owned products.
 An admitted query stores only its scope-issued world binding. It borrows the
 actual payload from the still-held scope after executor and phase checks, so a
 retained closed request does not become another raw-source/HPT retention owner.
-Optional worlds and original images share the existing input owner's byte and
-entry allowance. World charges conservatively include captured custody and
+Optional Worlds and original images share the existing input owner's byte
+allowance. World/module/product counts are diagnostics; the original-image
+4096-entry limit does not admit or evict Worlds. World charges conservatively include captured custody and
 physical source copies; equal seals alone do not prove physical sharing between
 world acquisitions. FIFO admission order and charges belong to the existing
 universe index. Resident hits and retained-world END do not inventory backing.
@@ -714,6 +712,18 @@ For a separate symbol-rich worker and bounded phase-aligned CPU/RSS captures,
 see [compiler profiling](../../docs/compiler-profiling.md).
 
 ## Worker lifetime
+
+World residency after END is optional. Acquisition reports retained-at-admission
+or active-only with the required storage reservation and byte limit; neither is
+a permanent worker lease. The shared optional input/backing allowance defaults
+to 128 MiB (`TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES`). Original-image counts
+bound only original images. World/node/product counts are diagnostics, not heap
+limits. Shared source backing is charged once through its actual lease account;
+payload reservations remain conservative per World where physical sharing has
+no owning identity. Encoded bytes do not measure GHC heap residency. Process RSS
+admission and rotation retain that separate responsibility. END restores mutable
+attempt state before releasing active custody; failed cleanup remains uncertain
+and charged until confirmed worker retirement.
 
 The Rust frontend owns CLI parsing, Unix sockets, daemon configuration, and
 process lifecycle. It either starts this worker for one typed request or keeps

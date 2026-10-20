@@ -6,7 +6,7 @@ import SourceBootCases
 import CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import CompilerRequestTest (checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldRejectionDiagnosticBoundaries)
+import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
@@ -39,6 +39,7 @@ tests = testGroup "source-boot"
   , testCase "compiler task attempt histories" compilerTaskAttemptHistories
   , testCase "fresh output seal set laws" freshOutputSealSetLaws
   , testCase "request input admission boundaries" requestInputBoundaries
+  , testCase "World residency uses shared bytes across END and eviction" worldResidencyBoundaries
   , testCase "world cell admission parses one recipe" worldCellAdmissionParse
   , testCase "bounded World rejection diagnostics" worldRejectionDiagnosticBoundaries
   , testCase "bounded artifact reads" boundedReadChecks

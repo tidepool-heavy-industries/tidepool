@@ -62,14 +62,33 @@ pub enum ExactInputsRejection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnsureExactInputsOutcome {
-    Ready { world: String, realization: String },
+    Ready {
+        world: String,
+        realization: String,
+        residency: WorldResidency,
+    },
     NeedsAcquisition(String),
     Rejected(ExactInputsRejection),
 }
 
+/// Optional storage observed at admission, never a residency lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldResidency {
+    RetainedAtAdmission,
+    ActiveOnly(WorldNonRetentionReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldNonRetentionReason {
+    StorageAllowanceExceeded {
+        required_bytes: u64,
+        limit_bytes: u64,
+    },
+}
+
 impl EnsureExactInputsOutcome {
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.get(..8) != Some(b"TPEXO002") {
+        if bytes.get(..8) != Some(b"TPEXO003") {
             return Err(ProtocolError::InvalidHeader);
         }
         let mut decoder = Decoder { bytes, cursor: 8 };
@@ -80,10 +99,25 @@ impl EnsureExactInputsOutcome {
                 if !valid_world_identity(world) || !valid_reference(realization) {
                     return Err(ProtocolError::InvalidExactInputs);
                 }
+                let residency = match decoder.byte()? {
+                    0 => WorldResidency::RetainedAtAdmission,
+                    1 => {
+                        let required_bytes = decoder.u64()?;
+                        let limit_bytes = decoder.u64()?;
+                        if required_bytes <= limit_bytes {
+                            return Err(ProtocolError::InvalidExactInputs);
+                        }
+                        WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded {
+                            required_bytes, limit_bytes,
+                        })
+                    },
+                    _ => return Err(ProtocolError::InvalidExactInputs),
+                };
                 decoder.finish()?;
                 Ok(Self::Ready {
                     world: world.to_owned(),
                     realization: realization.to_owned(),
+                    residency,
                 })
             }
             1 => {
@@ -3639,11 +3673,12 @@ mod tests {
             ..ExtractRequest::default()
         };
         let frame = |tag: u8, root: &str, reference: Option<&str>| {
-            let mut bytes = b"TPEXO002".to_vec();
+            let mut bytes = b"TPEXO003".to_vec();
             bytes.push(tag);
             push_frame(&mut bytes, OsStr::new(root));
             if let Some(reference) = reference {
                 push_frame(&mut bytes, OsStr::new(reference));
+                bytes.push(0);
             }
             bytes
         };
@@ -3680,30 +3715,39 @@ mod tests {
     fn exact_inputs_outcomes_match_closed_wire_and_reject_uncertain_frames() {
         let cases = [
             (
-                "545045584f303032004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564",
+                "545045584f303033004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a656400",
                 EnsureExactInputsOutcome::Ready {
                     world: "a".repeat(64),
                     realization: "realized".into(),
+                    residency: WorldResidency::RetainedAtAdmission,
                 },
             ),
             (
-                "545045584f303032014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+                "545045584f303033004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a65640181000000000000008000000000000000",
+                EnsureExactInputsOutcome::Ready {
+                    world: "a".repeat(64),
+                    realization: "realized".into(),
+                    residency: WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded { required_bytes: 129, limit_bytes: 128 }),
+                },
+            ),
+            (
+                "545045584f303033014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
                 EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64)),
             ),
             (
-                "545045584f3030320200",
+                "545045584f3030330200",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation),
             ),
             (
-                "545045584f3030320201",
+                "545045584f3030330201",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization),
             ),
             (
-                "545045584f3030320202",
+                "545045584f3030330202",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot),
             ),
             (
-                "545045584f3030320203",
+                "545045584f3030330203",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected),
             ),
         ];
@@ -3721,16 +3765,25 @@ mod tests {
             );
         }
         for hex in [
-            "545045584f30303203",
-            "545045584f3030320204",
-            "545045584f3030320000000000",
-            "545045584f303032010100000000",
+            "545045584f30303303",
+            "545045584f3030330204",
+            "545045584f3030330000000000",
+            "545045584f303033010100000000",
             "545045584f3030310200",
         ] {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
         }
+        for (required, limit) in [(0u64, 0u64), (128, 128), (127, 128)] {
+            let mut frame = b"TPEXO003\0".to_vec();
+            push_frame(&mut frame, OsStr::new(&"a".repeat(64)));
+            push_frame(&mut frame, OsStr::new("realized"));
+            frame.push(1);
+            frame.extend_from_slice(&required.to_le_bytes());
+            frame.extend_from_slice(&limit.to_le_bytes());
+            assert_eq!(EnsureExactInputsOutcome::decode(&frame), Err(ProtocolError::InvalidExactInputs));
+        }
         for reference in ["", "realized\0other"] {
-            let mut bytes = b"TPEXO002\0".to_vec();
+            let mut bytes = b"TPEXO003\0".to_vec();
             push_frame(&mut bytes, OsStr::new(&"a".repeat(64)));
             push_frame(&mut bytes, OsStr::new(reference));
             assert_eq!(

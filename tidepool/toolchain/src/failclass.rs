@@ -659,6 +659,7 @@ mod tests {
         );
 
         let completed = ExtractRun {
+            worker_location: None,
             request_correlation: "representation-only".into(),
             output: std::process::Output {
                 status: std::process::ExitStatus::from_raw(0),

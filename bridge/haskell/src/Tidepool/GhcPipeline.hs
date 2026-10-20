@@ -246,6 +246,7 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
+  , WorldResidency(..), WorldNonRetentionReason(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), publicQuestionInspection, publicQuestionIsType, WorldObservationQuery(..), InspectionRequest(..), StructuredInspection(..), StructuredNameScope(..)
   , WorldCellPlanRequest(..), WorldCellPrepareRequest(..), WorldCellOperandRequest(..), WorldCellRecipe(..), PlannedCellSlot(..)
   , StructuredNameNamespace(..), InspectionProvenance(..) )
@@ -307,9 +308,9 @@ import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
-  , exactInputRetentionLimits, commitWorldInputRetention
+  , exactInputRetentionLimits, optionalInputByteLimit, originalImageCountLimit, commitWorldInputRetention
   , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs, worldSuccessorFacts, worldSuccessorChangedAliases, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
-  , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
+  , worldInputsCompilerIdentity, worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
   , worldLexicalObservation, WorldObservationScaffold, worldObservationRequestTypes, worldObservationInputType
   , worldObservationFragment, worldObservationImports
@@ -1530,6 +1531,9 @@ newtype WorldBackingLease = WorldBackingLease (IORef WorldBackingState)
 data WorldBackingAccounting = WorldBackingAccounting !Int !Int !Integer !Int
 -- live realized owners, optional indexed owners, physical bytes and nodes
 
+-- Each logical World reserves its encoded input basis conservatively. Equal
+-- payloads are not proof of physical sharing; only the existing backing lease
+-- account below de-duplicates storage across authenticated successors.
 data CachedCompilerWorld = CachedCompilerWorld !Integer !Integer !Int HeldCompilerWorld
 data CompilerWorldCache = CompilerWorldCache
   { cachedCompilerWorlds :: Map.Map String CachedCompilerWorld
@@ -1560,6 +1564,14 @@ compilerWorldCharge (HeldCompilerWorld facts _ materialized _) =
   let (copies,nodes) = worldMaterializationCharge materialized
       (raw,entries) = worldInputsRetainedCharge facts
   in (raw + copies,entries + nodes + 1)
+
+-- This is an optional input/backing storage policy, not a GHC heap bound or a
+-- lease. A retained realization can subsequently be evicted or lose its worker.
+worldAdmissionResidency :: Integer -> HeldCompilerWorld -> WorldResidency
+worldAdmissionResidency limit world
+  | required > limit = WorldActiveOnly (WorldStorageAllowanceExceeded required limit)
+  | otherwise = WorldRetainedAtAdmission
+  where required = fst (compilerWorldCharge world)
 
 worldMaterializationCharge :: WorldMaterialization -> (Integer,Int)
 worldMaterializationCharge (WorldMaterialization _ _ _ _ _ _ copies nodes _) = (copies,nodes)
@@ -1613,10 +1625,10 @@ removeCompilerWorld root cache = case Map.lookup root (cachedCompilerWorlds cach
       _ -> throw WorldQueryCorrupt
     where key = worldMaterializationKey materialized
 
-admitCompilerWorld :: (Integer,Int) -> String -> HeldCompilerWorld -> CompilerWorldCache
+admitCompilerWorld :: Integer -> String -> HeldCompilerWorld -> CompilerWorldCache
   -> (CompilerWorldCache,[HeldCompilerWorld])
-admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ materialized _) cache
-  | standaloneBytes > byteLimit || standaloneNodes > countLimit = (cache,[])
+admitCompilerWorld byteLimit root world@(HeldCompilerWorld facts _ materialized _) cache
+  | WorldActiveOnly _ <- worldAdmissionResidency byteLimit world = (cache,[])
   | Map.member root (cachedCompilerWorlds cache) = throw WorldQueryCorrupt
   | otherwise = case Map.lookup key (compilerWorldBackingAccounts cache) of
       Just (WorldBackingAccounting live resident bytes nodes) -> trim [] cache
@@ -1630,7 +1642,6 @@ admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ 
       Nothing -> throw WorldQueryCorrupt
   where
     ticket = nextCompilerWorldTicket cache
-    (standaloneBytes,standaloneNodes) = compilerWorldCharge world
     key = worldMaterializationKey materialized
     (raw,rawEntries) = worldInputsRetainedCharge facts
     (charge,entries) = (raw,rawEntries+1)
@@ -1639,7 +1650,7 @@ admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ 
       Just _ -> (0,0)
       Nothing -> throw WorldQueryCorrupt
     trim evicted selected
-      | compilerWorldRetainedBytes selected <= byteLimit && compilerWorldRetainedNodes selected <= countLimit = (selected,reverse evicted)
+      | compilerWorldRetainedBytes selected <= byteLimit = (selected,reverse evicted)
       | otherwise = case Map.lookupMin (cachedCompilerWorldOrder selected) of
           Just (_,oldest) -> case Map.lookup oldest (cachedCompilerWorlds selected) of
             Just (CachedCompilerWorld _ _ _ retired) -> trim (retired:evicted) (removeCompilerWorld oldest selected)
@@ -1745,17 +1756,25 @@ observeCompilerWorld :: Bool -> CompilerUniverse -> WorldRetentionEvent -> Strin
   -> Maybe HeldCompilerWorld -> IO ()
 observeCompilerWorld timing universe event root reference world =
   forM_ (universePackageAssociation universe) $ \association -> do
-    let backing = (\(HeldCompilerWorld _ _ materialized _) -> worldMaterializationCharge materialized) <$> world
+    let limits = exactInputRetentionLimits (universeOriginalInputs universe)
+        backing = (\(HeldCompilerWorld _ _ materialized _) -> worldMaterializationCharge materialized) <$> world
         directory = (\(HeldCompilerWorld _ _ (WorldMaterialization path _ _ _ _ _ _ _ _) _) -> path) <$> world
     emitWorldRetention timing event root (hexBytes (servicePackageWorkerInstance association)) reference
       (compilerWorldCharge <$> world) backing (compilerWorldCacheCharge (universeWorlds universe))
-      (exactInputRetentionLimits (universeOriginalInputs universe)) directory
+      (optionalInputByteLimit limits,originalImageCountLimit limits) directory
     let (liveBytes,liveNodes) = compilerWorldLiveCharge (universeWorlds universe)
     emitCount timing "worlds.live_backing_bytes" liveBytes
     emitCount timing "worlds.live_backing_nodes" (fromIntegral liveNodes)
+    emitCount timing "worlds.retained_worlds" (fromIntegral (Map.size (cachedCompilerWorlds (universeWorlds universe))))
     forM_ world $ \(HeldCompilerWorld _ _ materialized _) -> do
       owners <- worldMaterializationOwners materialized
       forM_ owners (emitCount timing "worlds.backing_realization_owners" . fromIntegral)
+    forM_ world $ \(HeldCompilerWorld _ _ _ preparedRef) -> do
+      WorldPreparedModules _ receipts completed _ <- readIORef preparedRef
+      emitCount timing "worlds.prepared_home_receipts" (fromIntegral (Map.size receipts))
+      emitCount timing "worlds.completed_source_modules" $ case completed of
+        Nothing -> 0
+        Just (WorldCompletedDependencies _ versions) -> fromIntegral (Map.size versions)
 
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
 instance Exception WorldQueryFailure
@@ -2141,7 +2160,7 @@ prepareWorldObservationStage universe baseEnv timing
     world@(HeldCompilerWorld facts _ (WorldMaterialization realization _ roots _ _ _ _ _ _) _) query = do
   scaffold <- maybe (throwIO WorldQueryUnsupported) pure
     (worldLexicalObservation (worldInputsLexicalSurface facts))
-  let owner = generatedScaffoldModuleName ["held-world-observation-v1",worldInputsIdentity facts]
+  let owner = generatedScaffoldModuleName ["held-world-observation-v1",worldInputsCompilerIdentity facts]
       directory = realization </> "observation"
       path = directory </> owner ++ ".hs"
       flags = heldWorldCellFlags baseEnv directory roots
@@ -7158,16 +7177,18 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   let install event world@(HeldCompilerWorld facts reference _ _) = do
                         writeIORef heldWorld (Just world)
                         observeCompilerWorld timing selected event root reference (Just world)
-                        pure (ExactInputsReady (worldInputsIdentity facts) reference)
+                        pure (ExactInputsReady (worldInputsIdentity facts) reference
+                          (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                       publish world@(HeldCompilerWorld facts reference _ _) = do
                         selected <- readIORef universe
                         let (nextWorlds,evicted) = admitCompilerWorld
-                              (exactInputRetentionLimits (universeOriginalInputs selected)) root world (universeWorlds selected)
+                              (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) root world (universeWorlds selected)
                             retiredWorlds = removeCompilerWorld root nextWorlds
                         _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
                         retired <- evaluate (selected {universeWorlds=retiredWorlds})
                         held <- evaluate (Just world)
-                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
+                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference
+                          (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                         -- Retire old private owners before unlinking their backing.
                         -- The shared reservation remains conservative until cleanup
                         -- succeeds; failure retains it and retires this worker.
@@ -7182,14 +7203,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         finishCompletion (appendCleanupFailures released failures)
                         settled <- readIORef universe
                         let (settledWorlds,unexpected) = admitCompilerWorld
-                              (exactInputRetentionLimits (universeOriginalInputs settled)) root world (universeWorlds settled)
+                              (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs settled))) root world (universeWorlds settled)
                             finalNext = settled {universeWorlds=settledWorlds}
-                            (settledBytes,settledCount) = compilerWorldCacheCharge settledWorlds
+                            settledBytes = fst (compilerWorldCacheCharge settledWorlds)
                         unless (null unexpected) (throwIO WorldQueryCorrupt)
                         _ <- evaluate finalNext
                         finalResult <- evaluate (ready,world,finalNext)
                         -- No fallible or interruptible work follows decoder commit.
-                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes settledCount $ do
+                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes $ do
                           writeIORef universe finalNext
                           writeIORef heldWorld held
                         pure finalResult
