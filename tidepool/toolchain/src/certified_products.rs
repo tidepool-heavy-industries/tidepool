@@ -2559,6 +2559,51 @@ pub(crate) struct CertifiedSourceSelection {
     input_origin: CertifiedInputOrigin,
 }
 
+/// A physically bound product of this selection's completed compiler request.
+/// Its constructor checks current origin independently of issued availability;
+/// inherited native support cannot construct this borrow.
+pub(crate) struct CurrentProductRef<'a> {
+    selection: &'a CertifiedSourceSelection,
+    native: &'a ReceiptNativeSelection,
+    entry: &'a Arc<crate::artifact_inventory::ArtifactEntry>,
+    ordinal: u32,
+}
+
+impl CurrentProductRef<'_> {
+    pub(crate) fn key(&self) -> crate::artifact_inventory::NativeGroupKey {
+        crate::artifact_inventory::NativeGroupKey {
+            artifact: self.entry.descriptor.id,
+            original_ordinal: self.ordinal,
+        }
+    }
+
+    pub(crate) fn own_group_candidates(&self) -> CertResult<NativeGroupCandidates> {
+        match &self.native.availability {
+            ReceiptNativeAvailability::NewProduct { .. } => {
+                // This path preserves a carried own binding, if one exists.
+                // Physical completion alone does not require an earlier binding.
+                self.selection
+                    .native_group_candidates(self.key(), &self.native.owner)
+            }
+            ReceiptNativeAvailability::Issued(row) => {
+                // Only this product's issued row may select its own binding.
+                // Other private availability remains historical support.
+                let groups = row
+                    .dependency_support(self.key(), &self.native.owner)
+                    .map(|support| support.groups().collect())
+                    .unwrap_or_default();
+                Ok(NativeGroupCandidates::IssuedAvailability(groups))
+            }
+        }
+    }
+
+    pub(crate) fn requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
+        self.native.availability.requirements()
+    }
+}
+
 #[derive(Clone, Debug)]
 enum CertifiedInputOrigin {
     Continuation(Arc<crate::artifact_inventory::CompilerSourceSupport>),
@@ -2838,6 +2883,60 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    /// Bind current membership to the actual output row and payload. Available
+    /// originals and an absent continuation are not evidence of current output.
+    pub(crate) fn current_product<'a>(
+        &'a self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        entry: &'a Arc<crate::artifact_inventory::ArtifactEntry>,
+    ) -> CertResult<Option<CurrentProductRef<'a>>> {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactPayload};
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch(
+                "current product original payload",
+            ));
+        };
+        let owner = product.owner();
+        let module = (owner.unit.clone(), owner.module.clone());
+        if !self.contains_module(&module) {
+            return Ok(None);
+        }
+        let Some(ReceiptSourceSelection::Native { interface, native }) = self.modules.get(&module)
+        else {
+            return Ok(None);
+        };
+        if !matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+            return Ok(None);
+        }
+        let ReceiptOriginalIdentity::Bound(original) = native.original else {
+            return Err(CertificationError::Mismatch(
+                "current product original identity is not bound",
+            ));
+        };
+        let canonical = product
+            .module_interface()
+            .ok_or(CertificationError::Mismatch(
+                "current product canonical interface",
+            ))?;
+        if original != key.artifact
+            || original != entry.descriptor.id
+            || native.original_artifact_id()? != original
+            || &native.owner != owner
+            || *interface != ArtifactEntry::canonical_artifact_id(canonical)
+            || !entry.native_group_ordinals.contains(&key.original_ordinal)
+        {
+            return Err(CertificationError::Mismatch(
+                "current product identity, owner, interface or native ordinal",
+            ));
+        }
+        Ok(Some(CurrentProductRef {
+            selection: self,
+            native,
+            entry,
+            ordinal: key.original_ordinal,
+        }))
+    }
+
     /// Encoding bases borrow immutable facts only; native decisions still come
     /// from this selection's checked continuation and physical output.
     pub(crate) fn native_fact_base(
