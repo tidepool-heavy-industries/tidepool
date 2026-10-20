@@ -146,11 +146,13 @@ where
                 .with_machine(self.expected.context.clone(), move |session, context, _| {
                     let permission = context.source_dependency().claim()?;
                     let parent = expected.dependency().prerequisite().clone();
-                    let unpublished = session.mint_unpublished_notebook_scope(
-                        parent
-                            .as_ref()
-                            .map(|dependency| dependency.runtime_lease().clone()),
-                    )?;
+                    let unpublished = session
+                        .mint_unpublished_notebook_scope(
+                            parent
+                                .as_ref()
+                                .map(|dependency| dependency.runtime_lease().clone()),
+                        )
+                        .map_err(ResidentError::Session)?;
                     let generation = expected.id().next().map_err(|error| {
                         ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                     })?;

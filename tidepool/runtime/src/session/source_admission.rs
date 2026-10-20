@@ -881,10 +881,19 @@ mod tests {
             crate::CompilerTransactionCancellation::new(),
             None,
             |_| {},
-            |_, _| entered.set(true),
+            |session, _| {
+                session
+                    .admit_source_work_in(held.scope())
+                    .map(|_| entered.set(true))
+            },
+        );
+        let settled = result.unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
         );
         assert!(matches!(
-            result,
+            settled.into_outcome().action,
             Err(SourceAdmissionError::Closed {
                 phase: SourceAdmissionPhase::ScopeRetired,
                 ..

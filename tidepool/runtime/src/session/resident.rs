@@ -12906,6 +12906,213 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn closed_source_startup_owns_fresh_domain_and_survives_prior_source_cutoff() {
+        use crate::session::{
+            assemble_expression_module, run_turn, ExpressionLift, TemplateSelector, TurnRequest,
+            TurnResult, TurnTemplate,
+        };
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let templates = vec![TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_expression_module(
+                effects.preamble(),
+                "__result",
+                effects.row(),
+                "{{TURN}}",
+                ExpressionLift::Pure,
+            ),
+        }];
+        let root = tempfile::tempdir().unwrap();
+        let mut includes = effects.include_paths().to_vec();
+        includes.push(root.path().to_path_buf());
+        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "(42 :: Int)",
+                    templates: &templates,
+                    include: &includes,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap() else {
+            panic!("actual source expression target");
+        };
+        let prepared = crate::session::PreparedSourceEntry::prepare(
+            Arc::new(compiled),
+            Arc::new(ImageRegistry::new()),
+        )
+        .unwrap();
+        let lib =
+            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session =
+            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
+        let prior = session.mint_unpublished_notebook_scope(None).unwrap();
+        let candidate = session.mint_unpublished_notebook_scope(None).unwrap();
+        let source = candidate.lease().original_source().clone();
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: candidate.lease().scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let prepare = |session: &mut TestSession| {
+            session
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.prepare_source_startup_entry(&prepared),
+                )
+                .unwrap()
+                .into_outcome()
+                .action
+                .unwrap()
+        };
+        let before = session.run_context;
+        let abandoned = prepare(&mut session);
+        assert_eq!(
+            session.run_context, before,
+            "runtime preparation never changes ambient placement"
+        );
+        assert_ne!(
+            abandoned.installation_scope.scope(),
+            candidate.lease().scope()
+        );
+        let program = abandoned.entry.program.unwrap();
+        let cancelled = session.mint_unpublished_notebook_scope(None).unwrap();
+        let cancelled_source = cancelled.lease().original_source().clone();
+        let cancelled_entry = session
+            .with_source_compiler_transaction(
+                cancelled_source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.prepare_source_startup_entry(&prepared),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        drop(cancelled);
+        assert!(matches!(
+            cancelled_source.source_admission().admit(),
+            Err(super::super::SourceAdmissionError::Closed {
+                phase: super::super::SourceAdmissionPhase::ScopeRetired,
+                ..
+            })
+        ));
+        drop(cancelled_entry);
+        drop(abandoned);
+        assert!(session.settle_dropped_custody() >= 2);
+        assert!(
+            !session.state.require_prepared().unwrap().unpin(program),
+            "pre-hole cancellation released actual install pin"
+        );
+        let entry = prepare(&mut session);
+        let wrong_scope = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        assert!(matches!(wrong_scope, Err(ResidentError::StaleStartupEntry)));
+        session.settle_dropped_custody();
+        let entry = prepare(&mut session);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: entry.installation_scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let wrong_source = session
+            .with_source_compiler_transaction(
+                prior.lease().original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        assert!(matches!(
+            wrong_source,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::DifferentOriginalSource
+            )))
+        ));
+        session.settle_dropped_custody();
+        let entry = prepare(&mut session);
+        let sites = entry.entry.provenance.original_sources.sites.len();
+        for site in entry.entry.provenance.original_sources.sites.keys() {
+            assert!(Arc::ptr_eq(
+                &entry
+                    .entry
+                    .provenance
+                    .original_sources
+                    .require_unique(*site)
+                    .unwrap(),
+                &source
+            ));
+        }
+        let cutoff = prior.lease().source_admission().fence_if_idle().unwrap();
+        assert!(prior.lease().admit_source().is_err());
+        assert!(
+            candidate.lease().admit_source().is_ok(),
+            "B has no prior-A source edge"
+        );
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: entry.installation_scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let completed = session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        let ResidentOutcome::Completed { result, .. } = completed else {
+            panic!("closed B source completes after A cutoff");
+        };
+        assert_eq!(result.to_json(), serde_json::json!(42));
+        eprintln!(
+            "actual closed source executed after prior cutoff; witnessed native sites={sites}"
+        );
+        cutoff.reopen(prior.lease().original_source()).unwrap();
+    }
+
+    #[test]
     fn staged_authored_refusal_preserves_binding_visibility_before_retry() {
         let root = tempfile::tempdir().unwrap();
         let lib = authored_lib(root.path());
