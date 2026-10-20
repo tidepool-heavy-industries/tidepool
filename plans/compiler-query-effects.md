@@ -91,9 +91,9 @@ handler captures the compile-view provenance before the query, recomputes it
 afterward, and returns `ScopeChanged(before, after)` if the compile view moved,
 instead of returning the stale answer. For the five new verbs this decision lives
 in the handler module: `entry_scope_refusal` refuses a pin that never matched at
-entry (`exomonad/actor/src/resident_workbench/compiler_query.rs:446-456`), and
+entry (`exomonad/actor/src/resident_workbench/compiler_query.rs:636`), and
 `compiler_query_answer` refuses a view that moved while the query ran
-(`exomonad/actor/src/resident_workbench/compiler_query.rs:461-544`). Thus
+(`exomonad/actor/src/resident_workbench/compiler_query.rs:651`). Thus
 entry-versus-pre-reply drift is refused for **every** query, including a
 `Nothing` query that supplied no expected scope. The older `info`/`typeOf`
 structured path keeps its own pre/post comparison
@@ -456,7 +456,7 @@ consumer should reuse. Costs are as measured by the source path, not the target.
 | `scopeBindings` | runtime-owned: `IntrospectionReq::ScopeBindings` → `ResidentActorBoundary::WorldScopeBindings` → `resume_world_scope_bindings` → `public_module_query_source` gate → `capture_inspection_world_in` → `AdmittedInspectionWorld::scope_bindings` (`exomonad/actor/src/resident_workbench.rs:10871-10879`; `exomonad/actor/src/resident_workbench/world_enumeration.rs:110-215`; `tidepool/runtime/src/session/inspection.rs:490-535`). There is no `CompilerQuery::ScopeBindings` and no `InspectionQuery` for it | no compiler query, no extract worker; identity-only answer. `refsObserved` is the exact count of bindings in the admitted scope; `refs` may be truncated at `refsLimit` |
 | `info` | `InspectionQuery::StructuredInfo` (`tidepool/runtime/src/session/inspection.rs:26-29, 896-898`) | interface load |
 | `typeOf` | `InspectionQuery::StructuredType` (`tidepool/runtime/src/session/inspection.rs:30-33, 899-901`) | interface load |
-| `rowFit` | `row_fit_query` → `Browse`/`ScopeBrowse`, then `fit_from_entries` over typed entries (`exomonad/actor/src/resident_workbench/compiler_query.rs:186-195, 496-503, 605-635`) | interface load + module enumeration; NO-GO world-side, so this remains the only route |
+| `rowFit` | `CompilerQuery::plan` → `row_fit_target` → `Browse`/`ScopeBrowse`, then `fit_from_entries` over typed entries (`exomonad/actor/src/resident_workbench/compiler_query.rs:197, 394, 496`) | interface load + module enumeration; NO-GO world-side, so this remains the only route |
 | `typeOfExpression` | `InspectionQuery::TypeOf` (`tidepool/runtime/src/session/inspection.rs:18, 857, 881-883`) | probe compile |
 | `typeSearch` | `InspectionQuery::TypeSearch` (`tidepool/runtime/src/session/inspection.rs:20, 871-875, 887-889`) | probe compile |
 

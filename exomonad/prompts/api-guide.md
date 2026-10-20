@@ -280,10 +280,11 @@ When the admitted notebook lists `Introspection`, use qualified
 name's structured declaration or canonical type. A `NameQuery` carries a scope
 (`CurrentScope` or `PublicModule "Project.Work"`), a namespace (`AnyName`,
 `ValueName`, `TypeName`, or `ConstructorName`), and the name. Use
-`currentScopeView` and `scopeBindings` to enumerate the current view, `rowFit`
-to observe an identifier's fit against the executing actor's row, and
-`typeOfExpression` or `typeSearch` for compiled probes. `scopeBindings` reports
-the exact binding count in `refsObserved` and may truncate `refs` at
+`currentScopeView` observes the current view's provenance, `scopeBindings`
+enumerates one admitted scope's published value bindings, `rowFit` observes an
+identifier's fit against the executing actor's row, and `typeOfExpression` or
+`typeSearch` runs compiled probes. `scopeBindings` reports the binding count of
+that admitted scope in `refsObserved` and may truncate `refs` at
 `refsLimit`; `typeSearch` stops at its limit, so a count equal to the limit is
 a lower bound. Enumerating a public module's exports is deliberately absent
 from this surface until the non-compiling world query is wired. A no-match
@@ -298,8 +299,9 @@ detail <- Introspection.info
 display detail
 ```
 
-The fence above is the compiled `info` example. The five shipped verbs are
-compiled in the `IntrospectionFrontDoor` prepared fixture. The toolchain
+The fence above is the compiled `info` example. The five query verbs
+(`currentScopeView`, `rowFit`, `typeOfExpression`, `typeSearch`, `scopeBindings`)
+are compiled in the `IntrospectionFrontDoor` prepared fixture. The toolchain
 prepared-fixture test executes the fixture's `result` entry, so this is
 artifact execution evidence, not a published fence; the `frontDoor` function
 itself is compiled but not invoked.
