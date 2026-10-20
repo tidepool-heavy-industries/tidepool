@@ -335,37 +335,6 @@ fn type_defs() -> Vec<TypeDef> {
             &["One resolved identifier and its structured declaration."],
         ),
         record(
-            "NameEntry",
-            vec![
-                field("nameEntryName", HsType::Text),
-                field("nameEntryModule", HsType::maybe(HsType::Text)),
-                field("nameEntryKind", HsType::Text),
-                field("nameEntryDisplay", HsType::Text),
-                field("nameEntryAvailability", HsType::Named("FitAvailability")),
-                documented_field(
-                    "nameEntryReferences",
-                    HsType::list(HsType::Named("IdentifierRef")),
-                    &["Identifiers this name's declaration mentions or resolves. These are dependencies, not the entry's own identity."],
-                ),
-                documented_field(
-                    "nameEntryReference",
-                    HsType::Named("IdentifierRef"),
-                    &["The entry's canonical resolved identity. Pass this to `info`, `typeOf`, or `rowFit` to ask about the same binding."],
-                ),
-            ],
-            &["One enumerated name: its canonical resolved identity, presentation, row availability, and the identifiers its declaration mentions or resolves. `nameEntryReference` is the identity to chain into `info`/`typeOf`/`rowFit`; `nameEntryReferences` are dependencies, not the entry's own identity."],
-        ),
-        record(
-            "NameList",
-            vec![
-                field("entries", HsType::list(HsType::Named("NameEntry"))),
-                field("namesObserved", HsType::Int),
-                field("namesLimit", HsType::Int),
-                field("nameListProvenance", HsType::Named("ScopeProvenance")),
-            ],
-            &["Name entries retained after dedupe, bounded by the applied limit. `namesObserved` is the retained count, so `namesObserved == namesLimit` means at least that many names matched; the true scope size is not counted. Also records the compile view the answer describes. No verb on this surface returns `NameList` yet; it is the answer shape reserved for the pending public-module export route."],
-        ),
-        record(
             "NameRefList",
             vec![
                 field("refs", HsType::list(HsType::Named("IdentifierRef"))),
@@ -612,8 +581,6 @@ mod tests {
             "data TypeInfo = TypeInfo { typeIdentifier :: IdentifierRef, typeExpression :: TypeExpression, typeProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data ConstructorInfo = ConstructorInfo { constructorRef :: IdentifierRef, constructorType :: TypeExpression, constructorArguments :: [TypeExpression], recordFields :: [FieldInfo] } deriving (Show, Eq)",
             "data FieldInfo = FieldInfo { fieldName :: Text, fieldType :: TypeExpression } deriving (Show, Eq)",
-            "data NameEntry = NameEntry { nameEntryName :: Text, nameEntryModule :: Maybe Text, nameEntryKind :: Text, nameEntryDisplay :: Text, nameEntryAvailability :: FitAvailability, nameEntryReferences :: [IdentifierRef], nameEntryReference :: IdentifierRef } deriving (Show, Eq)",
-            "data NameList = NameList { entries :: [NameEntry], namesObserved :: Int, namesLimit :: Int, nameListProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data FitAvailability = FitAvailable | FitPolymorphic | FitUnavailable | FitUnknown deriving (Show, Eq)",
             "data Fit = Fit { fitAvailability :: FitAvailability, fitIdentifier :: IdentifierRef, fitProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data ExpressionType = ExpressionType { expressionSource :: Text, expressionDisplay :: Text, expressionAvailability :: FitAvailability, expressionProvenance :: ScopeProvenance } deriving (Show, Eq)",

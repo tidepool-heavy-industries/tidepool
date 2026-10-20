@@ -462,76 +462,6 @@ pub(super) struct Fit {
     provenance: ScopeProvenance,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct NameEntry {
-    name: String,
-    module: Option<String>,
-    kind: String,
-    display: String,
-    availability: FitAvailability,
-    references: Vec<IdentifierRef>,
-    reference: IdentifierRef,
-}
-
-impl From<InfoEntry> for NameEntry {
-    fn from(entry: InfoEntry) -> Self {
-        Self {
-            name: entry.name,
-            module: entry.module,
-            kind: entry.kind,
-            display: entry.display,
-            availability: entry.availability.into(),
-            references: entry.references,
-            reference: entry.identity,
-        }
-    }
-}
-
-impl PartialEq for NameList {
-    fn eq(&self, other: &Self) -> bool {
-        self.entries == other.entries
-            && self.observed == other.observed
-            && self.limit == other.limit
-            && self.provenance.same_view(&other.provenance)
-    }
-}
-
-impl Eq for NameList {}
-
-#[derive(Clone, Debug)]
-pub(super) struct NameList {
-    entries: Vec<NameEntry>,
-    observed: usize,
-    limit: usize,
-    provenance: ScopeProvenance,
-}
-
-impl NameList {
-    fn from_entries(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> Self {
-        // The worker deduplicates candidate names and then bounds the encoded
-        // list at `QUERY_RESULT_LIMIT`, so a conforming decode carries at most
-        // that many distinct entries. `observed` is the retained count, not a
-        // scope total: `observed == limit` means "at least limit" and the true
-        // scope size is never counted.
-        //
-        // A longer decode means the worker ignored its budget. Report the cap
-        // rather than the decoded length so the wire never carries a count the
-        // actor cannot justify; the retained entries are still trimmed below.
-        let observed = entries.len().min(QUERY_RESULT_LIMIT);
-        let entries = entries
-            .into_iter()
-            .take(QUERY_RESULT_LIMIT)
-            .map(NameEntry::from)
-            .collect();
-        Self {
-            entries,
-            observed,
-            limit: QUERY_RESULT_LIMIT,
-            provenance,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TypeMatchQuality {
     Exact,
@@ -680,7 +610,6 @@ impl Diagnostic {
 #[derive(Clone)]
 pub(super) enum CompilerQueryAnswer {
     ScopeView(ScopeProvenance),
-    Names(NameList),
     Fit(Fit),
     Expression(ExpressionType),
     Matches(TypeMatches),
@@ -896,7 +825,6 @@ impl ToHaskell for CompilerQueryAnswer {
         let right = matches!(
             self,
             Self::ScopeView(_)
-                | Self::Names(_)
                 | Self::Fit(_)
                 | Self::Expression(_)
                 | Self::Matches(_)
@@ -910,7 +838,6 @@ impl ToHaskell for CompilerQueryAnswer {
                 Self::ScopeView(provenance) => {
                     visit_introspection_provenance(table, visitor, provenance)
                 }
-                Self::Names(names) => visit_name_list(table, visitor, names),
                 Self::Fit(fit) => visit_fit(table, visitor, fit),
                 Self::Expression(expression) => visit_expression_type(table, visitor, expression),
                 Self::Matches(matches) => visit_type_matches(table, visitor, matches),
@@ -979,39 +906,6 @@ fn visit_optional_text(
         }),
         None => visit_named(table, visitor, "GHC.Maybe", "Nothing", |_| Ok(())),
     }
-}
-
-fn visit_name_entry(
-    table: &DataConTable,
-    visitor: &mut dyn HaskellVisitor,
-    entry: &NameEntry,
-) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "NameEntry", |visitor| {
-        entry.name.visit(table, visitor)?;
-        visit_optional_text(table, visitor, entry.module.as_ref())?;
-        entry.kind.visit(table, visitor)?;
-        entry.display.visit(table, visitor)?;
-        visit_fit_availability(table, visitor, entry.availability)?;
-        visit_structural_list(table, visitor, &entry.references, |reference, visitor| {
-            visit_introspection_identifier(table, visitor, reference)
-        })?;
-        visit_introspection_identifier(table, visitor, &entry.reference)
-    })
-}
-
-fn visit_name_list(
-    table: &DataConTable,
-    visitor: &mut dyn HaskellVisitor,
-    names: &NameList,
-) -> Result<(), BridgeError> {
-    visit_core(table, visitor, "NameList", |visitor| {
-        visit_structural_list(table, visitor, &names.entries, |entry, visitor| {
-            visit_name_entry(table, visitor, entry)
-        })?;
-        actor_haskell_int(names.observed as u64, "observed name count")?.visit(table, visitor)?;
-        actor_haskell_int(names.limit as u64, "name list limit")?.visit(table, visitor)?;
-        visit_introspection_provenance(table, visitor, &names.provenance)
-    })
 }
 
 fn visit_expression_type(
@@ -2520,7 +2414,6 @@ mod tests {
     fn answer_name(answer: &CompilerQueryAnswer) -> &'static str {
         match answer {
             CompilerQueryAnswer::ScopeView(_) => "scope view",
-            CompilerQueryAnswer::Names(_) => "names",
             CompilerQueryAnswer::Fit(_) => "fit",
             CompilerQueryAnswer::Expression(_) => "expression",
             CompilerQueryAnswer::Matches(_) => "matches",

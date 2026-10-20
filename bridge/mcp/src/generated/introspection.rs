@@ -31,8 +31,6 @@ pub fn introspection_decl() -> crate::EffectDecl {
             "data ClassMethodInfo = ClassMethodInfo { classMethodRef :: IdentifierRef, classMethodType :: TypeExpression } deriving (Show, Eq)",
             "data DeclarationInfo = ValueDeclaration TypeExpression | DataDeclaration [Text] [ConstructorInfo] | NewtypeDeclaration [Text] ConstructorInfo | TypeSynonymDeclaration [Text] TypeExpression | ClassDeclaration [Text] [TypeExpression] [ClassMethodInfo] | ConstructorDeclaration IdentifierRef ConstructorInfo | RecordSelectorDeclaration IdentifierRef TypeExpression deriving (Show, Eq)",
             "data IdentifierInfo = IdentifierInfo { inspectedIdentifier :: IdentifierRef, identifierDeclaration :: DeclarationInfo, identifierParent :: Maybe IdentifierRef, identifierProvenance :: ScopeProvenance } deriving (Show, Eq)",
-            "data NameEntry = NameEntry { nameEntryName :: Text, nameEntryModule :: Maybe Text, nameEntryKind :: Text, nameEntryDisplay :: Text, nameEntryAvailability :: FitAvailability, nameEntryReferences :: [IdentifierRef], nameEntryReference :: IdentifierRef } deriving (Show, Eq)",
-            "data NameList = NameList { entries :: [NameEntry], namesObserved :: Int, namesLimit :: Int, nameListProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data NameRefList = NameRefList { refs :: [IdentifierRef], refsObserved :: Int, refsLimit :: Int, refListProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data FitAvailability = FitAvailable | FitPolymorphic | FitUnavailable | FitUnknown deriving (Show, Eq)",
             "data Fit = Fit { fitAvailability :: FitAvailability, fitIdentifier :: IdentifierRef, fitProvenance :: ScopeProvenance } deriving (Show, Eq)",

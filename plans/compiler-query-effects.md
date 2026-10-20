@@ -108,22 +108,25 @@ the Haskell wire contract, and the schema test pins the rendered declarations
 (`bridge/protocol/src/effects/introspection.rs:621-640`).
 
 ```haskell
-data NameEntry = NameEntry
-  { nameEntryName         :: Text
-  , nameEntryModule       :: Maybe Text
-  , nameEntryKind         :: Text
-  , nameEntryDisplay      :: Text
-  , nameEntryAvailability :: FitAvailability
-  , nameEntryReferences   :: [IdentifierRef]
-  , nameEntryReference    :: IdentifierRef
-  }
-
-data NameList = NameList
-  { entries            :: [NameEntry]
-  , namesObserved      :: Int
-  , namesLimit         :: Int
-  , nameListProvenance :: ScopeProvenance
-  }
+-- `NameEntry`/`NameList` were the rich enumeration answer for `moduleExports`.
+-- They are deleted from the protocol with the verb; the sketch below records
+-- the design input for the pending public-module export route.
+-- data NameEntry = NameEntry
+--   { nameEntryName         :: Text
+--   , nameEntryModule       :: Maybe Text
+--   , nameEntryKind         :: Text
+--   , nameEntryDisplay      :: Text
+--   , nameEntryAvailability :: FitAvailability
+--   , nameEntryReferences   :: [IdentifierRef]
+--   , nameEntryReference    :: IdentifierRef
+--   }
+--
+-- data NameList = NameList
+--   { entries            :: [NameEntry]
+--   , namesObserved      :: Int
+--   , namesLimit         :: Int
+--   , nameListProvenance :: ScopeProvenance
+--   }
 
 data FitAvailability = FitAvailable | FitPolymorphic | FitUnavailable | FitUnknown
 
@@ -194,8 +197,8 @@ Two distinctions are load-bearing:
 
 ### Enumeration answer shape
 
-Enumeration does not return `NameEntry`. `NameEntry` is the `info` answer, and
-three of its fields are structurally unavailable world-side: `nameEntryDisplay`
+Enumeration does not return `NameEntry`. `NameEntry` was the `moduleExports`
+answer, and three of its fields are structurally unavailable world-side: `nameEntryDisplay`
 needs GHC `ppr` or an interface decode, `nameEntryAvailability` needs the
 executing actor's effect row, and `nameEntryReferences` needs GHC `NameInfo`
 (`bridge/protocol/src/effects/introspection.rs:357-377`). Encoding them would
@@ -214,8 +217,8 @@ data NameRefList = NameRefList
 ```
 
 `IdentifierRef` is the identity to chain into `info`, `typeOf`, or `rowFit`.
-`NameEntry`/`NameList` are the rich enumeration records retained for the
-pending public-module export route; no verb in this delivery returns them.
+`NameEntry`/`NameList` are deleted from the protocol with `moduleExports`; the
+sketch above stays as design input for the pending held-HPT route.
 `NameRefList` is committed at
 `bridge/protocol/src/effects/introspection.rs:56, 389` and regenerated in
 `bridge/mcp/src/generated/introspection.rs`; there is no separate `NameRef`
@@ -252,12 +255,6 @@ is the entry's canonical resolved identity. This is the source for the protocol
 
 Evidence for each protocol shape:
 
-- `NameEntry` carries the availability, dependency references, and canonical
-  reference shown: `bridge/protocol/src/effects/introspection.rs:357-377`;
-  generated text `bridge/mcp/src/generated/introspection.rs:35`.
-- `NameList` adds `nameListProvenance` beside the observed and retained counts:
-  `bridge/protocol/src/effects/introspection.rs:378-387`; generated text
-  `bridge/mcp/src/generated/introspection.rs:36`.
 - `FitAvailability` has exactly the four constructors shown:
   `bridge/protocol/src/effects/introspection.rs:388-396`; generated text
   `bridge/mcp/src/generated/introspection.rs:37`.
@@ -535,9 +532,9 @@ consumer should reuse. Costs are as measured by the source path, not the target.
   for compiler diagnostics, not for every answer
   (`bridge/protocol/src/effects/introspection.rs:448-458`).
 - Batching. Each verb asks one typed question and returns one `Either`
-  (`bridge/protocol/src/effects/introspection.rs:189-198`); `NameList` and
+  (`bridge/protocol/src/effects/introspection.rs:189-198`); `NameRefList` and
   `TypeMatches` expose observed and retained counts but no continuation token
-  (`bridge/protocol/src/effects/introspection.rs:378-387, 438-447`).
+  (`bridge/protocol/src/effects/introspection.rs:438-447`).
 - A second effect per cost class. Cost is documentation and prompt guidance;
   the effect and its `Member Introspection effs` constraint stay single
   (`bridge/protocol/src/effects/introspection.rs:603-619`).
