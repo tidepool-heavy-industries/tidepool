@@ -128,8 +128,36 @@ impl PublicationWriter {
         let _ = self.terminal.set(observed);
         #[cfg(test)]
         if self.lose_delivery_after_completion {
-            // The actual body result and notification were observed above;
-            // remove only their sole affine delivery at this controlled seam.
+            eprintln!("publication delivery-loss control: {observed:?}");
+            if let PublicationDelivery::Observed { body } = &delivery {
+                let detail = match body.completion() {
+                    ActorGenerationPublicationBodyCompletion::Observed { outcome, .. } => {
+                        match outcome {
+                            Ok(ActorGenerationBodyOutcome::Visible { .. }) => None,
+                            Ok(ActorGenerationBodyOutcome::Refused(detail)) => {
+                                Some(format!("Refused: {detail}"))
+                            }
+                            Ok(ActorGenerationBodyOutcome::Unconfirmed(detail)) => {
+                                Some(format!("Unconfirmed: {detail}"))
+                            }
+                            Err(error) => Some(format!("Failed: {error:?}")),
+                        }
+                    }
+                    ActorGenerationPublicationBodyCompletion::Unobserved { primary } => {
+                        Some(format!("Unobserved: {primary:?}"))
+                    }
+                };
+                if let Some(detail) = detail {
+                    let truncated = detail.chars().count() > 4096;
+                    eprintln!(
+                        "publication delivery-loss primary: {}{}",
+                        detail.chars().take(4096).collect::<String>(),
+                        if truncated { " [truncated]" } else { "" },
+                    );
+                }
+            }
+            // Observe the actual body result, then remove only its sole affine
+            // delivery. Printed diagnostics do not settle or confirm publication.
             drop(self.sender.take());
             self.notify();
             drop(delivery);
