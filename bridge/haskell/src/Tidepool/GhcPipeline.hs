@@ -2395,7 +2395,19 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   [(unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
                   | ModuleNode _ summary <- mgModSummaries' graph]
             pure planned
-              { cpBeforeModule = \summary -> do
+              { cpAfterLoad = \ingress -> do
+                  cpAfterLoad planned ingress
+                  case operation of
+                    WorldCellSource _ _ prefix _ _ _ -> do
+                      summary <- case [current | ModuleNode _ current <- mgModSummaries' (cpLoadGraph planned)
+                          , ms_mod_name current == target, ms_hsc_src current == HsSrcFile] of
+                        [current] -> pure current
+                        _ -> liftIO (throwIO WorldCellCorrupt)
+                      environment <- getSession
+                      ready <- liftIO (restoreWorldCellPrefixFor summary environment prefix)
+                      setSession ready
+                    WorldObservationSource {} -> pure ()
+              , cpBeforeModule = \summary -> do
                   cpBeforeModule planned summary
                   case operation of
                     WorldCellSource _ _ prefix _ _ _ -> do
@@ -5108,6 +5120,30 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           current <- getSession
           setSession current {hsc_mod_graph=mapMG restoreFreshSource (hsc_mod_graph current)}
           cpAfterLoad plan freshIngress
+          -- Make can replace a successful source home with an interface-only
+          -- details knot. World completion retains the actual finalized source
+          -- owner before any declaration or native consumer observes it.
+          when (pvWorldOnly variant) $ do
+            finalized <- liftIO (readIORef finalizedModulesRef)
+            current <- getSession
+            completed <- liftIO $ foldM (\environment (name,source) -> do
+              let home = finalizedHomeModInfo source
+                  iface = hm_iface home
+                  owner = mi_module iface
+                  summaries = [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+                    , ms_mod summary == owner, ms_hsc_src summary == HsSrcFile]
+              unless (name == moduleName owner && mi_hsc_src iface == HsSrcFile
+                  && moduleUnit owner == homeUnitAsUnit (hsc_home_unit environment)
+                  && length summaries == 1) (throwIO WorldCellCorrupt)
+              selected <- case lookupHpt (hsc_HPT environment) name of
+                Nothing -> pure home
+                Just previous -> do
+                  unless (sameWorldCellHome previous home
+                      && mi_hsc_src (hm_iface previous) == HsSrcFile) (throwIO WorldCellCorrupt)
+                  pure home {hm_linkable=hm_linkable previous}
+              pure (hscUpdateHPT (\table -> addToHpt table name selected) environment))
+              current (Map.toList finalized)
+            setSession completed
           pending <- liftIO (readIORef pendingFinalizationsRef)
           quotes <- liftIO (readIORef frontendQuasiQuotesRef)
           unless (Map.null pending && Map.null quotes) $
