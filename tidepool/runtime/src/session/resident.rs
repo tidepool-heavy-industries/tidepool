@@ -908,7 +908,7 @@ pub struct HostBindingPrototype {
     representation: HostRepresentation,
     authority_digest: [u8; 32],
     include_paths: Vec<std::path::PathBuf>,
-    _source_owner: Arc<dyn std::any::Any + Send + Sync>,
+    _source_owner: super::admission::RuntimeHostPrototypeSource,
 }
 
 impl HostBindingPrototype {
@@ -4221,10 +4221,16 @@ where
         plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: HostBindingType,
+        authority_digest: [u8; 32],
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state
-            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state.admit_world_planned_host_carrier_cell_in(
+            scope,
+            plan,
+            binding,
+            expected,
+            authority_digest,
+        )
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -6213,13 +6219,14 @@ where
             .code()
             .into_host_prototype()
             .map_err(SessionError::Compile)?;
+        let receipt = admission.prefix().admission().host_prototype_receipt()?;
         let prototype = Arc::new(HostBindingPrototype {
             compiler,
             code: Arc::new(code),
             representation: carrier.representation,
-            authority_digest: admission.prefix().admission().authority_digest()?,
-            include_paths: admission.prefix().admission().include_paths()?.to_vec(),
-            _source_owner: admission.prefix().admission().specification()?.clone(),
+            authority_digest: receipt.authority_digest,
+            include_paths: admission.item().include_paths().to_vec(),
+            _source_owner: receipt.source,
         });
         self.host_binding_prototypes
             .retain(|old| old.representation.host_type() != prototype.representation.host_type());

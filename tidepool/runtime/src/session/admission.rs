@@ -882,7 +882,24 @@ enum RuntimeCellPurpose {
     HostCarrier {
         binding: String,
         expected: super::resident::HostBindingType,
+        authority_digest: [u8; 32],
     },
+}
+
+/// Source custody for a reusable host type prototype, without runtime target custody.
+pub(super) enum RuntimeHostPrototypeSource {
+    Finite {
+        _specification: Arc<dyn Any + Send + Sync>,
+    },
+    World {
+        _original_source: Arc<RuntimeOriginalSource>,
+        _reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
+    },
+}
+
+pub(super) struct RuntimeHostPrototypeReceipt {
+    pub(super) authority_digest: [u8; 32],
+    pub(super) source: RuntimeHostPrototypeSource,
 }
 
 impl RuntimeCellPurpose {
@@ -892,8 +909,13 @@ impl RuntimeCellPurpose {
             Self::Observation => {}
             Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
             Self::NativeSetup => frame(b"TidepoolNativeSetupAdmission1"),
-            Self::HostCarrier { binding, expected } => {
-                frame(b"TidepoolHostCarrierAdmission1");
+            Self::HostCarrier {
+                binding,
+                expected,
+                authority_digest,
+            } => {
+                frame(b"TidepoolHostCarrierAdmission2");
+                frame(authority_digest);
                 frame(binding.as_bytes());
                 expected.frame_authorization(frame);
             }
@@ -2626,9 +2648,38 @@ impl RuntimeCellAdmission {
     }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
         match &self.purpose {
-            RuntimeCellPurpose::HostCarrier { binding, expected } => Some((binding, *expected)),
+            RuntimeCellPurpose::HostCarrier {
+                binding, expected, ..
+            } => Some((binding, *expected)),
             _ => None,
         }
+    }
+    pub(super) fn host_prototype_receipt(
+        &self,
+    ) -> Result<RuntimeHostPrototypeReceipt, SessionError> {
+        let RuntimeCellPurpose::HostCarrier {
+            authority_digest, ..
+        } = &self.purpose
+        else {
+            return Err(SessionError::StaleStagedDeclaration);
+        };
+        let source = match &self.compiler_basis {
+            RuntimeCellCompilerBasis::Finite(inputs) => RuntimeHostPrototypeSource::Finite {
+                _specification: inputs.specification.clone(),
+            },
+            RuntimeCellCompilerBasis::World {
+                original_source,
+                reservation,
+                ..
+            } => RuntimeHostPrototypeSource::World {
+                _original_source: original_source.clone(),
+                _reservation: reservation.clone(),
+            },
+        };
+        Ok(RuntimeHostPrototypeReceipt {
+            authority_digest: *authority_digest,
+            source,
+        })
     }
     pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
         Ok(&self.finite_inputs()?.view)
@@ -4199,7 +4250,11 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            RuntimeCellPurpose::HostCarrier { binding, expected },
+            RuntimeCellPurpose::HostCarrier {
+                binding,
+                expected,
+                authority_digest,
+            },
             compile_inputs,
         )
     }
@@ -5027,6 +5082,7 @@ impl PersistentSession {
         plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: super::resident::HostBindingType,
+        authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         let (plan, operand) = plan.into_parts();
         if operand.is_some() || plan.operand().is_some() {
@@ -5096,7 +5152,11 @@ impl PersistentSession {
             scope,
             plan,
             None,
-            RuntimeCellPurpose::HostCarrier { binding, expected },
+            RuntimeCellPurpose::HostCarrier {
+                binding,
+                expected,
+                authority_digest,
+            },
             retained_scope,
             original_source,
             published.base.source.clone(),
