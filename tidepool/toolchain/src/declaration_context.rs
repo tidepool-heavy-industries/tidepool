@@ -16507,6 +16507,141 @@ mod tests {
         })
     }
 
+    #[test]
+    fn compiler_role_conflict_diagnostics_preserve_shared_and_overlapping_births() {
+        let root = identity("fixture", "Alpha");
+        let dependency = identity("fixture", "Beta");
+        let mut source = published_original_choice_history_fixture().clone();
+        let target = source.original_instance_target().unwrap().clone();
+        edit_lexical(&mut source, |nodes| {
+            nodes
+                .iter_mut()
+                .find(|node| node.owner == target)
+                .unwrap()
+                .imports
+                .push(dependency.clone());
+            nodes
+                .iter_mut()
+                .find(|node| node.owner == root)
+                .unwrap()
+                .imports
+                .push(dependency.clone());
+            nodes.push(ExactLexicalNode {
+                owner: dependency.clone(),
+                imports: vec![],
+            });
+        });
+        let publish = |revision| {
+            let prior = source
+                .issue_published_source_original(revision, "beta-input", &dependency)
+                .unwrap();
+            let issued = source
+                .clone()
+                .with_published_source_originals(&prior)
+                .unwrap()
+                .issue_published_source_original("alpha-revision", "alpha-input", &root)
+                .unwrap();
+            issued
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+                .clone()
+        };
+        let first = publish("beta-first");
+        let repeated = first.clone();
+        let overlapping = publish("beta-second");
+        let authority = |role: &CompilerInputRole| match role {
+            CompilerInputRole::PublishedSourceOriginal {
+                native_authority, ..
+            } => Arc::clone(native_authority.facts()),
+            _ => panic!("the actual publication issuer must endorse its original"),
+        };
+        let first_authority = authority(&first);
+        let repeated_authority = authority(&repeated);
+        let overlapping_authority = authority(&overlapping);
+        assert!(Arc::ptr_eq(&first_authority, &repeated_authority));
+        assert!(!Arc::ptr_eq(&first_authority, &overlapping_authority));
+        assert_ne!(
+            first_authority.commitment(),
+            overlapping_authority.commitment()
+        );
+        assert_eq!(first.interface(), overlapping.interface());
+        assert_eq!(first.original(), overlapping.original());
+        let first_dependency = first_authority.roles[&dependency].as_role();
+        let overlapping_dependency = overlapping_authority.roles[&dependency].as_role();
+        assert!(first_dependency.is_published_source_original());
+        assert!(overlapping_dependency.is_published_source_original());
+        assert_eq!(
+            first_dependency.original(),
+            overlapping_dependency.original()
+        );
+        let incoming = CompilerInputRole::InterfaceOnly {
+            interface: source.compiler_input_projection().snapshot_roles()[&dependency].interface(),
+        };
+        let write_conflict = |role: CompilerInputRole| {
+            let mut projection = CompilerInputProjection::default();
+            projection.admit_role(root.clone(), role.clone()).unwrap();
+            let Err(CompileError::ArtifactInventory(error)) =
+                projection.admit_role(root.clone(), incoming.clone())
+            else {
+                panic!("a foreign interface must refuse at the role owner")
+            };
+            assert!(matches!(
+                &error.failure,
+                crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict { owner }
+                    if owner == &root
+            ));
+            let destination = tempfile::tempdir().unwrap();
+            error.retain_owner_conflict(destination.path()).unwrap();
+            let bytes =
+                std::fs::read(destination.path().join("owner-conflict/index.json")).unwrap();
+            assert!(bytes.len() < 4096);
+            let index: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(index["boundary"], "compiler_role");
+            assert_eq!(index.as_object().unwrap().len(), 3);
+            assert_eq!(index["incoming_role"]["kind"], "interface_only");
+            assert_eq!(index["incoming_role"].as_object().unwrap().len(), 2);
+            let CompilerInputRole::PublishedSourceOriginal {
+                interface,
+                original,
+                selection_sha256,
+                native_authority,
+                ..
+            } = role
+            else {
+                unreachable!()
+            };
+            let observed = &index["existing_role"];
+            assert_eq!(observed["kind"], "published_source_original");
+            assert_eq!(observed.as_object().unwrap().len(), 5);
+            assert_eq!(
+                observed["interface"],
+                serde_json::to_value(interface).unwrap()
+            );
+            assert_eq!(
+                observed["original"],
+                serde_json::to_value(original).unwrap()
+            );
+            assert_eq!(
+                observed["selection_sha256"],
+                serde_json::to_value(selection_sha256).unwrap()
+            );
+            assert_eq!(
+                observed["native_authority_cid"],
+                serde_json::to_value(native_authority.facts().commitment()).unwrap()
+            );
+            assert!(observed.get("selection").is_none());
+            assert!(observed.get("native_authority").is_none());
+            bytes
+        };
+        let first = write_conflict(first);
+        let repeated = write_conflict(repeated);
+        let overlapping = write_conflict(overlapping);
+        assert_eq!(first, repeated);
+        assert_ne!(first, overlapping);
+        assert!(first.len().abs_diff(overlapping.len()) < 128);
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(24))]
         #[test]

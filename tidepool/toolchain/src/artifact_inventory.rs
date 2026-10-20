@@ -1454,6 +1454,37 @@ impl ArtifactOwnerConflictEvidence {
         }
     }
     fn metadata(&self) -> serde_json::Value {
+        // Existing commitments identify the exact birth without expanding its
+        // historical facts, selection proofs or per-view native acquisition.
+        fn role(role: &CompilerInputRole) -> serde_json::Value {
+            match role {
+                CompilerInputRole::InterfaceOnly { interface } => serde_json::json!({
+                    "kind": "interface_only",
+                    "interface": interface,
+                }),
+                CompilerInputRole::ReusableOriginal {
+                    interface,
+                    original,
+                } => serde_json::json!({
+                    "kind": "reusable_original",
+                    "interface": interface,
+                    "original": original,
+                }),
+                CompilerInputRole::PublishedSourceOriginal {
+                    interface,
+                    original,
+                    selection_sha256,
+                    native_authority,
+                    ..
+                } => serde_json::json!({
+                    "kind": "published_source_original",
+                    "interface": interface,
+                    "original": original,
+                    "selection_sha256": selection_sha256,
+                    "native_authority_cid": native_authority.facts().commitment(),
+                }),
+            }
+        }
         match self {
             Self::ArtifactSelection {
                 existing,
@@ -1472,8 +1503,8 @@ impl ArtifactOwnerConflictEvidence {
             }),
             Self::CompilerRole { existing, incoming } => serde_json::json!({
                 "boundary": "compiler_role",
-                "existing_role": existing,
-                "incoming_role": incoming,
+                "existing_role": role(existing),
+                "incoming_role": role(incoming),
             }),
         }
     }
@@ -18867,7 +18898,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_role_conflict_reports_bounded_exact_ids_and_retains_full_selection() {
+    fn compiler_role_conflict_reports_bounded_exact_ids_and_commitments() {
         let owner = ExactModuleIdentity {
             unit: "unit".into(),
             module: "Shared".into(),
@@ -18933,9 +18964,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(index["boundary"], "compiler_role");
+        assert_eq!(index["incoming_role"]["kind"], "published_source_original");
         assert_eq!(
-            index["incoming_role"],
-            serde_json::to_value(incoming).unwrap()
+            index["incoming_role"]["interface"],
+            serde_json::to_value(incoming.interface()).unwrap()
+        );
+        let CompilerInputRole::PublishedSourceOriginal {
+            original,
+            selection_sha256,
+            native_authority,
+            ..
+        } = incoming
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            index["incoming_role"]["original"],
+            serde_json::to_value(original).unwrap()
+        );
+        assert_eq!(
+            index["incoming_role"]["selection_sha256"],
+            serde_json::to_value(selection_sha256).unwrap()
+        );
+        assert_eq!(
+            index["incoming_role"]["native_authority_cid"],
+            serde_json::to_value(native_authority.facts().commitment()).unwrap()
+        );
+        assert_eq!(index["incoming_role"].as_object().unwrap().len(), 5);
+        assert!(
+            std::fs::metadata(destination.path().join("owner-conflict/index.json"))
+                .unwrap()
+                .len()
+                < 4096
         );
     }
 
