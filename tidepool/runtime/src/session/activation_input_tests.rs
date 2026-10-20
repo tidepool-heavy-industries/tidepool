@@ -25,23 +25,197 @@ impl OutputSink for EmptyOutput {
     }
 }
 
-type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+type RuntimeTestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+struct TestSession {
+    // Drop the machine before its actual notebook source lease.
+    resident: RuntimeTestSession,
+    public_source: Arc<crate::session::RuntimeLexicalScopeLease>,
+}
+
+impl std::ops::Deref for TestSession {
+    type Target = RuntimeTestSession;
+    fn deref(&self) -> &Self::Target {
+        &self.resident
+    }
+}
+
+impl std::ops::DerefMut for TestSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.resident
+    }
+}
+
+impl TestSession {
+    fn unbootstrapped(
+        handlers: frunk::HNil,
+        output: EmptyOutput,
+        nursery: usize,
+        library: Option<SessionLib>,
+    ) -> Self {
+        let mut resident = RuntimeTestSession::unbootstrapped(handlers, output, nursery, library);
+        let public_source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: public_source.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        Self {
+            resident,
+            public_source,
+        }
+    }
+
+    fn public_scope(&self) -> ScopeId {
+        self.public_source.scope()
+    }
+
+    fn public_context(&self) -> SessionRunContext {
+        SessionRunContext {
+            lexical_scope: self.public_scope(),
+            ..SessionRunContext::ROOT
+        }
+    }
+
+    fn set_run_context(&mut self, context: SessionRunContext) -> Result<(), ResidentError> {
+        self.resident.set_run_context(context)
+    }
+
+    fn retain_visible_binding_custody(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<RootCustody>, ResidentError> {
+        let scope = self.resident.run_context().lexical_scope;
+        let Some(binding) = self
+            .resident
+            .state
+            .resolve_in(scope, name)
+            .map(|entry| entry.id)
+        else {
+            return Ok(None);
+        };
+        self.resident
+            .retain_binding_custody_in(scope, name, binding)
+    }
+
+    fn bootstrap_world(&mut self, recipe: &InputRecipe) {
+        let source = self.public_source.clone();
+        let scope = self.public_scope();
+        let admitted = self
+            .resident
+            .capture_inspection_world_in(scope, &recipe.reference, source.original_source())
+            .unwrap();
+        let settled = source
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| {
+                    crate::session::run_admitted_compiler_world(owner, admitted, || {
+                        Ok(Some(recipe.sources.clone()))
+                    })
+                },
+            )
+            .unwrap();
+        assert!(settled.close().resources_retired());
+        let completed = crate::session::finish_admitted_compiler_world(settled).unwrap();
+        assert!(self.resident.install_compiler_world_if_current(
+            &completed,
+            &recipe.reference,
+            source.original_source()
+        ));
+    }
+}
 
 /// The same owned source bytes and includes supply the admission and compiler.
 struct InputRecipe {
     preamble: String,
     row: String,
     include: Vec<PathBuf>,
+    reference: crate::session::GenerationArtifactReference,
+    sources: Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
 }
 
 impl InputRecipe {
-    fn digest(&self) -> [u8; 32] {
-        let mut digest = blake3::Hasher::new();
-        for bytes in [self.preamble.as_bytes(), self.row.as_bytes()] {
-            digest.update(&(bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
+    fn capture(preamble: String, row: String, include: Vec<PathBuf>) -> Self {
+        use std::io::Read;
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let owner = Arc::new(tempfile::tempdir().unwrap());
+        let mut roots = Vec::new();
+        let mut paths = Vec::new();
+        let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
+        for (ordinal, input) in include.iter().enumerate() {
+            remaining = remaining
+                .checked_sub(4)
+                .expect("source root framing fits capture allowance");
+            let files = tidepool_toolchain::cache::source_root_manifest(input).unwrap();
+            let destination = owner.path().join(format!("root-{ordinal}"));
+            std::fs::create_dir_all(&destination).unwrap();
+            let mut bodies = std::collections::BTreeMap::new();
+            for (relative, digest) in &files {
+                let path = input.join(relative);
+                let length = std::fs::metadata(&path).unwrap().len();
+                let framed = 8u64
+                    .checked_add(u64::try_from(relative.as_os_str().len()).unwrap())
+                    .and_then(|n| n.checked_add(length))
+                    .unwrap();
+                remaining = remaining
+                    .checked_sub(framed)
+                    .expect("fixture source capture fits compiler allowance before retention");
+                let mut body = Vec::new();
+                std::fs::File::open(&path)
+                    .unwrap()
+                    .take(length.checked_add(1).unwrap())
+                    .read_to_end(&mut body)
+                    .unwrap();
+                assert_eq!(body.len() as u64, length, "source changed during capture");
+                assert_eq!(
+                    blake3::hash(&body).to_hex().as_str(),
+                    digest,
+                    "source changed after manifest capture"
+                );
+                let target = destination.join(relative);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, &body).unwrap();
+                bodies.insert(relative.clone(), Arc::<[u8]>::from(body));
+            }
+            roots.push(CapturedCompilerSourceRoot {
+                manifest: tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
+                    .unwrap(),
+                bodies,
+            });
+            paths.push(destination);
         }
-        *digest.finalize().as_bytes()
+        let manifests = roots
+            .iter()
+            .map(|root| root.manifest.clone())
+            .collect::<Vec<_>>();
+        let identity = tidepool_toolchain::cache::source_manifests_identity(
+            b"runtime-activation-input-fixture",
+            &manifests,
+        );
+        let reference = crate::session::GenerationArtifactReference::capture(
+            serde_json::to_vec(&(&preamble, &row, identity)).unwrap(),
+        );
+        let sources = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                roots,
+                Arc::from(reference.bytes()),
+                owner,
+            )
+            .unwrap(),
+        );
+        Self {
+            preamble,
+            row,
+            include: paths,
+            reference,
+            sources,
+        }
     }
 }
 
@@ -124,11 +298,7 @@ impl InputFixture {
                 preamble = insert_preamble_imports(&preamble, import);
             }
         }
-        let recipe = Arc::new(InputRecipe {
-            preamble,
-            row: "'[Replies]".into(),
-            include,
-        });
+        let recipe = Arc::new(InputRecipe::capture(preamble, "'[Replies]".into(), include));
         (root, recipe)
     }
 
@@ -164,13 +334,21 @@ impl InputFixture {
             crate::DEFAULT_NURSERY_SIZE,
             Some(library),
         );
+        let public_context = resident.public_context();
         resident
             .set_actor_execution(
-                SessionRunContext::ROOT,
+                public_context,
                 EffectRunPolicy::SuspendAll,
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
             .unwrap();
+        assert_ne!(resident.public_scope(), ScopeId::ROOT);
+        assert!(matches!(
+            source_action(&mut resident, |resident, _| resident
+                .begin_private_execution(ScopeId::ROOT)),
+            Err(SessionError::MissingPublishedCompilerWorld(ScopeId::ROOT))
+        ));
+        resident.bootstrap_world(recipe);
         let previous_context = resident.run_context();
         let execution = begin_fixture_execution(&mut resident);
         resident
@@ -231,7 +409,7 @@ impl InputFixture {
             .expect("receiver settlement retained the checked value-interface proof");
         assert!(Arc::ptr_eq(retained, &interface));
         let published = resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .unwrap();
         for binder in &bound {
             assert!(
@@ -262,7 +440,7 @@ impl InputFixture {
         ));
         assert!(resident.parked_holes().contains(&hole.cont_id()));
         let reply = resident
-            .retain_binding_custody("activationUnitReply")
+            .retain_visible_binding_custody("activationUnitReply")
             .expect("retain the genuine native Unit reply")
             .expect("compiled Unit reply binding is installed");
         let publication = suspended(
@@ -309,7 +487,7 @@ impl InputFixture {
             .unwrap()
             .expect("original RunRequest remains a live native value");
         let receiver = resident
-            .retain_binding_custody("activationReceiver")
+            .retain_visible_binding_custody("activationReceiver")
             .unwrap()
             .expect("real compiled native receiver");
         let activation = suspended(
@@ -355,18 +533,32 @@ impl InputFixture {
 /// holds the close-report sink.
 fn source_action<T>(
     resident: &mut TestSession,
-    action: impl FnOnce(&mut TestSession, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    action: impl FnOnce(&mut RuntimeTestSession, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+) -> T {
+    let original = resident.public_source.original_source().clone();
+    source_action_with_original(&mut resident.resident, original, action)
+}
+
+fn source_action_with_original<T>(
+    resident: &mut RuntimeTestSession,
+    original: Arc<crate::session::RuntimeOriginalSource>,
+    action: impl FnOnce(&mut RuntimeTestSession, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
 ) -> T {
     if crate::CompilerTransactionOrigin::current().is_some() {
+        let owner = resident
+            .state
+            .source_transaction
+            .as_ref()
+            .expect("ambient compiler phase has its actual source owner");
+        owner
+            .admit_original(&original, None)
+            .expect("nested fixture phase matches its held source owner");
         let mut settlement = |_close| {};
         return action(resident, &mut settlement);
     }
-    let source = resident
-        .mint_isolated_scope_with_lease()
-        .expect("mint the fixture compiler source lease");
     let settled = resident
         .with_source_compiler_transaction(
-            source.original_source().clone(),
+            original,
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(),
             None,
@@ -385,11 +577,15 @@ fn source_action<T>(
 fn begin_fixture_execution(
     resident: &mut TestSession,
 ) -> Arc<crate::session::PrivateExecutionAdmission> {
-    Arc::new(source_action(resident, |resident, _| {
+    let scope = resident.public_scope();
+    let source = resident.public_source.original_source().clone();
+    let execution = Arc::new(source_action(resident, |resident, _| {
         resident
-            .begin_private_execution(ScopeId::ROOT)
+            .begin_private_execution(scope)
             .expect("begin the fixture private source execution")
-    }))
+    }));
+    assert!(Arc::ptr_eq(&execution.original_source().unwrap(), &source));
+    execution
 }
 
 fn publish_checked_fixture(
@@ -554,11 +750,11 @@ fn suspended(outcome: ResidentOutcome) -> ResidentHole {
 #[test]
 fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     let (root, recipe) = InputFixture::source_recipe(false);
-    let recipe = InputRecipe {
-        row: "'[Core.AgentTools]".into(),
-        preamble: recipe.preamble.clone(),
-        include: recipe.include.clone(),
-    };
+    let recipe = InputRecipe::capture(
+        recipe.preamble.clone(),
+        "'[Core.AgentTools]".into(),
+        recipe.include.clone(),
+    );
     let library = SessionLib::open(
         SessionId(1789),
         root.path(),
@@ -572,18 +768,20 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
         crate::DEFAULT_NURSERY_SIZE,
         Some(library),
     );
+    let public_context = resident.public_context();
     resident
         .set_actor_execution(
-            SessionRunContext::ROOT,
+            public_context,
             EffectRunPolicy::SuspendAll,
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
+    resident.bootstrap_world(&recipe);
     let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (binders, compiled, reservation) = compile_checked_binding(
@@ -604,10 +802,10 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     .unwrap();
     assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
     publish_checked_fixture(&mut resident, &execution, binders.len());
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     resident.retire_scope(execution.private_scope());
     let installer = resident
-        .retain_binding_custody("receiverInstaller")
+        .retain_visible_binding_custody("receiverInstaller")
         .unwrap()
         .unwrap();
     let realm = RealmId::fresh();
@@ -615,7 +813,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     // Keep real installed code and reply evidence, but carry public observations
     // across the value-to-code boundary without its compiler-issued authority.
     let mut observed = resident
-        .retain_binding_custody("receiverInstaller")
+        .retain_visible_binding_custody("receiverInstaller")
         .unwrap()
         .unwrap();
     observed.provenance =
@@ -975,71 +1173,67 @@ fn try_check_fixture_cell(
     declaration_count: usize,
 ) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
     use crate::session::TemplateSelector;
-    use tidepool_toolchain::checked_cell::CellRecipe;
-
-    let scope = resident.run_context().lexical_scope;
-    let view = resident
-        .compile_view_in(scope)
-        .unwrap()
-        .with_scoped_injection();
-    let imports = view.turn_imports(&SourceImports::new());
-    let preamble = if declaration_count == 0 {
-        recipe.preamble.clone()
-    } else {
-        recipe.preamble.replace(
-            "module Expr where",
-            &format!(
-                "module {} where",
-                resident.next_declaration_module().unwrap().module_name()
-            ),
+    let _ = declaration_count;
+    let imports = SourceImports::new();
+    let template =
+        resident_cell_check_template(&recipe.preamble, &recipe.row, &imports.template_text());
+    let templates =
+        resident_workbench_templates(&recipe.preamble, &recipe.row, &imports.template_text());
+    let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+        source: source.to_owned(),
+        template,
+        turn_templates: templates
+            .into_iter()
+            .map(|template| {
+                let kind = match template.kind {
+                    TemplateSelector::Decl => "decl",
+                    TemplateSelector::Bind => "bind",
+                    TemplateSelector::BindDiscard => "binddiscard",
+                    TemplateSelector::Expr => "expr",
+                };
+                (kind.to_owned(), template.source)
+            })
+            .collect(),
+    });
+    let world = execution.compiler_world().unwrap().clone();
+    let original = resident.public_source.original_source().clone();
+    let settled = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| turn::prepare_world_cell_plan_admitted(owner, &world, specification, None),
         )
-    };
-    let template = resident_cell_check_template(&preamble, &recipe.row, &imports);
-    let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
-    let specification = Arc::new(
-        CellRecipe::new(
-            source.to_string(),
-            template.clone(),
-            templates
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        TemplateSelector::Decl => "decl",
-                        TemplateSelector::Bind => "bind",
-                        TemplateSelector::BindDiscard => "binddiscard",
-                        TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source.clone())
-                })
-                .collect(),
-            view.injected_module_names(),
+        .unwrap();
+    let plan = turn::finish_world_cell_plan_admitted(settled)
+        .expect("parse fixture through its actual World");
+    let admission = source_action(resident, |resident, _| {
+        resident.admit_world_planned_cell_for_execution(execution, plan)
+    })
+    .unwrap();
+    let prepared = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, settlement| turn::prepare_cell_program_admitted(owner, admission, settlement),
         )
-        .unwrap(),
-    );
-    let includes = view.include_paths(&recipe.include);
-    let admission = source_action(resident, |resident, settlement| {
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            specification.clone(),
-            &includes,
-            settlement,
-        )?;
-        Ok::<_, turn::CellCheckFailure>(
-            resident
-                .admit_planned_cell_for_execution(
-                    execution,
-                    plan,
-                    specification.clone(),
-                    specification.specification_digest(),
-                    recipe.digest(),
-                    includes,
-                    None,
-                )
-                .expect("admit checked fixture bindings with their selected interfaces"),
-        )
-    })?;
-    let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-        turn::compile_cell_program_admitted(admission.clone(), settlement)
-    })?;
+        .unwrap();
+    let (checked, program) = turn::finish_cell_program_admitted(prepared)?;
+    if !checked.items.is_empty() {
+        checked
+            .checked_item(0)
+            .expect("the actual World checking source matches its issued owner");
+        let mut edited = checked.clone();
+        edited.checked_source.push('\n');
+        assert!(
+            matches!(edited.checked_item(0), Err(tidepool_toolchain::CompileError::ExtractFailed(detail))
+                if detail == "checked module observation was edited"),
+            "changed checking-source observations cannot retain item authority"
+        );
+    }
     let prefix = resident
         .begin_cell_program(program)
         .unwrap()
@@ -1178,7 +1372,7 @@ fn publish_fixture_declaration(
     resident.set_run_context(previous_context).unwrap();
     resident.retire_scope(execution.private_scope());
     let published = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     for (binder, certificate) in retained {
         assert!(published
@@ -1204,7 +1398,7 @@ fn original_value_probe(
     value: i64,
 ) {
     let previous_context = resident.run_context();
-    let original_bindings = resident.binding_names_in(ScopeId::ROOT);
+    let original_bindings = resident.binding_names_in(resident.public_scope());
     let execution = begin_fixture_execution(resident);
     let private_scope = execution.private_scope();
     resident
@@ -1234,7 +1428,10 @@ fn original_value_probe(
     };
     resident.set_run_context(previous_context).unwrap();
     resident.retire_scope(private_scope);
-    assert_eq!(resident.binding_names_in(ScopeId::ROOT), original_bindings);
+    assert_eq!(
+        resident.binding_names_in(resident.public_scope()),
+        original_bindings
+    );
     assert_eq!(
         result.to_json(),
         serde_json::json!([value, value.to_string()])
@@ -1242,69 +1439,23 @@ fn original_value_probe(
 }
 
 fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixture) {
-    use crate::session::TemplateSelector;
-    use tidepool_toolchain::checked_cell::CellRecipe;
-
     let execution = begin_fixture_execution(resident);
     let scope = execution.private_scope();
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: scope,
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
-    let view = execution.view().unwrap();
-    let imports = view.turn_imports(&SourceImports::new());
-    let template =
-        resident_cell_check_template(&fixture.recipe.preamble, &fixture.recipe.row, &imports);
-    let templates =
-        resident_workbench_templates(&fixture.recipe.preamble, &fixture.recipe.row, &imports);
-    let source = "let ordinaryValue = (42 :: Int)";
-    let specification = Arc::new(
-        CellRecipe::new(
-            source.to_string(),
-            template.clone(),
-            templates
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        TemplateSelector::Decl => "decl",
-                        TemplateSelector::Bind => "bind",
-                        TemplateSelector::BindDiscard => "binddiscard",
-                        TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source.clone())
-                })
-                .collect(),
-            view.injected_module_names(),
-        )
-        .unwrap(),
+    let prepared = check_fixture_cell(
+        resident,
+        &fixture.recipe,
+        "let ordinaryValue = (42 :: Int)",
+        execution,
+        0,
     );
-    let includes = view.include_paths(&fixture.recipe.include);
-    let admission = resident
-        .admit_planned_cell_for_execution(
-            execution.clone(),
-            tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    specification.clone(),
-                    &includes,
-                    settlement,
-                )
-            })
-            .unwrap(),
-            specification.clone(),
-            specification.specification_digest(),
-            fixture.recipe.digest(),
-            includes,
-            None,
-        )
-        .unwrap();
-    let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-        turn::compile_cell_program_admitted(admission.clone(), settlement)
-    })
-    .unwrap();
-    let item = checked.checked_item(0).unwrap();
-    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+    let item = prepared.checked.checked_item(0).unwrap();
+    let prefix = prepared.prefix;
     let reservation = source_action(resident, |resident, _| {
         resident.admit_checked_item(prefix.clone(), item).unwrap()
     });
@@ -1386,9 +1537,10 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
             crate::DEFAULT_NURSERY_SIZE,
             Some(library),
         );
+        let public_context = resident.public_context();
         resident
             .set_actor_execution(
-                SessionRunContext::ROOT,
+                public_context,
                 EffectRunPolicy::SuspendAll,
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
@@ -1398,17 +1550,17 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
 
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::actor_local_decl()]).unwrap();
-    let recipe = InputRecipe {
-        preamble: insert_preamble_imports(
+    let recipe = InputRecipe::capture(
+        insert_preamble_imports(
             &insert_preamble_imports(surface.preamble(), "Tidepool.Actor (receive)"),
             "qualified Tidepool.Aeson.Value as Json",
         ),
-        row: surface.row().into(),
-        include: surface.include_paths().to_vec(),
-    };
+        surface.row().into(),
+        surface.include_paths().to_vec(),
+    );
     let source_root = tempfile::tempdir().unwrap();
     let mut source = fresh(SessionId(1791), &source_root, &recipe);
-    let source_view = source.compile_view_in(ScopeId::ROOT).unwrap();
+    let source_view = source.compile_view_in(source.public_scope()).unwrap();
     let TurnResult::Bind {
         bound, compiled, ..
     } = compile_turn(
@@ -1436,7 +1588,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         ResidentOutcome::Completed { .. }
     ));
     let custody = source
-        .retain_binding_custody("heldRequest")
+        .retain_visible_binding_custody("heldRequest")
         .unwrap()
         .unwrap();
     let original = Arc::clone(&custody.provenance);
@@ -1454,7 +1606,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     // has never executed or installed the producer's request definition.
     let receiver_root = tempfile::tempdir().unwrap();
     let mut receiver = fresh(SessionId(1792), &receiver_root, &recipe);
-    let receiver_view = receiver.compile_view_in(ScopeId::ROOT).unwrap();
+    let receiver_view = receiver.compile_view_in(receiver.public_scope()).unwrap();
     let TurnResult::Bind {
         bound,
         compiled: runner,
@@ -1524,7 +1676,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
     assert!(Arc::ptr_eq(&imported.provenance, &original));
     let runner = receiver
-        .retain_binding_custody("runRequestValue")
+        .retain_visible_binding_custody("runRequestValue")
         .unwrap()
         .unwrap();
     let hole = suspended(
@@ -1561,7 +1713,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     ));
     assert_eq!(receiver.parked_holes(), vec![hole.cont_id()]);
     let answer = receiver
-        .retain_binding_custody("custodyAnswer")
+        .retain_visible_binding_custody("custodyAnswer")
         .unwrap()
         .unwrap();
     let ResidentOutcome::Completed { result, .. } =
@@ -1613,7 +1765,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let mut destination =
         InputFixture::fresh_in(SessionId(1707), &destination_root, &fixture.recipe);
     let wrong_owner = source
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .unwrap();
     let before = destination.residency();
@@ -1639,7 +1791,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     drop(source);
 
     let receiver = destination
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .unwrap();
     let activation = suspended(
@@ -1855,14 +2007,14 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
     .unwrap();
     let mut include = base.include.clone();
     include.push(home);
-    let recipe = Arc::new(InputRecipe {
-        preamble: insert_preamble_imports(
+    let recipe = Arc::new(InputRecipe::capture(
+        insert_preamble_imports(
             &insert_preamble_imports(&base.preamble, "Data.Text (Text)"),
             "qualified ProvenanceSharedRequest as Shared",
         ),
-        row: base.row.clone(),
+        base.row.clone(),
         include,
-    });
+    ));
     let session = SessionId(1791);
     let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
         .unwrap()
@@ -1907,7 +2059,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         3,
     );
     let receiver = destination
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .unwrap();
     let receiver_original = Arc::clone(&receiver.provenance);
@@ -2056,7 +2208,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let visibility = destination.public_visibility_snapshot_in(ScopeId::ROOT);
+    let visibility = destination.public_visibility_snapshot_in(destination.public_scope());
     let submissions = tidepool_extract_cmd::extract_spawn_count();
     assert!(
         matches!(destination.capture_activation_input(&activation, realm, demanded),
@@ -2079,7 +2231,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         holes
     );
     assert_eq!(
-        destination.public_visibility_snapshot_in(ScopeId::ROOT),
+        destination.public_visibility_snapshot_in(destination.public_scope()),
         visibility
     );
     assert_eq!(
@@ -2117,21 +2269,21 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     .unwrap();
     let mut include = base.include.clone();
     include.push(home);
-    let recipe = Arc::new(InputRecipe {
-        preamble: insert_preamble_imports(
+    let recipe = Arc::new(InputRecipe::capture(
+        insert_preamble_imports(
             &base.preamble,
             "qualified ProvenanceSharedRequest as Shared",
         ),
-        row: base.row.clone(),
+        base.row.clone(),
         include,
-    });
+    ));
     let session = SessionId(1793);
     let mut source = InputFixture::fresh_in(session, &root, &recipe);
     let execution = begin_fixture_execution(&mut source);
     source
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..source.public_context()
         })
         .unwrap();
     let checked = check_fixture_cell(
@@ -2179,7 +2331,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             "native settlement owns the exact private binding"
         );
         assert!(source
-            .current_binding_in(ScopeId::ROOT, &binder.name)
+            .current_binding_in(source.public_scope(), &binder.name)
             .is_none());
         values.push(
             source
@@ -2685,7 +2837,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     drop(receiver);
     drop(payload);
     drop(values);
-    source.set_run_context(SessionRunContext::ROOT).unwrap();
+    source.set_run_context(source.public_context()).unwrap();
     source.retire_scope(execution.private_scope());
     assert_eq!(source.outstanding_custody(), 0);
     assert_eq!(destination.outstanding_custody(), 0);
@@ -2715,7 +2867,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
             .site;
         let realm = resident.parked_realm(&hole).unwrap();
         let before = resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .unwrap();
         let custody = resident.outstanding_custody();
         if let Some(previous) = &previous_hole {
@@ -2731,7 +2883,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
         assert_eq!(resident.outstanding_custody(), custody);
         assert_eq!(
             resident
-                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .public_visibility_snapshot_in(resident.public_scope())
                 .unwrap(),
             before
         );
@@ -2771,7 +2923,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     assert!(payload.provenance.authenticated_inputs.is_empty());
     assert!(payload.provenance.native_sites.ids().next().is_none());
     let receiver = unsealed
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .expect("real compiled request receiver");
     let hole = suspended(
@@ -2797,7 +2949,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     let realm = unsealed.parked_realm(&hole).unwrap();
     let custody = unsealed.outstanding_custody();
     let before = unsealed
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(unsealed.public_scope())
         .unwrap();
     assert!(matches!(
         unsealed.capture_activation_input(&hole, realm, site),
@@ -2807,7 +2959,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     assert_eq!(unsealed.outstanding_custody(), custody);
     assert_eq!(
         unsealed
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(unsealed.public_scope())
             .unwrap(),
         before
     );
@@ -2860,12 +3012,12 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         2,
     );
     let original_head = resident
-        .current_decl_heads_in(ScopeId::ROOT)
+        .current_decl_heads_in(resident.public_scope())
         .into_iter()
         .find(|(name, _)| name == "Input")
         .unwrap();
     let original_projection = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap()
         .bindings
         .into_iter()
@@ -2873,7 +3025,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         .unwrap()
         .1;
     let original_input = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap()
         .bindings
         .into_iter()
@@ -2930,7 +3082,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         "same spelling has a distinct nominal declaration owner"
     );
     let selected = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     for (name, id) in [
         ("originalProject", original_projection),
@@ -2945,7 +3097,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         );
     }
     let shadow_head = resident
-        .current_decl_heads_in(ScopeId::ROOT)
+        .current_decl_heads_in(resident.public_scope())
         .into_iter()
         .find(|(name, _)| name == "Input")
         .unwrap();
@@ -3284,8 +3436,8 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         .capture_activation_input(&hole, realm, site)
         .unwrap();
     let evidence = input.type_evidence().clone();
-    let recipe = Arc::new(InputRecipe {
-        preamble: fixture
+    let recipe = Arc::new(InputRecipe::capture(
+        fixture
             .recipe
             .preamble
             .lines()
@@ -3293,18 +3445,26 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
             .collect::<Vec<_>>()
             .join("\n")
             + "\n",
-        row: fixture.recipe.row.clone(),
-        include: fixture
+        fixture.recipe.row.clone(),
+        fixture
             .recipe
             .include
             .iter()
-            .filter(|path| path.file_name().is_none_or(|name| name != "home"))
+            .filter(|path| !path.join("ActivationInputOriginal.hs").is_file())
             .cloned()
             .collect(),
-    });
+    ));
+    let original_home = fixture
+        .recipe
+        .include
+        .iter()
+        .find(|path| path.join("ActivationInputOriginal.hs").is_file())
+        .unwrap()
+        .clone();
     let InputFixture { root, producer, .. } = fixture;
     drop(producer);
     std::fs::remove_dir_all(root.path().join("home")).unwrap();
+    std::fs::remove_dir_all(original_home).unwrap();
     let retained = evidence.compile_context(None).unwrap();
     let retained_descriptors = retained.declarations().artifact_view().descriptors();
     eprintln!(
@@ -3335,7 +3495,7 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
     let (owner, compiled) = issued_captured_input(&mut resident, input, recipe);
     let prototype = Arc::downgrade(compiled.prototype());
     let mounted = mount_original(&mut resident, owner, compiled);
-    let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
+    let view = resident.compile_view_in(resident.public_scope()).unwrap();
     assert!(
         view.exact_compile_context().is_none(),
         "a mounted type interface grants no notebook source namespace",
@@ -3374,14 +3534,14 @@ fn ordinary_home_display_fixture(session: SessionId) -> InputFixture {
     .unwrap();
     let mut include = recipe.include.clone();
     include.push(home);
-    let recipe = Arc::new(InputRecipe {
-        preamble: insert_preamble_imports(
+    let recipe = Arc::new(InputRecipe::capture(
+        insert_preamble_imports(
             &recipe.preamble,
             "qualified ActivationDisplayOriginal as Original",
         ),
-        row: recipe.row.clone(),
+        recipe.row.clone(),
         include,
-    });
+    ));
     let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(recipe.include.clone());
@@ -3419,13 +3579,13 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         2,
     );
     let unrelated_binding = resident
-        .current_binding_in(ScopeId::ROOT, "unrelatedPreviewPrefix")
+        .current_binding_in(resident.public_scope(), "unrelatedPreviewPrefix")
         .expect("genuine unrelated completed binding is present before request compilation");
     let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (bound, producer, _) = compile_checked_binding(
@@ -3462,11 +3622,11 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     let input = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
     let mounted = mount_original(&mut resident, owner, interface);
     let view = resident
-        .compile_view_in(ScopeId::ROOT)
+        .compile_view_in(resident.public_scope())
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
@@ -3554,7 +3714,7 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     drop(offer);
     drop(endpoint);
     let handles = resident.value_handle_count();
-    let visibility = resident.public_visibility_snapshot_in(ScopeId::ROOT);
+    let visibility = resident.public_visibility_snapshot_in(resident.public_scope());
     let compiled =
         match compile_activation_preview(admission, &template, 512, &fixture.recipe.include)
             .expect("pure preview must not transport unrelated original prefix generations")
@@ -3581,11 +3741,11 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     );
     assert_eq!(resident.value_handle_count(), handles);
     assert_eq!(
-        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        resident.public_visibility_snapshot_in(resident.public_scope()),
         visibility
     );
     assert_eq!(
-        resident.current_binding_in(ScopeId::ROOT, "unrelatedPreviewPrefix"),
+        resident.current_binding_in(resident.public_scope(), "unrelatedPreviewPrefix"),
         Some(unrelated_binding)
     );
 }
@@ -3677,7 +3837,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     drop(producer);
     drop(recipe);
     let view = resident
-        .compile_view_in(ScopeId::ROOT)
+        .compile_view_in(resident.public_scope())
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
@@ -3687,7 +3847,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     ));
     let handles = resident.value_handle_count();
     let visibility = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     let template = turn::assemble_activation_preview_module(512);
     let retained_owner = admission.mounted.renderer_owner.clone();
@@ -3946,7 +4106,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         "pure preview releases its temporary native source roots"
     );
     assert_eq!(
-        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        resident.public_visibility_snapshot_in(resident.public_scope()),
         Some(visibility)
     );
     drop(resident);
@@ -4044,7 +4204,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
         child.set_image_registry(images.clone());
         let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
         let receiver = child
-            .retain_binding_custody("activationReceiver")
+            .retain_visible_binding_custody("activationReceiver")
             .unwrap()
             .unwrap();
         let hole = suspended(
@@ -4064,7 +4224,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
         let (input, interface) = issued_input(&mut child, &hole, site, fixture.recipe.clone());
         let mounted = mount_original(&mut child, input, interface);
         let view = child
-            .compile_view_in(ScopeId::ROOT)
+            .compile_view_in(child.public_scope())
             .unwrap()
             .with_scoped_injection();
         let admission = child.admit_activation_preview(mounted, view).unwrap();
@@ -4232,7 +4392,7 @@ fn activation_preview_revoked_original_lease_refuses_before_spend() {
         child.set_image_registry(images.clone());
         let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
         let receiver = child
-            .retain_binding_custody("activationReceiver")
+            .retain_visible_binding_custody("activationReceiver")
             .unwrap()
             .unwrap();
         let hole = suspended(
@@ -4252,7 +4412,7 @@ fn activation_preview_revoked_original_lease_refuses_before_spend() {
         let (input, interface) = issued_input(&mut child, &hole, site, fixture.recipe.clone());
         let mounted = mount_original(&mut child, input, interface);
         let view = child
-            .compile_view_in(ScopeId::ROOT)
+            .compile_view_in(child.public_scope())
             .unwrap()
             .with_scoped_injection();
         let admission = child.admit_activation_preview(mounted, view).unwrap();
@@ -4348,7 +4508,7 @@ fn activation_preview_failed_execution_admission_after_spend_stays_consumed() {
     let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
     let mounted = mount_original(&mut resident, owner, interface);
     let view = resident
-        .compile_view_in(ScopeId::ROOT)
+        .compile_view_in(resident.public_scope())
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
@@ -4414,7 +4574,7 @@ fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() 
     source
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..source.public_context()
         })
         .unwrap();
     let checked = check_fixture_cell(
@@ -4582,17 +4742,17 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
     let earlier = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
-    let recipe = Arc::new(InputRecipe {
-        preamble: insert_preamble_imports(
+    let recipe = Arc::new(InputRecipe::capture(
+        insert_preamble_imports(
             &insert_preamble_imports(
                 &fixture.recipe.preamble,
                 "Tidepool.Inspection.Display (Display(..), WorkbenchDisplay(..))",
             ),
             "qualified Data.Text as Text",
         ),
-        row: fixture.recipe.row.clone(),
-        include: fixture.recipe.include.clone(),
-    });
+        fixture.recipe.row.clone(),
+        fixture.recipe.include.clone(),
+    ));
     let display_owner = publish_fixture_declaration(
         &mut resident,
         &recipe,
@@ -4603,7 +4763,7 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (bound, producer, _) = compile_checked_binding(
@@ -4654,7 +4814,7 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
         Err(ResidentError::AmbiguousActivationInputOriginalContext { site: rejected, contexts })
             if rejected == site && contexts == expected_contexts
     ));
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     let (owner, interface) = issued_captured_input(&mut resident, earlier, recipe.clone());
     assert_eq!(
         execute_mounted_input_preview(&mut resident, owner, interface, &recipe),
@@ -4678,13 +4838,13 @@ fn execute_mounted_input_preview(
     let mounted = mount_original(resident, owner, interface);
     let binding = mounted.binding();
     let view = resident
-        .compile_view_in(ScopeId::ROOT)
+        .compile_view_in(resident.public_scope())
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
     let handles = resident.value_handle_count();
     let visibility = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     let template = turn::assemble_activation_preview_module(512);
     let compiled = match compile_activation_preview(admission, &template, 512, &recipe.include)
@@ -4718,7 +4878,7 @@ fn execute_mounted_input_preview(
         "pure preview releases its temporary native source roots"
     );
     assert_eq!(
-        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        resident.public_visibility_snapshot_in(resident.public_scope()),
         Some(visibility)
     );
     result.to_json()
@@ -4738,14 +4898,14 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
     let earlier = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
-    let recipe = Arc::new(InputRecipe {
-        preamble: format!(
+    let recipe = Arc::new(InputRecipe::capture(
+        format!(
             "{{-# LANGUAGE TypeFamilies #-}}\n{}",
             fixture.recipe.preamble
         ),
-        row: fixture.recipe.row.clone(),
-        include: fixture.recipe.include.clone(),
-    });
+        fixture.recipe.row.clone(),
+        fixture.recipe.include.clone(),
+    ));
     let family_owner = publish_fixture_declaration(
         &mut resident,
         &recipe,
@@ -4756,7 +4916,7 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (bound, producer, _) = compile_checked_binding(
@@ -4794,7 +4954,7 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
         .any(|product| product.owner().module == family_owner));
     assert_ne!(earlier.renderer_owner.identity, later.renderer_owner.identity, "a new family environment changes the complete display observation even without another Display dictionary");
     assert!(!Arc::ptr_eq(&earlier.renderer_owner, &later.renderer_owner));
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     for input in [earlier, later] {
         let (owner, interface) = issued_captured_input(&mut resident, input, recipe.clone());
         assert_eq!(
@@ -4813,11 +4973,13 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
         include_str!("fixtures/activation-input-unavailable-display.hs"),
     )
     .unwrap();
-    let recipe = Arc::new(InputRecipe {
-        preamble: insert_preamble_imports(&recipe.preamble, "ActivationDisplayUnavailable ()"),
-        row: recipe.row.clone(),
-        include: recipe.include.clone(),
-    });
+    let mut include = recipe.include.clone();
+    include.push(home);
+    let recipe = Arc::new(InputRecipe::capture(
+        insert_preamble_imports(&recipe.preamble, "ActivationDisplayUnavailable ()"),
+        recipe.row.clone(),
+        include,
+    ));
     let session = SessionId(1743);
     let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
         .unwrap()
@@ -4855,13 +5017,13 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
     );
     assert!(dictionary_owner.product_sha256.is_none());
     let view = resident
-        .compile_view_in(ScopeId::ROOT)
+        .compile_view_in(resident.public_scope())
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
     let roots = resident.persistent_roots_count();
     let visibility = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
     let selected = compile_activation_preview(
@@ -4890,7 +5052,7 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
     );
     assert_eq!(resident.persistent_roots_count(), roots);
     assert_eq!(
-        resident.public_visibility_snapshot_in(ScopeId::ROOT),
+        resident.public_visibility_snapshot_in(resident.public_scope()),
         Some(visibility)
     );
     assert!(resident.state.bindings().get(binding).is_some());
@@ -4912,14 +5074,14 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
         mounted.original_execution.toolchain_identity_sha256()
     );
     let view = resident
-        .compile_view_in(ScopeId::ROOT)
+        .compile_view_in(resident.public_scope())
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
     let roots = resident.persistent_roots_count();
     let visibility = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     let selected =
         OriginalDisplayContext::issue(admission.input_interface().prototype(), &type_only)
@@ -4936,7 +5098,7 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
     assert_eq!(resident.persistent_roots_count(), roots);
     assert_eq!(
         resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .as_ref(),
         Some(&visibility)
     );
@@ -4958,7 +5120,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (bound, producer, _) = compile_checked_binding(
@@ -4975,7 +5137,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         producer,
     };
     let reservation = fixture.start(&mut resident);
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     let (submission, hole) = fixture.deliver(&mut resident, reservation, 1);
     let site = parked_site(&mut resident, &hole);
     let realm = resident.parked_realm(&hole).unwrap();
@@ -4984,11 +5146,11 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         .unwrap();
 
     let child_effects = TestEffectSurface::minimal(&[]).unwrap();
-    let child_recipe = Arc::new(InputRecipe {
-        preamble: child_effects.preamble().to_owned(),
-        row: child_effects.row().to_owned(),
-        include: child_effects.include_paths().to_vec(),
-    });
+    let child_recipe = Arc::new(InputRecipe::capture(
+        child_effects.preamble().to_owned(),
+        child_effects.row().to_owned(),
+        child_effects.include_paths().to_vec(),
+    ));
     assert_ne!(child_recipe.row, fixture.recipe.row);
     let (owner, interface) = issued_captured_input(&mut resident, input, child_recipe.clone());
     mount_original(&mut resident, owner, interface);
@@ -5003,7 +5165,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: action_execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let source = "originalActionResult <- originalAction sessionInput";
@@ -5033,14 +5195,14 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         .binding_names_in(action_execution.private_scope())
         .iter()
         .any(|name| name == "originalActionResult"));
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     resident.retire_scope(action_execution.private_scope());
 
     let action_execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: action_execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (bound, compiled, reservation) = compile_checked_binding(
@@ -5067,7 +5229,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         panic!("pure parent action must complete");
     };
     assert_eq!(result.to_json(), serde_json::json!(43));
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     resident.retire_scope(action_execution.private_scope());
     assert!(matches!(
         fixture.resume_activation(&mut resident, hole),
@@ -5120,7 +5282,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         durable_ceiling,
     );
     assert!(durable_ceiling >= resident.state.lib().generation());
-    let public = resident.mint_scope(ScopeId::ROOT).unwrap();
+    let public = resident
+        .resident
+        .mint_scope(resident.public_source.scope())
+        .unwrap();
     let durable = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/private-source-input").unwrap(),
         1,
@@ -5134,7 +5299,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     ));
     let public_context = SessionRunContext {
         lexical_scope: public,
-        ..SessionRunContext::ROOT
+        ..resident.public_context()
     };
     resident.set_run_context(public_context).unwrap();
     let before = resident.public_visibility_snapshot_in(public).unwrap();
@@ -5415,12 +5580,12 @@ fn activation_input_staging_does_not_publish_a_reserved_interface() {
     let mut resident = fixture.fresh();
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
     let certificate = interface.value_interface_certificate();
-    let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
+    let view = resident.compile_view_in(resident.public_scope()).unwrap();
     let path = view
         .session_root()
         .join(certificate.owner().relative_hi_path());
     let visibility = resident
-        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
     let handles = resident.value_handle_count();
     let roots = resident.persistent_roots_count();
@@ -5437,12 +5602,12 @@ fn activation_input_staging_does_not_publish_a_reserved_interface() {
         certificate.bytes_owned().as_ref()
     );
     assert_eq!(
-        resident.compile_view_in(ScopeId::ROOT).as_ref(),
+        resident.compile_view_in(resident.public_scope()).as_ref(),
         Some(&view)
     );
     assert_eq!(
         resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .as_ref(),
         Some(&visibility)
     );
@@ -5528,7 +5693,7 @@ fn activation_input_interface_staging_io_failure_precedes_root_consumption() {
         let reservation = owner.reservation().clone();
         let certificate = interface.value_interface_certificate();
         let path = resident
-            .compile_view_in(ScopeId::ROOT)
+            .compile_view_in(resident.public_scope())
             .unwrap()
             .session_root()
             .join(certificate.owner().relative_hi_path());
@@ -5541,7 +5706,7 @@ fn activation_input_interface_staging_io_failure_precedes_root_consumption() {
             ExistingFile::Identical => std::fs::write(&path, certificate.bytes_owned()).unwrap(),
         }
         let visibility = resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .unwrap();
         let handles = resident.value_handle_count();
         let roots = resident.persistent_roots_count();
@@ -5565,7 +5730,8 @@ fn activation_input_interface_staging_io_failure_precedes_root_consumption() {
                     matches!(error, ResidentError::Session(SessionError::Io(_))),
                     "{error:?}"
                 );
-                assert_unpublished_input(&mut resident, ScopeId::ROOT, &visibility, handles, roots);
+                let scope = resident.public_scope();
+                assert_unpublished_input(&mut resident, scope, &visibility, handles, roots);
                 assert!(
                     resident
                         .state
@@ -5614,21 +5780,22 @@ fn activation_input_mount_observes_invocation_and_resource_cancellation_before_t
         let reservation = owner.reservation().clone();
         let certificate = interface.value_interface_certificate();
         let path = resident
-            .compile_view_in(ScopeId::ROOT)
+            .compile_view_in(resident.public_scope())
             .unwrap()
             .session_root()
             .join(certificate.owner().relative_hi_path());
         let visibility = resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .unwrap();
         let handles = resident.value_handle_count();
         let roots = resident.persistent_roots_count();
+        let original = resident.public_source.original_source().clone();
         let error = if invocation {
             resident
                 .with_invocation_cancel(
                     Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     |resident| {
-                        source_action(resident, |resident, settlement| {
+                        source_action_with_original(resident, original, |resident, settlement| {
                             resident.mount_activation_input(owner, interface.clone(), settlement)
                         })
                     },
@@ -5654,7 +5821,8 @@ fn activation_input_mount_observes_invocation_and_resource_cancellation_before_t
             ),
             "{error:?}"
         );
-        assert_unpublished_input(&mut resident, ScopeId::ROOT, &visibility, handles, roots);
+        let scope = resident.public_scope();
+        assert_unpublished_input(&mut resident, scope, &visibility, handles, roots);
         assert!(resident
             .state
             .validate_binding_interface(&reservation, &interface)
@@ -5695,16 +5863,10 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
         let (owner, interface) = parked_input_owner(&fixture, &mut resident);
         let reservation = owner.reservation().clone();
         match fence {
-            Fence::OwnerEpoch => {
-                let next = resident
-                    .state
-                    .prepare_execution_admission_epoch_advance()
-                    .unwrap();
-                resident
-                    .state
-                    .invalidate_execution_admissions_after_owner_transfer(next);
-            }
-            Fence::Visibility => resident.advance_public_visibility(ScopeId::ROOT),
+            Fence::OwnerEpoch => {}
+            Fence::Visibility => resident
+                .resident
+                .advance_public_visibility(resident.public_source.scope()),
             Fence::Consumed => resident
                 .state
                 .consume_binding_interface(&reservation, &interface)
@@ -5714,7 +5876,7 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
                 let mut destination =
                     InputFixture::fresh_in(SessionId(1734), &destination_root, &fixture.recipe);
                 let visibility = destination
-                    .public_visibility_snapshot_in(ScopeId::ROOT)
+                    .public_visibility_snapshot_in(destination.public_scope())
                     .unwrap();
                 let roots = destination.persistent_roots_count();
                 let handles = resident.value_handle_count();
@@ -5728,7 +5890,7 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
                 assert_eq!(destination.persistent_roots_count(), roots);
                 assert_eq!(
                     destination
-                        .public_visibility_snapshot_in(ScopeId::ROOT)
+                        .public_visibility_snapshot_in(destination.public_scope())
                         .unwrap(),
                     visibility
                 );
@@ -5741,11 +5903,20 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
             }
         }
         let visibility = resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .unwrap();
         let handles = resident.value_handle_count();
         let roots = resident.persistent_roots_count();
         let error = source_action(&mut resident, |resident, settlement| {
+            if matches!(fence, Fence::OwnerEpoch) {
+                let next = resident
+                    .state
+                    .prepare_execution_admission_epoch_advance()
+                    .unwrap();
+                resident
+                    .state
+                    .invalidate_execution_admissions_after_owner_transfer(next);
+            }
             resident.mount_activation_input(owner, interface, settlement)
         })
         .err()
@@ -5758,7 +5929,8 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
             ),
             "{error:?}"
         );
-        assert_unpublished_input(&mut resident, ScopeId::ROOT, &visibility, handles, roots);
+        let scope = resident.public_scope();
+        assert_unpublished_input(&mut resident, scope, &visibility, handles, roots);
     }
 }
 
@@ -5790,27 +5962,31 @@ fn activation_input_reservation_refuses_visible_names_without_recompiling() {
             .capture_activation_input(&hole, realm, site)
             .unwrap();
         let visibility = resident
-            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .public_visibility_snapshot_in(resident.public_scope())
             .unwrap();
-        let heads = resident.current_decl_heads_in(ScopeId::ROOT);
+        let heads = resident.current_decl_heads_in(resident.public_scope());
         let generation = resident.val_gen();
         let handles = resident.value_handle_count();
         let roots = resident.persistent_roots_count();
         let submissions = tidepool_extract_cmd::extract_spawn_count();
         let requests = tidepool_toolchain::artifacts::host_binding_interface_request_count();
+        let scope = resident.public_scope();
         let result = source_action(&mut resident, |resident, _| {
-            resident.admit_activation_input_in(ScopeId::ROOT, input)
+            resident.admit_activation_input_in(scope, input)
         });
         assert!(matches!(result, Err(ResidentError::Session(
-            SessionError::HostBindingNameCollision { scope: ScopeId::ROOT, ref binding }
-        )) if binding == "sessionInput"));
+            SessionError::HostBindingNameCollision { scope: rejected, ref binding }
+        )) if rejected == scope && binding == "sessionInput"));
         assert_eq!(
             resident
-                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .public_visibility_snapshot_in(resident.public_scope())
                 .unwrap(),
             visibility
         );
-        assert_eq!(resident.current_decl_heads_in(ScopeId::ROOT), heads);
+        assert_eq!(
+            resident.current_decl_heads_in(resident.public_scope()),
+            heads
+        );
         assert_eq!(resident.val_gen(), generation);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
         assert_eq!(
@@ -5831,11 +6007,13 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
         SessionId(1735),
     );
     let mut resident = fixture.fresh();
-    let scope = resident.mint_detached_scope(ScopeId::ROOT).unwrap();
+    let public = resident.public_scope();
+    let scope_lease = resident.retain_lexical_scope(public).unwrap();
+    let scope = scope_lease.scope();
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: scope,
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
@@ -5886,6 +6064,7 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
         "the original parked caller still owns its checked type prototype"
     );
     drop(resident);
+    drop(scope_lease);
     drop(fixture);
     assert!(prototype_lease.upgrade().is_none());
 }
@@ -5894,11 +6073,11 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
 fn checked_binding_survives_export_and_executes_in_later_cell() {
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
-    let recipe = InputRecipe {
-        preamble: effects.preamble().to_owned(),
-        row: effects.row().to_owned(),
-        include: effects.include_paths().to_vec(),
-    };
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
     let root = tempfile::tempdir().unwrap();
     let library = SessionLib::open(
         SessionId(1721),
@@ -5913,11 +6092,12 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
         crate::DEFAULT_NURSERY_SIZE,
         Some(library),
     );
+    resident.bootstrap_world(&recipe);
     let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
-            ..SessionRunContext::ROOT
+            ..resident.public_context()
         })
         .unwrap();
     let (bound, compiled, reservation) = compile_checked_binding(
@@ -5953,7 +6133,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
     .unwrap();
     assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
     publish_checked_fixture(&mut resident, &execution, 1);
-    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    resident.set_run_context(resident.public_context()).unwrap();
     let private_scope = execution.private_scope();
     drop(compiled);
     drop(reservation);
@@ -5966,16 +6146,21 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
             .unwrap(),
         &interface
     ));
-    let original = resident.current_binding_in(ScopeId::ROOT, "held").unwrap();
+    let original = resident
+        .current_binding_in(resident.public_scope(), "held")
+        .unwrap();
     assert_eq!(original.0, SessionVarId::from_extract(binder.var_id));
-    let custody = resident.retain_binding_custody("held").unwrap().unwrap();
+    let custody = resident
+        .retain_visible_binding_custody("held")
+        .unwrap()
+        .unwrap();
     let handles_before_export = resident.value_handle_count();
     let parcel = resident.export_custody(custody).unwrap();
     assert_eq!(resident.value_handle_count(), handles_before_export - 1);
 
     original_value_probe(&mut resident, &recipe, "held + 1", 1_000_000);
     assert_eq!(
-        resident.current_binding_in(ScopeId::ROOT, "held"),
+        resident.current_binding_in(resident.public_scope(), "held"),
         Some(original)
     );
     assert!(Arc::ptr_eq(
@@ -6078,7 +6263,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         Err(ResidentError::InvalidActivationInput { .. })
     ));
     let reply = source
-        .retain_binding_custody("activationFunctionReply")
+        .retain_visible_binding_custody("activationFunctionReply")
         .unwrap()
         .unwrap();
     let publication = suspended(
@@ -6183,7 +6368,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .quiesce_and_collect_now()
         .unwrap();
     let probe = destination
-        .retain_binding_custody("ownedResultProbe")
+        .retain_visible_binding_custody("ownedResultProbe")
         .unwrap()
         .unwrap();
     let ResidentOutcome::Completed { result, .. } =

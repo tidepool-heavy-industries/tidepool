@@ -1408,6 +1408,12 @@ def facade_test_cases(binary):
                                + ["//bridge/atomic-write:directory_fault_shared", "toolchains//:rustc", "toolchains//:cc"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
+        ("facade_reload_default_publication_test", [
+            "actor_host::coherent_reload_acceptance_tests::standard_reload_retains_complete_large_source_receipts_after_publication",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_force_refusal_test", [
+            "actor_host::coherent_reload_acceptance_tests::unsupported_force_preserves_the_original_generation_for_a_later_default_reload",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_introspection_service_test", [
             "actor_host::documentation_tests::published_introspection_example_returns_structured_declaration",
         ], host_env, service_host_paths, service_host_resources, True, False, 600),
@@ -1565,7 +1571,7 @@ def facade_test_cases(binary):
         if tests:
             lines.extend(["    exact_tests = [", render_strings(tests, 8), "    ],",
                           f"    expected_count = {len(tests)},"])
-        if name == "facade_introspection_service_test":
+        if name in ("facade_introspection_service_test", "facade_reload_default_publication_test", "facade_reload_force_refusal_test"):
             lines.append('    case_compiler_modes = {' + ", ".join(
                 json.dumps(test) + ': "owned-resident"' for test in tests
             ) + "},")
@@ -1861,6 +1867,8 @@ tidepool_buildscript_run(
                     package_name, "activation_renderer_terminal_tests"
                 )
                 retirement_tests = [
+                    "resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff",
+                    "resident_workbench::request_tests::actual_retirement_lost_delivery_preserves_published_notification",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
@@ -1871,6 +1879,7 @@ tidepool_buildscript_run(
                     "resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard",
                     "resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body",
                     "resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result",
+                    "resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen",
                 ]
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
@@ -1899,6 +1908,18 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                unstarted_control = "resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_unstarted_publication_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([unstarted_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(unstarted_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 capture_control = "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership"
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
@@ -1908,6 +1929,42 @@ tidepool_buildscript_run(
                     "    expected_count = 1,", "    ignored = True,",
                     "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                     '    case_compiler_modes = {' + json.dumps(capture_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                reservation_control = "resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_reservation_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([reservation_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(reservation_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                delivery_loss_control = "resident_workbench::request_tests::actual_retirement_lost_delivery_preserves_published_notification"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_delivery_loss_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([delivery_loss_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(delivery_loss_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                source_registration_control = "resident_actor::replacement::tests::source_registration_slots_preserve_independent_callbacks_and_deferred_input"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_source_registration_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([source_registration_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = False,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(source_registration_control) + ': "owned-resident"},',
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))

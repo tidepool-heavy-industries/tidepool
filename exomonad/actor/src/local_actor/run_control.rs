@@ -15,6 +15,8 @@ pub(crate) use startup::{
 };
 mod generation;
 #[cfg(test)]
+pub(crate) use generation::assert_source_registration_retirement_projection;
+#[cfg(test)]
 pub(crate) use generation::GenerationCompilerOwner;
 pub(crate) use generation::GenerationPopulation;
 #[cfg(test)]
@@ -168,7 +170,7 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
-    lost_retirements: Vec<generation::RetainedGenerationRetirementRecord>,
+    lost_retirements: Vec<generation::GenerationRetirementCore>,
     retirement_discards: Vec<generation::GenerationRetirementDiscard>,
     recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
@@ -224,6 +226,7 @@ impl RunState {
 #[derive(Default)]
 pub(super) struct RunControlNativeCleanup {
     terminal: std::sync::OnceLock<RunControlNativeExit>,
+    ready: tokio::sync::Notify,
 }
 
 enum RunControlNativeExit {
@@ -234,7 +237,7 @@ enum RunControlNativeExit {
 }
 
 struct RunControlNativeLoss {
-    attempts: Vec<generation::RetainedGenerationRetirementRecord>,
+    attempts: Vec<generation::GenerationRetirementCore>,
     worker_transfers: HashMap<u64, WorkerTransfer>,
     resource_transfers: HashMap<u64, ResourceTransfer>,
 }
@@ -268,6 +271,20 @@ struct RunControlNativeRecovery<'a> {
 }
 
 impl RunControlNativeCleanup {
+    async fn wait_for_terminal(&self) -> &RunControlNativeExit {
+        loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            // Register before observing the monotonic terminal slot. This also
+            // covers publication between registration and the following read.
+            notified.as_mut().enable();
+            if let Some(terminal) = self.terminal.get() {
+                return terminal;
+            }
+            notified.await;
+        }
+    }
+
     fn observation(&self) -> NativeRecoveryObservation {
         match self.terminal.get() {
             None => NativeRecoveryObservation::OwnerNotObserved,
@@ -281,7 +298,7 @@ impl RunControlNativeCleanup {
                         .filter(|record| {
                             matches!(
                                 record,
-                                generation::RetainedGenerationRetirementRecord::Active(_)
+                                generation::GenerationRetirementCore::Active(_)
                             )
                         })
                         .count(),
@@ -291,12 +308,12 @@ impl RunControlNativeCleanup {
                         .filter(|record| {
                             matches!(
                                 record,
-                                generation::RetainedGenerationRetirementRecord::Completed { .. }
+                                generation::GenerationRetirementCore::Completed { .. }
                             )
                         })
                         .count(),
                     sources_settled: custody.attempts.iter().filter(|record|
-                        matches!(record, generation::RetainedGenerationRetirementRecord::SourcesSettled { .. })).count(),
+                        matches!(record, generation::GenerationRetirementCore::SourcesSettled { .. })).count(),
                     worker_transfers: custody.worker_transfers.len(),
                     resource_transfers: custody.resource_transfers.len(),
                 },
@@ -768,12 +785,8 @@ pub(super) enum RunControlMessage {
     BeginGenerationRetirement {
         preparation: crate::resident_workbench::ActorGenerationRetirementPreparation,
         inventory: generation::GenerationRetirementInventory,
-        reply: oneshot::Sender<
-            Result<
-                crate::resident_workbench::ActorPublicationAttemptObserver,
-                generation::GenerationRetirementBeginFailure,
-            >,
-        >,
+        diagnostic: generation::GenerationRetirementDiagnostic,
+        reply: generation::GenerationRetirementBeginReply,
     },
     CaptureGenerationRetirement {
         actor: ActorRef,
@@ -787,6 +800,18 @@ pub(super) enum RunControlMessage {
     DispatchCancelledGenerationPublication {
         actor: ActorRef,
         observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+        reply: oneshot::Sender<
+            Result<
+                Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
+                generation::GenerationPublicationDispatchFailure,
+            >,
+        >,
+    },
+    #[cfg(test)]
+    DispatchDeliveryLostGenerationPublication {
+        actor: ActorRef,
+        observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+        lifecycle: crate::LifecycleHandle,
         reply: oneshot::Sender<
             Result<
                 Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
@@ -1199,7 +1224,7 @@ fn begin_reservation_after(
             reply: Some(reply),
             dependency,
             preparation: None,
-            retirement: generation::GenerationRetirementRecord::Idle,
+            retirement: generation::GenerationRetirementRecord::idle(),
         },
     );
     if state
@@ -1274,10 +1299,10 @@ impl Actor for RunControl {
             RunControlMessage::BeginGenerationRetirement {
                 preparation,
                 inventory,
+                diagnostic,
                 reply,
             } => {
-                let outcome = state.begin_generation_retirement(&myself, preparation, inventory);
-                let _ = reply.send(outcome);
+                state.receive_generation_retirement(&myself, preparation, inventory, diagnostic, reply);
             }
             #[cfg(test)]
             RunControlMessage::ObserveGenerationRetirementCompletion { actor, reply } => {
@@ -1285,12 +1310,7 @@ impl Actor for RunControl {
                     state
                         .reservations
                         .get(&actor)
-                        .and_then(|record| match &record.retirement {
-                            generation::GenerationRetirementRecord::Completed(completion) => {
-                                Some(completion.clone())
-                            }
-                            _ => None,
-                        });
+                        .and_then(|record| record.retirement.completed().cloned());
                 let _ = reply.send(outcome);
             }
             RunControlMessage::GenerationPublicationReady { actor, observer } => {
@@ -1306,8 +1326,16 @@ impl Actor for RunControl {
                     state.dispatch_cancelled_generation_publication(&myself, actor, observer),
                 );
             }
+            #[cfg(test)]
+            RunControlMessage::DispatchDeliveryLostGenerationPublication {
+                actor, observer, lifecycle, reply,
+            } => {
+                let _ = reply.send(state.dispatch_delivery_lost_generation_publication(
+                    &myself, actor, observer, lifecycle,
+                ));
+            }
             RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
-                state.capture_generation_retirement(actor, observer);
+                state.capture_generation_retirement(&myself, actor, observer);
             }
             RunControlMessage::GenerationPopulation { dependency, reply } => {
                 let _ = reply.send(state.generation_population(dependency));
@@ -1413,10 +1441,9 @@ impl Actor for RunControl {
                                 .is_none_or(|lifecycle| lifecycle.run_finalized())
                     })
                 {
-                    let _ = state
-                        .native_cleanup
-                        .terminal
-                        .set(RunControlNativeExit::Finalized);
+                    if state.native_cleanup.terminal.set(RunControlNativeExit::Finalized).is_ok() {
+                        state.native_cleanup.ready.notify_waiters();
+                    }
                     let supervisor = state.preparation_supervisor.take().map(|supervisor| {
                         let cell = supervisor.get_cell();
                         supervisor.stop(None);

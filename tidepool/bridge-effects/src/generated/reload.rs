@@ -97,7 +97,7 @@ pub enum RlNativeIdentity {
     ReloadNativeRemote(String, String),
 }
 
-/// Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs.
+/// Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs. Actor-owned and preparation-owned compiler resources are distinct from invocation-owned ReloadCompilerResource. Their registration ids and preparation ids preserve exact unsigned decimal coordinates as Text. Source binding resources name the actual actor's stable callback slot as unsigned decimal Text, not a watch id. These observations grant no authority.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum RlResource {
     ReloadActorResource((i64, i64)),
@@ -109,6 +109,9 @@ pub enum RlResource {
     ReloadDisplayResource(RlOperation),
     ReloadWatchResource((i64, i64), i64),
     ReloadUnclassifiedPhysicalResource(RlNativeIdentity),
+    ReloadActorCompilerResource((i64, i64), String),
+    ReloadPreparationCompilerResource(String, String),
+    ReloadSourceBindingResource((i64, i64), String),
 }
 
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
@@ -203,7 +206,7 @@ pub enum RlRetirementStage {
     ReloadSourcePublication,
 }
 
-/// AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings.
+/// Source outcome only: AReopened proves A selected and B uncommitted; actual partial stops remain in the receipt. Fenced does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings. Operational settlement is reported independently in the receipt.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum RlRetirementState {
     ReloadAReopened,
@@ -211,7 +214,33 @@ pub enum RlRetirementState {
     ReloadBPublished(Vec<String>, Vec<String>),
 }
 
-/// Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Primary and secondary causes survive independently of selection/fence state. Inspect the owning operation and resource records for detailed retained obligations.
+/// Owner-observed status of an outstanding obligation. Refused means its owner refused the outstanding obligation; a terminal failed operation with no remaining obligation is operationally Settled and retains its typed cause separately.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlObligationObservation {
+    ReloadObligationPending,
+    ReloadObligationUnconfirmed,
+    ReloadObligationRefused,
+}
+
+/// Exact outstanding work reported by its retained owner. Source delivery identifies the actual resource. These observations grant no stop, cleanup, publication or retry authority.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlRetirementObligation {
+    ReloadCandidateSettlementObligation(RlObligationObservation),
+    ReloadOriginalRetirementObligation(RlObligationObservation),
+    ReloadPhysicalCleanupObligation(RlObligationObservation),
+    ReloadPublicationNotificationObligation(RlObligationObservation),
+    ReloadSourceDeliveryObligation(RlResource, RlObligationObservation),
+    ReloadDiagnosticDeliveryObligation(RlObligationObservation),
+}
+
+/// Operational settlement is independent of source outcome and typed causes. Unsettled has a mandatory first obligation and reports operational Unknown; Settled means no outstanding obligations, including a terminal failed operation whose cause remains separately recorded.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlOperationalSettlement {
+    ReloadOperationalSettled,
+    ReloadOperationalUnsettled(RlRetirementObligation, Vec<RlRetirementObligation>),
+}
+
+/// Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Source outcome, operational settlement and primary/secondary causes are independent observations. Inspect the owning operation and resource records for detailed retained obligations.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 #[haskell(name = "ReloadRetirementReceipt")]
 pub struct RlRetirementReceipt {
@@ -224,4 +253,5 @@ pub struct RlRetirementReceipt {
     pub surface: RlSurfaceDiff,
     pub primary: Option<RlCause>,
     pub secondary: Vec<RlCause>,
+    pub settlement: RlOperationalSettlement,
 }

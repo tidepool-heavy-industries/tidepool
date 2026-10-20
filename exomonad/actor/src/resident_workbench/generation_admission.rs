@@ -832,12 +832,15 @@ impl GenerationRetirementFence {
     pub(crate) fn retire(
         self,
         successor: NotebookGenerationId,
-    ) -> Result<(), GenerationRetirementFenceError> {
+    ) -> Result<(), (Self, GenerationRetirementFenceError)> {
         match self.state {
-            GenerationRetirementFenceState::Held(fence) => Ok(fence.retire(successor)?),
-            GenerationRetirementFenceState::ReopenAttempted(_) => {
-                Err(GenerationRetirementFenceError::ReopenAttempted)
-            }
+            GenerationRetirementFenceState::Held(fence) => fence
+                .retire(successor)
+                .map_err(|(fence, error)| (Self::new(fence), error.into())),
+            state @ GenerationRetirementFenceState::ReopenAttempted(_) => Err((
+                Self { state },
+                GenerationRetirementFenceError::ReopenAttempted,
+            )),
         }
     }
 
@@ -895,8 +898,11 @@ impl GenerationFence {
     pub(crate) fn retire(
         self,
         successor: NotebookGenerationId,
-    ) -> Result<(), GenerationAdmissionError> {
-        self.fence.retire(successor)
+    ) -> Result<(), (Self, GenerationAdmissionError)> {
+        let Self { dependency, fence } = self;
+        fence
+            .retire(successor)
+            .map_err(|(fence, error)| (Self { dependency, fence }, error))
     }
 }
 
@@ -1249,6 +1255,122 @@ mod tests {
     }
 
     #[test]
+    fn retirement_after_visible_component_publication_keeps_original_on_error() {
+        let fixture = PublicationFixture::replacement(false);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let claim = expected.scope.admit_source().unwrap();
+        let original = capture_original(&mut owner);
+        // This exercises the actual component publication owner. It has no
+        // compiler body or durable head; those belong to the Rooted control.
+        assert!(owner
+            .visibility()
+            .unwrap()
+            .install(fixture.generation.clone()));
+        owner.confirmed().unwrap();
+        let successor = fixture.generation.id;
+        let Err((original, error)) = original.retire(successor) else {
+            panic!("the outstanding original action must refuse retirement");
+        };
+        assert!(matches!(
+            error,
+            GenerationRetirementFenceError::Admission(GenerationAdmissionError::Closed {
+                scope,
+                phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. },
+            }) if scope == expected.scope.scope()
+        ));
+        assert!(original.dependency().same_prepared(expected.dependency()));
+        assert_eq!(original.pending_claims().unwrap(), 1);
+        assert!(expected.scope.admit_source().is_err());
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &fixture.generation
+        ));
+        drop(claim);
+        assert!(original.retire(successor).is_ok());
+        assert!(matches!(
+            expected.scope.admit_source(),
+            Err(GenerationAdmissionError::Closed {
+                phase: tidepool_runtime::session::SourceAdmissionPhase::Retired { successor: actual },
+                ..
+            }) if actual == successor
+        ));
+        assert!(fixture.generation.scope.admit_source().is_ok());
+    }
+
+    #[test]
+    fn retirement_retains_unconfirmed_and_stale_original_with_typed_cause() {
+        for stale in [false, true] {
+            let mut history = History::new();
+            let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+            let claim = dependency.runtime_lease().admit_source().unwrap();
+            let original = GenerationRetirementFence::new(dependency.fence().unwrap());
+            let expected = if stale {
+                drop(claim);
+                history
+                    .session
+                    .retire_scope(dependency.runtime_lease().scope());
+                GenerationAdmissionError::StaleFence
+            } else {
+                claim.retain_unconfirmed();
+                GenerationAdmissionError::Unconfirmed {
+                    scope: dependency.runtime_lease().scope(),
+                    count: 1,
+                }
+            };
+            let Err((original, error)) = original.retire(NotebookGenerationId::INITIAL) else {
+                panic!("a refused original must remain owned");
+            };
+            assert!(matches!(
+                error,
+                GenerationRetirementFenceError::Admission(actual) if actual == expected
+            ));
+            assert!(original.dependency().same_prepared(&dependency));
+            let Err((original, error)) = original.retire(NotebookGenerationId::INITIAL) else {
+                panic!("an unchanged refusal must retain the same cause and original");
+            };
+            assert!(matches!(
+                error,
+                GenerationRetirementFenceError::Admission(actual) if actual == expected
+            ));
+            assert!(original.dependency().same_prepared(&dependency));
+        }
+    }
+
+    #[test]
+    fn retirement_reopen_attempt_error_returns_consumed_original_state() {
+        let fixture = PublicationFixture::replacement(false);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut owner);
+        owner.refuse_retirement(&mut original).unwrap();
+        let Err((original, error)) = original.retire(fixture.generation.id) else {
+            panic!("reopened originals cannot retire or issue another capability");
+        };
+        assert!(matches!(
+            error,
+            GenerationRetirementFenceError::ReopenAttempted
+        ));
+        assert!(original.dependency().same_prepared(expected.dependency()));
+        assert!(matches!(
+            original.pending_claims(),
+            Err(GenerationRetirementFenceError::ReopenAttempted)
+        ));
+        assert!(expected.scope.admit_source().is_ok());
+        let next = expected.dependency().fence().unwrap();
+        let Err((original, error)) = original.retire(fixture.generation.id) else {
+            panic!("the consumed original cannot settle a new retirement attempt");
+        };
+        assert!(matches!(
+            error,
+            GenerationRetirementFenceError::ReopenAttempted
+        ));
+        assert!(original.dependency().same_prepared(expected.dependency()));
+        assert!(expected.scope.admit_source().is_err());
+        assert!(next.retire(fixture.generation.id).is_ok());
+    }
+
+    #[test]
     fn retirement_cutoff_selection_loss_leaves_original_gate_unchanged() {
         let fixture = PublicationFixture::replacement(true);
         let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
@@ -1467,6 +1589,7 @@ mod tests {
         let mut original = capture_original(&mut guard);
         let completion = super::super::PublicationBodyCompletion::Observed {
             guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
         }
         .for_retirement();
@@ -1525,6 +1648,7 @@ mod tests {
             ));
             let completion = super::super::PublicationBodyCompletion::Observed {
                 guard,
+                obligations: super::super::PublicationBodyObligations::Retained,
                 outcome: Err(error),
             }
             .for_retirement();
@@ -1561,7 +1685,115 @@ mod tests {
             assert!(primary_error
                 .to_string()
                 .contains("retained storage evidence"));
+            let refusal = refusal.into_settled_diagnostic().err().expect(
+                "source restoration cannot settle unassessed storage work",
+            );
+            assert!(Arc::ptr_eq(&primary, refusal.outcome()));
         }
+    }
+
+    #[test]
+    fn typed_durable_refusal_keeps_refusal_control_and_unassessed_obligations() {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationRefusalObservation as Observation,
+            ActorGenerationPublicationIssue, ActorPublicationFailureCause as Cause,
+        };
+        use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let mut original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
+            outcome: Ok(ActorGenerationCommit::Refused(
+                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(Box::new(
+                    StoreError {
+                        path: "typed-refusal-control.db".into(),
+                        kind: StoreErrorKind::Storage,
+                        detail: "actual typed storage cause".into(),
+                    },
+                )))),
+            )),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+            completion
+        else {
+            panic!("a typed durable refusal retains the same unpublished owner");
+        };
+        let primary = refusal.outcome().clone();
+        assert!(matches!(
+            primary.as_ref(),
+            Ok(ActorGenerationCommit::Refused(
+                ActorGenerationPublicationIssue::Durable(_)
+            ))
+        ));
+        assert_eq!(
+            refusal.observation(),
+            Observation::Failed {
+                cause: Cause::RecoveryStore(StoreErrorKind::Storage),
+                execution: None,
+                requires_recovery: false,
+            }
+        );
+        refusal.refuse_retirement(&mut original).unwrap();
+        let refusal = refusal
+            .into_settled_diagnostic()
+            .err()
+            .expect("a typed refusal is not a storage settlement receipt");
+        assert!(Arc::ptr_eq(&primary, refusal.outcome()));
+        let Ok(ActorGenerationCommit::Refused(reason)) = primary.as_ref() else {
+            unreachable!()
+        };
+        assert!(reason.to_string().contains("actual typed storage cause"));
+        assert!(reason.failure_diagnostic().is_some());
+    }
+
+    #[test]
+    fn unconfirmed_durable_publication_retains_exact_storage_cause_and_uncertainty() {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationIssue, ActorPublicationFailureCause,
+        };
+        use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
+        let fixture = PublicationFixture::replacement(true);
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let error = Box::new(SessionError::RecoveryStore(Box::new(StoreError {
+            path: "unconfirmed-owner-control.db".into(),
+            kind: StoreErrorKind::RecoveryRequired,
+            detail: "original storage uncertainty".into(),
+        })));
+        let original = std::ptr::from_ref(error.as_ref());
+        let outcome = owner
+            .complete(Ok(ActorGenerationCommit::Unconfirmed(
+                ActorGenerationPublicationIssue::Durable(error),
+            )))
+            .unwrap();
+        let ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)) =
+            &outcome
+        else {
+            panic!("actual uncertainty must keep its typed storage cause");
+        };
+        assert!(std::ptr::eq(error.as_ref(), original));
+        assert!(fixture.state.current_generation().is_none());
+        assert!(fixture.generation.scope.admit_source().is_err());
+        let failure = outcome
+            .into_initial_generation()
+            .err()
+            .expect("a typed unconfirmed outcome cannot finish startup");
+        assert!(failure.requires_recovery());
+        assert_eq!(
+            failure.publication_failure_cause(),
+            ActorPublicationFailureCause::RecoveryStore(StoreErrorKind::RecoveryRequired)
+        );
+        let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = failure else {
+            panic!("the independent publication uncertainty must remain explicit");
+        };
+        let Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error))) =
+            failure.outcome.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(std::ptr::eq(error.as_ref(), original));
     }
 
     #[test]
@@ -1598,6 +1830,20 @@ mod tests {
                 Cause::RecoveryStore(kind)
             );
         }
+    }
+
+    #[test]
+    fn publication_diagnostic_refusal_preserves_its_typed_cause() {
+        let error = crate::ResidentActorWorkbenchError::OperationDiagnostic(
+            crate::WorkbenchDiagnosticRefusal::InvocationChanged,
+        );
+        assert_eq!(
+            error.publication_failure_cause(),
+            super::super::ActorPublicationFailureCause::OperationDiagnostic(
+                crate::WorkbenchDiagnosticRefusal::InvocationChanged,
+            )
+        );
+        assert!(!error.requires_recovery());
     }
 
     #[test]
@@ -1658,6 +1904,7 @@ mod tests {
         let mut original = capture_original(&mut guard);
         let completion = super::super::PublicationBodyCompletion::Observed {
             guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
         }
         .for_retirement();
@@ -1716,6 +1963,7 @@ mod tests {
         let _original = capture_original(&mut guard);
         let completion = super::super::PublicationBodyCompletion::Observed {
             guard,
+            obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Ok(super::super::ActorGenerationCommit::Unconfirmed(
                 "actual commit observation was lost".into(),
             )),
@@ -1756,6 +2004,7 @@ mod tests {
                 };
                 let completion = super::super::PublicationBodyCompletion::Observed {
                     guard,
+                    obligations: super::super::PublicationBodyObligations::Retained,
                     outcome: primary,
                 }
                 .for_retirement();
@@ -2560,7 +2809,7 @@ mod tests {
             first.prerequisite().clone(),
         );
         assert!(!next.depends_on(&first));
-        first.fence().unwrap().retire(next.generation()).unwrap();
+        assert!(first.fence().unwrap().retire(next.generation()).is_ok());
         assert!(alias.claim().is_err());
         drop(SourceDependency::Generation(next).claim().unwrap());
     }
@@ -2649,7 +2898,7 @@ mod tests {
             child.generation().next().unwrap(),
             child.prerequisite().clone(),
         );
-        child.fence().unwrap().retire(next.generation()).unwrap();
+        assert!(child.fence().unwrap().retire(next.generation()).is_ok());
         assert!(alias.claim().is_err());
         assert!(alias.depends_on(&child));
         assert!(alias.with_open_admission(|| ()).is_err());
@@ -2933,6 +3182,103 @@ mod tests {
         }
     }
 
+    async fn assert_actual_publication_body_refusal(
+        preparation: super::super::ActorGenerationRetirementPreparation,
+        state: &Arc<super::super::InstalledToolsState>,
+        expected: &Arc<super::super::ActorGeneration>,
+        target: GenerationDependency,
+        decision: &Arc<tidepool_runtime::session::PublicationDecision>,
+    ) {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationSettlement,
+            ActorGenerationRetirementCutoff, ActorGenerationRetirementPreparationOutcome,
+            InstalledToolsAvailability,
+        };
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let (prepared, driver) = preparation.into_parts();
+        let (mut reserved, publisher) = match driver
+            .reserve(prepared)
+            .unwrap_or_else(|_| panic!("the issued driver must accept its same preparation"))
+        {
+            ActorGenerationRetirementPreparationOutcome::Reserved {
+                reserved,
+                publisher,
+            } => (reserved, publisher),
+            ActorGenerationRetirementPreparationOutcome::Refused(reason) => panic!("{reason}"),
+            ActorGenerationRetirementPreparationOutcome::Failed(error) => panic!("{error}"),
+        };
+        let observer = reserved.attempt_observer();
+        let mut original = match reserved.fence_original() {
+            ActorGenerationRetirementCutoff::Fenced(fence) => fence,
+            _ => panic!("the actual live owner must fence its exact selected A"),
+        };
+        assert!(matches!(&state.0.lock().availability,
+            InstalledToolsAvailability::PublicationInProgress(attempt)
+                if Arc::ptr_eq(attempt, &observer.0)));
+        assert!(SourceDependency::Generation(expected.dependency().clone())
+            .claim()
+            .is_err());
+        assert!(SourceDependency::Generation(target.clone())
+            .claim()
+            .is_err());
+        assert_eq!(
+            decision.request_cancellation(),
+            tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
+        );
+        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = publisher
+            .run(reserved)
+            .await
+            .unwrap_or_else(|_| panic!("the issued publisher must accept its same reservation"))
+        else {
+            panic!("an observed cancelled body must return its actual armed guard");
+        };
+        let primary = refusal.outcome().clone();
+        assert!(matches!(
+            primary.as_ref(),
+            Ok(ActorGenerationCommit::Refused(_))
+        ));
+        refusal = refusal
+            .into_settled_diagnostic()
+            .err()
+            .expect("a pre-effect body still cannot release its armed source owner");
+        assert!(Arc::ptr_eq(refusal.outcome(), &primary));
+        assert!(matches!(&state.0.lock().availability,
+            InstalledToolsAvailability::PublicationInProgress(attempt)
+                if Arc::ptr_eq(attempt, &observer.0)));
+        assert!(state.current_generation().is_none());
+        assert!(SourceDependency::Generation(expected.dependency().clone())
+            .claim()
+            .is_err());
+        assert!(SourceDependency::Generation(target.clone())
+            .claim()
+            .is_err());
+        refusal.refuse_retirement(&mut original).unwrap();
+        assert!(Arc::ptr_eq(refusal.outcome(), &primary));
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        drop(SourceDependency::Generation(target).claim().unwrap());
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::CancellationRequested
+        );
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            compiler_calls,
+            "observed cancellation and source settlement never replay the compiler"
+        );
+        assert_eq!(
+            refusal
+                .into_settled_diagnostic()
+                .ok()
+                .expect("the actual cancelled Ephemeral body issued diagnostic-only settlement",),
+            super::super::ActorGenerationPublicationRefusalObservation::Refused,
+        );
+    }
+
     pub(crate) async fn assert_native_retirement_owner_control(
         workbench: &super::super::ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<super::super::InstalledToolsState>,
@@ -2944,6 +3290,18 @@ mod tests {
     ) {
         assert_eq!(expected.context().actor, context.actor);
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        let external = expected.dependency().prerequisite().as_ref().unwrap();
+        assert_eq!(external.actor(), crate::ActorRef::first(crate::ActorId(99)));
+        assert!(prepared
+            .candidate
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .prerequisite()
+            .as_ref()
+            .unwrap()
+            .same_owner(external));
         let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
         let (start_entered, starting) = tokio::sync::oneshot::channel();
         let (start_release, continue_start) = tokio::sync::oneshot::channel();
@@ -2988,7 +3346,10 @@ mod tests {
             .register_resident(context, descriptor, false)
             .await
             .unwrap();
-        kernel.lifecycle().generation_published(expected.clone());
+        assert_eq!(
+            kernel.lifecycle().generation_published(expected.clone()),
+            crate::kernel::GenerationPublicationNotification::Accepted
+        );
         let observed = kernel
             .lifecycle()
             .public_owner(Some(expected.public_owner().clone()), false)
@@ -3014,13 +3375,13 @@ mod tests {
             .generation()
             .unwrap()
             .clone();
+        let target_fence = (control
+            == crate::local_actor::run_control::GenerationRetirementNativeControl::ReservationTargetClosed)
+            .then(|| target.fence().unwrap());
         let preparation = publisher.into_retirement_preparation(
             prepared,
             publication.clone(),
             super::super::ActorGenerationPublication::Terminal,
-            runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
-                kernel.retained_exit(),
-            )),
         );
         assert_eq!(preparation.actor(), actor.identity());
         assert!(Arc::ptr_eq(
@@ -3028,18 +3389,46 @@ mod tests {
             &expected
         ));
         assert!(actor.terminal().get().is_none());
-        directory
-            .assert_generation_retirement_owner_control(
-                directory_task,
-                preparation,
-                state,
-                expected,
-                publication,
-                target,
-                control,
-                disposed,
+        if control
+            == crate::local_actor::run_control::GenerationRetirementNativeControl::PublicationBodyRefusal
+        {
+            assert_actual_publication_body_refusal(
+                preparation, &state, &expected, target, &publication,
             )
             .await;
+            directory
+                .assert_retirement_owner_loss_without_attempt(directory_task)
+                .await;
+        } else if control == crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerPublishedDeliveryLost {
+            directory.assert_generation_publication_delivery_lost(
+                directory_task, preparation, state, expected, publication, target,
+                kernel.lifecycle().clone(),
+            ).await;
+        } else if let Some(target_fence) = target_fence {
+            directory
+                .assert_generation_retirement_reservation_failed(
+                    directory_task,
+                    preparation,
+                    state,
+                    expected,
+                    publication,
+                    target_fence,
+                )
+                .await;
+        } else {
+            directory
+                .assert_generation_retirement_owner_control(
+                    directory_task,
+                    preparation,
+                    state,
+                    expected,
+                    publication,
+                    target,
+                    control,
+                    disposed,
+                )
+                .await;
+        }
         assert!(actor.terminal().get().is_none());
         assert!(
             actor.terminal().requested_shutdown().is_none(),

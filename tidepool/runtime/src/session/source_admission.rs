@@ -749,10 +749,16 @@ impl RuntimeSourceFence {
             ScopedReopen::settle(&mut state, settle)
         })
     }
-    pub fn retire(self, successor: NotebookGenerationId) -> Result<(), SourceAdmissionError> {
+    /// Refusal precedes mutation and returns this exact attempt for explicit
+    /// owner reconciliation. It never reopens admission or retries retirement.
+    pub fn retire(
+        self,
+        successor: NotebookGenerationId,
+    ) -> Result<(), (Self, SourceAdmissionError)> {
         self.settle(SourceAdmissionPhase::Retired { successor })
+            .map_err(|error| (self, error))
     }
-    fn settle(self, phase: SourceAdmissionPhase) -> Result<(), SourceAdmissionError> {
+    fn settle(&self, phase: SourceAdmissionPhase) -> Result<(), SourceAdmissionError> {
         let mut state = self.owner.0.state.lock();
         if state.phase
             != (SourceAdmissionPhase::Fenced {
@@ -1385,6 +1391,96 @@ mod tests {
     }
 
     #[test]
+    fn retirement_refusal_returns_exact_attempt_until_claim_settles() {
+        let mut session = PersistentSession::new(None, 1024);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let claim = lease.admit_source().unwrap();
+        let fence = lease.source_admission().fence().unwrap();
+        let attempt = fence.attempt;
+        let successor = NotebookGenerationId::INITIAL.next().unwrap();
+        let Err((fence, error)) = fence.retire(successor) else {
+            panic!("an active source action must prevent retirement");
+        };
+        assert_eq!(
+            error,
+            SourceAdmissionError::Closed {
+                scope: lease.scope(),
+                phase: SourceAdmissionPhase::Fenced { attempt },
+            }
+        );
+        assert!(fence.owner.same_owner(lease.source_admission()));
+        assert_eq!(fence.attempt, attempt);
+        assert_eq!(fence.pending_claims(), 1);
+        assert!(lease.admit_source().is_err());
+        drop(claim);
+        assert!(fence.retire(successor).is_ok());
+        assert_eq!(
+            lease.source_admission().0.state.lock().phase,
+            SourceAdmissionPhase::Retired { successor }
+        );
+    }
+
+    #[test]
+    fn retirement_error_preserves_unconfirmed_and_stale_capabilities() {
+        for stale in [false, true] {
+            let mut session = PersistentSession::new(None, 1024);
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let claim = lease.admit_source().unwrap();
+            let fence = lease.source_admission().fence().unwrap();
+            let attempt = fence.attempt;
+            let error = if stale {
+                drop(claim);
+                session.retire_scope(lease.scope());
+                SourceAdmissionError::StaleFence
+            } else {
+                claim.retain_unconfirmed();
+                SourceAdmissionError::Unconfirmed {
+                    scope: lease.scope(),
+                    count: 1,
+                }
+            };
+            let phase = lease.source_admission().0.state.lock().phase;
+            let successor = NotebookGenerationId::INITIAL.next().unwrap();
+            let Err((fence, actual)) = fence.retire(successor) else {
+                panic!("retirement must preserve the exact typed refusal");
+            };
+            assert_eq!(actual, error);
+            assert!(fence.owner.same_owner(lease.source_admission()));
+            assert_eq!(fence.attempt, attempt);
+            assert_eq!(lease.source_admission().0.state.lock().phase, phase);
+            let Err((fence, actual)) = fence.retire(successor) else {
+                panic!("unsettled refusal cannot become retirement success");
+            };
+            assert_eq!(actual, error);
+            assert_eq!(fence.attempt, attempt);
+            assert_eq!(lease.source_admission().0.state.lock().phase, phase);
+        }
+    }
+
+    #[test]
+    fn returned_retirement_fence_cannot_authorize_a_later_attempt() {
+        let mut session = PersistentSession::new(None, 1024);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let claim = lease.admit_source().unwrap();
+        let fence = lease.source_admission().fence().unwrap();
+        let old_view = fence.publication_view(None);
+        let successor = NotebookGenerationId::INITIAL.next().unwrap();
+        let Err((fence, _)) = fence.retire(successor) else {
+            panic!("active work must return its original fence");
+        };
+        drop(claim);
+        fence.reopen(lease.original_source()).unwrap();
+        let next = lease.source_admission().fence().unwrap();
+        assert_ne!(old_view.attempt, next.attempt);
+        assert!(matches!(
+            old_view.with_current(&lease, || panic!("a previous attempt cannot publish")),
+            Err(SourceAdmissionError::StaleFence)
+        ));
+        assert!(lease.admit_source().is_err());
+        assert!(next.retire(successor).is_ok());
+    }
+
+    #[test]
     fn captured_scopes_keep_dependency_but_independent_notebook_issues_its_own() {
         let mut session = PersistentSession::new(None, 1024);
         let parent = session.mint_isolated_scope_with_lease().unwrap();
@@ -1448,7 +1544,10 @@ mod tests {
                         let outstanding = claims.iter().flatten().filter(|(owner, _)| gate == 0 || *owner == gate).count() + uncertainty[gate];
                         let result = fence.retire(NotebookGenerationId::INITIAL.next().unwrap());
                         prop_assert_eq!(result.is_ok(), outstanding == 0);
-                        if result.is_ok() { phases[gate] = 2; }
+                        match result {
+                            Ok(()) => phases[gate] = 2,
+                            Err((fence, _)) => fences[gate] = Some(fence),
+                        }
                     },
                     4 => { claims[slot] = None; },
                     5 => if let Some((owner, claim)) = claims[slot].take() {

@@ -245,7 +245,8 @@ impl RunControlClient {
             .send_message(RunControlMessage::BeginGenerationRetirement {
                 preparation,
                 inventory: GenerationRetirementInventory::Unavailable,
-                reply,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
+                reply: GenerationRetirementBeginReply::Observe(reply),
             })
             .unwrap();
         let observer = expect_begin(answer.await.unwrap());
@@ -296,9 +297,10 @@ impl RunControlClient {
         .unwrap();
         assert!(matches!(
             terminal.get(),
-            Some(preparation::PublicationTerminalObservation::Completed(
-                preparation::PublicationOutcomeObservation::Refused
-            ))
+            Some(preparation::PublicationTerminalObservation::Completed {
+                outcome: preparation::PublicationOutcomeObservation::Refused,
+                notification: preparation::PublicationNotificationObservation::NotRequired,
+            })
         ));
         if control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody {
             assert!(state.current_generation().is_none());
@@ -329,7 +331,7 @@ impl RunControlClient {
                 let attempt = custody.attempts[0].active_for_test();
                 assert!(candidate.same_candidate(&attempt.candidate));
                 assert!(Arc::ptr_eq(&attempt.expected, &expected));
-                let RetainedGenerationRetirementPhase::Publication {
+                let GenerationRetirementPhase::Entered {
                     observer: issued, ..
                 } = &attempt.phase
                 else {
@@ -349,11 +351,11 @@ impl RunControlClient {
             recovery.reconcile_publications();
             assert!(
                 matches!(recovery.custody.as_ref().unwrap().attempts.as_slice(),
-                [RetainedGenerationRetirementRecord::SourcesSettled { actor: completed, completion: GenerationRetirementCompletion::AReopened { .. }, .. }]
+                [GenerationRetirementCore::SourcesSettled { actor: completed, completion: GenerationRetirementCompletion::AReopened { .. }, .. }]
                     if *completed == actor)
             );
             let resource_witness = native_resource.as_ref().unwrap();
-            let RetainedGenerationRetirementRecord::SourcesSettled {
+            let GenerationRetirementCore::SourcesSettled {
                 cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
                 ..
             } = &recovery.custody.as_ref().unwrap().attempts[0]
@@ -485,6 +487,239 @@ impl RunControlClient {
         }
     }
 
+    pub(crate) async fn assert_generation_publication_delivery_lost(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+        preparation: ActorGenerationRetirementPreparation,
+        state: Arc<InstalledToolsState>,
+        expected: Arc<ActorGeneration>,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        target: GenerationDependency,
+        lifecycle: crate::LifecycleHandle,
+    ) {
+        let actor = preparation.actor();
+        let candidate = preparation.candidate_custody();
+        let retained = self.native_cleanup.clone();
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(lifecycle.identity(), actor);
+        assert!(Arc::ptr_eq(
+            preparation.expected_generation().unwrap(),
+            &expected
+        ));
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory: GenerationRetirementInventory::Unavailable,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
+                reply: GenerationRetirementBeginReply::Observe(reply),
+            })
+            .unwrap();
+        let observer = expect_begin(answer.await.unwrap());
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(
+                RunControlMessage::DispatchDeliveryLostGenerationPublication {
+                    actor,
+                    observer: observer.clone(),
+                    lifecycle: lifecycle.clone(),
+                    reply,
+                },
+            )
+            .unwrap();
+        let terminal = answer.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while terminal.get().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            terminal.get(),
+            Some(preparation::PublicationTerminalObservation::Completed {
+                outcome: preparation::PublicationOutcomeObservation::Published,
+                notification: preparation::PublicationNotificationObservation::Accepted,
+            })
+        ));
+        // The ready notification precedes this ordinary directory round trip.
+        assert_eq!(
+            self.resolve(actor).await.unwrap().unwrap().identity(),
+            actor
+        );
+        let published = state.current_generation().unwrap();
+        assert_eq!(published.id(), target.generation());
+        assert!(!Arc::ptr_eq(&published, &expected));
+        let actual_owner = lifecycle
+            .public_owner(Some(published.public_owner().clone()), false)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&actual_owner, published.public_owner()));
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Published
+        );
+        assert!(matches!(
+            SourceDependency::Generation(expected.dependency().clone()).claim(),
+            Err(
+                crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. },
+                    ..
+                }
+            )
+        ));
+        drop(
+            SourceDependency::Generation(target.clone())
+                .claim()
+                .unwrap(),
+        );
+        self.owner.get_cell().kill();
+        tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut recovery = retained.take_recovery().unwrap();
+        for _ in 0..2 {
+            recovery.reconcile_publications();
+            let custody = recovery.custody.as_ref().unwrap();
+            assert_eq!(custody.attempts.len(), 1);
+            let attempt = custody.attempts[0].active_for_test();
+            assert!(candidate.same_candidate(&attempt.candidate));
+            assert!(Arc::ptr_eq(&attempt.expected, &expected));
+            let GenerationRetirementPhase::Entered {
+                observer: actual,
+                cutoff: GenerationRetirementCutoffPhase::Captured { fence, .. },
+                custody: publication,
+            } = &attempt.phase
+            else {
+                panic!("lost affine delivery must retain the actual A fence");
+            };
+            assert!(actual.same_attempt(&observer));
+            assert!(fence.dependency().same_owner(expected.dependency()));
+            let GenerationPublicationCustody::DeliveryLost { terminal: actual } = publication
+            else {
+                panic!("closed receiver must retain the SAME terminal publication metadata");
+            };
+            assert!(Arc::ptr_eq(actual, &terminal));
+            assert!(publication.published());
+            assert_eq!(
+                publication.notification(),
+                preparation::PublicationNotificationObservation::Accepted
+            );
+            let (obligations, _) = custody.attempts[0]
+                .operational_obligations(&GenerationRetirementReplyOwner::Native(&recovery));
+            assert!(obligations.contains(&tidepool_bridge_effects::RlRetirementObligation::ReloadCandidateSettlementObligation(
+                tidepool_bridge_effects::RlObligationObservation::ReloadObligationUnconfirmed,
+            )));
+            assert!(obligations.contains(&tidepool_bridge_effects::RlRetirementObligation::ReloadOriginalRetirementObligation(
+                tidepool_bridge_effects::RlObligationObservation::ReloadObligationPending,
+            )));
+            assert!(!obligations.iter().any(|obligation| matches!(obligation,
+                tidepool_bridge_effects::RlRetirementObligation::ReloadPublicationNotificationObligation(_),
+            )));
+
+            assert!(Arc::ptr_eq(
+                &state.current_generation().unwrap(),
+                &published
+            ));
+            assert_eq!(
+                decision.phase(),
+                tidepool_runtime::session::PublicationPhase::Published
+            );
+            assert!(matches!(SourceDependency::Generation(expected.dependency().clone()).claim(),
+                Err(crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. }, ..
+                })));
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls);
+        }
+    }
+
+    pub(crate) async fn assert_generation_retirement_reservation_failed(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+        preparation: ActorGenerationRetirementPreparation,
+        state: Arc<InstalledToolsState>,
+        expected: Arc<ActorGeneration>,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        target_fence: GenerationFence,
+    ) {
+        let actor = preparation.actor();
+        let candidate = preparation.candidate_custody();
+        assert!(Arc::ptr_eq(
+            preparation.expected_generation().unwrap(),
+            &expected,
+        ));
+        assert_eq!(actor, expected.context().actor);
+        let target = target_fence.dependency().clone();
+        let retained = self.native_cleanup.clone();
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory: GenerationRetirementInventory::Unavailable,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
+                reply: GenerationRetirementBeginReply::Observe(reply),
+            })
+            .unwrap();
+        let Err(GenerationRetirementBeginFailure::Publication(primary)) = answer.await.unwrap()
+        else {
+            panic!("the actual foreign target fence must refuse reservation before A cutoff");
+        };
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        assert!(SourceDependency::Generation(target.clone())
+            .claim()
+            .is_err());
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+        );
+        self.owner.get_cell().kill();
+        tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let recovery = retained.take_recovery().unwrap();
+        let custody = recovery.custody.as_ref().unwrap();
+        assert_eq!(custody.attempts.len(), 1);
+        let attempt = custody.attempts[0].active_for_test();
+        assert_eq!(attempt.actor, actor);
+        assert!(candidate.same_candidate(&attempt.candidate));
+        assert!(Arc::ptr_eq(&attempt.expected, &expected));
+        let GenerationRetirementPhase::ReservationFailed(actual) = &attempt.phase else {
+            panic!("native loss must retain the SAME failed reservation, not a completion");
+        };
+        assert!(Arc::ptr_eq(actual, &primary));
+        // Releasing the foreign gate is not an instruction to retry the failed
+        // reservation or to enter the body. Its original cause remains owned.
+        target_fence.reopen().unwrap();
+        drop(SourceDependency::Generation(target).claim().unwrap());
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls);
+        drop(recovery);
+        let recovery = retained.take_recovery().unwrap();
+        let attempt = recovery.custody.as_ref().unwrap().attempts[0].active_for_test();
+        assert!(candidate.same_candidate(&attempt.candidate));
+        assert!(
+            matches!(&attempt.phase, GenerationRetirementPhase::ReservationFailed(actual)
+            if Arc::ptr_eq(actual, &primary))
+        );
+    }
+
     pub(crate) async fn assert_generation_retirement_owner_control(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,
@@ -523,6 +758,20 @@ impl RunControlClient {
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
         let retained = self.native_cleanup.clone();
+        // This member is admitted under A's real gate. Installing A does not
+        // change the hosting actor's independent physical birth provenance.
+        let captured_reservation = if control == GenerationRetirementNativeControl::AfterCapture {
+            Some(
+                self.reserve_source_actor(
+                    &SourceDependency::Generation(expected.dependency().clone()),
+                    crate::Incarnation::FIRST,
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
         let mut acknowledged = None;
         let mut waiter = None;
         let mut pause_release = None;
@@ -546,7 +795,8 @@ impl RunControlClient {
                 .send_message(RunControlMessage::BeginGenerationRetirement {
                     preparation,
                     inventory: GenerationRetirementInventory::Unavailable,
-                    reply,
+                    diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
+                    reply: GenerationRetirementBeginReply::Observe(reply),
                 })
                 .unwrap();
             if control == GenerationRetirementNativeControl::PanicAfterReserve {
@@ -598,6 +848,11 @@ impl RunControlClient {
                 | GenerationRetirementNativeControl::QueuedBeforeReceive
         );
         if !before_reserve {
+            assert_eq!(
+                decision.phase(),
+                tidepool_runtime::session::PublicationPhase::Running,
+                "losing an observer does not request publication cancellation"
+            );
             assert_eq!(
                 decision.request_cancellation(),
                 tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
@@ -659,10 +914,11 @@ impl RunControlClient {
             assert_eq!(attempt.actor, actor);
             assert!(candidate.same_candidate(&attempt.candidate));
             assert!(Arc::ptr_eq(&attempt.expected, &expected));
-            let RetainedGenerationRetirementPhase::Reserved {
-                reserved,
+            let GenerationRetirementPhase::Unstarted {
+                publication: GenerationUnstartedPublication::Available(reserved),
                 observer,
                 cutoff,
+                ..
             } = &attempt.phase
             else {
                 panic!("successful reserve must retain the same actual reservation")
@@ -686,13 +942,22 @@ impl RunControlClient {
                         capture.work,
                         GenerationRetirementWork::Unavailable
                     ));
-                    let GenerationCapturePhysicalClosure::Guarded { actors, cells } =
+                    let GenerationCapturePhysicalClosure::Guarded { actors, .. } =
                         &capture.physical_closure;
-                    assert!(actors.contains(&actor));
-                    assert!(capture.actors.iter().any(|captured| {
-                        captured.identity() == actor
-                            && cells.contains(&captured.address().get_id())
-                    }));
+                    let member = captured_reservation.as_ref().unwrap().identity();
+                    assert!(actors.contains(&member));
+                    assert!(capture
+                        .population
+                        .resources
+                        .iter()
+                        .any(|resource| resource.identity
+                            == GenerationResourceIdentity::Actor(member)));
+                    assert_eq!(capture.reservations.len(), 1);
+                    assert!(!actors.contains(&actor));
+                    assert!(!capture
+                        .actors
+                        .iter()
+                        .any(|captured| captured.identity() == actor));
                 }
                 (
                     _,
@@ -714,6 +979,12 @@ impl RunControlClient {
                 tidepool_runtime::session::PublicationPhase::CancellationRequested
             );
         }
+        let external = expected.dependency().prerequisite().as_ref().unwrap();
+        drop(
+            SourceDependency::Generation(external.clone())
+                .claim()
+                .unwrap(),
+        );
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
             compiler_calls,

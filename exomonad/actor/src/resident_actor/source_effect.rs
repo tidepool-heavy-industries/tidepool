@@ -159,9 +159,19 @@ pub(super) fn reload_disposition(
             WorkbenchOperationDisposition::Unknown
         }
         Ok(SrReloadOutcome::ReloadRetirement(receipt)) => {
-            use tidepool_bridge_effects::{RlCleanupOutcome, RlRetirementState, RlStopOutcome};
+            use tidepool_bridge_effects::{
+                RlCleanupOutcome, RlOperationalSettlement, RlRetirementState, RlStopOutcome,
+            };
+            if matches!(
+                receipt.settlement,
+                RlOperationalSettlement::ReloadOperationalUnsettled(..)
+            ) {
+                return WorkbenchOperationDisposition::Unknown;
+            }
             match &receipt.state {
-                RlRetirementState::ReloadRetirementFenced(_) => WorkbenchOperationDisposition::Unknown,
+                RlRetirementState::ReloadRetirementFenced(_) => {
+                    WorkbenchOperationDisposition::Unknown
+                }
                 RlRetirementState::ReloadBPublished(..) => WorkbenchOperationDisposition::Committed,
                 RlRetirementState::ReloadAReopened => {
                     if receipt.outcomes.iter().any(|outcome| {
@@ -249,12 +259,15 @@ where
     }
     pub(super) fn prepare_reload_effect(
         &self,
+        kernel: KernelContext,
+        coordinator: Option<Arc<InvocationWork>>,
         context: ActorSessionContext,
         issued: Option<ActorRequestSnapshot>,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
         continuation: ResidentHole,
         request: crate::generated::reload::ReloadReq,
         authorized: bool,
+        diagnostic: Option<WorkbenchOperationDiagnosticOwner>,
     ) -> futures_util::future::BoxFuture<'static, commands::CommandResolution> {
         use crate::generated::reload::{ReloadError, ReloadReq};
         let runner = self.environment.runner.clone();
@@ -268,22 +281,38 @@ where
                 "forced generation retirement is not supported".into(),
             ))
         } else {
-            issued
-                .as_ref()
-                .and_then(ActorRequestSnapshot::generation)
-                .cloned()
+            diagnostic
                 .ok_or_else(|| {
                     SourceError::SourceUnavailable(
-                        "reload requires an initialized notebook generation".into(),
+                        "reload has no actual admitted operation diagnostic owner".into(),
                     )
                 })
-                .and_then(|generation| {
-                    self.coherent_reload_operation(
-                        generation,
-                        control,
-                        options.also_check,
-                        options.policy,
-                    )
+                .and_then(|diagnostic| {
+                    let coordinator = coordinator.ok_or_else(|| {
+                        SourceError::SourceUnavailable(
+                            "reload has no actual admitted invocation owner".into(),
+                        )
+                    })?;
+                    issued
+                        .as_ref()
+                        .and_then(ActorRequestSnapshot::generation)
+                        .cloned()
+                        .ok_or_else(|| {
+                            SourceError::SourceUnavailable(
+                                "reload requires an initialized notebook generation".into(),
+                            )
+                        })
+                        .and_then(|generation| {
+                            self.coherent_reload_operation(
+                                kernel,
+                                coordinator,
+                                generation,
+                                control,
+                                options.also_check,
+                                options.policy,
+                                diagnostic,
+                            )
+                        })
                 })
         };
         Box::pin(async move {
@@ -400,7 +429,71 @@ mod tests {
                 WorkbenchOperationDisposition::Rejected,
             ),
         ];
-        for (answer, expected) in cases {
+        let retirement = |state, settlement| {
+            Ok(SrReloadOutcome::ReloadRetirement(
+                tidepool_bridge_effects::RlRetirementReceipt {
+                    previous: revision("A"),
+                    candidate: revision("B"),
+                    operation: None,
+                    state,
+                    blockers: vec![],
+                    outcomes: vec![],
+                    surface: tidepool_bridge_effects::RlSurfaceDiff {
+                        added: vec![],
+                        removed: vec![],
+                        changed: vec![],
+                    },
+                    primary: Some(tidepool_bridge_effects::RlCause {
+                        kind: tidepool_bridge_effects::RlCauseKind::ReloadPublicationFailed,
+                        detail: "a completed failure can have all obligations settled".into(),
+                    }),
+                    secondary: vec![],
+                    settlement,
+                },
+            ))
+        };
+        use tidepool_bridge_effects::{
+            RlObligationObservation as Observation, RlOperationalSettlement as Settlement,
+            RlRetirementObligation as Obligation, RlRetirementState as State,
+        };
+        let explicit_settlement = [
+            (
+                retirement(State::ReloadAReopened, Settlement::ReloadOperationalSettled),
+                WorkbenchOperationDisposition::Rejected,
+            ),
+            (
+                retirement(
+                    State::ReloadBPublished(vec![], vec![]),
+                    Settlement::ReloadOperationalSettled,
+                ),
+                WorkbenchOperationDisposition::Committed,
+            ),
+            (
+                retirement(
+                    State::ReloadAReopened,
+                    Settlement::ReloadOperationalUnsettled(
+                        Obligation::ReloadPhysicalCleanupObligation(
+                            Observation::ReloadObligationUnconfirmed,
+                        ),
+                        vec![],
+                    ),
+                ),
+                WorkbenchOperationDisposition::Unknown,
+            ),
+            (
+                retirement(
+                    State::ReloadBPublished(vec![], vec![]),
+                    Settlement::ReloadOperationalUnsettled(
+                        Obligation::ReloadOriginalRetirementObligation(
+                            Observation::ReloadObligationRefused,
+                        ),
+                        vec![],
+                    ),
+                ),
+                WorkbenchOperationDisposition::Unknown,
+            ),
+        ];
+        for (answer, expected) in cases.into_iter().chain(explicit_settlement) {
             let disposition = reload_disposition(&answer);
             assert_eq!(disposition, expected);
             let delivered = format!("{answer:?}");

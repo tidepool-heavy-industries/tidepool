@@ -151,6 +151,7 @@ pub(crate) enum SourceEvent {
 /// handles or retires it. Later publications cannot replace that value.
 #[derive(Debug, Clone)]
 pub struct SourceDelivery {
+    pub(crate) slot_delivery: Option<crate::resident_actor::source_slots::SourceSlotDelivery>,
     pub(crate) slot: usize,
     pub(crate) target: SourceTarget,
     pub(crate) event: SourceEvent,
@@ -189,6 +190,7 @@ impl RequestSourceConnection {
             && self
                 .recipient
                 .send(SourceDelivery {
+                    slot_delivery: None,
                     slot: self.slot,
                     target: SourceTarget::Request(self.request, self.kind),
                     event,
@@ -202,9 +204,10 @@ impl RequestSourceConnection {
 
 pub(crate) struct ActorSourceConnections {
     registry: Arc<RequestRegistry>,
-    lifecycle: Vec<crate::ActorLifecycleConnection>,
-    commands: Vec<crate::command_jobs::CommandConnection>,
+    lifecycle: Vec<(usize, crate::ActorLifecycleConnection)>,
+    commands: Vec<(usize, crate::command_jobs::CommandConnection)>,
     recipient: SourceDestination,
+    request_slots: std::collections::HashSet<usize>,
 }
 
 impl ActorSourceConnections {
@@ -245,6 +248,7 @@ impl ActorSourceConnections {
         }
         record.sources.push(connection);
         record.publish_source_closure();
+        self.request_slots.insert(slot);
         Ok(())
     }
 
@@ -258,36 +262,92 @@ impl ActorSourceConnections {
         let recipient = self.recipient.clone();
         let target = SourceTarget::Command(key);
         let observer = recipient.identity();
-        self.commands.push(jobs.connect(
-            owner,
-            observer,
-            &uuid::Uuid::from_u128(key).to_string(),
-            move |event| {
-                recipient
-                    .send(SourceDelivery {
-                        slot,
-                        target,
-                        event: SourceEvent::Command(event),
-                    })
-                    .is_ok()
-            },
-        )?);
+        self.commands.push((
+            slot,
+            jobs.connect(
+                owner,
+                observer,
+                &uuid::Uuid::from_u128(key).to_string(),
+                move |event| {
+                    recipient
+                        .send(SourceDelivery {
+                            slot_delivery: None,
+                            slot,
+                            target,
+                            event: SourceEvent::Command(event),
+                        })
+                        .is_ok()
+                },
+            )?,
+        ));
         Ok(())
     }
 
     pub(crate) fn attach_lifecycle(&mut self, slot: usize, actor: &LocalActorRef) {
         let recipient = self.recipient.clone();
         let target = SourceTarget::Lifecycle(actor.identity());
-        self.lifecycle
-            .push(actor.terminal().connect_lifecycle(move |event| {
+        self.lifecycle.push((
+            slot,
+            actor.terminal().connect_lifecycle(move |event| {
                 recipient
                     .send(SourceDelivery {
+                        slot_delivery: None,
                         slot,
                         target,
                         event: SourceEvent::Lifecycle(event),
                     })
                     .is_ok()
-            }));
+            }),
+        ));
+    }
+
+    /// Move one subscription into its existing stable source slot. The shared
+    /// destination still forwards every slot through the original lifecycle.
+    pub(crate) fn take_slot(&mut self, slot: usize) -> Self {
+        let lifecycle = self
+            .lifecycle
+            .iter()
+            .position(|(id, _)| *id == slot)
+            .map(|index| self.lifecycle.remove(index))
+            .into_iter()
+            .collect();
+        let commands = self
+            .commands
+            .iter()
+            .position(|(id, _)| *id == slot)
+            .map(|index| self.commands.remove(index))
+            .into_iter()
+            .collect();
+        let request_slots = self
+            .request_slots
+            .remove(&slot)
+            .then_some(slot)
+            .into_iter()
+            .collect();
+        Self {
+            registry: self.registry.clone(),
+            recipient: self.recipient.clone(),
+            lifecycle,
+            commands,
+            request_slots,
+        }
+    }
+
+    pub(crate) fn dispatch(
+        &self,
+        delivery: SourceDelivery,
+    ) -> Result<(), crate::KernelCallFailure> {
+        self.recipient.send(delivery)
+    }
+
+    pub(crate) fn destination(&self) -> crate::LifecycleHandle {
+        (*self.recipient.0).clone()
+    }
+
+    pub(crate) fn handoff_observers(&mut self, successor: ActorRef) {
+        for (_, command) in &mut self.commands {
+            command.handoff(successor);
+        }
     }
 
     /// The predecessor selects forwarding before subscriptions change owner.
@@ -297,7 +357,7 @@ impl ActorSourceConnections {
         grant: crate::local_actor::run_control::ReplacementIngressGrant,
     ) -> Result<(), crate::KernelCallFailure> {
         self.recipient.0.retarget_sources(grant.clone()).await?;
-        for command in &mut self.commands {
+        for (_, command) in &mut self.commands {
             command.handoff(grant.successor());
         }
         Ok(())
@@ -308,9 +368,10 @@ impl Drop for ActorSourceConnections {
     fn drop(&mut self) {
         let mut state = self.registry.state.lock();
         for record in state.requests.values_mut() {
-            record
-                .sources
-                .retain(|source| !source.recipient.same_connections(&self.recipient));
+            record.sources.retain(|source| {
+                !(source.recipient.same_connections(&self.recipient)
+                    && self.request_slots.contains(&source.slot))
+            });
         }
     }
 }
@@ -386,6 +447,7 @@ impl RequestRegistry {
             lifecycle: Vec::new(),
             commands: Vec::new(),
             recipient,
+            request_slots: sources.iter().map(|(slot, _, _)| *slot).collect(),
         })
     }
 }
@@ -455,7 +517,7 @@ impl RequestRecord {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::KernelMessage;
     use ractor::{Actor, ActorProcessingErr};
@@ -508,16 +570,16 @@ mod tests {
         }
     }
 
-    struct DirectoryFixture {
-        directory: crate::LocalActorDirectory,
+    pub(crate) struct DirectoryFixture {
+        pub(crate) directory: crate::LocalActorDirectory,
         task: ractor::concurrency::JoinHandle<()>,
     }
     impl DirectoryFixture {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let (directory, task) = crate::LocalActorDirectory::start().await.unwrap();
             Self { directory, task }
         }
-        async fn spawn(
+        pub(crate) async fn spawn(
             &self,
             events: mpsc::UnboundedSender<SourceDelivery>,
             predecessor: Option<ActorRef>,
@@ -582,7 +644,9 @@ mod tests {
         ActorRef::first(crate::ActorId(id))
     }
 
-    async fn receive(events: &mut mpsc::UnboundedReceiver<SourceDelivery>) -> SourceDelivery {
+    pub(crate) async fn receive(
+        events: &mut mpsc::UnboundedReceiver<SourceDelivery>,
+    ) -> SourceDelivery {
         tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
             .await
             .unwrap()

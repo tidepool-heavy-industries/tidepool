@@ -171,6 +171,7 @@ pub use request::{
     SettlementNotification, SettlementTransition, UpdateReconciliationError, WatchId,
     WatchNotification, WatchObservation, WatchStateProjection, WatchTransition,
 };
+pub use resident_actor::WorkbenchDiagnosticRefusal;
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
     spawn_resident_root_with_workspace_admission, ActorDisplayAdmission, ActorGraphNode,

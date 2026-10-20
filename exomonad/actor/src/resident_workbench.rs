@@ -1959,19 +1959,30 @@ impl ActorGenerationCandidateCustody {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    pub(crate) fn identity_observer(&self) -> ActorGenerationCandidateObserver {
+        ActorGenerationCandidateObserver(Arc::downgrade(&self.0))
+    }
+
     #[cfg(test)]
-    pub(crate) fn retention_observer(&self) -> ActorGenerationCandidateRetentionObserver {
-        ActorGenerationCandidateRetentionObserver(Arc::downgrade(&self.0))
+    pub(crate) fn retention_observer(&self) -> ActorGenerationCandidateObserver {
+        self.identity_observer()
     }
 }
 
-#[cfg(test)]
-pub(crate) struct ActorGenerationCandidateRetentionObserver(
-    std::sync::Weak<ActorGenerationCandidate>,
-);
+/// Exact issued identity without candidate custody or publication rights.
+#[derive(Clone)]
+pub(crate) struct ActorGenerationCandidateObserver(std::sync::Weak<ActorGenerationCandidate>);
 
-#[cfg(test)]
-impl ActorGenerationCandidateRetentionObserver {
+impl ActorGenerationCandidateObserver {
+    pub(crate) fn same_candidate(&self, candidate: &ActorGenerationCandidateCustody) -> bool {
+        self.0.ptr_eq(&Arc::downgrade(&candidate.0))
+    }
+
+    pub(crate) fn same_observer(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_retained(&self) -> bool {
         self.0.upgrade().is_some()
     }
@@ -1994,6 +2005,8 @@ struct PreparingActorGeneration {
 
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(PreparedActorGeneration: Clone, Copy);
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(UnstartedRetirementSourceSettlement: Clone, Copy);
 
 /// Immutable rendering evidence, never publication authority.
 #[derive(Clone)]
@@ -2016,6 +2029,13 @@ pub(crate) struct ReservedActorGeneration {
     prepared: PreparedActorGeneration,
     guard: ActorPublicationGuard,
     publication_kind: ActorGenerationPublication,
+}
+
+/// Witnesses this reservation's actual B-then-A refusal transition. It grants
+/// no authority and says nothing about compiler, storage, or physical cleanup.
+#[must_use]
+pub(crate) struct UnstartedRetirementSourceSettlement {
+    attempt: std::sync::Weak<ActorPublicationAttempt>,
 }
 
 pub(crate) enum ActorGenerationReservation {
@@ -2064,7 +2084,7 @@ impl ReservedActorGeneration {
         self.guard.refuse_unstarted().map_err(|settlement| {
             ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned()))),
+                    outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned().into()))),
                     settlement,
                 }),
             }
@@ -2075,17 +2095,35 @@ impl ReservedActorGeneration {
         &mut self,
         original: &mut generation_admission::GenerationRetirementFence,
         detail: &str,
-    ) -> Result<(), ResidentActorWorkbenchError> {
+    ) -> Result<UnstartedRetirementSourceSettlement, ResidentActorWorkbenchError> {
         self.guard
             .refuse_retirement(original)
+            .map(|()| UnstartedRetirementSourceSettlement {
+                attempt: Arc::downgrade(&self.guard.attempt),
+            })
             .map_err(
                 |settlement| ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned()))),
+                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned().into()))),
                         settlement,
                     }),
                 },
             )
+    }
+
+    /// Consumes the same never-executed reservation and its source settlement.
+    /// The retirement record retains candidate and physical custody separately.
+    pub(crate) fn into_settled_unstarted(
+        self,
+        settlement: UnstartedRetirementSourceSettlement,
+    ) -> Result<(), (Self, UnstartedRetirementSourceSettlement)> {
+        if matches!(self.guard.settlement, ActorPublicationState::Settled)
+            && settlement.attempt.ptr_eq(&Arc::downgrade(&self.guard.attempt))
+        {
+            Ok(())
+        } else {
+            Err((self, settlement))
+        }
     }
 }
 
@@ -2184,40 +2222,24 @@ type GenerationPublicationAction = Box<
         + Send,
 >;
 
-type GenerationReservationAction = Box<
-    dyn FnOnce(
-            PreparedActorGeneration,
-        )
-            -> Result<ActorGenerationRetirementPreparationOutcome, ResidentActorWorkbenchError>
-        + Send,
->;
-
-/// The publisher is discarded only after its affine product is retained by the
-/// cleanup owner. This value exposes no publication or reservation operation.
-pub(crate) struct ActorGenerationPublicationDiscard {
-    _action: GenerationPublicationDiscardAction,
-}
-
-enum GenerationPublicationDiscardAction {
-    Reservation {
-        _reserve: GenerationReservationAction,
-    },
-    Publication {
-        _publish: GenerationPublicationAction,
-    },
-}
+type GenerationReservationAction =
+    Box<dyn FnOnce(PreparedActorGeneration) -> ActorGenerationRetirementPreparationOutcome + Send>;
 
 /// The real publisher and its single frozen candidate cross into RunState
 /// before reservation changes either source admission or installed state.
 #[must_use]
 pub(crate) struct ActorGenerationRetirementPreparation {
     prepared: PreparedActorGeneration,
-    reserve: GenerationReservationAction,
+    driver: ActorGenerationReservationDriver,
 }
 
 pub(crate) enum ActorGenerationRetirementPreparationOutcome {
-    Reserved(ActorGenerationPublicationOperation),
+    Reserved {
+        reserved: ReservedActorGeneration,
+        publisher: ActorGenerationPublicationDriver,
+    },
     Refused(String),
+    Failed(ResidentActorWorkbenchError),
 }
 
 impl ActorGenerationRetirementPreparation {
@@ -2237,61 +2259,67 @@ impl ActorGenerationRetirementPreparation {
         self.prepared.expected.generation()
     }
 
-    pub(crate) fn reserve(
-        self,
-    ) -> Result<ActorGenerationRetirementPreparationOutcome, ResidentActorWorkbenchError> {
-        let Self { prepared, reserve } = self;
-        reserve(prepared)
+    pub(crate) fn matches_execution_control(
+        &self,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) -> bool {
+        match (self.driver.publication_kind, control) {
+            (ActorGenerationPublication::Terminal, None) => true,
+            (ActorGenerationPublication::Continuing, Some(control)) => {
+                Arc::ptr_eq(&self.driver.decision, &control.publication_decision())
+            }
+            _ => false,
+        }
     }
 
-    pub(crate) fn into_retained_parts(
-        self,
-    ) -> (PreparedActorGeneration, ActorGenerationPublicationDiscard) {
-        let Self { prepared, reserve } = self;
-        (
-            prepared,
-            ActorGenerationPublicationDiscard {
-                _action: GenerationPublicationDiscardAction::Reservation { _reserve: reserve },
-            },
-        )
+    /// The serial owner retains the affine preparation before invoking its
+    /// transient driver. Dropping that driver cannot drop the preparation.
+    pub(crate) fn into_parts(self) -> (PreparedActorGeneration, ActorGenerationReservationDriver) {
+        let Self { prepared, driver } = self;
+        (prepared, driver)
     }
 }
 
-/// Affine transfer payload for the linked publication worker. The concrete
-/// publisher supplies its consumer; callers cannot replace it with a closure
-/// that loses the reservation before recording whether publication started.
+/// Executable endpoints are separate from the retained affine state. Their
+/// private issuer binds each endpoint to the same immutable candidate.
 #[must_use]
-pub(crate) struct ActorGenerationPublicationOperation {
-    reserved: ReservedActorGeneration,
+pub(crate) struct ActorGenerationReservationDriver {
+    candidate: std::sync::Weak<ActorGenerationCandidate>,
+    decision: Arc<tidepool_runtime::session::PublicationDecision>,
+    publication_kind: ActorGenerationPublication,
+    reserve: GenerationReservationAction,
+}
+
+impl ActorGenerationReservationDriver {
+    pub(crate) fn reserve(
+        self,
+        prepared: PreparedActorGeneration,
+    ) -> Result<ActorGenerationRetirementPreparationOutcome, (PreparedActorGeneration, Self)> {
+        if !self.candidate.ptr_eq(&Arc::downgrade(&prepared.candidate)) {
+            return Err((prepared, self));
+        }
+        Ok((self.reserve)(prepared))
+    }
+}
+
+#[must_use]
+pub(crate) struct ActorGenerationPublicationDriver {
+    candidate: std::sync::Weak<ActorGenerationCandidate>,
     publish: GenerationPublicationAction,
 }
 
-impl ActorGenerationPublicationOperation {
-    pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
-        self.reserved.attempt_observer()
-    }
-
-    pub(crate) fn reserved_mut(&mut self) -> &mut ReservedActorGeneration {
-        &mut self.reserved
-    }
-
-    /// Possession of the unconsumed payload proves its publication body has not
-    /// run. A failed worker transfer must return this whole payload first.
-    pub(crate) fn into_retained_parts(
+impl ActorGenerationPublicationDriver {
+    pub(crate) async fn run(
         self,
-    ) -> (ReservedActorGeneration, ActorGenerationPublicationDiscard) {
-        let Self { reserved, publish } = self;
-        (
-            reserved,
-            ActorGenerationPublicationDiscard {
-                _action: GenerationPublicationDiscardAction::Publication { _publish: publish },
-            },
-        )
-    }
-
-    pub(crate) async fn run(self) -> ActorGenerationPublicationSettlement {
-        let Self { reserved, publish } = self;
-        publish(reserved).await
+        reserved: ReservedActorGeneration,
+    ) -> Result<ActorGenerationPublicationSettlement, (ReservedActorGeneration, Self)> {
+        if !self
+            .candidate
+            .ptr_eq(&Arc::downgrade(&reserved.prepared.candidate))
+        {
+            return Err((reserved, self));
+        }
+        Ok((self.publish)(reserved).await)
     }
 }
 
@@ -2301,6 +2329,21 @@ impl ActorGenerationPublicationOperation {
 pub(crate) enum ActorGenerationPublicationSettlement {
     Unpublished(ActorGenerationPublicationRefusal),
     Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
+}
+
+impl ActorGenerationPublicationSettlement {
+    pub(crate) fn diagnostic_outcome(
+        &self,
+    ) -> Option<(
+        &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+        ActorGenerationPublicationRefusalObservation,
+    )> {
+        let outcome = match self {
+            Self::Unpublished(refusal) => refusal.outcome(),
+            Self::Settled(outcome) => outcome,
+        };
+        publication_failure_observation(outcome).map(|observation| (outcome.as_ref(), observation))
+    }
 }
 
 /// Causal metadata only: no source leases, compiler products, or error Arcs.
@@ -2329,6 +2372,7 @@ impl ActorGenerationPublicationRefusalObservation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ActorPublicationFailureCause {
     SourceAdmission(tidepool_runtime::session::SourceAdmissionError),
+    OperationDiagnostic(crate::WorkbenchDiagnosticRefusal),
     Io(std::io::ErrorKind),
     RecoveryStore(tidepool_runtime::session::StoreErrorKind),
     RecoveryStoreRefused,
@@ -2382,6 +2426,14 @@ pub(crate) enum ActorPublicationFailureCause {
 pub(crate) struct ActorGenerationPublicationRefusal {
     guard: ActorPublicationGuard,
     outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
+    obligations: PublicationBodyObligations,
+}
+
+/// Issued by the observed body before any durable publication work starts.
+/// Source restoration and diagnostic recording do not settle unassessed work.
+enum PublicationBodyObligations {
+    DiagnosticOnly,
+    Retained,
 }
 
 impl ActorGenerationPublicationRefusal {
@@ -2392,20 +2444,19 @@ impl ActorGenerationPublicationRefusal {
     }
 
     pub(crate) fn observation(&self) -> ActorGenerationPublicationRefusalObservation {
-        match self.outcome.as_ref() {
-            Ok(ActorGenerationCommit::Refused(_)) => {
-                ActorGenerationPublicationRefusalObservation::Refused
-            }
-            Err(error) => ActorGenerationPublicationRefusalObservation::Failed {
-                cause: error.publication_failure_cause(),
-                execution: error.execution_failure_kind(),
-                requires_recovery: error.requires_recovery(),
-            },
-            Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_)) => {
-                unreachable!(
-                    "the publisher issues refusal custody only for a known unpublished body"
-                )
-            }
+        publication_failure_observation(self.outcome.as_ref())
+            .expect("an unpublished refusal retains its original refusal or error")
+    }
+
+    pub(crate) fn into_settled_diagnostic(
+        self,
+    ) -> Result<ActorGenerationPublicationRefusalObservation, Self> {
+        if matches!(self.obligations, PublicationBodyObligations::DiagnosticOnly)
+            && matches!(self.guard.settlement, ActorPublicationState::Settled)
+        {
+            Ok(self.observation())
+        } else {
+            Err(self)
         }
     }
 
@@ -2426,12 +2477,55 @@ impl ActorGenerationPublicationRefusal {
     }
 }
 
+fn publication_failure_observation(
+    outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+) -> Option<ActorGenerationPublicationRefusalObservation> {
+    use ActorGenerationPublicationRefusalObservation as Observation;
+    Some(match outcome {
+        Ok(ActorGenerationCommit::Published { .. }) => return None,
+        Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Detail(_))) => {
+            Observation::Refused
+        }
+        Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))) => {
+            Observation::Failed {
+                cause: publication_session_failure_cause(
+                    error,
+                    ActorPublicationFailureCause::Resident,
+                ),
+                execution: None,
+                requires_recovery: session_error_requires_recovery(error),
+            }
+        }
+        Ok(ActorGenerationCommit::Unconfirmed(issue)) => Observation::Failed {
+            cause: match issue {
+                ActorGenerationPublicationIssue::Detail(_) => {
+                    ActorPublicationFailureCause::PublicationSettlement
+                }
+                ActorGenerationPublicationIssue::Durable(error) => {
+                    publication_session_failure_cause(
+                        error,
+                        ActorPublicationFailureCause::PublicationSettlement,
+                    )
+                }
+            },
+            execution: None,
+            requires_recovery: true,
+        },
+        Err(error) => Observation::Failed {
+            cause: error.publication_failure_cause(),
+            execution: error.execution_failure_kind(),
+            requires_recovery: error.requires_recovery(),
+        },
+    })
+}
+
 /// Checkout completion and source settlement are distinct observations. An
 /// unobserved body never grants the right to reopen either source.
 enum PublicationBodyCompletion {
     Observed {
         guard: ActorPublicationGuard,
         outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+        obligations: PublicationBodyObligations,
     },
     Unobserved {
         guard: ActorPublicationGuard,
@@ -2443,7 +2537,7 @@ enum PublicationBodyCompletion {
 impl PublicationBodyCompletion {
     fn complete(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
         match self {
-            Self::Observed { guard, outcome } => guard.complete(outcome),
+            Self::Observed { guard, outcome, .. } => guard.complete(outcome),
             Self::Unobserved { guard, primary } => Err(guard.unobserved(primary)),
             Self::Terminal(outcome) => outcome,
         }
@@ -2451,14 +2545,18 @@ impl PublicationBodyCompletion {
 
     fn for_retirement(self) -> ActorGenerationPublicationSettlement {
         match self {
-            Self::Observed { guard, outcome }
-                if matches!(&guard.settlement, ActorPublicationState::Armed(_))
-                    && guard.known_unpublished(&outcome) =>
+            Self::Observed {
+                guard,
+                outcome,
+                obligations,
+            } if matches!(&guard.settlement, ActorPublicationState::Armed(_))
+                && guard.known_unpublished(&outcome) =>
             {
                 ActorGenerationPublicationSettlement::Unpublished(
                     ActorGenerationPublicationRefusal {
                         guard,
                         outcome: Arc::new(outcome),
+                        obligations,
                     },
                 )
             }
@@ -2470,7 +2568,9 @@ impl PublicationBodyCompletion {
 }
 
 #[cfg(test)]
-static_assertions::assert_not_impl_any!(ActorGenerationPublicationOperation: Clone, Copy);
+static_assertions::assert_not_impl_any!(ActorGenerationReservationDriver: Clone, Copy);
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(ActorGenerationPublicationDriver: Clone, Copy);
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(ActorGenerationRetirementPreparation: Clone, Copy);
 
@@ -2548,6 +2648,8 @@ enum PublicationSettlementError {
     BodyUnobserved,
     #[error("publication completion cannot establish whether visibility committed")]
     PublicationUnconfirmed,
+    #[error("the generation was published, but its lifecycle owner refused notification")]
+    NotificationRefused,
     #[error("retirement {stage} settlement failed: {source}")]
     Retirement {
         stage: RetirementSettlementStage,
@@ -3136,39 +3238,39 @@ where
         prepared: PreparedActorGeneration,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
         kind: ActorGenerationPublication,
-        compiler: crate::capabilities::CompilerOwnerScope,
     ) -> ActorGenerationRetirementPreparation {
+        let candidate = Arc::downgrade(&prepared.candidate);
         ActorGenerationRetirementPreparation {
             prepared,
-            reserve: Box::new(move |prepared| {
-                Ok(match self.reserve(prepared, decision, kind)? {
-                    ActorGenerationReservation::Reserved(reserved) => {
-                        ActorGenerationRetirementPreparationOutcome::Reserved(
-                            self.into_publication_operation(reserved, compiler),
-                        )
-                    }
-                    ActorGenerationReservation::Refused(reason) => {
-                        ActorGenerationRetirementPreparationOutcome::Refused(reason)
-                    }
-                })
-            }),
-        }
-    }
-
-    pub(crate) fn into_publication_operation(
-        self,
-        reserved: ReservedActorGeneration,
-        compiler: crate::capabilities::CompilerOwnerScope,
-    ) -> ActorGenerationPublicationOperation {
-        ActorGenerationPublicationOperation {
-            reserved,
-            publish: Box::new(move |reserved| {
-                Box::pin(async move {
-                    compiler
-                        .scope(async { self.run_publication_body(reserved).await.for_retirement() })
-                        .await
-                })
-            }),
+            driver: ActorGenerationReservationDriver {
+                candidate,
+                decision: decision.clone(),
+                publication_kind: kind,
+                reserve: Box::new(
+                    move |prepared| match self.reserve(prepared, decision, kind) {
+                        Ok(ActorGenerationReservation::Reserved(reserved)) => {
+                            let candidate = Arc::downgrade(&reserved.prepared.candidate);
+                            ActorGenerationRetirementPreparationOutcome::Reserved {
+                                reserved,
+                                publisher: ActorGenerationPublicationDriver {
+                                    candidate,
+                                    publish: Box::new(move |reserved| {
+                                        Box::pin(async move {
+                                            self.run_publication_body(reserved)
+                                                .await
+                                                .for_retirement()
+                                        })
+                                    }),
+                                },
+                            }
+                        }
+                        Ok(ActorGenerationReservation::Refused(reason)) => {
+                            ActorGenerationRetirementPreparationOutcome::Refused(reason)
+                        }
+                        Err(error) => ActorGenerationRetirementPreparationOutcome::Failed(error),
+                    },
+                ),
+            },
         }
     }
 
@@ -3181,7 +3283,7 @@ where
         match self.reserve(prepared, publication, publication_kind)? {
             ActorGenerationReservation::Reserved(reserved) => self.publish_reserved(reserved).await,
             ActorGenerationReservation::Refused(detail) => {
-                Ok(ActorGenerationCommit::Refused(detail))
+                Ok(ActorGenerationCommit::Refused(detail.into()))
             }
         }
     }
@@ -3259,10 +3361,15 @@ where
             let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
             Arc::downgrade(&owner)
         };
+        let obligations = match &prepared.commit {
+            PreparedGenerationCommit::Ephemeral { .. } => PublicationBodyObligations::DiagnosticOnly,
+            PreparedGenerationCommit::Restored { .. } | PreparedGenerationCommit::Durable { .. } => PublicationBodyObligations::Retained,
+        };
         if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner)
         {
             return PublicationBodyCompletion::Observed {
                 guard: owner,
+                obligations,
                 outcome: Ok(ActorGenerationCommit::Refused(
                     "publication reservation belongs to another publisher".into(),
                 )),
@@ -3287,8 +3394,9 @@ where
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.
         let completed = self.access.with_machine_wait_mode(prepared.checkout_context.clone(), None, false, move |session, _, _| {
+            let mut obligations = obligations;
             if !visibility.is_current() {
-                return Ok(Ok(ActorGenerationCommit::Refused("publication attempt is unavailable".into())));
+                return Ok((Ok(ActorGenerationCommit::Refused("publication attempt is unavailable".into())), obligations));
             }
             let outcome = (|| {
             session.validate_lexical_scope_lease(prepared.candidate.scope.scope(), &prepared.candidate.scope)?;
@@ -3302,6 +3410,7 @@ where
             let mut visibility_live = true;
             match commit {
                 PreparedGenerationCommit::Restored { selected, readiness } => {
+                    obligations = PublicationBodyObligations::Retained;
                     let canonical = selected.owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL);
                     let observed = session.active_notebook_generation(&canonical).map_err(ResidentError::Session)?;
                     if observed.as_ref() != Some(&selected) || !readiness.is_current() {
@@ -3323,6 +3432,7 @@ where
                     let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
                     let settled = session.with_current_compiler_world(&candidate.compiler_world, &visibility.source, || {
                         let Some(claim) = publication.claim_commit() else { return Err(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
+                        obligations = PublicationBodyObligations::Retained;
                         visibility_live = visibility.install(generation.clone());
                         let cancellation_pending = match publication_kind {
                             ActorGenerationPublication::Terminal => claim.published(),
@@ -3336,6 +3446,7 @@ where
                     }
                 },
                 PreparedGenerationCommit::Durable { prepared, selected } => {
+                    obligations = PublicationBodyObligations::Retained;
                     let mut candidate = Some(InitialPublicationCandidate {
                         installation, context, scope, public_owner, prompts, configuration_digest, selected,
                     });
@@ -3354,7 +3465,7 @@ where
                         Ok(result) => result,
                         Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
                             visibility.retain_unconfirmed(&mut candidate);
-                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                            return Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(Box::new(error))));
                         },
                         Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
                     };
@@ -3363,10 +3474,10 @@ where
                             visible = visible.map(|(generation, _)| (generation, cancellation_pending));
                         },
                         tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
-                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(error.to_string())),
+                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))),
                         tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired { error } => {
                             visibility.retain_unconfirmed(&mut candidate);
-                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                            return Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)));
                         },
                     }
                 },
@@ -3384,9 +3495,9 @@ where
             })();
             // Preserve whether the body actually ran; a checkout/setup error is
             // never evidence that a publication claim had no physical effects.
-            Ok(outcome)
+            Ok((outcome, obligations))
         }).await;
-        let outcome = match completed {
+        let (outcome, obligations) = match completed {
             Ok(outcome) => outcome,
             Err(primary) => {
                 return PublicationBodyCompletion::Unobserved {
@@ -3402,6 +3513,7 @@ where
         PublicationBodyCompletion::Observed {
             guard: owner,
             outcome,
+            obligations,
         }
     }
 }
@@ -3416,17 +3528,72 @@ pub(crate) enum ActorGenerationCommit {
         generation: Arc<ActorGeneration>,
         cancellation_pending: bool,
     },
-    Refused(String),
-    Unconfirmed(String),
+    Refused(ActorGenerationPublicationIssue),
+    Unconfirmed(ActorGenerationPublicationIssue),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ActorGenerationPublicationIssue {
+    #[error("{0}")]
+    Detail(String),
+    #[error(transparent)]
+    Durable(Box<tidepool_runtime::session::SessionError>),
+}
+
+impl From<String> for ActorGenerationPublicationIssue {
+    fn from(detail: String) -> Self {
+        Self::Detail(detail)
+    }
+}
+
+impl From<&str> for ActorGenerationPublicationIssue {
+    fn from(detail: &str) -> Self {
+        Self::Detail(detail.into())
+    }
+}
+
+impl ActorGenerationPublicationIssue {
+    pub(crate) fn failure_diagnostic(
+        &self,
+    ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
+        match self {
+            Self::Detail(_) => None,
+            Self::Durable(error) => Some(tidepool_runtime::failclass::classify_session(error)),
+        }
+    }
 }
 
 impl ActorGenerationCommit {
-    pub(crate) fn into_initial_generation(
+    pub(crate) fn notify_initial_generation(
+        self,
+        lifecycle: &crate::LifecycleHandle,
+    ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
+        if let Self::Published { generation, .. } = &self {
+            if lifecycle.generation_published(generation.clone())
+                == crate::kernel::GenerationPublicationNotification::Refused
+            {
+                return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Arc::new(Ok(self)),
+                        settlement: PublicationSettlementError::NotificationRefused,
+                    }),
+                });
+            }
+        }
+        self.into_initial_generation()
+    }
+
+    fn into_initial_generation(
         self,
     ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
         match self {
             Self::Published { generation, .. } => Ok(generation),
-            Self::Refused(detail) => Err(ResidentActorWorkbenchError::ActorProtocol(detail)),
+            Self::Refused(ActorGenerationPublicationIssue::Detail(detail)) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(detail))
+            }
+            Self::Refused(ActorGenerationPublicationIssue::Durable(error)) => Err(
+                ResidentActorWorkbenchError::Resident(ResidentError::Session(*error)),
+            ),
             outcome @ Self::Unconfirmed(_) => {
                 Err(ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
@@ -7637,6 +7804,8 @@ fn admit_explicit_effects(
 pub enum ResidentActorWorkbenchError {
     #[error(transparent)]
     SourceAdmission(#[from] generation_admission::GenerationAdmissionError),
+    #[error("operation diagnostic handoff refused: {0}")]
+    OperationDiagnostic(#[from] crate::WorkbenchDiagnosticRefusal),
     #[error("request {request:?} reply refused: {refusal}")]
     RequestReplyRefused {
         request: crate::RequestId,
@@ -7815,6 +7984,7 @@ impl ResidentActorWorkbenchError {
         use ActorPublicationFailureCause as Cause;
         match self {
             Self::SourceAdmission(source) => Cause::SourceAdmission(source.clone()),
+            Self::OperationDiagnostic(refusal) => Cause::OperationDiagnostic(*refusal),
             Self::RequestReplyRefused { .. } => Cause::RequestAdmission,
             Self::UnsupportedToolSurface { .. } => Cause::ToolSurface,
             Self::Directory(_) => Cause::Directory,
@@ -7835,6 +8005,12 @@ impl ResidentActorWorkbenchError {
             Self::PreparedEntryAbsent { .. } => Cause::PreparedEntryAbsent,
             Self::PublicationSettlement { failure } => match failure.outcome.as_ref() {
                 Err(primary) => primary.publication_failure_cause(),
+                Ok(
+                    ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))
+                    | ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(
+                        error,
+                    )),
+                ) => publication_session_failure_cause(error, Cause::PublicationSettlement),
                 Ok(_) => Cause::PublicationSettlement,
             },
             Self::Resident(error) => publication_resident_failure_cause(error, Cause::Resident),
@@ -23115,7 +23291,7 @@ pub(crate) mod request_tests {
         };
         assert!(matches!(
             failure.outcome.as_ref(),
-            Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed == detail
+            Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed.to_string() == detail
         ));
         assert!(matches!(
             failure.settlement,
@@ -23139,9 +23315,21 @@ pub(crate) mod request_tests {
         BootstrapCheckoutRetired,
         ReplacementCheckoutRetired,
         ReplacementFrozenSource,
+        UnstartedSourceSettlements,
         RetirementNativeOwnerLoss(
             crate::local_actor::run_control::GenerationRetirementNativeControl,
         ),
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::UnstartedSourceSettlements),
+            ).await;
+        }).await;
     }
 
     impl PublicationFailureControl {
@@ -23239,7 +23427,12 @@ pub(crate) mod request_tests {
         );
         observed.insert(
             "owned_publication",
-            output_size(|operation: ActorGenerationPublicationOperation| operation.run()),
+            output_size(
+                |(publisher, reserved): (
+                    ActorGenerationPublicationDriver,
+                    ReservedActorGeneration,
+                )| { publisher.run(reserved) },
+            ),
         );
         eprintln!(
             "ACTOR_GENERATION_FUTURE_LAYOUT {}",
@@ -23259,6 +23452,19 @@ pub(crate) mod request_tests {
                 ).await;
             }).await;
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_reservation_refuses_foreign_target_before_cutoff() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::ReservationTargetClosed,
+                )),
+            ).await;
+        }).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -23367,6 +23573,19 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_lost_delivery_preserves_published_notification() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerPublishedDeliveryLost,
+                )),
+            ).await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
     async fn actual_retirement_linked_publication_worker_settles_cancelled_body() {
         with_test_compiler_owner(|client| async move {
             quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
@@ -23415,11 +23634,24 @@ pub(crate) mod request_tests {
             state.clone(),
             ActorPublicationOwner::Preparation(terminal.client()),
         );
-        let publication = publisher.publish(
+        let preparation = publisher.into_retirement_preparation(
             prepared,
             tidepool_runtime::session::PublicationDecision::new(),
             ActorGenerationPublication::Terminal,
         );
+        let (prepared, reserve) = preparation.into_parts();
+        let outcome = match reserve.reserve(prepared) {
+            Ok(outcome) => outcome,
+            Err(_) => panic!("the actual publisher retains its candidate"),
+        };
+        let ActorGenerationRetirementPreparationOutcome::Reserved {
+            reserved,
+            publisher,
+        } = outcome
+        else {
+            panic!("the actual publisher reserves before checkout")
+        };
+        let publication = publisher.run(reserved);
         tokio::pin!(publication);
         assert!(futures_util::poll!(publication.as_mut()).is_pending());
         assert!(
@@ -23431,7 +23663,14 @@ pub(crate) mod request_tests {
             receipt,
             "publication checkout control retired the actual owner",
         );
-        let error = match publication.await {
+        let settlement = match publication.await {
+            Ok(settlement) => settlement,
+            Err(_) => panic!("the actual reservation matches its publisher"),
+        };
+        let ActorGenerationPublicationSettlement::Settled(outcome) = &settlement else {
+            panic!("unobserved checkout cannot grant source restoration")
+        };
+        let error = match outcome.as_ref() {
             Err(error) => error,
             Ok(_) => panic!("retired checkout cannot publish"),
         };
@@ -23441,17 +23680,186 @@ pub(crate) mod request_tests {
             if matches!(failure.outcome.as_ref(), Err(ResidentActorWorkbenchError::Checkout(_)))
                 && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
         );
-        let diagnostic = error.to_string();
-        let observed = crate::resident_actor::reload_publication_result(Err(error)).unwrap();
+        let (_, observed) = settlement.diagnostic_outcome().unwrap();
+        assert!(matches!(
+            observed,
+            ActorGenerationPublicationRefusalObservation::Failed {
+                cause: ActorPublicationFailureCause::Checkout,
+                requires_recovery: true,
+                ..
+            }
+        ));
         assert!(
-            matches!(observed, ActorGenerationCommit::Unconfirmed(ref detail) if detail == &diagnostic && detail.contains("publication checkout control retired the actual owner"))
+            crate::resident_actor::RetirementDiagnosticEvidence::from_settlement(&settlement)
+                .is_some()
         );
+        assert!(error
+            .to_string()
+            .contains("publication checkout control retired the actual owner"));
         assert!(
             matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target))
         );
         assert_eq!(parent_fence.pending_claims(), 1);
         assert_eq!(parent_fence.unconfirmed_claims(), 1);
         drop(held_session);
+    }
+
+    async fn assert_unstarted_source_settlements(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        preparations: Vec<PreparedActorGeneration>,
+    ) {
+        assert_eq!(preparations.len(), 3);
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let preparation = crate::CompilerPreparationOwner::new();
+        let mut preparations = preparations.into_iter();
+        let issue = |prepared| {
+            workbench
+                .generation_publisher(
+                    state.clone(),
+                    ActorPublicationOwner::Preparation(preparation.client()),
+                )
+                .into_retirement_preparation(
+                    prepared,
+                    tidepool_runtime::session::PublicationDecision::new(),
+                    ActorGenerationPublication::Terminal,
+                )
+                .into_parts()
+        };
+        let reserve = |driver: ActorGenerationReservationDriver, prepared| match driver
+            .reserve(prepared)
+            .unwrap_or_else(|_| panic!("the issued driver must accept its same prepared candidate"))
+        {
+            ActorGenerationRetirementPreparationOutcome::Reserved {
+                reserved,
+                publisher,
+            } => (reserved, publisher),
+            ActorGenerationRetirementPreparationOutcome::Refused(detail) => panic!("{detail}"),
+            ActorGenerationRetirementPreparationOutcome::Failed(error) => panic!("{error}"),
+        };
+        let capture = |reserved: &mut ReservedActorGeneration| match reserved.fence_original() {
+            ActorGenerationRetirementCutoff::Fenced(fence) => fence,
+            _ => panic!("the actual reservation must fence its selected source A"),
+        };
+        let (first_prepared, first_driver) = issue(preparations.next().unwrap());
+        let (second_prepared, second_driver) = issue(preparations.next().unwrap());
+        let (second_prepared, first_driver) = first_driver
+            .reserve(second_prepared)
+            .err()
+            .expect("a driver cannot reserve another actual B candidate");
+        let (first_prepared, second_driver) = second_driver
+            .reserve(first_prepared)
+            .err()
+            .expect("the reverse crossed reservation returns both same owners");
+        let (mut first, first_publisher) = reserve(first_driver, first_prepared);
+        let first_candidate = first.candidate_custody();
+        let first_identity = first_candidate.identity_observer();
+        assert!(first_identity.same_candidate(&first_candidate));
+        assert!(first_identity.same_observer(&first_identity.clone()));
+        let mut first_original = capture(&mut first);
+        let first_settlement = first
+            .refuse_retirement(&mut first_original, "first actual refusal")
+            .unwrap();
+        let (mut second, second_publisher) = reserve(second_driver, second_prepared);
+        let (returned_second, first_publisher) = first_publisher
+            .run(second)
+            .await
+            .err()
+            .expect("a publication driver cannot enter another actual B reservation");
+        second = returned_second;
+        let second_candidate = second.candidate_custody();
+        assert!(!first_identity.same_candidate(&second_candidate));
+        let mut second_original = capture(&mut second);
+        let second_settlement = second
+            .refuse_retirement(&mut second_original, "second actual refusal")
+            .unwrap();
+        let (first, second_publisher) = second_publisher
+            .run(first)
+            .await
+            .err()
+            .expect("crossed publication returns the same unentered reservation and driver");
+        drop((first_publisher, second_publisher));
+        let (first, second_settlement) = first
+            .into_settled_unstarted(second_settlement)
+            .err()
+            .expect("another actual attempt cannot settle the first reservation");
+        assert!(first.candidate_custody().same_candidate(&first_candidate));
+        let (second, first_settlement) = second
+            .into_settled_unstarted(first_settlement)
+            .err()
+            .expect("the reverse crossed receipt also refuses without losing either owner");
+        assert!(second.candidate_custody().same_candidate(&second_candidate));
+
+        let (third_prepared, third_driver) = issue(preparations.next().unwrap());
+        let (mut third, third_publisher) = reserve(third_driver, third_prepared);
+        drop(third_publisher);
+        let expected = third.expected_generation().unwrap().clone();
+        let target = third.prepared.candidate.scope.clone();
+        assert!(!target
+            .source_admission()
+            .same_owner(expected.scope.source_admission()));
+        let original_source = expected.scope.clone();
+        let mut third_original = capture(&mut third);
+        let (entered, started) = std::sync::mpsc::sync_channel(0);
+        let (release, finish) = std::sync::mpsc::sync_channel(0);
+        third.guard.settlement_probe = Some(Arc::new(PublicationSettlementProbe {
+            entered,
+            release: parking_lot::Mutex::new(finish),
+            unwind: false,
+        }));
+        let closer = std::thread::spawn(move || {
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            // This probe runs after B settlement. A whole-DAG fresh admission
+            // can still refuse the intentionally fenced original source A.
+            let observed_b = target.source_admission().fence().and_then(|fence| {
+                fence
+                    .reopen_with(target.original_source(), |reopen| {
+                        reopen.commit();
+                        Ok::<(), std::convert::Infallible>(())
+                    })
+                    .map(|settled| match settled {
+                        Ok(_) => (),
+                        Err(never) => match never {},
+                    })
+            });
+            let original_still_closed = original_source.admit_source().is_err();
+            drop(preparation);
+            release.send(()).unwrap();
+            assert!(
+                observed_b.is_ok(),
+                "B's actual own gate did not reopen: {observed_b:?}"
+            );
+            assert!(
+                original_still_closed,
+                "the scoped B exercise cannot reopen A"
+            );
+        });
+        let error = third
+            .refuse_retirement(&mut third_original, "actual partial source settlement")
+            .err()
+            .unwrap();
+        closer.join().unwrap();
+        assert!(
+            matches!(error, ResidentActorWorkbenchError::PublicationSettlement { failure }
+            if matches!(failure.settlement, PublicationSettlementError::Retirement { stage: RetirementSettlementStage::Original, .. }))
+        );
+        assert!(expected.scope.admit_source().is_err());
+        let (third, first_settlement) = third
+            .into_settled_unstarted(first_settlement)
+            .err()
+            .expect("partial A failure cannot consume a foreign successful receipt");
+        assert!(first.into_settled_unstarted(first_settlement).is_ok());
+        assert!(second.into_settled_unstarted(second_settlement).is_ok());
+        drop(third);
+        assert!(state.current_generation().is_none());
+        assert!(expected.scope.admit_source().is_err());
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            compiler_calls,
+            "source settlement never replays compilation or executes a publication body"
+        );
     }
 
     async fn assert_real_publisher_failure(
@@ -23461,6 +23869,9 @@ pub(crate) mod request_tests {
         control: PublicationFailureControl,
     ) {
         match control {
+            PublicationFailureControl::UnstartedSourceSettlements => {
+                unreachable!("source settlement controls retain their three actual preparations")
+            }
             PublicationFailureControl::RetirementNativeOwnerLoss(_) => {
                 unreachable!("native controls use their actual directory owner")
             }
@@ -24523,6 +24934,16 @@ pub(crate) mod request_tests {
                             control,
                         )
                         .await;
+                    } else if matches!(control, PublicationFailureControl::UnstartedSourceSettlements) {
+                        let mut preparations = vec![prepared];
+                        for _ in 0..2 {
+                            preparations.push(workbench.prepare_actor_generation(
+                                context.clone(), descriptor.clone(),
+                                ActorRequestSnapshot::Generation(initial.clone()),
+                                next_installation.clone(), prompts.clone(),
+                            ).await.unwrap());
+                        }
+                        assert_unstarted_source_settlements(&workbench, state, preparations).await;
                     } else {
                         assert_real_publisher_failure(&workbench, state, prepared, control).await;
                     }

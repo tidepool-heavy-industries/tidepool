@@ -740,7 +740,7 @@ mod tests {
             "{:?}",
             refused.err()
         );
-        scope_lease
+        assert!(scope_lease
             .source_admission()
             .fence()
             .unwrap()
@@ -749,7 +749,7 @@ mod tests {
                     .next()
                     .unwrap(),
             )
-            .unwrap();
+            .is_ok());
         assert!(session.scope_tree().is_live(scope));
         source_action(&mut session, &scope_lease, |session, _| {
             let native_ends = std::cell::Cell::new(0);

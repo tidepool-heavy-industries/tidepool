@@ -30,9 +30,15 @@ mod drain_wait;
 mod forest_shutdown_tests;
 pub(crate) mod forms;
 mod generation_inventory;
-pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
+pub(crate) mod source_slots;
 #[cfg(test)]
 pub(crate) use generation_inventory::assert_owner_observation_contract;
+pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
+pub use workbench_ledger::WorkbenchDiagnosticRefusal;
+pub(crate) use workbench_ledger::{
+    RecordedRetirementDiagnostic, RecordedRetirementDiagnosticObservation,
+    RetirementDiagnosticEvidence, WorkbenchOperationDiagnosticOwner,
+};
 pub(crate) mod green;
 mod green_notebook;
 #[cfg(test)]
@@ -45,8 +51,6 @@ pub(crate) mod invocation_work;
 #[cfg(test)]
 mod jev_form_runtime_tests;
 mod owned_workbench;
-#[cfg(test)]
-pub(crate) use owned_workbench::reload_publication_result;
 #[cfg(test)]
 mod root_preparation_tests;
 #[cfg(test)]
@@ -607,6 +611,7 @@ struct ResidentActorRecord {
     lifecycle: crate::LifecycleHandle,
     fresh_context_seed: Option<String>,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
+    source_slots: source_slots::SourceSlots,
     interactive_policy_installed: bool,
     descriptor: ActorDescriptor,
     bound_worktree: Option<String>,
@@ -2999,6 +3004,7 @@ impl WorkbenchDisplayBudget {
 
 struct WorkbenchUnitExecution<'a> {
     execution: Option<&'a WorkbenchExecutionId>,
+    invocation: Option<&'a crate::resident_tools::WorkbenchCallKey>,
     input_unit_index: usize,
     total: usize,
     named_tool: bool,
@@ -3098,9 +3104,8 @@ pub struct ResidentKernelBehavior<H, O> {
     child_placement_custody: Option<child_launch::ChildPlacementCustody>,
     pending_checkpoint: Option<StateCheckpoint>,
     input_origin: ActorInputOrigin,
-    sources: Vec<crate::request::sources::SourceBinding>,
+    sources: source_slots::SourceSlots,
     static_source_count: usize,
-    source_connections: Option<crate::request::sources::ActorSourceConnections>,
     launch_worktrees: Vec<String>,
     prepared_workspace: Option<crate::PreparedWorkspaceAttachment>,
     worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
@@ -4135,8 +4140,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             child_placement_custody: None,
             pending_checkpoint: None,
             input_origin: ActorInputOrigin::ActorStartup,
-            sources: Vec::new(),
-            source_connections: None,
+            sources: source_slots::SourceSlots::default(),
             static_source_count: 0,
             launch_worktrees,
             prepared_workspace: None,
@@ -5427,9 +5431,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             render_source_drift_section(&self.runtime_observation.snapshot().source_drift);
         let attachments = self
             .sources
-            .iter()
+            .bindings()
+            .into_iter()
             .enumerate()
             .skip(self.static_source_count)
+            .filter_map(|(slot, source)| source.map(|source| (slot, source)))
             .map(|(slot, source)| {
                 use crate::request::sources::{RequestSourceKind, SourceTarget};
                 let target = match source.target {
@@ -6137,48 +6143,53 @@ where
         if owner != context.actor {
             return Err("event sink belongs to another actor incarnation".into());
         }
-        if self.source_connections.is_none() {
+        if !self.sources.has_connections() {
             let recipient = kernel
                 .resolve(context.actor)
                 .await
                 .map_err(|error| error.to_string())?
-                .ok_or_else(|| "current actor is absent from its directory".to_owned())?;
-            self.source_connections = Some(
-                self.environment
-                    .requests
-                    .attach_sources(context.actor, recipient, &[])
-                    .map_err(|error| format!("source attachment rejected: {error:?}"))?,
-            );
+                .ok_or("current actor is absent from its directory")?;
+            let connections = self
+                .environment
+                .requests
+                .attach_sources(context.actor, recipient, &[])
+                .map_err(|error| format!("source attachment rejected: {error:?}"))?;
+            self.sources.install_connections(connections);
         }
-        let slot = self.sources.len();
-        let connections = self
-            .source_connections
-            .as_mut()
-            .ok_or_else(|| "source connections are unavailable".to_owned())?;
-        match source.target {
-            SourceTarget::Request(request, kind) => connections
-                .attach_request(slot, request, kind, context.actor)
-                .map_err(|error| format!("request source refused: {error:?}"))?,
-            SourceTarget::Command(key) => connections
-                .attach_command(slot, key, context.actor, &self.environment.commands)
-                .map_err(|error| format!("command source refused: {error:?}"))?,
-            SourceTarget::Lifecycle(target) => {
-                if !kernel
-                    .authorize_observe(target)
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    return Err("lifecycle source is not authorized".into());
-                }
-                let actor = kernel
+        let lifecycle = if let SourceTarget::Lifecycle(target) = source.target {
+            if !kernel
+                .authorize_observe(target)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err("lifecycle source is not authorized".into());
+            }
+            Some(
+                kernel
                     .resolve(target)
                     .await
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "lifecycle source target is unavailable".to_owned())?;
-                connections.attach_lifecycle(slot, &actor);
-            }
-        }
-        self.sources.push(source);
+                    .ok_or("lifecycle source target is unavailable")?,
+            )
+        } else {
+            None
+        };
+        self.sources
+            .attach(source.clone(), |connections, slot| match source.target {
+                SourceTarget::Request(request, kind) => connections
+                    .attach_request(slot, request, kind, context.actor)
+                    .map_err(|error| format!("request source refused: {error:?}")),
+                SourceTarget::Command(key) => connections
+                    .attach_command(slot, key, context.actor, &self.environment.commands)
+                    .map_err(|error| format!("command source refused: {error:?}")),
+                SourceTarget::Lifecycle(_) => {
+                    connections.attach_lifecycle(
+                        slot,
+                        lifecycle.as_ref().expect("lifecycle authorized above"),
+                    );
+                    Ok(())
+                }
+            })?;
         Ok(())
     }
 
@@ -6191,6 +6202,7 @@ where
         context: &ActorSessionContext,
         effect_owner: &CurrentEffectOwner<'_>,
         boundary: ResidentActorBoundary,
+        diagnostic: Option<WorkbenchOperationDiagnosticOwner>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<
@@ -6218,12 +6230,15 @@ where
             } => {
                 let authorized = effect_owner.admits_reload(context.actor);
                 let operation = self.prepare_reload_effect(
+                    kernel,
+                    effect_owner.invocation_work(),
                     context,
                     effect_owner.issued_snapshot().cloned(),
                     control,
                     continuation,
                     request,
                     authorized,
+                    diagnostic,
                 );
                 return Box::pin(std::future::ready(Ok(operation)));
             }
@@ -6949,7 +6964,7 @@ where
             Err(error) => return commands::CommandResolution::from_outcome(Err(error)),
         };
         let boundary = match self
-            .prepare_independent_effect(kernel, context, &effect_owner, boundary)
+            .prepare_independent_effect(kernel, context, &effect_owner, boundary, None)
             .await
         {
             Ok(operation) => return operation.await,
@@ -8436,15 +8451,22 @@ where
             return Ok(InteractivePark::Cancelled(request.request));
         }
         let (public_compile_context, public_authority) = WorkbenchCompilationAuthority::admit(
-            context.clone(), activation_source.clone(), installed_tools.clone(),
+            context.clone(),
+            activation_source.clone(),
+            installed_tools.clone(),
             self.environment.source_layers.as_ref(),
-        ).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-        let workbench = self.environment.request_workbench(
-            request.response.clone(), request.request, request.type_evidence.clone(),
-        ).with_compilation_authority(public_authority);
-        let observation = workbench.capture_activation_observation_scaffold(
-            &public_compile_context, &input,
-        )?;
+        )
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let workbench = self
+            .environment
+            .request_workbench(
+                request.response.clone(),
+                request.request,
+                request.type_evidence.clone(),
+            )
+            .with_compilation_authority(public_authority);
+        let observation =
+            workbench.capture_activation_observation_scaffold(&public_compile_context, &input)?;
         let private = Arc::new(
             self.environment
                 .runner
@@ -8881,7 +8903,7 @@ where
         })?;
         let publisher = workbench.generation_publisher(
             self.installed_tools.clone(),
-            crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle),
+            crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle.clone()),
         );
         let prepared = workbench
             .prepare_initial_generation(
@@ -8892,17 +8914,14 @@ where
                 prompts.clone(),
             )
             .await?;
-        let generation = publisher
+        publisher
             .publish(
                 prepared,
                 tidepool_runtime::session::PublicationDecision::new(),
                 crate::resident_workbench::ActorGenerationPublication::Terminal,
             )
             .await?
-            .into_initial_generation()?;
-        if let Some(lifecycle) = &self.lifecycle {
-            lifecycle.generation_published(generation);
-        }
+            .notify_initial_generation(&lifecycle)?;
         installation.prepared_tools.take();
         Ok(())
     }
@@ -9511,9 +9530,10 @@ where
                                             "source actor is absent from its directory".into(),
                                         )
                                     })?;
-                                let sources = self
-                                    .sources
+                                let bindings = self.sources.bindings();
+                                let sources = bindings
                                     .iter()
+                                    .map(|source| source.as_ref().expect("startup source is live"))
                                     .enumerate()
                                     .filter_map(|(slot, source)| match source.target {
                                         crate::request::sources::SourceTarget::Request(
@@ -9525,7 +9545,11 @@ where
                                     })
                                     .collect::<Vec<_>>();
                                 let mut lifecycle = Vec::new();
-                                for (slot, source) in self.sources.iter().enumerate() {
+                                for (slot, source) in bindings
+                                    .iter()
+                                    .map(|source| source.as_ref().expect("startup source is live"))
+                                    .enumerate()
+                                {
                                     if let crate::request::sources::SourceTarget::Lifecycle(
                                         target,
                                     ) = source.target
@@ -9555,29 +9579,24 @@ where
                                         lifecycle.push((slot, actor));
                                     }
                                 }
-                                self.source_connections = Some(
-                                    self.environment
-                                        .requests
-                                        .attach_sources(owner, recipient, &sources)
-                                        .map_err(|error| {
-                                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                                "source attachment rejected: {error:?}"
-                                            ))
-                                        })?,
-                                );
-                                for (slot, source) in self.sources.iter().enumerate() {
+                                let mut connections = self
+                                    .environment
+                                    .requests
+                                    .attach_sources(owner, recipient, &sources)
+                                    .map_err(|error| {
+                                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                                            "source attachment rejected: {error:?}"
+                                        ))
+                                    })?;
+                                for (slot, source) in bindings
+                                    .iter()
+                                    .map(|source| source.as_ref().expect("startup source is live"))
+                                    .enumerate()
+                                {
                                     if let crate::request::sources::SourceTarget::Command(key) =
                                         source.target
                                     {
-                                        #[allow(
-                                            clippy::expect_used,
-                                            reason = "self.source_connections was set to \
-                                                      Some(..) immediately above, with no \
-                                                      intervening code that clears it"
-                                        )]
-                                        self.source_connections
-                                            .as_mut()
-                                            .expect("attached sources")
+                                        connections
                                             .attach_command(
                                                 slot,
                                                 key,
@@ -9592,17 +9611,9 @@ where
                                     }
                                 }
                                 for (slot, actor) in lifecycle {
-                                    #[allow(
-                                        clippy::expect_used,
-                                        reason = "self.source_connections was set to \
-                                                  Some(..) immediately above, with no \
-                                                  intervening code that clears it"
-                                    )]
-                                    self.source_connections
-                                        .as_mut()
-                                        .expect("attached source set")
-                                        .attach_lifecycle(slot, &actor);
+                                    connections.attach_lifecycle(slot, &actor);
                                 }
+                                self.sources.install_connections(connections);
                             }
                             break self
                                 .environment
@@ -10439,11 +10450,36 @@ where
                                     )))
                                 }
                                 boundary => {
+                                    // Only this actual admitted Reload boundary
+                                    // issues its non-Clone diagnostic owner.
+                                    let diagnostic = if matches!(
+                                        &boundary,
+                                        ResidentActorBoundary::Reload { .. }
+                                    ) && effect_owner
+                                        .admits_reload(context.actor)
+                                    {
+                                        let execution = unit.execution.ok_or(
+                                            crate::WorkbenchDiagnosticRefusal::ExecutionMissing,
+                                        )?;
+                                        Some(WorkbenchExecutions::admit_operation_diagnostic(
+                                            &self.workbench_executions,
+                                            WorkbenchOperationId {
+                                                execution: execution.clone(),
+                                                input_unit_index: unit.input_unit_index,
+                                                effect_ordinal: ordinal,
+                                            },
+                                            unit.invocation,
+                                            &execution_state.invocation_work,
+                                        )?)
+                                    } else {
+                                        None
+                                    };
                                     self.prepare_invocation_wait(
                                         kernel,
                                         context,
                                         &effect_owner,
                                         boundary,
+                                        diagnostic,
                                     )
                                     .await?
                                 }
@@ -10815,6 +10851,7 @@ where
                 effects,
                 request,
                 cursor,
+                invocation,
                 ..
             } = execution_state;
             let context = effects.context.clone();
@@ -11074,6 +11111,7 @@ where
                                     .expect("after-tool retains original fragment cursor"),
                                 WorkbenchUnitExecution {
                                     execution: execution.as_ref(),
+                                    invocation: invocation.as_ref(),
                                     input_unit_index: cursor.index,
                                     total: request.items.len(),
                                     named_tool: true,
@@ -11271,6 +11309,7 @@ where
                                     .expect("cell retained its running unit"),
                                 WorkbenchUnitExecution {
                                     execution: execution.as_ref(),
+                                    invocation: invocation.as_ref(),
                                     input_unit_index: cursor.index,
                                     total: request.items.len(),
                                     named_tool: request.tool_call().is_some(),
@@ -12181,22 +12220,29 @@ where
                             ActorInputOrigin::ActorLifecycleFrom(actor_address(actor))
                         }
                     };
-                    let source = self
-                        .sources
-                        .get(delivery.slot)
-                        .filter(|source| source.target == delivery.target)
-                        .ok_or_else(|| KernelBehaviorError {
-                            detail: "source delivery does not match an installed connection".into(),
-                            diagnostic: None,
-                        })?;
-                    source
-                        .execution
-                        .admit_activation()
-                        .map_err(ResidentActorWorkbenchError::from)
-                        .map_err(Self::workbench_failure)?;
+                    let admitted = match self.sources.admit_delivery(delivery) {
+                        source_slots::SourceDeliveryAdmission::Admitted(admitted) => admitted,
+                        source_slots::SourceDeliveryAdmission::Deferred(identity) => {
+                            tracing::debug!(?identity, "source delivery retained before mapping while fenced");
+                            return Ok(KernelStep::Continue(()));
+                        }
+                        source_slots::SourceDeliveryAdmission::Refused(identity, error) => {
+                            tracing::warn!(?identity, %error, "source delivery retained with refused admission");
+                            return Ok(KernelStep::Continue(()));
+                        }
+                        source_slots::SourceDeliveryAdmission::Closed(identity) => {
+                            tracing::debug!(?identity, "source delivery refused by closed registration");
+                            return Ok(KernelStep::Continue(()));
+                        }
+                        source_slots::SourceDeliveryAdmission::Rejected(detail) => {
+                            tracing::warn!(actor = ?kernel.identity(), %detail, "source delivery refused before mapping");
+                            return Ok(KernelStep::Continue(()));
+                        }
+                    };
+                    let source = &admitted.binding;
                     let context = source.execution.activation_context();
                     self.actor_callback_execution = Some(source.execution.clone());
-                    let delivery = self.environment.requests.accept_source_delivery(delivery);
+                    let delivery = self.environment.requests.accept_source_delivery(admitted.delivery.clone());
                     if let Some(committed) = &mut self.committed {
                         committed.input = Some(RetainedActorInput::Source(delivery.clone()));
                     }
@@ -12242,7 +12288,7 @@ where
     }
 
     fn close_sources(&mut self) {
-        self.source_connections.take();
+        self.sources.close_connections();
     }
 
     fn drain<'a>(
@@ -12405,6 +12451,7 @@ where
                         .await
                         .map_err(Self::failure)?;
                     self.lifecycle = Some(lifecycle.clone());
+                    self.sources.bind_owner(context.actor);
                     kernel
                         .register_resident(
                             context.clone(),
@@ -12420,6 +12467,7 @@ where
                             lifecycle: lifecycle.clone(),
                             fresh_context_seed: self.fresh_context_seed.clone(),
                             workbench_executions: self.workbench_executions.clone(),
+                            source_slots: self.sources.clone(),
                             interactive_policy_installed: false,
                             descriptor: self.descriptor.clone(),
                             bound_worktree: self.launch_worktrees.first().cloned(),
@@ -12779,8 +12827,12 @@ where
         }
         let work = self.workbench_executions.lock().begin_selecting_invocation(
             actor,
-            execution.as_ref().expect("tool control issues an execution"),
-            request.as_ref().expect("tool execution carries its request"),
+            execution
+                .as_ref()
+                .expect("tool control issues an execution"),
+            request
+                .as_ref()
+                .expect("tool execution carries its request"),
             key.as_ref(),
             &control,
         );
@@ -13775,7 +13827,7 @@ where
             }
             let staged_replacement = self.replacement_staged();
             let staged_placement = self.boot.is_some();
-            self.source_connections.take();
+            self.sources.close_connections();
             self.sources.clear();
             let context = self.context(kernel.identity());
             publish_request_retirement(
@@ -16223,7 +16275,7 @@ mod tests {
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, ResidentError,
-        TurnClassification, TurnKind, TypeMatch, TypeMatchQuality, WorkbenchCellItemKind,
+        TurnClassification, TurnKind, WorkbenchCellItemKind,
         WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt,
         WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
         WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,

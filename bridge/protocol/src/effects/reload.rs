@@ -151,7 +151,10 @@ fn retirement_types() -> Vec<TypeDef> {
             variant("ReloadDisplayResource", vec![Named("ReloadOperation")]),
             variant("ReloadWatchResource", vec![address(), Int]),
             variant("ReloadUnclassifiedPhysicalResource", vec![Named("ReloadNativeIdentity")]),
-        ], &["Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs."]),
+            variant("ReloadActorCompilerResource", vec![address(), Text]),
+            variant("ReloadPreparationCompilerResource", vec![Text, Text]),
+            variant("ReloadSourceBindingResource", vec![address(), Text]),
+        ], &["Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs. Actor-owned and preparation-owned compiler resources are distinct from invocation-owned ReloadCompilerResource. Their registration ids and preparation ids preserve exact unsigned decimal coordinates as Text. Source binding resources name the actual actor's stable callback slot as unsigned decimal Text, not a watch id. These observations grant no authority."]),
         sum("ReloadBlockerReason", "RlBlockerReason", vec![
             variant("ReloadActiveDependentWork", vec![]),
             variant("ReloadUnclassifiedWork", vec![]),
@@ -224,7 +227,24 @@ fn retirement_types() -> Vec<TypeDef> {
             variant("ReloadAReopened", vec![]),
             variant("ReloadRetirementFenced", vec![Named("ReloadRetirementStage")]),
             variant("ReloadBPublished", vec![HsType::list(Text), HsType::list(Text)]),
-        ], &["AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings."]),
+        ], &["Source outcome only: AReopened proves A selected and B uncommitted; actual partial stops remain in the receipt. Fenced does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings. Operational settlement is reported independently in the receipt."]),
+        sum("ReloadObligationObservation", "RlObligationObservation", vec![
+            variant("ReloadObligationPending", vec![]),
+            variant("ReloadObligationUnconfirmed", vec![]),
+            variant("ReloadObligationRefused", vec![]),
+        ], &["Owner-observed status of an outstanding obligation. Refused means its owner refused the outstanding obligation; a terminal failed operation with no remaining obligation is operationally Settled and retains its typed cause separately."]),
+        sum("ReloadRetirementObligation", "RlRetirementObligation", vec![
+            variant("ReloadCandidateSettlementObligation", vec![Named("ReloadObligationObservation")]),
+            variant("ReloadOriginalRetirementObligation", vec![Named("ReloadObligationObservation")]),
+            variant("ReloadPhysicalCleanupObligation", vec![Named("ReloadObligationObservation")]),
+            variant("ReloadPublicationNotificationObligation", vec![Named("ReloadObligationObservation")]),
+            variant("ReloadSourceDeliveryObligation", vec![Named("ReloadResource"), Named("ReloadObligationObservation")]),
+            variant("ReloadDiagnosticDeliveryObligation", vec![Named("ReloadObligationObservation")]),
+        ], &["Exact outstanding work reported by its retained owner. Source delivery identifies the actual resource. These observations grant no stop, cleanup, publication or retry authority."]),
+        sum("ReloadOperationalSettlement", "RlOperationalSettlement", vec![
+            variant("ReloadOperationalSettled", vec![]),
+            variant("ReloadOperationalUnsettled", vec![Named("ReloadRetirementObligation"), HsType::list(Named("ReloadRetirementObligation"))]),
+        ], &["Operational settlement is independent of source outcome and typed causes. Unsettled has a mandatory first obligation and reports operational Unknown; Settled means no outstanding obligations, including a terminal failed operation whose cause remains separately recorded."]),
         record("ReloadRetirementReceipt", "RlRetirementReceipt", vec![
             field("reloadPrevious", "previous", Named("SourceRevision")),
             field("reloadCandidate", "candidate", Named("SourceRevision")),
@@ -235,7 +255,8 @@ fn retirement_types() -> Vec<TypeDef> {
             field("reloadRetirementSurface", "surface", Named("ReloadSurfaceDiff")),
             field("reloadPrimaryCause", "primary", HsType::maybe(Named("ReloadCause"))),
             field("reloadSecondaryCauses", "secondary", HsType::list(Named("ReloadCause"))),
-        ], &["Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Primary and secondary causes survive independently of selection/fence state. Inspect the owning operation and resource records for detailed retained obligations."]),
+            field("reloadOperationalSettlement", "settlement", Named("ReloadOperationalSettlement")),
+        ], &["Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Source outcome, operational settlement and primary/secondary causes are independent observations. Inspect the owning operation and resource records for detailed retained obligations."]),
     ]
 }
 

@@ -7485,7 +7485,9 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                     .unwrap()
                     .clone(),
             ));
-            let broader = inventory
+            let broader = context
+                .artifact_view()
+                .inventory()
                 .admit_shared_with_demand(
                     context.artifact_view(),
                     vec![unrelated.clone()],
@@ -9221,7 +9223,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
 }
 
 #[test]
-fn fresh_candidate_dependency_uses_issued_availability_without_selecting_execution() {
+fn candidate_custody_preserves_issued_availability_without_selecting_execution() {
     use crate::artifact_inventory::{
         ArtifactBindingNode, ExactArtifactSelection, IssuedNativeOffer, NativeOriginalRequirement,
     };
@@ -9359,18 +9361,54 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         catalog_owner: None,
         input_transport: Vec::new(),
     };
-    let inputs = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
-        .expect("fresh exact body dependency may consume issued group availability without selecting execution")
-        .unwrap();
-    assert!(inputs
-        .issued_artifacts()
-        .selected_native_groups()
-        .is_empty());
-    assert_eq!(context.artifact_view().capture_graph_selection(), before);
-    assert!(inputs
-        .native_offers()
-        .iter()
-        .any(|offer| offer.is_full() && offer.original() == fresh_id));
+    let assert_candidate_custody = |context: &ExactDeclarationContext| {
+        let before = context.artifact_view().capture_graph_selection();
+        let inputs = OriginalCompilerInputs::from_candidates(context, producer, &candidates)
+            .expect("candidate bytes do not demand fresh native permission")
+            .expect("candidate bytes produce a custody fragment");
+        assert!(inputs.issued_artifacts().artifact_ids().contains(&fresh_id));
+        assert!(inputs
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert_eq!(
+            inputs.role_projection().snapshot_roles(),
+            context.compiler_input_projection().snapshot_roles(),
+            "candidate custody cannot select a fresh compiler role"
+        );
+        assert_eq!(
+            inputs.native_availability().snapshot_facts().unwrap(),
+            context
+                .compiler_source_support()
+                .native_availability()
+                .snapshot_facts()
+                .unwrap(),
+            "all existing permission rows survive unchanged"
+        );
+        assert_eq!(
+            inputs.native_offers().len(),
+            context.compiler_source_support().native_offers().len()
+        );
+        for (retained, issued) in inputs
+            .native_offers()
+            .iter()
+            .zip(context.compiler_source_support().native_offers())
+        {
+            assert!(retained.same_issuance(issued));
+            assert_eq!(retained.snapshot_facts(), issued.snapshot_facts());
+        }
+        assert!(!inputs
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == fresh_id));
+        assert!(!inputs
+            .native_availability()
+            .snapshot_facts()
+            .unwrap()
+            .contains_key(&fresh_id));
+        assert_eq!(context.artifact_view().capture_graph_selection(), before);
+    };
+    assert_candidate_custody(&context);
 
     // A continued input carries its issued row permissions. It has no new
     // product receipt and cannot authorize a fresh body alongside those rows.
@@ -9581,34 +9619,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             .native_offers()
             .iter()
             .any(|retained| retained.same_issuance(&restored_offer)));
-        let result =
-            OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
-        assert_eq!(
-            result.is_ok(),
-            expected,
-            "only an exact issued group3 can support this dependency"
-        );
-        if expected {
-            let inputs = result
-                .expect("the exact dependency group is available")
-                .expect("fresh candidate issuance must produce a fragment");
-            assert!(inputs
-                .issued_artifacts()
-                .selected_native_groups()
-                .is_empty());
-            assert!(inputs
-                .native_offers()
-                .iter()
-                .any(|offer| offer.is_full() && offer.original() == fresh_id));
-        } else {
-            assert!(
-                matches!(result, Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact, original_ordinal: 3,
-                } if artifact == entry.descriptor.id)),
-                "missing exact dependency availability must refuse at its typed owner"
-            );
-        }
+        assert_candidate_custody(&bounded_context);
     }
     let historical_view = inventory
         .admit_shared(
@@ -9668,40 +9679,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             before.namespace
         );
         assert!(scoped.artifact_view().selected_native_groups().is_empty());
-        let inputs = OriginalCompilerInputs::from_candidates(&scoped, producer, &candidates)
-            .unwrap()
-            .unwrap();
-        let fresh_offer = inputs
-            .native_offers()
-            .iter()
-            .find(|offer| offer.original() == fresh_id)
-            .unwrap();
-        assert!(fresh_offer.is_full());
-        let groups = fresh_offer.issued_group_carriers().unwrap();
-        let dependent = *groups
-            .keys()
-            .find(|group| group.binding.artifact() == fresh_id && group.original_ordinal == 11)
-            .unwrap();
-        let expected = (
-            ArtifactBindingNode::Group(dependent),
-            ArtifactBindingNode::Group(current_group),
-            crate::artifact_inventory::ArtifactDependency::NativeGroup {
-                dependent_ordinal: 11,
-                required_ordinal: 3,
-            },
-        );
-        assert!(
-            fresh_offer
-                .custody_snapshot()
-                .binding_dependencies()
-                .unwrap()
-                .contains(&expected),
-            "the fresh body uses the exact current carrier's issued dependency edge"
-        );
-        assert!(inputs
-            .issued_artifacts()
-            .selected_native_groups()
-            .is_empty());
+        assert_candidate_custody(&scoped);
     }
     let historical_support =
         fixture_compiler_support(context.compiler_input_projection().clone(), historical_view);

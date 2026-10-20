@@ -4,12 +4,264 @@ use super::*;
 struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
     state: WorkbenchExecutionState,
+    operation_diagnostics: Vec<WorkbenchOperationDiagnosticRecord>,
     invocation_work: Option<Arc<InvocationWork>>,
     cell_terminal: Option<crate::CellExit>,
     boundary_abort: Option<BoundaryAbortCleanup>,
     display_settlements: Arc<DisplayExecutionSettlement>,
     provider_finalization: Option<Arc<crate::resident_tools::ProviderFinalization>>,
     provider_owner: Option<crate::HostedOperationSettlement>,
+}
+
+/// Original publication diagnostics are ordinary evidence. They retain no
+/// publication guard, source owner, compiler World, or cleanup authority.
+#[derive(Debug)]
+pub(crate) struct RetirementDiagnosticEvidence {
+    detail: String,
+    diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
+    observation: crate::resident_workbench::ActorGenerationPublicationRefusalObservation,
+    retirement: Option<Arc<tidepool_bridge_effects::RlRetirementReceipt>>,
+}
+
+impl RetirementDiagnosticEvidence {
+    pub(crate) fn default_refusal(
+        receipt: &Arc<tidepool_bridge_effects::RlRetirementReceipt>,
+    ) -> Self {
+        Self {
+            detail: "generation retirement refused because admitted dependent work remains".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: Some(receipt.clone()),
+        }
+    }
+
+    pub(crate) fn from_refusal(
+        refusal: &crate::resident_workbench::ActorGenerationPublicationRefusal,
+    ) -> Self {
+        Self::from_outcome(refusal.outcome().as_ref(), refusal.observation())
+    }
+
+    pub(crate) fn from_settlement(
+        settlement: &crate::resident_workbench::ActorGenerationPublicationSettlement,
+    ) -> Option<Self> {
+        let (outcome, observation) = settlement.diagnostic_outcome()?;
+        Some(Self::from_outcome(outcome, observation))
+    }
+
+    fn from_outcome(
+        outcome: &Result<
+            crate::resident_workbench::ActorGenerationCommit,
+            ResidentActorWorkbenchError,
+        >,
+        observation: crate::resident_workbench::ActorGenerationPublicationRefusalObservation,
+    ) -> Self {
+        let (detail, diagnostic) = match outcome {
+            Ok(
+                crate::resident_workbench::ActorGenerationCommit::Refused(detail)
+                | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail),
+            ) => (detail.to_string(), detail.failure_diagnostic()),
+            Err(error) => (error.to_string(), error.failure_diagnostic()),
+            Ok(crate::resident_workbench::ActorGenerationCommit::Published { .. }) => {
+                unreachable!("successful publication has no failure diagnostic")
+            }
+        };
+        Self {
+            detail,
+            diagnostic,
+            observation,
+            retirement: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorkbenchOperationDiagnosticRecord {
+    operation: WorkbenchOperationId,
+    evidence: Option<Arc<RetirementDiagnosticEvidence>>,
+}
+
+/// Issued at the actual admitted effect boundary. A weak journal reference
+/// cannot keep an invocation's resources or its native run alive after loss.
+pub(crate) struct WorkbenchOperationDiagnosticOwner {
+    journal: std::sync::Weak<Mutex<WorkbenchExecutions>>,
+    work: std::sync::Weak<InvocationWork>,
+    key: WorkbenchReplayKey,
+    operation: WorkbenchOperationId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum WorkbenchDiagnosticRefusal {
+    #[error("operation diagnostic journal differs from its issuing owner")]
+    JournalChanged,
+    #[error("operation diagnostic replay membership differs from its issuing owner")]
+    ReplayChanged,
+    #[error("operation diagnostic coordinate differs from its issuing owner")]
+    OperationChanged,
+    #[error("admitted execution journal is unavailable")]
+    ExecutionMissing,
+    #[error("operation execution differs from its admitted journal")]
+    ExecutionChanged,
+    #[error("operation invocation allocation differs from its admitted owner")]
+    InvocationChanged,
+    #[error("unrecorded operation execution is already terminal")]
+    ExecutionTerminal,
+    #[error("operation diagnostic owner was already admitted")]
+    OperationAlreadyAdmitted,
+    #[error("admitted operation diagnostic record is unavailable")]
+    OperationMissing,
+    #[error("operation diagnostic evidence differs from its issued projection")]
+    DifferentEvidence,
+    #[error("operation diagnostic retention capacity is unavailable")]
+    RetentionCapacityUnavailable,
+}
+
+/// Only a completed write by the admitted journal owner constructs this
+/// receipt. Observing or rendering a primary failure cannot acknowledge it.
+pub(crate) struct RecordedRetirementDiagnostic {
+    journal: std::sync::Weak<Mutex<WorkbenchExecutions>>,
+    work: std::sync::Weak<InvocationWork>,
+    key: WorkbenchReplayKey,
+    operation: WorkbenchOperationId,
+    evidence: Arc<RetirementDiagnosticEvidence>,
+}
+
+/// This observation retains the written diagnostic itself, without the full
+/// error Arc that can recursively own a published generation or compiler World.
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedRetirementDiagnosticObservation {
+    operation: WorkbenchOperationId,
+    evidence: Arc<RetirementDiagnosticEvidence>,
+}
+
+impl RecordedRetirementDiagnosticObservation {
+    pub(crate) fn detail(&self) -> &str {
+        &self.evidence.detail
+    }
+}
+
+impl WorkbenchOperationDiagnosticOwner {
+    pub(crate) fn operation(&self) -> &WorkbenchOperationId {
+        &self.operation
+    }
+
+    pub(crate) fn record(
+        &self,
+        evidence: Arc<RetirementDiagnosticEvidence>,
+    ) -> Result<RecordedRetirementDiagnostic, WorkbenchDiagnosticRefusal> {
+        let journal = self
+            .journal
+            .upgrade()
+            .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+        // Rendering and diagnostic projection happened before this lock. The
+        // stored Arc contains only immutable diagnostic data.
+        let written = {
+            let mut journal = journal.lock();
+            let record = journal
+                .0
+                .get_mut(&self.key)
+                .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+            if record.request.execution_id() != Some(&self.operation.execution) {
+                return Err(WorkbenchDiagnosticRefusal::ExecutionChanged);
+            }
+            if !record
+                .invocation_work
+                .as_ref()
+                .is_some_and(|actual| std::ptr::eq(Arc::as_ptr(actual), self.work.as_ptr()))
+            {
+                return Err(WorkbenchDiagnosticRefusal::InvocationChanged);
+            }
+            let terminal = matches!(record.state, WorkbenchExecutionState::Terminal { .. });
+            let operation = record
+                .operation_diagnostics
+                .iter_mut()
+                .find(|record| record.operation == self.operation)
+                .ok_or(WorkbenchDiagnosticRefusal::OperationMissing)?;
+            match &operation.evidence {
+                Some(written) if Arc::ptr_eq(written, &evidence) => written.clone(),
+                Some(_) => return Err(WorkbenchDiagnosticRefusal::DifferentEvidence),
+                None if terminal => return Err(WorkbenchDiagnosticRefusal::ExecutionTerminal),
+                None => {
+                    operation.evidence = Some(evidence.clone());
+                    evidence
+                }
+            }
+        };
+        Ok(RecordedRetirementDiagnostic {
+            journal: self.journal.clone(),
+            work: self.work.clone(),
+            key: self.key.clone(),
+            operation: self.operation.clone(),
+            evidence: written,
+        })
+    }
+
+    pub(crate) fn acknowledge(
+        &self,
+        receipt: RecordedRetirementDiagnostic,
+    ) -> Result<
+        RecordedRetirementDiagnosticObservation,
+        (WorkbenchDiagnosticRefusal, RecordedRetirementDiagnostic),
+    > {
+        let refusal = if !std::sync::Weak::ptr_eq(&self.journal, &receipt.journal) {
+            Some(WorkbenchDiagnosticRefusal::JournalChanged)
+        } else if !std::sync::Weak::ptr_eq(&self.work, &receipt.work) {
+            Some(WorkbenchDiagnosticRefusal::InvocationChanged)
+        } else if self.key != receipt.key {
+            Some(WorkbenchDiagnosticRefusal::ReplayChanged)
+        } else if self.operation.execution != receipt.operation.execution {
+            Some(WorkbenchDiagnosticRefusal::ExecutionChanged)
+        } else if self.operation != receipt.operation {
+            Some(WorkbenchDiagnosticRefusal::OperationChanged)
+        } else {
+            self.validate_written_receipt(&receipt).err()
+        };
+        if let Some(refusal) = refusal {
+            return Err((refusal, receipt));
+        }
+        Ok(RecordedRetirementDiagnosticObservation {
+            operation: receipt.operation,
+            evidence: receipt.evidence,
+        })
+    }
+
+    fn validate_written_receipt(
+        &self,
+        receipt: &RecordedRetirementDiagnostic,
+    ) -> Result<(), WorkbenchDiagnosticRefusal> {
+        let journal = self
+            .journal
+            .upgrade()
+            .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+        let journal = journal.lock();
+        let record = journal
+            .0
+            .get(&self.key)
+            .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+        if record.request.execution_id() != Some(&self.operation.execution) {
+            return Err(WorkbenchDiagnosticRefusal::ExecutionChanged);
+        }
+        if !record
+            .invocation_work
+            .as_ref()
+            .is_some_and(|actual| std::ptr::eq(Arc::as_ptr(actual), self.work.as_ptr()))
+        {
+            return Err(WorkbenchDiagnosticRefusal::InvocationChanged);
+        }
+        let operation = record
+            .operation_diagnostics
+            .iter()
+            .find(|record| record.operation == self.operation)
+            .ok_or(WorkbenchDiagnosticRefusal::OperationMissing)?;
+        if !operation
+            .evidence
+            .as_ref()
+            .is_some_and(|written| Arc::ptr_eq(written, &receipt.evidence))
+        {
+            return Err(WorkbenchDiagnosticRefusal::DifferentEvidence);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -93,6 +345,58 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn admit_operation_diagnostic(
+        journal: &Arc<Mutex<Self>>,
+        operation: WorkbenchOperationId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        work: &Arc<InvocationWork>,
+    ) -> Result<WorkbenchOperationDiagnosticOwner, WorkbenchDiagnosticRefusal> {
+        let key = WorkbenchReplayKey::new(&operation.execution, invocation);
+        {
+            let mut ledger = journal.lock();
+            let record = ledger
+                .0
+                .get_mut(&key)
+                .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+            if record.request.execution_id() != Some(&operation.execution) {
+                return Err(WorkbenchDiagnosticRefusal::ExecutionChanged);
+            }
+            if !record
+                .invocation_work
+                .as_ref()
+                .is_some_and(|actual| Arc::ptr_eq(actual, work))
+            {
+                return Err(WorkbenchDiagnosticRefusal::InvocationChanged);
+            }
+            if !matches!(record.state, WorkbenchExecutionState::Unconfirmed) {
+                return Err(WorkbenchDiagnosticRefusal::ExecutionTerminal);
+            }
+            if record
+                .operation_diagnostics
+                .iter()
+                .any(|record| record.operation == operation)
+            {
+                return Err(WorkbenchDiagnosticRefusal::OperationAlreadyAdmitted);
+            }
+            record
+                .operation_diagnostics
+                .try_reserve(1)
+                .map_err(|_| WorkbenchDiagnosticRefusal::RetentionCapacityUnavailable)?;
+            record
+                .operation_diagnostics
+                .push(WorkbenchOperationDiagnosticRecord {
+                    operation: operation.clone(),
+                    evidence: None,
+                });
+        }
+        Ok(WorkbenchOperationDiagnosticOwner {
+            journal: Arc::downgrade(journal),
+            work: Arc::downgrade(work),
+            key,
+            operation,
+        })
+    }
+
     pub(super) fn admit_source_invocation(
         journal: &Arc<Mutex<Self>>,
         actor: ActorRef,
@@ -447,6 +751,7 @@ impl WorkbenchExecutions {
             WorkbenchExecutionRecord {
                 request,
                 state: WorkbenchExecutionState::Unconfirmed,
+                operation_diagnostics: Vec::new(),
                 invocation_work: None,
                 cell_terminal: None,
                 boundary_abort: None,
@@ -491,10 +796,16 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .and_then(|record| record.provider_finalization.clone());
+        let operation_diagnostics = self
+            .0
+            .get_mut(&key)
+            .map(|record| std::mem::take(&mut record.operation_diagnostics))
+            .unwrap_or_default();
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
                 request,
+                operation_diagnostics,
                 state: WorkbenchExecutionState::Terminal {
                     reply,
                     cancellation,
@@ -790,6 +1101,281 @@ impl WorkbenchExecutions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retirement_diagnostic_write_survives_lost_receipt_and_continuation_failure() {
+        let fixture = invocation_work::tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let execution = control.execution_id(actor);
+        let request = WorkbenchRequest::from_cell_input("retirement diagnostic journal")
+            .with_execution_id(execution.clone());
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let work = journal
+            .lock()
+            .begin_selecting_invocation(actor, &execution, &request, None, &control);
+        let operation = WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        let owner = WorkbenchExecutions::admit_operation_diagnostic(
+            &journal,
+            operation.clone(),
+            None,
+            &work,
+        )
+        .unwrap();
+        assert!(matches!(
+            WorkbenchExecutions::admit_operation_diagnostic(
+                &journal,
+                operation.clone(),
+                None,
+                &work
+            ),
+            Err(WorkbenchDiagnosticRefusal::OperationAlreadyAdmitted)
+        ));
+        let evidence = Arc::new(RetirementDiagnosticEvidence {
+            detail: "original publication refusal".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        });
+        // Losing the receipt does not erase the write or require a new evidence
+        // identity. The actual owning phase keeps this same projection Arc.
+        drop(owner.record(evidence.clone()).unwrap());
+        journal.lock().record(
+            execution.clone(),
+            request,
+            Err(crate::KernelInvocationFailure::Failed {
+                actor,
+                detail: "later continuation failed".into(),
+                receipts: Vec::new(),
+                diagnostic: None,
+            }),
+            crate::WorkbenchCancellationOutcome::NotSleeping { execution },
+            None,
+        );
+        let receipt = owner.record(evidence.clone()).unwrap();
+        let observation = match owner.acknowledge(receipt) {
+            Ok(observation) => observation,
+            Err(_) => panic!("same written owner must acknowledge its receipt"),
+        };
+        assert_eq!(observation.operation, operation);
+        assert!(Arc::ptr_eq(&observation.evidence, &evidence));
+        let ledger = journal.lock();
+        let record = ledger.0.get(&owner.key).unwrap();
+        let written = record.operation_diagnostics[0].evidence.as_ref().unwrap();
+        assert!(Arc::ptr_eq(written, &evidence));
+        assert_eq!(written.detail, "original publication refusal");
+        assert!(
+            matches!(&record.state, WorkbenchExecutionState::Terminal { reply: Err(crate::KernelInvocationFailure::Failed { detail, .. }), .. } if detail == "later continuation failed")
+        );
+        drop(ledger);
+        let reconstructed = Arc::new(RetirementDiagnosticEvidence {
+            detail: "original publication refusal".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        });
+        assert!(matches!(
+            owner.record(reconstructed),
+            Err(WorkbenchDiagnosticRefusal::DifferentEvidence)
+        ));
+        work.close();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn retirement_diagnostic_owner_refuses_wrong_membership_and_missing_journal() {
+        let fixture = invocation_work::tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let execution = control.execution_id(actor);
+        let request = WorkbenchRequest::from_cell_input("retirement diagnostic admission")
+            .with_execution_id(execution.clone());
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let work = journal
+            .lock()
+            .begin_selecting_invocation(actor, &execution, &request, None, &control);
+        let sibling = InvocationWork::new_neutral(actor, control.reservation_owner(actor).unwrap());
+        let operation = WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        assert!(matches!(
+            WorkbenchExecutions::admit_operation_diagnostic(
+                &journal,
+                operation.clone(),
+                None,
+                &sibling
+            ),
+            Err(WorkbenchDiagnosticRefusal::InvocationChanged)
+        ));
+        assert!(journal
+            .lock()
+            .0
+            .values()
+            .all(|record| record.operation_diagnostics.is_empty()));
+        let owner =
+            WorkbenchExecutions::admit_operation_diagnostic(&journal, operation, None, &work)
+                .unwrap();
+        journal.lock().record(
+            execution.clone(),
+            request,
+            Err(crate::KernelInvocationFailure::Cancelled { actor }),
+            crate::WorkbenchCancellationOutcome::NotSleeping { execution },
+            None,
+        );
+        let evidence = Arc::new(RetirementDiagnosticEvidence {
+            detail: "unrecorded primary remains owned by the attempt".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        });
+        assert!(matches!(
+            owner.record(evidence.clone()),
+            Err(WorkbenchDiagnosticRefusal::ExecutionTerminal)
+        ));
+        assert!(journal.lock().0.values().all(|record| record
+            .operation_diagnostics
+            .iter()
+            .all(|operation| operation.evidence.is_none())));
+        drop(journal);
+        assert!(matches!(
+            owner.record(evidence),
+            Err(WorkbenchDiagnosticRefusal::ExecutionMissing)
+        ));
+        work.close();
+        sibling.close();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn stale_retirement_diagnostic_owner_cannot_write_replaced_operation() {
+        let fixture = invocation_work::tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let execution = control.execution_id(actor);
+        let request = WorkbenchRequest::from_cell_input("same replay coordinate")
+            .with_execution_id(execution.clone());
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let old_work = journal
+            .lock()
+            .begin_selecting_invocation(actor, &execution, &request, None, &control);
+        let operation = WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        let old_owner = WorkbenchExecutions::admit_operation_diagnostic(
+            &journal,
+            operation.clone(),
+            None,
+            &old_work,
+        )
+        .unwrap();
+        let evidence = Arc::new(RetirementDiagnosticEvidence {
+            detail: "old primary".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        });
+        let old_receipt = old_owner.record(evidence.clone()).unwrap();
+        // Model replacement through the existing begin issuer, preserving every
+        // coordinate but issuing a distinct actual invocation-work allocation.
+        let new_work = journal
+            .lock()
+            .begin_selecting_invocation(actor, &execution, &request, None, &control);
+        assert!(!Arc::ptr_eq(&old_work, &new_work));
+        let new_owner =
+            WorkbenchExecutions::admit_operation_diagnostic(&journal, operation, None, &new_work)
+                .unwrap();
+        assert!(matches!(
+            old_owner.record(evidence),
+            Err(WorkbenchDiagnosticRefusal::InvocationChanged)
+        ));
+        let (reason, same_receipt) = match new_owner.acknowledge(old_receipt) {
+            Err(rejected) => rejected,
+            Ok(_) => panic!("a foreign invocation cannot acknowledge the old receipt"),
+        };
+        assert_eq!(reason, WorkbenchDiagnosticRefusal::InvocationChanged);
+        let (reason, same_receipt) = match old_owner.acknowledge(same_receipt) {
+            Err(rejected) => rejected,
+            Ok(_) => panic!("the replaced actual record cannot acknowledge its stale owner"),
+        };
+        assert_eq!(reason, WorkbenchDiagnosticRefusal::InvocationChanged);
+        assert_eq!(same_receipt.evidence.detail, "old primary");
+        assert!(journal.lock().0.values().all(|record| record
+            .operation_diagnostics
+            .iter()
+            .all(|operation| operation.evidence.is_none())));
+        old_work.close();
+        new_work.close();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn retirement_diagnostic_receipt_refusal_preserves_coordinate_cause_and_same_receipt() {
+        let fixture = invocation_work::tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let execution = control.execution_id(actor);
+        let request = WorkbenchRequest::from_cell_input("two actual diagnostic operations")
+            .with_execution_id(execution.clone());
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let work = journal
+            .lock()
+            .begin_selecting_invocation(actor, &execution, &request, None, &control);
+        let first = WorkbenchExecutions::admit_operation_diagnostic(
+            &journal,
+            WorkbenchOperationId {
+                execution: execution.clone(),
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            None,
+            &work,
+        )
+        .unwrap();
+        let second = WorkbenchExecutions::admit_operation_diagnostic(
+            &journal,
+            WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 1,
+            },
+            None,
+            &work,
+        )
+        .unwrap();
+        let evidence = Arc::new(RetirementDiagnosticEvidence {
+            detail: "same actual first operation".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        });
+        let receipt = first.record(evidence.clone()).unwrap();
+        let (reason, returned) = match second.acknowledge(receipt) {
+            Err(rejected) => rejected,
+            Ok(_) => panic!("a distinct operation cannot acknowledge the first receipt"),
+        };
+        assert_eq!(reason, WorkbenchDiagnosticRefusal::OperationChanged);
+        assert!(Arc::ptr_eq(&returned.evidence, &evidence));
+        let observation = match first.acknowledge(returned) {
+            Ok(observation) => observation,
+            Err(_) => panic!("the returned same receipt remains valid at its actual owner"),
+        };
+        assert!(Arc::ptr_eq(&observation.evidence, &evidence));
+        work.close();
+        fixture.finish().await;
+    }
 
     #[test]
     fn operation_discovery_pages_pending_and_finalized_refs_without_losing_pre_receipt_work() {

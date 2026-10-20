@@ -349,7 +349,10 @@ impl GenerationSupport {
             ActorGenerationCommit::Published { generation, .. } => generation,
             _ => panic!("real source-backed generation must publish"),
         };
-        fixture.admission.lifecycle.generation_published(generation);
+        assert_eq!(
+            fixture.admission.lifecycle.generation_published(generation),
+            crate::kernel::GenerationPublicationNotification::Accepted
+        );
         assert_eq!(
             std::fs::read_to_string(&self.quotation_executions).unwrap(),
             self.completed_executions,

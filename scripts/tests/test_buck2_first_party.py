@@ -1096,6 +1096,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                                'tidepool_rust_test_cases')
         self.assertEqual(retirement['binary'], group['binary'])
         self.assertEqual(retirement['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff',
+            'resident_workbench::request_tests::actual_retirement_lost_delivery_preserves_published_notification',
             'resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate',
             'resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic',
             'resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open',
@@ -1106,14 +1108,79 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             'resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard',
             'resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body',
             'resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result',
+            'resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen',
         ])
-        self.assertEqual(retirement['expected_count'], 10)
+        self.assertEqual(retirement['expected_count'], 13)
         self.assertTrue(retirement['ignored'])
         self.assertEqual(retirement['case_compiler_modes'], {
             name: 'owned-resident' for name in retirement['exact_tests']
         })
         self.assertEqual(retirement['resource_env'], rooted['resource_env'])
         self.assertEqual(retirement['resources'], rooted['resources'])
+        refusal = self.rule('exomonad/actor', 'actor_generation_publication_refusal_tests',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(refusal['binary'], retirement['binary'])
+        self.assertEqual(refusal['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard',
+        ])
+        self.assertEqual(refusal['expected_count'], 1)
+        self.assertTrue(refusal['ignored'])
+        self.assertEqual(refusal['case_compiler_modes'], {
+            name: 'owned-resident' for name in refusal['exact_tests']
+        })
+        self.assertEqual(refusal['resource_env'], rooted['resource_env'])
+        self.assertEqual(refusal['resources'], rooted['resources'])
+        unstarted = self.rule('exomonad/actor', 'actor_generation_unstarted_publication_tests',
+                              'tidepool_rust_test_cases')
+        self.assertEqual(unstarted['binary'], retirement['binary'])
+        self.assertEqual(unstarted['exact_tests'], [
+            'resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen',
+        ])
+        self.assertEqual(unstarted['expected_count'], 1)
+        self.assertTrue(unstarted['ignored'])
+        self.assertEqual(unstarted['case_compiler_modes'], {
+            name: 'owned-resident' for name in unstarted['exact_tests']
+        })
+        self.assertEqual(unstarted['resource_env'], rooted['resource_env'])
+        self.assertEqual(unstarted['resources'], rooted['resources'])
+        capture = self.rule('exomonad/actor', 'actor_generation_retirement_capture_tests',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(capture['binary'], retirement['binary'])
+        self.assertEqual(capture['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership',
+        ])
+        self.assertEqual(capture['expected_count'], 1)
+        self.assertTrue(capture['ignored'])
+        self.assertEqual(capture['case_compiler_modes'], {
+            name: 'owned-resident' for name in capture['exact_tests']
+        })
+        reservation = self.rule('exomonad/actor', 'actor_generation_retirement_reservation_tests',
+                                'tidepool_rust_test_cases')
+        self.assertEqual(reservation['binary'], retirement['binary'])
+        self.assertEqual(reservation['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff',
+        ])
+        self.assertEqual(reservation['expected_count'], 1)
+        self.assertTrue(reservation['ignored'])
+        self.assertEqual(reservation['case_compiler_modes'], {
+            name: 'owned-resident' for name in reservation['exact_tests']
+        })
+        self.assertEqual(reservation['resource_env'], rooted['resource_env'])
+        self.assertEqual(reservation['resources'], rooted['resources'])
+        delivery_loss = self.rule('exomonad/actor', 'actor_generation_retirement_delivery_loss_tests',
+                                  'tidepool_rust_test_cases')
+        self.assertEqual(delivery_loss['binary'], retirement['binary'])
+        self.assertEqual(delivery_loss['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_lost_delivery_preserves_published_notification',
+        ])
+        self.assertEqual(delivery_loss['expected_count'], 1)
+        self.assertTrue(delivery_loss['ignored'])
+        self.assertEqual(delivery_loss['case_compiler_modes'], {
+            name: 'owned-resident' for name in delivery_loss['exact_tests']
+        })
+        self.assertEqual(delivery_loss['resource_env'], rooted['resource_env'])
+        self.assertEqual(delivery_loss['resources'], rooted['resources'])
+        self.assertTrue(delivery_loss['haskell_worker'])
         publication = self.rule('exomonad/actor', 'actor_world_declaration_publication_test',
                                 'tidepool_rust_test_cases')
         self.assertEqual(publication['binary'], rooted['binary'])
@@ -1142,9 +1209,6 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(durable['resource_env'], rooted['resource_env'])
         self.assertEqual(durable['resources'], rooted['resources'])
         self.assertTrue(durable['haskell_worker'])
-        capture = self.rule('exomonad/actor', 'actor_generation_retirement_capture_tests',
-                            'tidepool_rust_test_cases')
-        self.assertEqual(capture['expected_count'], 1)
         self.assertEqual(capture['resource_env'], rooted['resource_env'])
         self.assertEqual(capture['resources'], rooted['resources'])
         worker = self.rule('exomonad/actor', 'actor_generation_retirement_worker_tests',

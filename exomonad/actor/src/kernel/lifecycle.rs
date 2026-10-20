@@ -19,6 +19,15 @@ pub(crate) mod resident;
 mod transfer;
 pub(crate) use transfer::ReplacementIngressError;
 
+/// Whether the exact lifecycle owner accepted the published generation message.
+/// Acceptance does not establish that its handler has executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub(crate) enum GenerationPublicationNotification {
+    Accepted,
+    Refused,
+}
+
 #[cfg(test)]
 mod control_cluster_tests;
 

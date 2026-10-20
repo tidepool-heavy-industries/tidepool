@@ -60,9 +60,10 @@ main = do
             (ReloadDisplayAcknowledgementUnconfirmed "packet acknowledgement lost")
         , ReloadCollateralBlocker actor nextActor ReloadPhysicalSupervision
         ]
-      receipt state effects = ReloadRetirement (ReloadRetirementReceipt
+      receiptWith settlement state effects = ReloadRetirement (ReloadRetirementReceipt
         (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
-        (Just operation) state blockers effects diff (Just (primaryFor state)) (secondaryFor state))
+        (Just operation) state blockers effects diff (Just (primaryFor state)) (secondaryFor state) settlement)
+      receipt = receiptWith ReloadOperationalSettled
       primaryFor state = case state of
         ReloadAReopened -> ReloadCause ReloadRetirementBlocked "known live blocker"
         ReloadRetirementFenced _ -> cause
@@ -71,6 +72,16 @@ main = do
         ReloadBPublished _ _ -> [ReloadCause ReloadContinuationFailed "response delivery failed"]
         _ -> [ReloadCause ReloadPublicationFailed "publication uncommitted"]
       render state effects = reloadPresenter (Right (receipt state effects))
+      outstanding = ReloadOperationalUnsettled
+        (ReloadOriginalRetirementObligation ReloadObligationUnconfirmed)
+        [ ReloadCandidateSettlementObligation ReloadObligationPending
+        , ReloadPhysicalCleanupObligation ReloadObligationRefused
+        , ReloadPublicationNotificationObligation ReloadObligationPending
+        , ReloadSourceDeliveryObligation actor ReloadObligationUnconfirmed
+        , ReloadDiagnosticDeliveryObligation ReloadObligationRefused
+        ]
+      publishedUnsettled = reloadPresenter (Right (receiptWith outstanding
+        (ReloadBPublished ["Changed"] ["repair projection"]) [stopped, pending]))
       reopened = render ReloadAReopened [stopped, refused]
       fenced = render (ReloadRetirementFenced ReloadResourceCleanup) [stopped, pending, unknown]
       published = render (ReloadBPublished ["Changed"] ["repair projection"]) [stopped]
@@ -91,6 +102,55 @@ main = do
   assert ("Published source frozen-B" `T.isInfixOf` published) "confirmed candidate lost"
   assert ("Notebook reset" `T.isInfixOf` published) "published reset contract lost"
   assert ("Warnings: repair projection" `T.isInfixOf` published) "published warnings lost"
+  mapM_ (\fragment -> assert (fragment `T.isInfixOf` publishedUnsettled)
+    "known publication with outstanding obligations lost an independent observation")
+    [ "Published source frozen-B", "Notebook reset", "Warnings: repair projection"
+    , "Operational obligations unsettled", "original retirement unconfirmed"
+    , "candidate settlement pending", "physical cleanup refused"
+    , "publication notification pending", "source delivery for actor 42/7 unconfirmed"
+    , "diagnostic delivery refused", "Primary: continuation failed"
+    ]
+  assert (not ("was not published" `T.isInfixOf` publishedUnsettled)
+    && not ("reopened" `T.isInfixOf` publishedUnsettled))
+    "operational uncertainty changed known source publication"
+  assert ("Operational obligations settled" `T.isInfixOf` published)
+    "a retained terminal cause was mistaken for outstanding work"
+  let observations = [ReloadObligationPending, ReloadObligationUnconfirmed, ReloadObligationRefused]
+      obligations = concatMap (\observation ->
+        [ ReloadCandidateSettlementObligation observation
+        , ReloadOriginalRetirementObligation observation
+        , ReloadPhysicalCleanupObligation observation
+        , ReloadPublicationNotificationObligation observation
+        , ReloadSourceDeliveryObligation actor observation
+        , ReloadDiagnosticDeliveryObligation observation
+        ]) observations
+      settlements = ReloadOperationalSettled :
+        [ReloadOperationalUnsettled obligation [] | obligation <- obligations]
+      sourceStates = [ReloadAReopened, ReloadRetirementFenced ReloadResourceCleanup,
+        ReloadBPublished ["Changed"] ["repair projection"]]
+  mapM_ (\settlement -> assert (fromJSON (toJSON settlement) == Success settlement)
+    "operational settlement or nonempty typed obligation did not roundtrip") settlements
+  mapM_ (\state -> mapM_ (\settlement ->
+    let value = receiptWith settlement state [stopped]
+    in assert (fromJSON (toJSON value) == Success value)
+      "source outcome and operational settlement did not roundtrip independently") settlements) sourceStates
+  assert (toJSON (ReloadOperationalUnsettled
+    (ReloadSourceDeliveryObligation actor ReloadObligationPending) []) /=
+    toJSON (ReloadOperationalUnsettled
+      (ReloadSourceDeliveryObligation nextActor ReloadObligationPending) []))
+    "source delivery obligation lost its exact resource"
+  case (fromJSON (object ["tag" .= ("ReloadOperationalUnsettled" :: String),
+    "contents" .= ([] :: [Value])]) :: Result ReloadOperationalSettlement) of
+    Error _ -> pure ()
+    Success _ -> fail "unsettled accepted without its mandatory first obligation"
+  let noCause = ReloadRetirement (ReloadRetirementReceipt
+        (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
+        (Just operation) ReloadAReopened [] [] diff Nothing [] outstanding)
+      noCauseSummary = reloadPresenter (Right noCause)
+  assert ("frozen-A reopened" `T.isInfixOf` noCauseSummary
+    && "Operational obligations unsettled" `T.isInfixOf` noCauseSummary
+    && not ("Operational obligations settled" `T.isInfixOf` noCauseSummary))
+    "source outcome or missing cause incorrectly implied operational settlement"
   assert ("Primary: retirement blocked" `T.isInfixOf` reopened) "reopened receipt lost primary cause"
   assert ("Secondary causes: continuation failed" `T.isInfixOf` published) "published receipt lost secondary cause"
   assert (toJSON (receipt ReloadAReopened []) /=
@@ -101,6 +161,40 @@ main = do
     toJSON (ReloadWorkbenchReservation "exec-issued" "attempt-b")) "reservation attempts collapsed"
   assert (toJSON (ReloadNativeLocal "18446744073709551615") /=
     toJSON (ReloadNativeRemote "0" "18446744073709551615")) "native identity tag or unsigned coordinates lost"
+  let maximumUnsigned = "18446744073709551615"
+      actorCompiler = ReloadActorCompilerResource (42, 7) maximumUnsigned
+      preparationCompiler = ReloadPreparationCompilerResource maximumUnsigned maximumUnsigned
+      invocationCompiler = ReloadCompilerResource (42, 7) (ReloadWorkbenchReservation "exec-issued" "attempt-a") 0
+      compilerResources = [actorCompiler, preparationCompiler, invocationCompiler]
+      sourceBinding = ReloadSourceBindingResource (42, 7) maximumUnsigned
+  mapM_ (\resource -> assert (fromJSON (toJSON resource) == Success resource)
+    "compiler resource observation did not roundtrip") compilerResources
+  assert (toJSON actorCompiler == object
+    ["tag" .= ("ReloadActorCompilerResource" :: String), "contents" .= ((42, 7) :: (Int, Int), maximumUnsigned :: T.Text)])
+    "actor compiler resource lost actor or unsigned registration coordinate"
+  assert (toJSON preparationCompiler == object
+    ["tag" .= ("ReloadPreparationCompilerResource" :: String), "contents" .= (maximumUnsigned :: T.Text, maximumUnsigned :: T.Text)])
+    "preparation compiler resource lost unsigned coordinates"
+  assert (toJSON actorCompiler /= toJSON preparationCompiler &&
+    toJSON actorCompiler /= toJSON invocationCompiler &&
+    toJSON preparationCompiler /= toJSON invocationCompiler)
+    "compiler resource owners collapsed"
+  assert (fromJSON (toJSON sourceBinding) == Success sourceBinding)
+    "source binding observation did not roundtrip"
+  assert (toJSON sourceBinding == object
+    ["tag" .= ("ReloadSourceBindingResource" :: String), "contents" .= ((42, 7) :: (Int, Int), maximumUnsigned :: T.Text)])
+    "source binding lost its actual actor or unsigned stable slot"
+  assert (toJSON sourceBinding /= toJSON (ReloadWatchResource (42, 7) 0))
+    "source binding was replaced by a watch coordinate"
+  let compilerReceipt = render ReloadAReopened
+        [ReloadResourceOutcome resource ReloadStopPending ReloadCleanupPending | resource <- sourceBinding : compilerResources]
+  mapM_ (\fragment -> assert (fragment `T.isInfixOf` compilerReceipt)
+    "compiler resource presenter lost exact owner or coordinate")
+    [ "actor 42/7 compiler registration=18446744073709551615"
+    , "preparation 18446744073709551615 compiler registration=18446744073709551615"
+    , "actor 42/7 compiler exec-issued/attempt=attempt-a/registration=0"
+    , "actor 42/7 source binding slot=18446744073709551615"
+    ]
   assert (jsonSchema (Proxy :: Proxy ReloadRetirementReceipt) /= Null) "retirement receipt lacks generated schema"
 
   -- Cover every tuple arity supported by the actual JSON codecs. The missing

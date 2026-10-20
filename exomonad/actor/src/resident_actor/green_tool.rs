@@ -241,7 +241,7 @@ where
                     )
                     .await?;
                 match self
-                    .prepare_invocation_wait(kernel, context, &owner, boundary)
+                    .prepare_invocation_wait(kernel, context, &owner, boundary, None)
                     .await?
                 {
                     Ok(wait) => {

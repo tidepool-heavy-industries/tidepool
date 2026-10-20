@@ -217,6 +217,7 @@ mod tests {
                 lifecycle: context.lifecycle().clone(),
                 fresh_context_seed: None,
                 workbench_executions: Arc::default(),
+                source_slots: source_slots::SourceSlots::default(),
                 interactive_policy_installed: false,
                 descriptor,
                 bound_worktree: None,
