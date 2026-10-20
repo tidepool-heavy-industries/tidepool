@@ -5201,10 +5201,12 @@ mod checkpoint_scope_tests {
                 |owner, _| run_admitted_compiler_world(owner, admitted, || Ok(Some(sources))),
             )
             .unwrap();
-        assert!(matches!(
+        assert!(
+            matches!(settled.close(), crate::CompilerTransactionClose::Clean),
+            "actual World acquisition close {:?}, primary {:?}",
             settled.close(),
-            crate::CompilerTransactionClose::Clean
-        ));
+            settled.action().as_ref().err()
+        );
         let completed = finish_admitted_compiler_world(settled).unwrap();
         let observation = completed.association.clone();
         let world = completed.world().clone();
