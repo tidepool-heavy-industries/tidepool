@@ -5654,6 +5654,46 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             (zip (map (ms_mod_name . observationSummary) observations) moduleFacts))
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           finalizedModules <- liftIO (readIORef finalizedModulesRef)
+          traceOwner <- liftIO (lookupEnv "TIDEPOOL_FINALIZED_OWNER_TRACE")
+          forM_ traceOwner $ \requested -> liftIO $ do
+            let key owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+                matches owner = let (unit,name) = key owner in requested == unit ++ ":" ++ name
+                summaries graph owner = [summary | ModuleNode _ summary <- mgModSummaries' graph
+                  , ms_mod summary == owner]
+                selectedSources = [owner | WorldSourceSelection selected _ _ <- maybe [] pure worldSources
+                  , selection <- maybe [] pure selected,(owner,_,_,_) <- selectedOriginalRows selection]
+                observed owner = [case observation of
+                    CachedObservation _ entry -> "memo:" ++ show (gmeCycle entry)
+                    LoadedObservation {} -> "loaded"
+                    HydratedObservation {} -> "admitted-candidate"
+                  | observation <- observations,ms_mod (observationSummary observation) == owner]
+                sourcePaths graph owner = take 2
+                  [take 256 source | summary <- summaries graph owner
+                    , source <- maybe [] pure (ml_hs_file (ms_location summary))]
+                selected = [mi_module (hm_iface (finalizedHomeModInfo finalized))
+                | finalized <- Map.elems finalizedModules
+                , matches (mi_module (hm_iface (finalizedHomeModInfo finalized)))]
+            hPutStrLn stderr ("e6-finalized-role-request owner=" ++ show (take 256 requested)
+              ++ " finalized_matches=" ++ show (length selected))
+            forM_ (take 1 selected) $ \owner -> do
+              let (unit,name) = key owner
+                  nodes = [node | node <- dependencyModules dependencies
+                    , dependencyModuleUnit node == unit,dependencyModuleName node == name]
+                  paths = map dependencyModuleSource nodes
+                  consumed = [source | source <- dependencySources dependencies
+                    , dependencySourcePath source `elem` paths]
+              hPutStrLn stderr ("e6-finalized-role owner=" ++ show (unit,name)
+                ++ " fresh_graph=" ++ show (length (summaries freshGraph owner))
+                ++ " source_capture_graph=" ++ show (length (summaries sourceCaptureGraph owner))
+                ++ " fresh_paths=" ++ show (sourcePaths freshGraph owner)
+                ++ " selected_world_source=" ++ show (key owner `elem` selectedSources)
+                ++ " canonical_admission=" ++ show (Map.member (key owner) selectedCanonicalInterfaces)
+                ++ " validated_memo=" ++ show (Map.member owner validatedMemo)
+                ++ " observations=" ++ show (take 2 (observed owner))
+                ++ " native_prepared=" ++ show (any ((== owner) . pmModule) preparedModules)
+                ++ " dependency_nodes=" ++ show (length nodes)
+                ++ " dependency_paths=" ++ show (map (take 256) (take 2 paths))
+                ++ " consumed_sources=" ++ show (length consumed))
           let packageRoots = Map.union
                 (Map.fromList [(ms_mod_name (observationSummary observation), moduleFactPackageImports facts)
                   | (observation, facts) <- zip observations moduleFacts])
