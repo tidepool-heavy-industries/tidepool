@@ -208,7 +208,7 @@ impl Fixture {
         let source = context.source_dependency().source_lease().unwrap();
         let installed = resident
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 tidepool_runtime::CompilerTransactionCancellation::new(),
                 None,
@@ -251,7 +251,7 @@ impl Fixture {
         let settled = self
             .resident
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 tidepool_runtime::CompilerTransactionCancellation::new(),
                 None,

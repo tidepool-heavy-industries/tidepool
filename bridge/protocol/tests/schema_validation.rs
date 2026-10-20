@@ -337,6 +337,7 @@ fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
             .map(|variant| variant.ctor)
             .collect::<Vec<_>>(),
         [
+            "ReloadRetirement",
             "ReloadRefused",
             "ReloadUnchanged",
             "ReloadPublished",

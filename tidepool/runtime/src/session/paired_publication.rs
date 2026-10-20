@@ -79,7 +79,7 @@ pub struct FinalExecutionIntent {
 pub(super) struct WorldExecutionIntent {
     pub(super) association: Arc<super::inspection::InspectionWorldAssociation>,
     pub(super) source: Arc<super::GenerationArtifactReference>,
-    pub(super) original_source: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) original_source: Arc<super::RuntimeOriginalSource>,
     pub(super) target: Arc<super::RuntimeLexicalScopeLease>,
     pub(super) private: Arc<super::inspection::InspectionWorldAssociation>,
 }
@@ -653,11 +653,12 @@ impl PersistentSession {
         }
         let facts = admission.world_execution_facts();
         let target = admission.retained_lexical_scope();
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [facts.original_source.clone(), target.clone()],
-            |leases| {
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [facts.original_source.clone()],
+            [target.clone()],
+            |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
+                    sources.iter().map(|source| source.source_admission()),
                     || {
                         let private = self
                             .lib()

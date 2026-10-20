@@ -23,6 +23,10 @@ pub enum SourceAdmissionError {
     MissingTransaction,
     #[error("source compiler transactions cannot borrow a foreign or nested transaction")]
     ForeignTransaction,
+    #[error("source compiler transaction differs from the original runtime source owner")]
+    DifferentOriginalSource,
+    #[error("a source-neutral owner cannot admit original-source compiler work")]
+    NeutralSourceOwner,
     #[error("source lexical lease belongs to a stale issuing epoch")]
     StaleSourceLease,
     #[error("source work has no live canonical target lease for scope {scope:?}")]
@@ -189,14 +193,14 @@ impl RuntimeSourceAdmission {
     /// uncertain claims remain visible to the retirement owner after cutoff.
     pub fn fence_with<E>(
         &self,
-        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::RuntimeOriginalSource>,
         compare: impl for<'a> FnOnce(RuntimeSourceFenceTransition<'a>) -> Result<(), E>,
     ) -> Result<Result<RuntimeSourceFence, SourceFenceTransitionFailure<E>>, SourceAdmissionError>
     {
-        if !lease.source_admission().same_owner(self) {
+        if !source.source_admission().same_owner(self) {
             return Err(SourceAdmissionError::StaleSourceLease);
         }
-        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
+        super::RuntimeOriginalSource::with_sources_and_targets([source.clone()], [], |_, _| {
             let mut state = self.0.state.lock();
             if state.phase != SourceAdmissionPhase::Open {
                 return Err(SourceAdmissionError::Closed {
@@ -322,16 +326,18 @@ impl Drop for RuntimeSourceClaim {
 /// share a gate. Issued only by a validated canonical lexical lease.
 pub struct RuntimeSourceLeaseClaim {
     claims: Vec<RuntimeSourceClaim>,
+    sources: Vec<Arc<super::RuntimeOriginalSource>>,
     leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceLeaseClaim {
     pub(super) fn admit(
+        sources: &[Arc<super::RuntimeOriginalSource>],
         leases: &[Arc<super::RuntimeLexicalScopeLease>],
     ) -> Result<Self, SourceAdmissionError> {
         let mut gates: Vec<RuntimeSourceAdmission> = Vec::new();
         let mut claims = Vec::new();
-        for lease in leases {
-            let gate = lease.source_admission();
+        for source in sources {
+            let gate = source.source_admission();
             if !gates.iter().any(|held| held.same_owner(gate)) {
                 claims.push(gate.admit_local()?);
                 gates.push(gate.clone());
@@ -339,11 +345,15 @@ impl RuntimeSourceLeaseClaim {
         }
         Ok(Self {
             claims,
+            sources: sources.to_vec(),
             leases: leases.to_vec(),
         })
     }
 
     pub fn retain_unconfirmed(self) {
+        for source in &self.sources {
+            source.retain_unconfirmed_source_custody();
+        }
         for lease in &self.leases {
             lease.retain_unconfirmed_source_custody();
         }
@@ -518,9 +528,9 @@ impl RuntimeSourceFence {
     #[cfg(test)]
     pub fn reopen(
         self,
-        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<(), SourceAdmissionError> {
-        self.reopen_with(lease, |reopen| {
+        self.reopen_with(source, |reopen| {
             reopen.commit();
             Ok::<_, ()>(())
         })
@@ -537,13 +547,13 @@ impl RuntimeSourceFence {
     /// Success reopens only this gate; future work admits the full source chain.
     pub fn reopen_with<E>(
         self,
-        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::RuntimeOriginalSource>,
         settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
     ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
-        if !lease.source_admission().same_owner(&self.owner) {
+        if !source.source_admission().same_owner(&self.owner) {
             return Err(SourceAdmissionError::StaleFence);
         }
-        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
+        super::RuntimeOriginalSource::with_sources_and_targets([source.clone()], [], |_, _| {
             let mut state = self.owner.0.state.lock();
             let original = SourceAdmissionPhase::Fenced {
                 attempt: self.attempt,
@@ -613,6 +623,83 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn original_source_transaction_keeps_original_and_target_distinct() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original = original_scope.original_source().clone();
+        let target = session.mint_notebook_scope_with_lease(None).unwrap();
+        assert!(!Arc::ptr_eq(&original, target.original_source()));
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |transaction, _| {
+                    assert_eq!(
+                        transaction.admit_original(target.original_source(), Some(target.clone())),
+                        Err(SourceAdmissionError::DifferentOriginalSource),
+                    );
+                    assert_eq!(original.source_admission().0.state.lock().claims, 0);
+                    assert_eq!(target.source_admission().0.state.lock().claims, 0);
+                    transaction
+                        .admit_original(&original, Some(target.clone()))
+                        .unwrap();
+                    assert_eq!(original.source_admission().0.state.lock().claims, 1);
+                    assert_eq!(target.source_admission().0.state.lock().claims, 1);
+                    transaction
+                        .admit_original(&original, Some(target.clone()))
+                        .unwrap();
+                    assert_eq!(original.source_admission().0.state.lock().claims, 1);
+                    assert_eq!(target.source_admission().0.state.lock().claims, 1);
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
+        ));
+        assert_eq!(original.source_admission().0.state.lock().claims, 0);
+        assert_eq!(target.source_admission().0.state.lock().claims, 0);
+    }
+
+    #[test]
+    fn fenced_original_refuses_before_claiming_open_target() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original = original_scope.original_source().clone();
+        let target = session.mint_notebook_scope_with_lease(None).unwrap();
+        let fence = original.source_admission().fence().unwrap();
+        original.validate_source_issuer().unwrap();
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |transaction, _| {
+                    assert!(matches!(
+                        transaction.admit_original(&original, Some(target.clone())),
+                        Err(SourceAdmissionError::Closed {
+                            phase: SourceAdmissionPhase::Fenced { .. },
+                            ..
+                        }),
+                    ));
+                    assert_eq!(target.source_admission().0.state.lock().claims, 0);
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
+        ));
+        assert_eq!(fence.pending_claims(), 0);
+        fence.reopen(&original).unwrap();
+        assert!(original.admit_source().is_ok());
+        assert!(target.admit_source().is_ok());
+    }
+
+    #[test]
     fn publication_view_requires_its_exact_still_held_fence() {
         let mut session = PersistentSession::new(None, 0);
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
@@ -628,7 +715,7 @@ mod tests {
         view.with_current(&lease, || ran.set(true)).unwrap();
         assert!(ran.replace(false));
 
-        fence.reopen(&lease).unwrap();
+        fence.reopen(lease.original_source()).unwrap();
         assert_eq!(
             view.with_current(&lease, || ran.set(true)),
             Err(SourceAdmissionError::StaleFence)
@@ -681,7 +768,7 @@ mod tests {
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
         let gate = lease.source_admission();
         assert!(matches!(
-            gate.fence_with(&lease, |_| Err("selection changed")),
+            gate.fence_with(lease.original_source(), |_| Err("selection changed")),
             Ok(Err(SourceFenceTransitionFailure::Refused(
                 "selection changed"
             )))
@@ -689,7 +776,7 @@ mod tests {
         assert_eq!(gate.0.state.lock().next_attempt, 0);
         assert!(lease.admit_source().is_ok());
         assert!(matches!(
-            gate.fence_with(&lease, |_| Ok::<_, ()>(())),
+            gate.fence_with(lease.original_source(), |_| Ok::<_, ()>(())),
             Err(SourceAdmissionError::FenceNotCommitted)
         ));
         assert_eq!(gate.0.state.lock().next_attempt, 0);
@@ -702,7 +789,7 @@ mod tests {
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
         let gate = lease.source_admission();
         let claim = lease.admit_source().unwrap();
-        let fence = match gate.fence_with(&lease, |transition| {
+        let fence = match gate.fence_with(lease.original_source(), |transition| {
             assert!(gate.0.state.try_lock().is_none());
             transition.commit();
             Ok::<_, ()>(())
@@ -713,7 +800,7 @@ mod tests {
         assert_eq!(fence.pending_claims(), 1);
         assert!(lease.admit_source().is_err());
         drop(claim);
-        fence.reopen(&lease).unwrap();
+        fence.reopen(lease.original_source()).unwrap();
         assert!(lease.admit_source().is_ok());
     }
 
@@ -722,7 +809,7 @@ mod tests {
         let mut session = PersistentSession::new(None, 0);
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
         let gate = lease.source_admission();
-        let fence = match gate.fence_with(&lease, |transition| {
+        let fence = match gate.fence_with(lease.original_source(), |transition| {
             transition.commit();
             Err("owner completion failed")
         }) {
@@ -735,7 +822,7 @@ mod tests {
             _ => panic!("a committed cutoff must retain its exact owner"),
         };
         assert!(lease.admit_source().is_err());
-        fence.reopen(&lease).unwrap();
+        fence.reopen(lease.original_source()).unwrap();
         assert!(lease.admit_source().is_ok());
     }
 
@@ -746,7 +833,7 @@ mod tests {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
             let gate = lease.source_admission();
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = gate.fence_with::<()>(&lease, |transition| {
+                let _ = gate.fence_with::<()>(lease.original_source(), |transition| {
                     if commit {
                         transition.commit();
                     }
@@ -774,7 +861,7 @@ mod tests {
         let child_fence = child.source_admission().fence().unwrap();
         let selected = Mutex::new(false);
         let _own_only = child_fence
-            .reopen_with(&child, |reopen| {
+            .reopen_with(child.original_source(), |reopen| {
                 let mut current = selected.lock();
                 *current = true;
                 reopen.commit();
@@ -787,7 +874,7 @@ mod tests {
             child.admit_source(),
             Err(SourceAdmissionError::Closed { .. })
         ));
-        parent_fence.reopen(&parent).unwrap();
+        parent_fence.reopen(parent.original_source()).unwrap();
         child.admit_source().unwrap();
     }
 
@@ -798,7 +885,7 @@ mod tests {
             let scope = session.mint_notebook_scope_with_lease(None).unwrap();
             let fence = scope.source_admission().fence().unwrap();
             let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fence.reopen_with(&scope, |reopen| {
+                fence.reopen_with(scope.original_source(), |reopen| {
                     if outcome != 0 {
                         reopen.commit();
                     }
@@ -831,7 +918,7 @@ mod tests {
         let fence = first.source_admission().fence().unwrap();
         let called = std::cell::Cell::new(false);
         assert!(matches!(
-            fence.reopen_with(&other, |reopen| {
+            fence.reopen_with(other.original_source(), |reopen| {
                 called.set(true);
                 reopen.commit();
                 Ok::<_, ()>(())
@@ -843,7 +930,7 @@ mod tests {
         let fence = other.source_admission().fence().unwrap();
         drop(session);
         assert!(matches!(
-            fence.reopen_with(&other, |reopen| {
+            fence.reopen_with(other.original_source(), |reopen| {
                 called.set(true);
                 reopen.commit();
                 Ok::<_, ()>(())
@@ -860,14 +947,14 @@ mod tests {
         let other = session.mint_notebook_scope_with_lease(None).unwrap();
         let fence = first.source_admission().fence().unwrap();
         assert!(matches!(
-            fence.reopen(&other),
+            fence.reopen(other.original_source()),
             Err(SourceAdmissionError::StaleFence)
         ));
         assert!(first.source_admission().admit().is_err());
         let fence = other.source_admission().fence().unwrap();
         drop(session);
         assert!(matches!(
-            fence.reopen(&other),
+            fence.reopen(other.original_source()),
             Err(SourceAdmissionError::StaleSourceLease)
         ));
         assert!(other.source_admission().admit().is_err());
@@ -882,7 +969,7 @@ mod tests {
         claim.retain_unconfirmed();
         let called = std::cell::Cell::new(false);
         assert!(matches!(
-            fence.reopen_with(&scope, |reopen| {
+            fence.reopen_with(scope.original_source(), |reopen| {
                 called.set(true);
                 reopen.commit();
                 Ok::<_, ()>(())
@@ -899,7 +986,7 @@ mod tests {
         let scope = session.mint_isolated_scope_with_lease().unwrap();
         let mut before = session
             .with_source_compiler_transaction(
-                scope.clone(),
+                scope.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -916,7 +1003,7 @@ mod tests {
         before.scope = scope.scope();
         session
             .with_source_compiler_transaction(
-                scope.clone(),
+                scope.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -931,7 +1018,7 @@ mod tests {
             .unwrap();
         let mut late = session
             .with_source_compiler_transaction(
-                scope.clone(),
+                scope.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -949,7 +1036,7 @@ mod tests {
         assert!(matches!(
             session
                 .with_source_compiler_transaction(
-                    scope.clone(),
+                    scope.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -971,7 +1058,7 @@ mod tests {
         assert!(session.resolve_in(scope.scope(), "late").is_none());
         assert_eq!(session.value_handle_count() + 1, before_handles);
         assert!(session.scope_tree().is_live(scope.scope()));
-        fence.reopen(&scope).unwrap();
+        fence.reopen(scope.original_source()).unwrap();
         scope.source_admission().admit().unwrap();
     }
 
@@ -989,7 +1076,7 @@ mod tests {
             Err(SourceAdmissionError::Unconfirmed { count: 1, .. })
         ));
         assert!(matches!(
-            fence.reopen(&scope),
+            fence.reopen(scope.original_source()),
             Err(SourceAdmissionError::Unconfirmed { .. })
         ));
         assert!(scope.source_admission().with_open_admission(|| ()).is_err());
@@ -1051,7 +1138,7 @@ mod tests {
                         if let Ok(fence) = result { phases[gate] = 1; fences[gate] = Some(fence); }
                     }
                     2 => if let Some(fence) = fences[gate].take() {
-                        let result = fence.reopen(leases[gate]);
+                        let result = fence.reopen(leases[gate].original_source());
                         prop_assert_eq!(result.is_ok(), uncertainty[gate] == 0);
                         if result.is_ok() { phases[gate] = 0; }
                     },
@@ -1086,7 +1173,8 @@ mod tests {
 /// One physical compiler scope retains every earned lower claim until its END.
 /// The original lease is independent of the recipient's current placement.
 pub struct RuntimeSourceCompilerTransaction {
-    pub(super) source: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) source: Arc<super::RuntimeOriginalSource>,
+    operation_target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     origin: crate::CompilerTransactionOrigin,
     hook: Option<SourceAdmissionHook>,
     holds: Mutex<SourceCompilerHolds>,
@@ -1096,11 +1184,23 @@ pub struct RuntimeSourceCompilerTransaction {
 struct SourceCompilerHolds {
     hook_admitted: bool,
     claims: Vec<(RuntimeSourceAdmission, RuntimeSourceClaim)>,
+    sources: Vec<Arc<super::RuntimeOriginalSource>>,
     leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceCompilerTransaction {
     pub(super) fn origin(&self) -> &crate::CompilerTransactionOrigin {
         &self.origin
+    }
+
+    pub(crate) fn admit_original(
+        &self,
+        original: &Arc<super::RuntimeOriginalSource>,
+        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<(), SourceAdmissionError> {
+        if !Arc::ptr_eq(&self.source, original) {
+            return Err(SourceAdmissionError::DifferentOriginalSource);
+        }
+        self.admit(target)
     }
 
     pub(super) fn admit(
@@ -1120,11 +1220,12 @@ impl RuntimeSourceCompilerTransaction {
             }
             holds.hook_admitted = true;
         }
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            std::iter::once(self.source.clone()).chain(target),
-            |leases| {
-                for lease in leases {
-                    let admission = lease.source_admission();
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [self.source.clone()],
+            self.operation_target.iter().cloned().chain(target),
+            |sources, leases| {
+                for source in sources {
+                    let admission = source.source_admission();
                     if !holds
                         .claims
                         .iter()
@@ -1134,6 +1235,11 @@ impl RuntimeSourceCompilerTransaction {
                             .claims
                             .push((admission.clone(), admission.admit_local()?));
                     }
+                    if !holds.sources.iter().any(|held| Arc::ptr_eq(held, source)) {
+                        holds.sources.push(source.clone());
+                    }
+                }
+                for lease in leases {
                     if !holds.leases.iter().any(|held| Arc::ptr_eq(held, lease)) {
                         holds.leases.push(lease.clone());
                     }
@@ -1144,7 +1250,7 @@ impl RuntimeSourceCompilerTransaction {
     }
     pub(crate) fn admitted_original_source(
         &self,
-    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SourceAdmissionError> {
+    ) -> Result<Arc<super::RuntimeOriginalSource>, SourceAdmissionError> {
         self.admit(None)?;
         Ok(self.source.clone())
     }
@@ -1154,6 +1260,9 @@ impl RuntimeSourceCompilerTransaction {
             .store(true, std::sync::atomic::Ordering::Release);
         let mut holds = self.holds.lock();
         if !confirmed {
+            for source in &holds.sources {
+                source.retain_unconfirmed_source_custody();
+            }
             for lease in &holds.leases {
                 lease.retain_unconfirmed_source_custody();
             }
@@ -1163,12 +1272,14 @@ impl RuntimeSourceCompilerTransaction {
                 claim.retain_unconfirmed();
             }
         }
+        holds.sources.clear();
         holds.leases.clear();
     }
 }
 
 pub(super) fn run_source_compiler_transaction<T>(
-    source: Arc<super::RuntimeLexicalScopeLease>,
+    source: Arc<super::RuntimeOriginalSource>,
+    operation_target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     workload: tidepool_toolchain::artifacts::CompileWorkload,
     cancellation: crate::CompilerTransactionCancellation,
     supplemental_hook: Option<SourceAdmissionHook>,
@@ -1200,6 +1311,7 @@ pub(super) fn run_source_compiler_transaction<T>(
         |report| {
             let issued = Arc::new(RuntimeSourceCompilerTransaction {
                 source,
+                operation_target,
                 origin: crate::CompilerTransactionOrigin::current().expect("actual compiler owner"),
                 hook: supplemental_hook,
                 holds: Mutex::new(SourceCompilerHolds::default()),
@@ -1213,8 +1325,8 @@ pub(super) fn run_source_compiler_transaction<T>(
     ))
 }
 
-impl super::RuntimeLexicalScopeLease {
-    /// Run one off-checkout source compiler phase with the original strong lease.
+impl super::RuntimeOriginalSource {
+    /// Run one off-checkout compiler phase from its actual original-source token.
     /// The borrowed capability can only be used inside this physical owner.
     pub fn with_source_compiler_transaction<T>(
         self: &Arc<Self>,
@@ -1229,6 +1341,32 @@ impl super::RuntimeLexicalScopeLease {
     ) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
         run_source_compiler_transaction(
             self.clone(),
+            None,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |owner, report| action(&owner, report),
+        )
+    }
+}
+
+impl super::RuntimeLexicalScopeLease {
+    /// Retain this actual operation placement separately from source identity.
+    pub fn with_source_compiler_transaction<T>(
+        self: &Arc<Self>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(
+            &RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(crate::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
+        run_source_compiler_transaction(
+            self.original_source().clone(),
+            Some(self.clone()),
             workload,
             cancellation,
             supplemental_hook,
