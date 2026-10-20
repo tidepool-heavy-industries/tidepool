@@ -33,36 +33,37 @@ a reason to preserve the finite engine while building another abstraction layer.
 
 ## Current implementation and evidence
 
-The published root checkpoint is `25316371c1` on
-`integration/compiler-query-warm-final`. It includes root repair `e27921de24`,
-engine cold-host repair `7ae7d2741d`, and the preview caller repair
-`b2f02e4cc1`. All four affected production/test consumer targets compile.
-Root fixture repair `115c81ee9e` has independent source acceptance and awaits
-the next joined replay. These are intermediate integrations, not release candidates.
-Compiler service, declaration publication, native issuer, lifecycle and query
-owners are receiving reviewed changes on their area branches.
+The root source checkpoint `3f8b3bb54d` on
+`integration/compiler-query-warm-final` compiles runtime, actor and host
+production/test consumers. Eight source-admission controls and ten actor
+generation controls executed and passed. Runner evidence repairs are integrated
+at `7bcfb4d00f`; all 186 joined Python controls executed and passed.
+These are intermediate integrations, not release candidates. Compiler service,
+native source, lifecycle and query owners are receiving reviewed changes on their
+area branches; the table distinguishes their evidence from the root checkpoint.
 The baseline already has persistent GHC infrastructure; this campaign replaces
 repeated reconstruction and competing cell paths, not a process-per-cell design.
 
 | Evidence | Exact boundary | Remaining gate |
 | --- | --- | --- |
-| Root `d5d5686fda`: toolchain, runtime, actor and host production/test consumers compile | Selected native acquisition, source scope and ordered native assembly are joined | Actual full histories and current area folds |
-| Engine `7ae7d2741d`: four consumers compile, build `051befb8-b7de-4f17-a2c2-ee4fb8dd77d0` | World host prototype retains its actual owner instead of requiring finite-only access | Actual private-input cohort executed 2: lifetime/refusal passes; positive fails later at `MissingFinalizedSource Scientific` |
-| Actual query cohort at `b2f02e4cc1`: 2 executed, 1 pass, 1 failure | Source/base invalidation passes; the hot query and settlement now succeed before a later fixture admission failure | Root `115c81ee9e` uses actual source/private/public owners for that later history; rerun pending |
-| Frozen declaration closure `053fd2cd41`, ordering repair `450483bd95`, final support `857afe6454` | Prospective readers validate origin/baseline pairing; the final binding API consumes issued custody instead of rediscovering dependencies. Codegen production/test compilation and 12 focused controls pass | Joined runtime materializer `3b6682bab7`, earlier reservation guard removal, and actual declaration-history execution |
-| Retirement area `853ad26614`: production/test compilation and 2 actual rooted controls pass | Guard transfer, real owner loss and disposal uncertainty remain with their actual attempt | Affine worker return, final physical cutoff/stop and full force/recovery |
-| Haskell optional display `79dcf9eab1`: 2 actual GHC controls pass | Optional rich display respects the authored extension capability | Finalized product role repair, mixed-stage and declaration histories |
-| Scoped query `e1a1af0c0b`, producer `b3909545ec` | Runtime/actor and Haskell producer consumers compile separately; five projection/refusal and one context-mutation controls pass | Joined protocol 27/PREP5 execution, canonical resolver correlation, all-five semantics and malformed-output controls on genuine products |
-| Scoped native target `93d82210be` | The target owns its exact demanded images; all five affected consumers compile. Seventeen of eighteen controls passed, and the corrected source-transaction fixture passes separately | Joined replay and actual current/historical causal source acquisition |
-| Publisher body split `efe7a80a41`, rooted control `8a0e1ac303` | Actual unpublished A/B body returns the same guard; one real rooted control passes | Worker transport, terminal recovery, final cutoff/stop and full force/recovery |
+| Root `3f8b3bb54d`: affected consumers compile; 18 focused controls pass | The publication owner retains the actual prerequisite claim through ordered source/world/installed-state settlement. Observation cannot extend authority, and missing confirmation cannot establish release | Actual hosted query regression, public reload, durable recovery and joined area folds |
+| Engine `3cef3698f1`: affected consumers compile; four metadata controls pass; actual private-input cohort executes 2 with 1 pass and 1 failure | Request-owned metadata replaces accidental dependence on a populated `ArtifactView` metadata cache. Crossed/retired input owner refuses correctly | Positive execution now reaches native demand: current Scientific output is incorrectly treated as requiring a prior body choice. The current-output/external-input repair must pass the actual producer/consumer history |
+| Native source `5bc75aece0`: affected consumers compile; 3 focused and 18 bundled controls pass | Actual prepared targets issue Current source support; raw/compiler-only inputs do not. Selected missing historical support remains a refusal | Carry the actual solver's source receipt through complete native offers, retaining exact selected historical anchors without unrelated sibling ownership |
+| Native fixture/model checkpoint `c021f5e4a1`: test targets compile; 12 execute with 3 passes and 9 failures | Failed oracles conflated a native offer's private proof with the receiving artifact view, and continuation with NewProduct issuance | Source-reviewed corrections must compile and rerun all 12. Preserve exact binding/edge and genuine ambiguity checks; do not amend already issued offers |
+| Lifecycle `a8bc364ebf`: affected consumers compile; 2 real worker controls pass; compact-cause `be11436023` has 5 focused passes | Real callbacks, candidate source ownership, refusal restoration and retained uncertainty are exercised through their owners | Operation diagnostic handoff, post-death terminal observation, compiler-owner DTOs, durable B import and full default/force/recovery path |
+| Query namespace `1dd53569cf`: one real GHC selector passes; query fixture `18b38632fc` compiles | Exact names, aliases and operator namespaces use the owning compiler; the hosted test contains all five semantic operations and explicit absence/malformed controls | Execute the hosted program on the join; precise diagnostics `82133b99cd` and status error propagation `6c29b1c6f4` must join first |
+| Notebook source fixture `30787690fa`: independent source review and 2 generator controls pass | Compilation and runtime source admission use the same captured files and actual source owner | Compile and execute the four native notebook cases; generator passes are not notebook execution |
+| Runner `7bcfb4d00f`: independently reviewed; leaf and joined Python controls pass 186/186 | Fresh output ownership prevents a retry or competing runner from overwriting retained evidence; wrapper reads the actual receipt's stream paths and hashes | No native property or compiler claim follows; later native cases use new output roots |
 
 Exact commands, artifact hashes, selected/executed counts and logs are retained
 under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`, especially
-`completion/engine/`, `completion/queries/` and
-`post-de124-review/canonical-source-checkpoint.json`. The closed-origin handoff is
-`/srv/swarm/evidence/inanna/world-input-origin-receiver-20261020/handoff.json`.
-The authored native scope controls are under
-`/srv/swarm/evidence/inanna/world-stage-native-scopes-final-20261020/`.
+`completion/publication-claims-joined-verification.json`,
+`completion/native-runtime-source/`,
+`completion/tc-triage/c021-failed-execution-manifest.json`,
+`completion/runner-evidence-root/` and the lifecycle area's
+`retirement-implementation/area-worker-joined-checkpoint.json`.
+The actual private-input result is
+`/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/main-3cef3698f1/summary.json`.
 Leaf passes qualify their exact revisions and boundaries only. Frozen-bundle
 qualification and a new Persona launch have not passed.
 
@@ -86,11 +87,13 @@ Receiving work not yet fully qualified in the joined checkpoint:
   exact captured inputs, including hidden private operands, through the existing
   declaration dependency owner.
 - Product finalization must distinguish fresh source, selected canonical SOURCE,
-  retained prior Originals and TYPE-only evidence. The failing Scientific operation
-  uses the actual successor's selected module/interface, not the previously inspected
-  empty base World. Its selected proof is now carried into completion; finalization
-  partition and actual execution remain pending. Unchanged interface bytes at another stage path do not issue
-  a new implementation, and equal interfaces do not prove equal original lineage.
+  retained prior Originals and TYPE-only evidence. A SOURCE claim supplies
+  compiler evidence, not native execution authority. Classify prior native demand
+  from the same decoded physical output and its receipt once: an unversioned
+  reference to actual current output is not a prior input; an explicitly versioned
+  reference remains historical even if that owner is also produced now. Current
+  output must still pass the complete product certifier. Origin labels alone
+  cannot classify a Cached output. Equal interfaces do not prove equal lineage.
 - Native installation advances its checked world's runtime association coherently.
   Do not refresh source observations, replace the world under its prefix or weaken
   unrelated stale-key checks.
