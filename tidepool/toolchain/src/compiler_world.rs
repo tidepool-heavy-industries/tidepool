@@ -747,6 +747,11 @@ impl fmt::Debug for CompilerWorldRestoration {
 }
 
 impl CompilerWorldRestoration {
+    #[cfg(test)]
+    pub(crate) fn input_directory_for_test(&self) -> &Arc<tempfile::TempDir> {
+        &self.inputs.directory
+    }
+
     pub(crate) fn captured_source_domain(&self) -> &[u8; 32] {
         self.inputs.sources.seal()
     }
