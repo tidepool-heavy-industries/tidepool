@@ -365,7 +365,7 @@ pub(crate) enum OriginalInstanceEnvironment {
     Complete {
         target: ExactModuleIdentity,
     },
-    MissingOriginalOwners(Vec<ExactModuleIdentity>),
+    MissingOriginalOwners(Arc<[ExactModuleIdentity]>),
 }
 
 /// Trusted source recipe associated with request-local native type custody.
@@ -10119,7 +10119,7 @@ impl ExactDeclarationContext {
         }
         {
             let updated = if !missing.is_empty() {
-                OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+                OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
             } else {
                 OriginalInstanceEnvironment::Complete { target }
             };
@@ -13270,10 +13270,13 @@ mod tests {
         assert_context_observation_wire(&context);
         let before = context.clone();
         let digest = context.semantic_sha256();
-        context = context.rebuild(|facts| {
-            facts.original_instance_environment =
-                OriginalInstanceEnvironment::MissingOriginalOwners(vec![identity("u", "Missing")])
-        });
+        context =
+            context.rebuild(|facts| {
+                facts.original_instance_environment =
+                    OriginalInstanceEnvironment::MissingOriginalOwners(
+                        vec![identity("u", "Missing")].into(),
+                    )
+            });
         assert!(context.owner.observations.get().is_none());
         assert_ne!(context, before);
         assert_ne!(context.semantic_sha256(), digest);
@@ -13302,13 +13305,13 @@ mod tests {
             "095f07297f14b1bf77e3e1110364052f66a3200be55ec74f7381e2fcc3e9e3de"
         );
         let mut missing = base.clone();
-        missing = missing.rebuild(|facts| {
-            facts.original_instance_environment =
-                OriginalInstanceEnvironment::MissingOriginalOwners(vec![
-                    identity("unit", "Z"),
-                    identity("unit", "A"),
-                ])
-        });
+        missing =
+            missing.rebuild(|facts| {
+                facts.original_instance_environment =
+                    OriginalInstanceEnvironment::MissingOriginalOwners(
+                        vec![identity("unit", "Z"), identity("unit", "A")].into(),
+                    )
+            });
         assert_context_observation_wire(&missing);
         assert_eq!(
             hex(&missing.semantic_sha256()),
@@ -13320,7 +13323,7 @@ mod tests {
                 if let OriginalInstanceEnvironment::MissingOriginalOwners(owners) =
                     &mut facts.original_instance_environment
                 {
-                    owners.reverse();
+                    Arc::make_mut(owners).reverse();
                 }
             });
             context
@@ -15860,7 +15863,7 @@ mod tests {
                     target: target.clone(),
                 }
             } else {
-                OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+                OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
             };
             assert_eq!(context.original_instance_environment(), &expected);
             assert_eq!(context.lexical_graph().len(), issued_entries.len());

@@ -45,6 +45,8 @@ fn identity(rows: &BindingRows, own: ArtifactSelectionId) -> ArtifactSelectionId
 
 impl ScopeProofV3 {
     pub fn scope_dependencies(&self) -> BTreeSet<ArtifactSelectionId> {
+        #[cfg(test)]
+        SCOPE_ANCESTRY_EDGE_VISITS.with(|count| count.set(count.get() + self.dependencies.len()));
         self.dependencies
             .iter()
             .map(|(_, target, _)| target.selection())
@@ -232,22 +234,33 @@ pub(super) fn authenticate(
 pub(super) fn prepare_install(
     state: &InventoryState,
     proofs: impl IntoIterator<Item = Arc<ScopeProofV3>>,
-) -> Result<BTreeMap<ArtifactSelectionId, Arc<ScopeProofV3>>, CompileError> {
+) -> Result<BTreeMap<ArtifactSelectionId, ImmutableScopeProofRef>, CompileError> {
+    prepare_issued_install(
+        state,
+        proofs.into_iter().map(ImmutableScopeProofRef::from_issued),
+    )
+}
+
+/// Transferring an issued owner shares its complete proof and its immutable
+/// direct-ancestor index. Cold raw proofs enter through the same checks above.
+pub(super) fn prepare_issued_install(
+    state: &InventoryState,
+    proofs: impl IntoIterator<Item = ImmutableScopeProofRef>,
+) -> Result<BTreeMap<ArtifactSelectionId, ImmutableScopeProofRef>, CompileError> {
     let additions = proofs
         .into_iter()
-        .map(|proof| (proof.selection, proof))
+        .map(|proof| (proof.proof().selection, proof))
         .collect::<BTreeMap<_, _>>();
     for (scope, proof) in &additions {
         if state
             .selection_plans
             .get(scope)
-            .is_some_and(|existing| existing.proof() != proof)
+            .is_some_and(|existing| existing != proof)
         {
             return Err(failure("scope identity has differing immutable proofs"));
         }
-        for ancestor in proof.scope_dependencies() {
-            if !state.selection_plans.contains_key(&ancestor) && !additions.contains_key(&ancestor)
-            {
+        for ancestor in proof.direct_ancestors() {
+            if !state.selection_plans.contains_key(ancestor) && !additions.contains_key(ancestor) {
                 return Err(failure("issuing binding scope ancestor proof missing"));
             }
         }
@@ -257,18 +270,26 @@ pub(super) fn prepare_install(
 
 pub(super) fn install(
     state: &mut InventoryState,
-    additions: BTreeMap<ArtifactSelectionId, Arc<ScopeProofV3>>,
+    additions: BTreeMap<ArtifactSelectionId, ImmutableScopeProofRef>,
 ) {
     for (scope, proof) in additions {
         if !state.selection_plans.contains_key(&scope) {
             state
                 .issued_scope_nodes
-                .fetch_add(proof.nodes.len() as u64, Ordering::Relaxed);
-            state
-                .selection_plans
-                .insert(scope, ImmutableScopeProofRef::from_issued(proof));
+                .fetch_add(proof.proof().nodes.len() as u64, Ordering::Relaxed);
+            state.selection_plans.insert(scope, proof);
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCOPE_ANCESTRY_EDGE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_ancestry_edge_visits() -> usize {
+    SCOPE_ANCESTRY_EDGE_VISITS.with(|count| count.replace(0))
 }
 
 #[cfg(test)]

@@ -161,7 +161,7 @@ mod program_source_support_history {
         } else {
             assert_eq!(
                 actual.original_instance_environment(),
-                &OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+                &OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
             );
         }
         // Private execution evidence cannot change the request's public scope.
