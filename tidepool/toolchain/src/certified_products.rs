@@ -16,6 +16,8 @@ use tidepool_repr::execution_schema::{
     ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
+mod package_code;
+pub use package_code::CertifiedPackageCodeProduct;
 mod native_demand;
 pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
