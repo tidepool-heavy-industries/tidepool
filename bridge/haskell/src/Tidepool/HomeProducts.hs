@@ -8,7 +8,8 @@ module Tidepool.HomeProducts
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
   , CanonicalOriginalInputs, captureCanonicalOriginalInputs, lookupCanonicalOriginalInput
   , CanonicalOriginalInput, canonicalOriginalOwner
-  , canonicalOriginalVersion, canonicalOriginalHome, canonicalOriginalProof
+  , canonicalOriginalVersion, canonicalOriginalHome, canonicalOriginalProof, canonicalOriginalPackages
+  , materializeCanonicalOriginalView
   , recoverCanonicalOriginalWithPrevious
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal, admitCompiledCanonicalOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
@@ -146,6 +147,9 @@ canonicalOriginalHome (CanonicalOriginalInput _ home _ _) = home
 canonicalOriginalProof :: CanonicalOriginalInput -> CanonicalInterfaceProof
 canonicalOriginalProof (CanonicalOriginalInput metadata _ _ _) = capturedCanonicalMetadataProof metadata
 
+canonicalOriginalPackages :: CanonicalOriginalInput -> PackageImportEvidence
+canonicalOriginalPackages (CanonicalOriginalInput _ _ packages _) = packages
+
 canonicalOriginalVersion :: CanonicalOriginalInput -> Maybe OriginalVersion
 canonicalOriginalVersion (CanonicalOriginalInput _ _ _ version) = version
 
@@ -157,10 +161,10 @@ newtype CanonicalOriginalInputs = CanonicalOriginalInputs (Map.Map Module Canoni
 lookupCanonicalOriginalInput :: CanonicalOriginalInputs -> Module -> Maybe CanonicalOriginalInput
 lookupCanonicalOriginalInput (CanonicalOriginalInputs inputs) owner = Map.lookup owner inputs
 
-captureCanonicalOriginalInputs :: HscEnv -> String
+captureCanonicalOriginalInputs :: String
   -> HydratedExactInterfaces
   -> [(CanonicalInterfaceProof,PackageImportEvidence)] -> IO CanonicalOriginalInputs
-captureCanonicalOriginalInputs _env producer closure sources = do
+captureCanonicalOriginalInputs producer closure sources = do
   let homes = hydratedExactInterfaces closure
       selected = Map.fromList
         [((exactUnit artifact,exactModule artifact),(artifact,home)) | (artifact,home) <- homes]
@@ -214,6 +218,27 @@ recoverCanonicalOriginalWithPrevious env input@(CanonicalOriginalInput _ home _ 
           original <- decodeFinalizedCore env home location bytes
             >>= either (throwIO . CandidateCoreDecodeFailure) pure
           pure (Just (version,AdmittedFinalizedOriginal original captured row location))
+
+-- GHC may require executable bytecode for a real compile-time dependency.
+-- Its supported interface/Core handoff consumes this same admitted input;
+-- source frontend replay cannot substitute a different finalized Original.
+materializeCanonicalOriginalView :: FilePath -> Int -> HscEnv -> CanonicalOriginalInput
+  -> ModSummary -> IO ModSummary
+materializeCanonicalOriginalView directory index env input summary = do
+  unless (ms_mod summary == canonicalOriginalOwner input && ms_hsc_src summary == HsSrcFile)
+    (throwIO CandidateOriginalOwnerMismatch)
+  validateCandidateCompilerViewProfile summary
+  iface <- if backendGeneratesCode (backend (ms_hspp_opts summary))
+    then do
+      captured <- captureCanonicalProofs Nothing [(canonicalOriginalProof input,ExecutableInterfaceUse)]
+      proof <- case captured of
+        [issued] -> pure issued
+        _ -> throwIO CandidateCoreMissing
+      bytes <- readAdmittedCore (ModuleInterfaceAdmission proof)
+      attachFinalizedCore env (canonicalOriginalHome input) bytes
+        >>= either (throwIO . CandidateCoreDecodeFailure) pure
+    else pure (set_mi_extra_decls Nothing (hm_iface (canonicalOriginalHome input)))
+  materializeInterfaceView directory index iface summary
 
 -- A current compiler finalization can reuse a selected canonical original
 -- only when it is the exact interface/Core/package pair already admitted.

@@ -25,6 +25,7 @@ module Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader
   , selectVerifiedExactInterfaces
+  , VerifiedExactInterface, selectVerifiedExactInterfaceProducts, verifiedExactInterface
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , CheckedTemplateInterface(..)
@@ -250,6 +251,18 @@ selectVerifiedExactInterfaces (VerifiedExactIfaceClosure captured) artifacts =
     select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
       Just (original,iface,_) | original == artifact -> Right (original,iface)
       _ -> Left "requested exact interface differs from its verified closure"
+
+-- A small projection of the verified reader's actual artifact/decoded pair.
+-- No public constructor can attach another same-spelled interface to its seal.
+data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact ModIface
+
+verifiedExactInterface :: VerifiedExactInterface -> (ExactIfaceArtifact,ModIface)
+verifiedExactInterface (VerifiedExactInterface artifact iface) = (artifact,iface)
+
+selectVerifiedExactInterfaceProducts :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact]
+  -> Either String [VerifiedExactInterface]
+selectVerifiedExactInterfaceProducts closure artifacts =
+  map (uncurry VerifiedExactInterface) <$> selectVerifiedExactInterfaces closure artifacts
 
 -- Completed-value wire inputs bind bytes and selected exported Names. Their
 -- type requirements come from this complete verified closure, including
@@ -1152,10 +1165,14 @@ newtype HydratedExactInterfaces = HydratedExactInterfaces [(ExactIfaceArtifact,H
 hydratedExactInterfaces :: HydratedExactInterfaces -> [(ExactIfaceArtifact,HomeModInfo)]
 hydratedExactInterfaces (HydratedExactInterfaces homes) = homes
 
-hydrateExactScopeWithProducts :: HscEnv -> [(ExactIfaceArtifact,ModIface)]
-  -> IO (HscEnv,HydratedExactInterfaces)
-hydrateExactScopeWithProducts env inputs = do
-  completed <- hydrateExactScope env inputs
+hydrateExactScopeWithProducts :: HscEnv -> [VerifiedExactInterface]
+  -> [(ExactIfaceArtifact,ModIface)] -> IO (HscEnv,HydratedExactInterfaces)
+hydrateExactScopeWithProducts env verified additional = do
+  let inputs = map verifiedExactInterface verified
+      keys = Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- inputs]
+  unless (all (\(artifact,_) -> (exactUnit artifact,exactModule artifact) `Set.notMember` keys) additional)
+    (fail "unverified hydration rows overlap the exact selected product")
+  completed <- hydrateExactScope env (inputs ++ additional)
   homes <- forM inputs $ \(artifact,iface) -> do
     home <- maybe (fail "hydrated interface lost its actual home") pure
       (lookupHpt (hsc_HPT completed) (moduleName (mi_module iface)))

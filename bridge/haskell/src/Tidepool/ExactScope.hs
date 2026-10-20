@@ -39,7 +39,7 @@ module Tidepool.ExactScope
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , WorldSourceClosureEntry(..)
   , WorldTypeClosureEntry, readWorldTypeInputs
-  , worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody
+  , worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody
   , VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs
   , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, verifiedWorldDeclarationTypeInputs
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
@@ -96,7 +96,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isAlreadyExistsError, isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, hydrateExactScope)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, hydrateExactScope)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
@@ -2538,13 +2538,16 @@ decodeWorldCellOperand bytes = do
 
 -- Artifact, decoded compiler identity, admitted role and package facts travel
 -- together. This is type availability, never source or native execution rights.
-data WorldTypeClosureEntry = WorldTypeClosureEntry ScopeInterfaceInput ModIface PackageImportEvidence ArtifactBytes
+data WorldTypeClosureEntry = WorldTypeClosureEntry ScopeInterfaceInput VerifiedExactInterface PackageImportEvidence ArtifactBytes
 
 worldTypeEntryArtifact :: WorldTypeClosureEntry -> ExactIfaceArtifact
 worldTypeEntryArtifact (WorldTypeClosureEntry (ScopeInterfaceInput (artifact,_,_) _) _ _ _) = artifact
 
 worldTypeEntryInterface :: WorldTypeClosureEntry -> ModIface
-worldTypeEntryInterface (WorldTypeClosureEntry _ iface _ _) = iface
+worldTypeEntryInterface = snd . verifiedExactInterface . worldTypeEntryVerifiedInterface
+
+worldTypeEntryVerifiedInterface :: WorldTypeClosureEntry -> VerifiedExactInterface
+worldTypeEntryVerifiedInterface (WorldTypeClosureEntry _ iface _ _) = iface
 
 worldTypeEntryPackages :: WorldTypeClosureEntry -> PackageImportEvidence
 worldTypeEntryPackages (WorldTypeClosureEntry _ _ packages _) = packages
@@ -2605,8 +2608,9 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
         closure <- readCapturedExactIfaceClosureWithCheckedValues decoder selectedBody env artifacts []
         pure $ do
           verified <- closure
-          interfaces <- selectVerifiedExactInterfaces verified artifacts
-          let byOwner = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,iface)) | (artifact,iface) <- interfaces]
+          interfaces <- selectVerifiedExactInterfaceProducts verified artifacts
+          let byOwner = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,iface))
+                | iface <- interfaces,let (artifact,_) = verifiedExactInterface iface]
           unless (Map.size byOwner == length interfaces && Map.keysSet byOwner == Map.keysSet rows)
             (Left "world type closure differs from its selected exact interfaces")
           Map.traverseWithKey (\key row@(ScopeInterfaceInput (selectedArtifact,_,_) _) -> do

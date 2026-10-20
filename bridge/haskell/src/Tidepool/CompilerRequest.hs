@@ -354,7 +354,7 @@ prepareOriginals prepared recovery executor worklist prior context external = do
     Just completed -> prepareOriginalProductsWithWorklist completed env exact interfaces context external modules
     Nothing -> prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
       (compilerPreparedBodies recovery) (Just (compilerOriginalProjections recovery)) executor
-      ((\previous -> (prepared,completedWorldNative previous)) <$> prior)
+      (Just (prepared,completedWorldNative <$> prior))
       env exact interfaces context external modules
 
 compileWithWorklist :: BoundCompilerRequest -> PipelineSelection result
