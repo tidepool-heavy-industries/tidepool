@@ -707,7 +707,8 @@ impl AppliedModuleCandidateOffer {
 pub struct PreparedCellProgram {
     root_owner: Option<Arc<tempfile::TempDir>>,
     checked: Arc<crate::checked_cell::ExactCheckedCell>,
-    planned: crate::checked_cell::CheckedPlannedCellSpecification,
+    basis: crate::checked_cell::CellProgramBacking,
+    slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
     context: Arc<crate::declaration_context::ExactDeclarationContext>,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     produced_outputs: crate::checked_cell::ProducedValueTypeInterfaces,
@@ -753,7 +754,8 @@ impl PreparedCellProgram {
         let Self {
             root_owner: _root_owner,
             checked: cell,
-            planned,
+            basis,
+            slots,
             context,
             source_lexical,
             produced_outputs,
@@ -793,7 +795,7 @@ impl PreparedCellProgram {
             let output = outputs.remove(&index).ok_or_else(|| {
                 CompileError::ExtractFailed("program native target is missing".into())
             })?;
-            let (generation, observation) = match &planned.slots[index] {
+            let (generation, observation) = match &slots[index] {
                 CheckedPlannedCellSlot::Bind { value } => (*value, None),
                 CheckedPlannedCellSlot::Expression {
                     capture,
@@ -845,8 +847,8 @@ impl PreparedCellProgram {
         }
         let program = Arc::new(CellProgram {
             checked: cell,
-            parsed: planned.parsed_plan.clone(),
-            slots: planned.slots.clone(),
+            basis,
+            slots,
             items,
         });
         cancellation.checkpoint()?;
@@ -2565,7 +2567,8 @@ impl SelectedModuleCandidateOffer {
         let prepared = PreparedCellProgram {
             root_owner: None,
             checked: cell,
-            planned: planned.clone(),
+            basis: checked_cell::CellProgramBacking::Finite(planned.parsed_plan.clone()),
+            slots: planned.slots.clone(),
             context,
             source_lexical: program_request.program_source_lexical().to_vec(),
             produced_outputs,
