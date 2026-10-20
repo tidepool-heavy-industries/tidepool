@@ -10990,12 +10990,11 @@ mod tests {
     fn bound_segment_preserves_explicit_groups_and_same_carrier_ambiguity() {
         for explicit in [false, true] {
             let inventory = ArtifactInventory::default();
-            let native = Arc::new(issued_native_groups(
-                "BoundInheritedCarrier",
-                vec![(7, Vec::new())],
-                &[],
-                &BTreeMap::new(),
-            ));
+            let (native, values, next_values) = native_scope_fixture();
+            let native = Arc::new(native);
+            let old_child_id = values.descriptor.id;
+            let new_child_id = next_values.descriptor.id;
+            assert_ne!(old_child_id, new_child_id);
             let id = native.descriptor.id;
             let base = inventory
                 .admit_recovery_selection(
@@ -11004,11 +11003,11 @@ mod tests {
                     &BTreeSet::new(),
                 )
                 .unwrap();
-            let capture = |name: &str| {
+            let capture = |values: ArtifactEntry| {
                 inventory
                     .admit_recovery_selection(
                         &base,
-                        vec![native.clone(), Arc::new(entry(name, &[]))],
+                        vec![native.clone(), Arc::new(values)],
                         &BTreeSet::from([NativeGroupKey {
                             artifact: id,
                             original_ordinal: 7,
@@ -11017,9 +11016,14 @@ mod tests {
                     .unwrap()
             };
             let mut supports = Vec::new();
-            for view in [capture("InheritedLeft"), capture("InheritedRight")] {
+            for view in [capture(values), capture(next_values)] {
+                // The compiler receives Root. Its retained body dependency stays
+                // with the exact historical proof rather than a Values source role.
                 let projection =
-                    CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+                    CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+                let requirements =
+                    NativeOriginalRequirement::for_projection(&projection, &view, &[]).unwrap();
+                assert_eq!(requirements.len(), 1);
                 let mut selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
@@ -11027,11 +11031,14 @@ mod tests {
                         &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                     )
                     .unwrap();
+                selection
+                    .with_new_product_dependencies(&view.metadata_snapshot(), &requirements)
+                    .unwrap();
                 let issued =
                     crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                         &mut selection,
                         &view,
-                        view.entries(),
+                        vec![native.clone()],
                     )
                     .unwrap();
                 let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
@@ -11072,6 +11079,11 @@ mod tests {
             let competing = *right_groups.first().unwrap();
             assert_ne!(expected, competing);
             assert_ne!(expected.binding.selection(), competing.binding.selection());
+            let (left_carrier, left_child) = scoped_group_child(left.artifacts(), expected);
+            let (right_carrier, right_child) = scoped_group_child(right.artifacts(), competing);
+            assert_eq!(left_carrier, right_carrier);
+            assert_eq!(left_child.artifact, old_child_id);
+            assert_eq!(right_child.artifact, new_child_id);
             let canonical = ArtifactEntry::canonical(match &native.payload {
                 ArtifactPayload::Original(product) => product.module_interface().unwrap().clone(),
                 _ => unreachable!(),
@@ -14494,7 +14506,7 @@ mod tests {
         let issuer = inventory
             .admit_shared_with_demand(
                 &carriers,
-                vec![Arc::new(root.clone())],
+                vec![Arc::new(root.clone()), Arc::new(child.clone())],
                 NativeArtifactDemand::AllGroups,
             )
             .unwrap();
@@ -14504,6 +14516,11 @@ mod tests {
                 vec![Arc::new(child.clone()), Arc::new(unrelated.clone())],
                 NativeArtifactDemand::AllGroups,
             )
+            .unwrap();
+        // Capture this own proof before the output projection retains the
+        // child only as a dependency of Root's private offer.
+        let child_own = NativeOriginalRequirement::from_selected_view(child.descriptor.id, &issuer)
+            .unwrap()
             .unwrap();
         let mut produced = Vec::new();
         for (physical, entries) in [
@@ -14616,12 +14633,8 @@ mod tests {
             let mut facts =
                 NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
             if child_reusable {
-                let child_own =
-                    NativeOriginalRequirement::from_selected_view(child.descriptor.id, issuer)
-                        .unwrap()
-                        .unwrap();
                 if !facts.contains(&child_own) {
-                    facts.push(child_own);
+                    facts.push(child_own.clone());
                 }
             }
             let mut receipt =
