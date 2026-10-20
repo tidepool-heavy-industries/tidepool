@@ -19577,24 +19577,8 @@ pub(crate) mod tests {
         let complete = CompilerSourceSupport::close_complete_output(&finished).unwrap();
         let closure = current.selected_original_closure(&target).unwrap();
         let selected = complete.certify_original_closure(&closure).unwrap();
-        let context = ExactDeclarationContext::from_authenticated_execution_support(
-            producer.sha256(),
-            selected,
-            [
-                r_entry.descriptor.owner.clone(),
-                g_entry.descriptor.owner.clone(),
-                j_entry.descriptor.owner.clone(),
-            ]
-            .into_iter()
-            .map(|owner| crate::declaration_join::ExactLexicalNode {
-                owner,
-                imports: vec![],
-            })
-            .collect(),
-            j_entry.descriptor.owner.clone(),
-            &[],
-        )
-        .unwrap();
+        let context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap()
+            .extend_issued_compiler_support(&selected).unwrap();
         let inputs = context
             .capture_world_primary_compiler_inputs(producer.sha256())
             .unwrap();
