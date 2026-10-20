@@ -7941,18 +7941,31 @@ impl ArtifactView {
         if roots.iter().any(|id| !namespace.contains_key(id)) {
             return Err(failure("issued root lacks exact namespace binding"));
         }
-        let selected = graph.roots.clone();
-        let custody = graph.custody_roots.clone();
+        for (scope, requested) in &selection.snapshot().scopes {
+            let acquired =
+                self.lease.selection.scopes.get(scope).ok_or_else(|| {
+                    failure("issued selection scope is outside acquisition custody")
+                })?;
+            if acquired != requested {
+                return Err(failure(
+                    "issued selection scope proof differs from acquisition custody",
+                ));
+            }
+        }
         validate_issued_selection(&state, owned, graph)?;
         drop(state);
-        let mut retained = self
-            .lease
-            .inventory
-            .retain(selected, custody, Vec::new(), Vec::new());
-        retained.replace_namespace(&namespace);
-        let mut retained = self.retain_projected_materializations(retained)?;
-        retained.replace_namespace(&namespace);
-        Ok(retained)
+        // The issuer can retain proof-only scopes for recorded native offers.
+        // Graph reachability grants payload custody but cannot recreate those facts.
+        let retained = Self::new(ViewDraft {
+            roots: graph.roots.clone(),
+            selection: Arc::clone(selection.snapshot()),
+            inventory: self.lease.inventory.clone(),
+            parents: Vec::new(),
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        self.retain_projected_materializations(retained)
     }
 
     /// Transfer physical file owners only for this exact selected closure.

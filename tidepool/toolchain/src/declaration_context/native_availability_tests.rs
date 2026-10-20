@@ -7346,7 +7346,10 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
         }
         hydrate_context(&store, receipt.root()).unwrap()
     };
-    for ordinals in [vec![7, 9001], vec![9001], vec![]] {
+    for (ordinals, published) in [vec![7, 9001], vec![9001], vec![]]
+        .into_iter()
+        .flat_map(|ordinals| [false, true].map(move |published| (ordinals.clone(), published)))
+    {
         // Only durable facts and newly acquired certified bytes leave this
         // scope; no original offer/view/payload owner backs the restored context.
         let (snapshot, mut acquired_inventory, id, recorded_full, carriers) = {
@@ -7355,11 +7358,17 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 ArtifactEntry::original(producer.sha256(), product("ProofOnlyOffer", 119)).unwrap(),
             );
             let id = entry.descriptor.id;
+            let target = Arc::new(ArtifactEntry::canonical(
+                product("ProofOnlyOfferTarget", 120)
+                    .module_interface()
+                    .unwrap()
+                    .clone(),
+            ));
             let inventory = ArtifactInventory::default();
             let initial = inventory
                 .admit_shared_with_demand(
                     &inventory.empty_view(),
-                    vec![entry.clone()],
+                    vec![entry.clone(), target.clone()],
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
@@ -7382,7 +7391,8 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 )
                 .unwrap();
             let projection =
-                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()])
+                    .unwrap();
             let full_support = fixture_compiler_support(projection.clone(), full.clone());
             let full_offer = full_support
                 .native_offers()
@@ -7444,6 +7454,89 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             });
+            let selection =
+                crate::artifact_inventory::ExactArtifactSelection::capture(context.artifact_view());
+            let reopened = context
+                .artifact_view()
+                .select_issued(vec![id], &selection)
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                reopened.selection_snapshot(),
+                selection.snapshot()
+            ));
+            assert_eq!(
+                reopened.capture_graph_selection(),
+                context.artifact_view().capture_graph_selection()
+            );
+            assert!(
+                matches!(
+                    baseline.artifacts().select_issued(vec![id], &selection),
+                    Err(CompileError::ExtractFailed(detail))
+                        if detail == "artifact inventory: issued selection scope is outside acquisition custody"
+                ),
+                "available equal payloads cannot replace an unacquired proof scope"
+            );
+            let proof_scope = carriers
+                .keys()
+                .map(|group| group.binding.selection())
+                .find(|scope| {
+                    !baseline
+                        .artifacts()
+                        .selection_snapshot()
+                        .scopes
+                        .contains_key(scope)
+                })
+                .unwrap();
+            let mut altered = selection.snapshot().as_ref().clone();
+            let mut proof = altered.scopes[&proof_scope].proof().as_ref().clone();
+            proof.nodes.push(proof.nodes[0]);
+            altered.scopes.insert(
+                proof_scope,
+                ImmutableScopeProofRef::from_issued(Arc::new(proof)),
+            );
+            let altered =
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(altered));
+            assert!(
+                matches!(
+                    context.artifact_view().select_issued(vec![id], &altered),
+                    Err(CompileError::ExtractFailed(detail))
+                        if detail == "artifact inventory: issued selection scope proof differs from acquisition custody"
+                ),
+                "scope identity alone cannot authenticate different immutable proof facts"
+            );
+            let context = if published {
+                let source = ExactDeclarationContext::from_authenticated_execution_support(
+                    producer.sha256(),
+                    context.compiler_source_support().clone(),
+                    vec![
+                        ExactLexicalNode {
+                            owner: target.descriptor.owner.clone(),
+                            imports: vec![entry.descriptor.owner.clone()],
+                        },
+                        ExactLexicalNode {
+                            owner: entry.descriptor.owner.clone(),
+                            imports: vec![],
+                        },
+                    ],
+                    target.descriptor.owner.clone(),
+                    &[
+                        target.descriptor.owner.clone(),
+                        entry.descriptor.owner.clone(),
+                    ],
+                )
+                .unwrap();
+                let publication = source
+                    .issue_published_source_original("revision", "input", &entry.descriptor.owner)
+                    .unwrap();
+                assert!(publication
+                    .context()
+                    .compiler_input_roles()
+                    .iter()
+                    .any(CompilerInputRole::is_published_source_original));
+                publication.context().as_ref().clone()
+            } else {
+                context
+            };
             assert!(context.artifact_view().selected_native_groups().is_empty());
             let row = context
                 .compiler_source_support()
@@ -7502,6 +7595,14 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .context_for_expected_snapshot(receipt.root(), &receipt)
             .unwrap();
         assert!(restored.artifact_view().selected_native_groups().is_empty());
+        assert_eq!(restored.snapshot().roles, snapshot.roles);
+        assert_eq!(
+            restored
+                .compiler_input_roles()
+                .iter()
+                .any(CompilerInputRole::is_published_source_original),
+            published,
+        );
         assert_eq!(
             restored.snapshot().selection().as_ref(),
             snapshot.selection().as_ref()
