@@ -230,7 +230,7 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
   , matchesCapturedFinalization, localFinalizedPackageEvidence, finalizedInterfaceSeals )
 import Tidepool.HomeProducts
-  ( CanonicalOriginalInputs, CanonicalOriginalInput, captureCanonicalOriginalInputs
+  ( CandidateCoreFailure(..), CanonicalOriginalInputs, CanonicalOriginalInput, captureCanonicalOriginalInputs
   , lookupCanonicalOriginalInput, canonicalOriginalHome, canonicalOriginalProof
   , canonicalOriginalPackages, canonicalOriginalVersion, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof
@@ -5684,6 +5684,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 siblings <- liftIO (readIORef preparedSiblingsRef)
                 result <- liftIO (prepare siblings (ms_mod summary))
                 (admitted,reuse,task) <- maybe (liftIO (throwIO CandidateCoreMissing)) pure result
+                unless (admittedOriginalProof admitted == canonicalOriginalProof input)
+                  (liftIO (throwIO CandidateOriginalOwnerMismatch))
                 liftIO (modifyIORef' acquiredCanonicalOriginalsRef (Map.insert (ms_mod summary) admitted))
                 liftIO (emitCount timing "world.cell.canonical_body_acquisitions" 1)
                 when (reuse == PreparedBodyReused) $ liftIO
