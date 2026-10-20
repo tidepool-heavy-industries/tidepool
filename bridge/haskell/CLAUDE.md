@@ -713,6 +713,18 @@ see [compiler profiling](../../docs/compiler-profiling.md).
 
 ## Worker lifetime
 
+World residency after END is optional. Acquisition reports retained-at-admission
+or active-only with the required storage reservation and byte limit; neither is
+a permanent worker lease. The shared optional input/backing allowance defaults
+to 128 MiB (`TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES`). Original-image counts
+bound only original images. World/node/product counts are diagnostics, not heap
+limits. Shared source backing is charged once through its actual lease account;
+payload reservations remain conservative per World where physical sharing has
+no owning identity. Encoded bytes do not measure GHC heap residency. Process RSS
+admission and rotation retain that separate responsibility. END restores mutable
+attempt state before releasing active custody; failed cleanup remains uncertain
+and charged until confirmed worker retirement.
+
 The Rust frontend owns CLI parsing, Unix sockets, daemon configuration, and
 process lifecycle. It either starts this worker for one typed request or keeps
 one worker alive with `--worker-loop-v2`. `Tidepool.WorkerServer` owns only the

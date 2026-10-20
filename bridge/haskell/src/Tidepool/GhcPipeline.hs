@@ -1531,6 +1531,9 @@ newtype WorldBackingLease = WorldBackingLease (IORef WorldBackingState)
 data WorldBackingAccounting = WorldBackingAccounting !Int !Int !Integer !Int
 -- live realized owners, optional indexed owners, physical bytes and nodes
 
+-- Each logical World reserves its encoded input basis conservatively. Equal
+-- payloads are not proof of physical sharing; only the existing backing lease
+-- account below de-duplicates storage across authenticated successors.
 data CachedCompilerWorld = CachedCompilerWorld !Integer !Integer !Int HeldCompilerWorld
 data CompilerWorldCache = CompilerWorldCache
   { cachedCompilerWorlds :: Map.Map String CachedCompilerWorld
@@ -1762,9 +1765,16 @@ observeCompilerWorld timing universe event root reference world =
     let (liveBytes,liveNodes) = compilerWorldLiveCharge (universeWorlds universe)
     emitCount timing "worlds.live_backing_bytes" liveBytes
     emitCount timing "worlds.live_backing_nodes" (fromIntegral liveNodes)
+    emitCount timing "worlds.retained_worlds" (fromIntegral (Map.size (cachedCompilerWorlds (universeWorlds universe))))
     forM_ world $ \(HeldCompilerWorld _ _ materialized _) -> do
       owners <- worldMaterializationOwners materialized
       forM_ owners (emitCount timing "worlds.backing_realization_owners" . fromIntegral)
+    forM_ world $ \(HeldCompilerWorld _ _ _ preparedRef) -> do
+      WorldPreparedModules _ receipts completed _ <- readIORef preparedRef
+      emitCount timing "worlds.prepared_home_receipts" (fromIntegral (Map.size receipts))
+      emitCount timing "worlds.completed_source_modules" $ case completed of
+        Nothing -> 0
+        Just (WorldCompletedDependencies _ versions) -> fromIntegral (Map.size versions)
 
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
 instance Exception WorldQueryFailure
