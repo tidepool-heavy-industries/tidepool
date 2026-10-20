@@ -4102,7 +4102,10 @@ fn prepare_world_cell_outputs(
             .map_err(|error| source_failure(error.to_string()))?;
         let diagnostics =
             crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
-        let run = world_execute(&command, bound, Vec::new())?;
+        let files = plan.operand()
+            .map(|operand| operand.retain_for_request())
+            .transpose()?.unwrap_or_default();
+        let run = world_execute(&command, bound, files)?;
         diagnostics.completed(
             directory.path(),
             &command,
