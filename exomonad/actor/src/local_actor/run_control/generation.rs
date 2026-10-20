@@ -479,15 +479,9 @@ impl GenerationPublicationCustody {
             } if settlement_error.is_none() => {
                 let observation = refusal.observation();
                 match refusal.refuse_retirement(fence) {
-                    Ok(())
-                        if matches!(
-                            observation,
-                            ActorGenerationPublicationRefusalObservation::Failed { .. }
-                        ) || !diagnostic.is_cancelled_component() =>
-                    {
-                        // The original diagnostic must reach its real journal
-                        // consumer; source restoration alone cannot erase it or
-                        // resolve an independent recovery obligation.
+                    Ok(()) => {
+                        // Preserve the body-issued assessment through the real
+                        // diagnostic handoff and consuming settled-owner check.
                         let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
                         let Self::Unpublished { refusal, .. } = old else {
                             return None;
@@ -500,12 +494,6 @@ impl GenerationPublicationCustody {
                         );
                         None
                     }
-                    Ok(()) => Some(GenerationRetirementCompletion::AReopened {
-                        outcome: observation,
-                        nonstart: None,
-                        diagnostic: None,
-                        diagnostic_refusals: Vec::new(),
-                    }),
                     Err(error) => {
                         *settlement_error = Some(Arc::new(error));
                         None
@@ -521,18 +509,48 @@ impl GenerationPublicationCustody {
         &mut self,
         diagnostic: &mut GenerationRetirementDiagnostic,
     ) -> Option<GenerationRetirementCompletion> {
-        match self {
-            Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
-                refusal,
-                ..
-            }) => {
-                diagnostic.record_refusal(refusal)?;
-                // A recorded diagnostic does not settle the body's other owners.
-                // Both Refused and Failed retain the same full refusal until its
-                // actual producer positively assesses those obligations.
+        let Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
+            refusal,
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        let (recorded, refusals) = if diagnostic.is_cancelled_component() {
+            // The private cancellation component has a fixed known cause. It
+            // still requires the actual body's settled-obligation assessment.
+            (None, Vec::new())
+        } else {
+            let (recorded, refusals) = diagnostic.record_refusal(refusal)?;
+            (Some(recorded), refusals)
+        };
+        // The producer's consuming check has no await or source transition. It
+        // returns the SAME refusal unless both its own obligations and guard
+        // are settled; diagnostic acknowledgement alone grants no release.
+        let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
+        let Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
+            refusal,
+            observation,
+        }) = old
+        else {
+            *self = old;
+            return None;
+        };
+        match refusal.into_settled_diagnostic() {
+            Ok(outcome) => Some(GenerationRetirementCompletion::AReopened {
+                outcome,
+                nonstart: None,
+                diagnostic: recorded,
+                diagnostic_refusals: refusals,
+            }),
+            Err(refusal) => {
+                *self =
+                    Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
+                        refusal,
+                        observation,
+                    });
                 None
             }
-            _ => None,
         }
     }
 }
