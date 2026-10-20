@@ -6112,6 +6112,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     Nothing -> pure (ExactInputsRejected UnsupportedOperation)
                     Just _ | conflicting -> pure (ExactInputsRejected InvalidRealization)
                     Just association -> case acquisition of
+                      SuccessorExactInputs _ _ _ -> pure (ExactInputsRejected UnsupportedOperation)
                       ResidentExactInputs reference ->
                         case held of
                           Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentHeldHit world
