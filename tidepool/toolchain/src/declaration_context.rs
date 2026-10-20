@@ -445,7 +445,7 @@ pub(crate) struct ProtectedScaffoldRequirements {
 /// Complete private compiler inputs from one already certified output.
 /// This retains exact native roles and their custody without publishing either
 /// authored lexical rights or persistent source-reuse roles.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum OriginalInputDemand {
     RolePolicy,
     Issued(crate::artifact_inventory::IssuedInputNativeDecisions),
@@ -465,8 +465,13 @@ impl PartialEq for OriginalCompilerInputs {
     fn eq(&self, other: &Self) -> bool {
         // The immutable encoding base affects changed-node work, not input
         // authority or semantics. Actual carried facts remain compared here.
-        self.demand == other.demand
-            && self.projection == other.projection
+        (match (&self.demand, &other.demand) {
+            (OriginalInputDemand::RolePolicy, OriginalInputDemand::RolePolicy) => true,
+            (OriginalInputDemand::Issued(left), OriginalInputDemand::Issued(right)) => {
+                left.recorded_facts() == right.recorded_facts()
+            }
+            _ => false,
+        }) && self.projection == other.projection
             && self.artifacts == other.artifacts
             && self.native_offers == other.native_offers
             && self.native_availability == other.native_availability
@@ -17227,7 +17232,7 @@ mod tests {
                 actual_support.artifacts().capture_graph_selection() == expected_support.artifacts().capture_graph_selection(),
                 actual_support.native_offers() == expected_support.native_offers(),
                 actual_support.native_availability() == expected_support.native_availability(),
-                actual_support.input_decisions() == expected_support.input_decisions(),
+                actual_support.input_decisions().recorded_facts() == expected_support.input_decisions().recorded_facts(),
                 actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
                 actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
                 actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
@@ -17282,7 +17287,9 @@ mod tests {
                         .unwrap()
                 );
             }
-            if actual_support.input_decisions() != expected_support.input_decisions() {
+            if actual_support.input_decisions().recorded_facts()
+                != expected_support.input_decisions().recorded_facts()
+            {
                 eprintln!(
                     "publication input decisions actual={:?} expected={:?}",
                     actual_support.input_decisions(),
@@ -17377,7 +17384,7 @@ mod tests {
                         actual_support.native_offer_observations().unwrap() == expected_support.native_offer_observations().unwrap(),
                         actual_support.native_availability() == expected_support.native_availability(),
                         actual_support.native_availability().persistent_facts() == expected_support.native_availability().persistent_facts(),
-                        actual_support.input_decisions() == expected_support.input_decisions(),
+                        actual_support.input_decisions().recorded_facts() == expected_support.input_decisions().recorded_facts(),
                         actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
                         actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
                         actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
@@ -17484,11 +17491,14 @@ mod tests {
                 publication.context().semantic_sha256()
             );
             assert_eq!(
-                born.compiler_source_support().input_decisions(),
+                born.compiler_source_support()
+                    .input_decisions()
+                    .recorded_facts(),
                 publication
                     .context()
                     .compiler_source_support()
                     .input_decisions()
+                    .recorded_facts()
             );
             assert_eq!(
                 born.compiler_source_support()
@@ -22105,8 +22115,11 @@ mod tests {
         .restore_snapshot_evidence(&snapshot)
         .unwrap();
         assert_eq!(
-            support.input_decisions(),
-            narrowed.compiler_source_support().input_decisions()
+            support.input_decisions().recorded_facts(),
+            narrowed
+                .compiler_source_support()
+                .input_decisions()
+                .recorded_facts()
         );
         support
             .native_availability()
@@ -24279,8 +24292,11 @@ mod tests {
             .restore_snapshot_evidence(&issued.snapshot())
             .unwrap();
             assert_eq!(
-                support.input_decisions(),
-                issued.compiler_source_support().input_decisions()
+                support.input_decisions().recorded_facts(),
+                issued
+                    .compiler_source_support()
+                    .input_decisions()
+                    .recorded_facts()
             );
             support
                 .native_availability()

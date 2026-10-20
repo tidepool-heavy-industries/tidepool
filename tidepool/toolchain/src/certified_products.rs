@@ -13406,8 +13406,11 @@ pub(crate) mod tests {
                         .any(|offer| offer.original() == replacement_id));
                     assert_eq!(request.projection(), baseline.projection());
                     assert_eq!(
-                        request.shared_compiler_source_support().input_decisions(),
-                        baseline.input_decisions()
+                        request
+                            .shared_compiler_source_support()
+                            .input_decisions()
+                            .recorded_facts(),
+                        baseline.input_decisions().recorded_facts()
                     );
                     assert_eq!(
                         request.artifacts().capture_graph_selection().namespace,
@@ -14404,7 +14407,10 @@ pub(crate) mod tests {
                     joined.artifacts().capture_graph_selection().namespace,
                     left_support.artifacts().capture_graph_selection().namespace
                 );
-                assert_eq!(joined.input_decisions(), left_support.input_decisions());
+                assert_eq!(
+                    joined.input_decisions().recorded_facts(),
+                    left_support.input_decisions().recorded_facts()
+                );
                 assert_retained_offer("joined-current", 6, &joined, &input_b);
             }
             assert_eq!(
@@ -14443,8 +14449,12 @@ pub(crate) mod tests {
             let explicit_a = selected_fragment(left);
             let explicit_b = selected_fragment(right);
             assert_ne!(
-                explicit_a.issued_input_decisions(),
-                explicit_b.issued_input_decisions(),
+                explicit_a
+                    .issued_input_decisions()
+                    .map(|decisions| decisions.recorded_facts()),
+                explicit_b
+                    .issued_input_decisions()
+                    .map(|decisions| decisions.recorded_facts()),
                 "selected demand identity includes exact scoped issuer choices"
             );
             for (left, right) in [(&explicit_a, &explicit_b), (&explicit_b, &explicit_a)] {
@@ -22548,7 +22558,10 @@ pub(crate) mod tests {
                 .next()
                 .is_none());
             assert_eq!(
-                context.compiler_source_support().input_decisions(),
+                context
+                    .compiler_source_support()
+                    .input_decisions()
+                    .recorded_facts(),
                 &decisions
             );
             assert!(context.artifact_view().selected_native_groups().is_empty());
