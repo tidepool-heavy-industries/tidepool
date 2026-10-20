@@ -592,7 +592,37 @@ impl Drop for ScopedSourceFence<'_> {
 /// fresh work; this value grants no source admission.
 #[derive(Debug)]
 pub struct OwnSourceFenceReopened {
-    _private: (),
+    owner: RuntimeSourceAdmission,
+    attempt: u64,
+}
+
+impl OwnSourceFenceReopened {
+    pub(super) fn matches(&self, owner: &RuntimeSourceAdmission, attempt: u64) -> bool {
+        self.owner.same_owner(owner) && self.attempt == attempt
+    }
+
+    pub(super) fn discard_unpublished(&self) -> Result<(), SourceAdmissionError> {
+        let mut state = self.owner.0.state.lock();
+        if state.phase != SourceAdmissionPhase::Open
+            || state.next_attempt
+                != self
+                    .attempt
+                    .checked_add(1)
+                    .ok_or(SourceAdmissionError::Exhausted)?
+        {
+            return Err(SourceAdmissionError::StaleFence);
+        }
+        if state.claims != 0 || state.unconfirmed != 0 {
+            return Err(SourceAdmissionError::BootstrapBusy {
+                claims: state.claims,
+                unconfirmed: state.unconfirmed,
+            });
+        }
+        state.phase = SourceAdmissionPhase::ScopeRetired;
+        drop(state);
+        self.owner.0.settled.notify_waiters();
+        Ok(())
+    }
 }
 
 /// A synchronous view of the existing locked fence. Its owner compares its
@@ -617,6 +647,8 @@ struct ScopedReopen<'a> {
 impl ScopedReopen<'_> {
     fn settle<E>(
         state: &mut AdmissionState,
+        owner: &RuntimeSourceAdmission,
+        attempt: u64,
         settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
     ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
         let original = state.phase;
@@ -633,7 +665,10 @@ impl ScopedReopen<'_> {
         match result {
             Ok(()) if scoped.committed => {
                 scoped.accepted = true;
-                Ok(Ok(OwnSourceFenceReopened { _private: () }))
+                Ok(Ok(OwnSourceFenceReopened {
+                    owner: owner.clone(),
+                    attempt,
+                }))
             }
             Ok(_) => Err(SourceAdmissionError::ReopenNotCommitted),
             Err(error) => Ok(Err(error)),
@@ -648,6 +683,21 @@ impl Drop for ScopedReopen<'_> {
     }
 }
 impl RuntimeSourceFence {
+    pub(super) fn reservation_for(
+        &self,
+        lease: &super::RuntimeLexicalScopeLease,
+    ) -> Result<u64, SourceAdmissionError> {
+        if !lease.source_admission().same_owner(&self.owner)
+            || self.owner.0.state.lock().phase
+                != (SourceAdmissionPhase::Fenced {
+                    attempt: self.attempt,
+                })
+        {
+            return Err(SourceAdmissionError::StaleFence);
+        }
+        Ok(self.attempt)
+    }
+
     pub fn publication_view(
         &self,
         prerequisite: Option<&RuntimeSourcePublicationPrerequisite>,
@@ -670,7 +720,9 @@ impl RuntimeSourceFence {
         settle: impl for<'a> FnOnce(RuntimeSourceReopen<'a>) -> Result<(), E>,
     ) -> Result<Result<OwnSourceFenceReopened, E>, SourceAdmissionError> {
         self.publication_view(prerequisite)
-            .with_current_state(lease, |state| ScopedReopen::settle(state, settle))
+            .with_current_state(lease, |state| {
+                ScopedReopen::settle(state, &self.owner, self.attempt, settle)
+            })
     }
 
     pub fn unconfirmed_claims(&self) -> usize {
@@ -746,7 +798,7 @@ impl RuntimeSourceFence {
                     count: state.unconfirmed,
                 });
             }
-            ScopedReopen::settle(&mut state, settle)
+            ScopedReopen::settle(&mut state, &self.owner, self.attempt, settle)
         })
     }
     /// Refusal precedes mutation and returns this exact attempt for explicit
@@ -789,6 +841,103 @@ mod tests {
     use super::*;
     use crate::session::{PersistentSession, SessionError};
     use proptest::prelude::*;
+
+    #[test]
+    fn unpublished_notebook_abandonment_closes_source_before_first_installer() {
+        let mut session = PersistentSession::new(None, 1024);
+        let provisional = session.mint_unpublished_notebook_scope(None).unwrap();
+        let held = provisional.lease().clone();
+        let source = held.original_source().clone();
+        assert!(held.admit_source().is_ok());
+        drop(provisional);
+        assert!(
+            held.validate_lexical_issuer().is_ok(),
+            "a retained native target is not physical cleanup"
+        );
+        assert!(matches!(
+            held.admit_source(),
+            Err(SourceAdmissionError::Closed {
+                phase: SourceAdmissionPhase::ScopeRetired,
+                ..
+            })
+        ));
+        let entered = std::cell::Cell::new(false);
+        let result = session.with_source_compiler_transaction(
+            source,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |_, _| entered.set(true),
+        );
+        assert!(matches!(
+            result,
+            Err(SourceAdmissionError::Closed {
+                phase: SourceAdmissionPhase::ScopeRetired,
+                ..
+            })
+        ));
+        assert!(!entered.get());
+    }
+
+    #[test]
+    fn reserved_notebook_requires_exact_settlement_and_never_auto_retires() {
+        let mut session = PersistentSession::new(None, 1024);
+        let first = session.mint_unpublished_notebook_scope(None).unwrap();
+        let first_lease = first.lease().clone();
+        let second = session.mint_unpublished_notebook_scope(None).unwrap();
+        let second_lease = second.lease().clone();
+        let second_fence = second_lease.source_admission().fence_if_idle().unwrap();
+        let (first, error) = first.into_reserved(&second_fence).err().unwrap();
+        assert_eq!(error, SourceAdmissionError::StaleFence);
+        assert!(first_lease.admit_source().is_ok());
+        let first_fence = first_lease.source_admission().fence_if_idle().unwrap();
+        let mut first = first
+            .into_reserved(&first_fence)
+            .unwrap_or_else(|(_, error)| panic!("{error}"));
+        let mut second = second
+            .into_reserved(&second_fence)
+            .unwrap_or_else(|(_, error)| panic!("{error}"));
+        let reopened = second_fence
+            .reopen_with(second_lease.original_source(), |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first.discard_unpublished(&reopened),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        second.discard_unpublished(&reopened).unwrap();
+        assert!(matches!(
+            second_lease.admit_source(),
+            Err(SourceAdmissionError::Closed {
+                phase: SourceAdmissionPhase::ScopeRetired,
+                ..
+            })
+        ));
+        drop(first);
+        assert!(
+            matches!(
+                first_lease.admit_source(),
+                Err(SourceAdmissionError::Closed {
+                    phase: SourceAdmissionPhase::Fenced { .. },
+                    ..
+                })
+            ),
+            "reserved custody Drop cannot retire an uncertain publication"
+        );
+        let reopened = first_fence
+            .reopen_with(first_lease.original_source(), |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
+        drop(reopened);
+        assert!(first_lease.admit_source().is_ok());
+    }
 
     #[test]
     fn original_source_transaction_keeps_original_and_target_distinct() {
