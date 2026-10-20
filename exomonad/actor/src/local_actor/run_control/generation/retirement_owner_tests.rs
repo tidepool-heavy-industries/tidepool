@@ -16,6 +16,101 @@ fn expect_begin(
     }
 }
 
+// The source relationship is issued by the real reservation, while this
+// native-only behavior merely exposes its actual context to resource admission.
+struct NativeResourceParent {
+    started: Option<oneshot::Sender<crate::KernelContext>>,
+}
+
+impl crate::KernelBehavior for NativeResourceParent {
+    fn start<'a>(
+        &'a mut self,
+        context: &'a crate::KernelContext,
+    ) -> BoxFuture<'a, Result<crate::KernelStep<()>, crate::KernelBehaviorError>> {
+        let started = self.started.take().unwrap();
+        let context = context.clone();
+        Box::pin(async move {
+            assert!(started.send(context).is_ok());
+            Ok(crate::KernelStep::Continue(()))
+        })
+    }
+    fn cast<'a>(
+        &'a mut self,
+        _: &'a crate::KernelContext,
+        _: ActorRef,
+        _: crate::MailboxValue,
+    ) -> BoxFuture<'a, Result<crate::KernelStep<()>, crate::KernelBehaviorError>> {
+        unreachable!("native resource fixture accepts no authored messages")
+    }
+    fn call<'a>(
+        &'a mut self,
+        _: &'a crate::KernelContext,
+        _: ActorRef,
+        _: crate::CallAncestry,
+        _: crate::MailboxValue,
+    ) -> BoxFuture<'a, Result<crate::KernelStep<crate::MailboxValue>, crate::KernelBehaviorError>>
+    {
+        unreachable!("native resource fixture accepts no authored calls")
+    }
+    fn tool<'a>(
+        &'a mut self,
+        _: &'a crate::KernelContext,
+        _: exomonad_tool::ToolInvocation,
+        _: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    ) -> BoxFuture<'a, Result<crate::KernelStep<serde_json::Value>, crate::KernelInvocationFailure>>
+    {
+        unreachable!("native resource fixture has no tools")
+    }
+    fn dispatch_workbench(
+        &mut self,
+        _: &crate::KernelContext,
+        _: crate::ActorWorkbenchInvocation,
+        _: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> crate::WorkbenchDispatch<Self> {
+        unreachable!("native resource fixture has no workbench")
+    }
+    fn external_application_failed<'a>(
+        &'a mut self,
+        _: &'a crate::KernelContext,
+        _: crate::ExternalApplicationFailure,
+    ) -> BoxFuture<'a, crate::ExternalFailureDisposition> {
+        unreachable!("native resource fixture has no external application")
+    }
+    fn shutdown<'a>(
+        &'a mut self,
+        _: &'a crate::KernelContext,
+        _: &'a crate::ActorTerminal,
+    ) -> BoxFuture<'a, Result<(), crate::KernelBehaviorError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn stopped<'a>(
+        &'a mut self,
+        _: &'a crate::KernelContext,
+        _: &'a crate::ActorTerminal,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+    fn child_exited(&mut self, _: crate::ChildExitNotice) {}
+}
+
+struct NativeCleanupResource;
+impl ractor::Actor for NativeCleanupResource {
+    type Msg = ();
+    type State = ();
+    type Arguments = ();
+    async fn pre_start(&self, _: RactorRef<()>, (): ()) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+struct NativeResourceWitness {
+    parent: LocalActorRef,
+    parent_task: ractor::concurrency::JoinHandle<()>,
+    child: RactorRef<()>,
+    cleanup_probe: std::sync::Weak<()>,
+    cleanup_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 impl RunControlClient {
     pub(crate) async fn assert_retirement_owner_loss_without_attempt(
         &self,
@@ -34,6 +129,93 @@ impl RunControlClient {
         assert!(custody.as_ref().unwrap().attempts.is_empty());
     }
 
+    async fn admit_native_cleanup_resource(
+        &self,
+        dependency: &GenerationDependency,
+    ) -> NativeResourceWitness {
+        let reservation = self
+            .reserve_source_actor(
+                &SourceDependency::Generation(dependency.clone()),
+                crate::Incarnation::FIRST,
+            )
+            .await
+            .unwrap();
+        let identity = reservation.identity();
+        let (started, context) = oneshot::channel();
+        let (parent, parent_task) = crate::local_actor::spawn_reserved_local_actor(
+            None,
+            NativeResourceParent {
+                started: Some(started),
+            },
+            reservation,
+            self.clone(),
+        )
+        .await
+        .unwrap();
+        let context = context.await.unwrap();
+        assert_eq!(parent.identity(), identity);
+        assert_eq!(context.identity(), identity);
+        assert_eq!(
+            self.resolve(identity).await.unwrap().unwrap().identity(),
+            identity
+        );
+        let probe = Arc::new(());
+        let cleanup_probe = Arc::downgrade(&probe);
+        let cleanup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let issued_cell = Arc::new(std::sync::OnceLock::<ractor::ActorCell>::new());
+        let child = context
+            .spawn_resource(None, NativeCleanupResource, (), {
+                let issued_cell = issued_cell.clone();
+                let cleanup_calls = cleanup_calls.clone();
+                move |mode| {
+                    let _probe = probe.clone();
+                    let cell = issued_cell.get().cloned();
+                    let cleanup_calls = cleanup_calls.clone();
+                    Box::pin(async move {
+                        let _probe = _probe;
+                        let Some(cell) = cell else {
+                            return crate::CleanupComponentOutcome::Unconfirmed(
+                                "resource never returned its issued physical cell".into(),
+                            );
+                        };
+                        match mode {
+                            ResourceCleanup::Observe => {
+                                crate::CleanupComponentOutcome::Unconfirmed(
+                                    "native resource is still live".into(),
+                                )
+                            }
+                            ResourceCleanup::Retire => {
+                                cleanup_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                cell.stop(None);
+                                match cell.wait(Some(Duration::from_secs(10))).await {
+                                    Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                                    Err(error) => crate::CleanupComponentOutcome::Unconfirmed(
+                                        error.to_string(),
+                                    ),
+                                }
+                            }
+                        }
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        assert!(issued_cell.set(child.get_cell()).is_ok());
+        assert_eq!(
+            child.get_cell().try_get_supervisor().unwrap().get_id(),
+            parent.address().get_id()
+        );
+        drop(context);
+        assert!(cleanup_probe.upgrade().is_some());
+        NativeResourceWitness {
+            parent,
+            parent_task,
+            child,
+            cleanup_probe,
+            cleanup_calls,
+        }
+    }
+
     async fn assert_generation_publication_worker_control(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,
@@ -49,6 +231,15 @@ impl RunControlClient {
         let candidate_retention = candidate.retention_observer();
         let retained = self.native_cleanup.clone();
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let native_resource =
+            if control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody {
+                Some(
+                    self.admit_native_cleanup_resource(expected.dependency())
+                        .await,
+                )
+            } else {
+                None
+            };
         let (reply, answer) = oneshot::channel();
         self.owner
             .send_message(RunControlMessage::BeginGenerationRetirement {
@@ -161,6 +352,58 @@ impl RunControlClient {
                 [RetainedGenerationRetirementRecord::SourcesSettled { actor: completed, completion: GenerationRetirementCompletion::AReopened { .. }, .. }]
                     if *completed == actor)
             );
+            let resource_witness = native_resource.as_ref().unwrap();
+            let RetainedGenerationRetirementRecord::SourcesSettled {
+                cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
+                ..
+            } = &recovery.custody.as_ref().unwrap().attempts[0]
+            else {
+                panic!("source settlement retains physical cleanup custody");
+            };
+            assert!(capture
+                .actors
+                .iter()
+                .any(|parent| parent.identity() == resource_witness.parent.identity()));
+            let resource = capture
+                .resources
+                .iter()
+                .find(|resource| resource.cell.get_id() == resource_witness.child.get_id())
+                .expect("the actual source-A resource is captured");
+            assert!(resource_witness.cleanup_probe.upgrade().is_some());
+            assert_eq!(
+                resource_witness
+                    .cleanup_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert_ne!(
+                resource_witness.child.get_status(),
+                ractor::ActorStatus::Stopped
+            );
+            assert!(resource_witness
+                .parent
+                .terminal()
+                .requested_shutdown()
+                .is_none());
+            drop(candidate);
+            assert!(
+                !candidate_retention.is_retained(),
+                "B releases while the same native cleanup callback remains retained"
+            );
+            assert!(matches!(
+                (resource.cleanup)(ResourceCleanup::Retire).await,
+                crate::CleanupComponentOutcome::Confirmed
+            ));
+            assert_eq!(
+                resource_witness.child.get_status(),
+                ractor::ActorStatus::Stopped
+            );
+            assert_eq!(
+                resource_witness
+                    .cleanup_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
             drop(recovery);
         } else {
             tokio::time::timeout(Duration::from_secs(10), async {
@@ -189,8 +432,8 @@ impl RunControlClient {
                 .await
                 .unwrap()
                 .unwrap();
+            drop(candidate);
         }
-        drop(candidate);
         assert!(
             !candidate_retention.is_retained(),
             "known settled records release the same frozen candidate product"
@@ -233,6 +476,13 @@ impl RunControlClient {
             tidepool_runtime::session::PublicationPhase::CancellationRequested
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls);
+        if let Some(witness) = native_resource {
+            witness.parent.address().stop(None);
+            tokio::time::timeout(Duration::from_secs(10), witness.parent_task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 
     pub(crate) async fn assert_generation_retirement_owner_control(
