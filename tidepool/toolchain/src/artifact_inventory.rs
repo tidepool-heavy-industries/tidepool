@@ -11009,8 +11009,24 @@ mod tests {
                 left.artifacts().namespace()[&id],
                 right.artifacts().namespace()[&id]
             );
-            let left_groups = left.artifacts().selected_native_groups();
-            let right_groups = right.artifacts().selected_native_groups();
+            let left_groups = left
+                .artifacts()
+                .roots()
+                .iter()
+                .filter_map(|node| match node {
+                    InventoryNodeKey::Group(group) => Some(*group),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            let right_groups = right
+                .artifacts()
+                .roots()
+                .iter()
+                .filter_map(|node| match node {
+                    InventoryNodeKey::Group(group) => Some(*group),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
             assert_eq!(left_groups.len(), 1);
             assert_eq!(right_groups.len(), 1);
             let expected = *left_groups.first().unwrap();
@@ -11030,7 +11046,13 @@ mod tests {
             let peer = right.for_source_owners(&BTreeSet::new()).unwrap();
             let chosen = left.merge(&peer).unwrap();
             let chosen = chosen.artifacts();
-            assert_eq!(chosen.selected_native_groups(), BTreeSet::from([expected]));
+            let expected_keys = BTreeSet::from([NativeGroupKey {
+                artifact: id,
+                original_ordinal: 7,
+            }]);
+            assert_eq!(chosen.selected_native_groups(), expected_keys);
+            assert!(chosen.roots().contains(&InventoryNodeKey::Group(expected)));
+            assert!(!chosen.roots().contains(&InventoryNodeKey::Group(competing)));
             let mut selection = bound_selection_for_entries(chosen, &[native.clone()]);
             if explicit {
                 let requirement =

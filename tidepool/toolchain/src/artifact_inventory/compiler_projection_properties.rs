@@ -701,18 +701,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             .into_iter()
             .map(|group| catalog.key(group))
             .collect::<BTreeSet<_>>();
-        assert_eq!(
-            support
-                .artifacts()
-                .selected_native_groups()
-                .iter()
-                .map(|group| NativeGroupKey {
-                    artifact: group.binding.artifact(),
-                    original_ordinal: group.original_ordinal
-                })
-                .collect::<BTreeSet<_>>(),
-            expected
-        );
+        assert_eq!(support.artifacts().selected_native_groups(), expected);
         catalog.assert_projection(
             support.artifacts(),
             support.projection(),
@@ -720,6 +709,16 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
         );
         islands.push(support);
     }
+    let selected_bindings = |view: &ArtifactView| {
+        let state = view.inventory().0.lock().unwrap();
+        view.selected_nodes(&state)
+            .iter()
+            .filter_map(|node| match node {
+                InventoryNodeKey::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
     for version in 0..VERSIONS {
         let selected = &islands[version];
         let opposite = &islands[1 - version];
@@ -749,8 +748,8 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
         for (left, right) in [(selected, &peer), (&peer, selected)] {
             let merged = left.merge(right).unwrap();
             assert_eq!(
-                merged.artifacts().selected_native_groups(),
-                selected.artifacts().selected_native_groups()
+                selected_bindings(merged.artifacts()),
+                selected_bindings(selected.artifacts())
             );
             catalog.assert_projection(
                 merged.artifacts(),
@@ -803,7 +802,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 )
                 .unwrap()
                 .artifacts;
-            assert_eq!(target.selected_native_groups(), expected);
+            assert_eq!(selected_bindings(&target), expected);
             assert_eq!(
                 target
                     .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
