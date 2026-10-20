@@ -279,3 +279,91 @@ fn renderer_clean_admission_failure_preserves_the_resident_recovery_requirement(
         assert_eq!(renderer.failure_diagnostic(), original.failure_diagnostic());
     }
 }
+
+#[test]
+fn renderer_language_failure_keeps_primary_when_original_source_is_fenced() {
+    use tidepool_toolchain::diag::{DiagnosticSeverity, ExtractDiag};
+    let mut session = tidepool_runtime::session::PersistentSession::new(None, 1024);
+    let original = session.mint_notebook_scope_with_lease(None).unwrap();
+    let target = session.mint_notebook_scope_with_lease(None).unwrap();
+    let _fence = original.source_admission().fence().unwrap();
+    let refusal = original
+        .with_open_source_admission(|| panic!("fenced source admitted"))
+        .unwrap_err();
+    assert!(target.admit_source().is_ok());
+    let primary = Arc::new(
+        tidepool_runtime::session::RendererProductionFailure::Compile(
+            tidepool_runtime::session::turn::ActivationRendererFailure::from(
+                CompileError::Diagnostics(vec![ExtractDiag {
+                    span: None,
+                    severity: DiagnosticSeverity::Error,
+                    message: "retained renderer source diagnostic".into(),
+                }]),
+            ),
+        ),
+    );
+    let error = ResidentActorWorkbenchError::RendererAdmission {
+        failure: primary.clone(),
+        producer_join: None,
+        admission: Box::new(ResidentActorWorkbenchError::SourceAdmission(refusal)),
+    };
+    let diagnostic = error.failure_diagnostic().unwrap();
+    assert_eq!(diagnostic.class, FailureClass::UserHaskell);
+    assert!(diagnostic
+        .message
+        .contains("retained renderer source diagnostic"));
+    assert!(diagnostic.message.contains("Fenced"));
+    assert!(!error.is_tool_presentation_failure());
+    assert!(!error.is_observation_budget_exhausted());
+    assert!(!error.requires_recovery());
+    let ResidentActorWorkbenchError::RendererAdmission {
+        failure, admission, ..
+    } = error
+    else {
+        panic!("both causes must remain typed");
+    };
+    assert!(Arc::ptr_eq(&failure, &primary));
+    assert!(matches!(
+        *admission,
+        ResidentActorWorkbenchError::SourceAdmission(
+            tidepool_runtime::session::SourceAdmissionError::Closed { .. }
+        )
+    ));
+}
+
+#[test]
+fn renderer_admission_failure_keeps_independent_recovery_requirement() {
+    use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
+    for kind in [StoreErrorKind::RecoveryRequired, StoreErrorKind::Storage] {
+        let error = ResidentActorWorkbenchError::RendererAdmission {
+            failure: Arc::new(
+                tidepool_runtime::session::RendererProductionFailure::Compile(
+                    tidepool_runtime::session::turn::ActivationRendererFailure::from(
+                        CompileError::MissingOutput("retained-renderer-output".into()),
+                    ),
+                ),
+            ),
+            producer_join: None,
+            admission: Box::new(ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(SessionError::RecoveryStore(Box::new(StoreError {
+                    path: "fresh-admission-store".into(),
+                    kind,
+                    detail: "independent admission obligation".into(),
+                }))),
+            )),
+        };
+        assert_eq!(
+            error.requires_recovery(),
+            kind == StoreErrorKind::RecoveryRequired
+        );
+        let diagnostic = error.failure_diagnostic().unwrap();
+        assert_eq!(
+            diagnostic.cause,
+            Some(tidepool_toolchain::failclass::CompileFailureCause::MissingOutput)
+        );
+        assert!(diagnostic.message.contains("retained-renderer-output"));
+        assert!(diagnostic
+            .message
+            .contains("independent admission obligation"));
+    }
+}
