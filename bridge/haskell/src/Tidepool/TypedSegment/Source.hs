@@ -113,7 +113,7 @@ typedSegmentInputOccurrences environment (SegmentDemandScope aliases bindings)
       imports = hsmodImports syntax
       owner = maybe (mkModuleName "Main") unLoc (hsmodName syntax)
       allImports = mkPrelImports owner noSrcSpan (xopt LangExt.ImplicitPrelude flags) imports ++ imports
-  (_,renamed) <- initTcInteractive probe $ do
+  (diagnostics,renamed) <- initTcInteractive probe $ do
     (_,_,imported,available,_,_) <- rnImports
       [(declaration,text "held-world demand") | declaration <- allImports]
     current <- getGblEnv
@@ -126,7 +126,7 @@ typedSegmentInputOccurrences environment (SegmentDemandScope aliases bindings)
       (_,result) <- rnSrcDecls group
       pure result
   pure $ case renamed of
-    Nothing -> Left UnprovedRootAbstraction
+    Nothing -> Left (InputDemandRenameRejected (showPpr probeFlags diagnostics))
     Just result ->
       let selected = everything (++) (mkQ [] occurrence) result
           demanded = Map.fromList

@@ -65,7 +65,8 @@ demandScopeChecks = do
               demanded <- typedSegmentInputOccurrences environment scope parsed
               case (expected,demanded) of
                 (Bindings names,Right selected) | map fst selected == names -> pure ()
-                (RenameRefusal,Left _) -> pure ()
+                (RenameRefusal,Left (InputDemandRenameRejected diagnostic))
+                  | not (null diagnostic) -> putStrLn (name ++ ": " ++ diagnostic)
                 _ -> fail (name ++ ": wrong demand or refusal phase")
               forM_ demanded $ \selected -> forM_ selected $ \(alias,binding) ->
                 unless (Map.lookup alias bindings == Just binding)
@@ -95,5 +96,6 @@ controls =
   , ("AliasNamespace","root",["versionBranch"],Bindings [])
   , ("AliasSynonyms","root",["first","second"],Bindings ["first","second"])
   , ("RenameError","root",["old"],RenameRefusal)
+  , ("MissingImport","root",["old"],RenameRefusal)
   , ("ActualQuote","root",[],ParseRefusal)
   ]
