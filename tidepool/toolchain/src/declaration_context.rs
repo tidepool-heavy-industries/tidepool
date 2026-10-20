@@ -612,7 +612,9 @@ impl CompletedNativeProductAvailability {
         key: NativeGroupKey,
         group: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
-        self.groups(key).any(|root| root == group).then_some(&self.own)
+        self.groups(key)
+            .any(|root| root == group)
+            .then_some(&self.own)
     }
 }
 

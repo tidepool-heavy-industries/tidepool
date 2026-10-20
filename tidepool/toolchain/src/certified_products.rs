@@ -3389,9 +3389,14 @@ impl CertifiedSourceSelection {
         owner: &CachedHomeOwner,
         group: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<CertifiedNativeGroupSupport<'_>> {
-        if let Some(native) = self.native_selections().find(|native| &native.owner == owner) {
+        if let Some(native) = self
+            .native_selections()
+            .find(|native| &native.owner == owner)
+        {
             if let ReceiptNativeAvailability::Completed(receipt) = &native.availability {
-                return receipt.support(key, group).map(CertifiedNativeGroupSupport::Issued);
+                return receipt
+                    .support(key, group)
+                    .map(CertifiedNativeGroupSupport::Issued);
             }
         }
         self.issued_native_availability()
