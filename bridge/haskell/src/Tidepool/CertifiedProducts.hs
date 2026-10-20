@@ -516,9 +516,9 @@ certifyItemProducts env context program = do
     witnesses <- sequence globals
     additions <- catMaybes <$> sequence validated
     let bytes = toStrictByteString $ array [encodeString "TPCERT",encodeWord 10,
-      array [encodeString "segment-item",list encodeFullWitness witnesses,
-        list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
-          encodeString (T.pack path),encodeString seal]) additions]]
+          array [encodeString "segment-item",list encodeFullWitness witnesses,
+            list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
+              encodeString (T.pack path),encodeString seal]) additions]]
     Right (bytes,witnesses)
 
 encodeFullWitness :: GlobalWitness -> Encoding
