@@ -2416,9 +2416,18 @@ impl RunState {
             return;
         }
         if !capture.actors.iter().all(|captured| {
-            self.entries
-                .values()
-                .any(|entry| entry.actor.address().get_id() == captured.address().get_id())
+            match self.entries.get(&captured.identity()) {
+                Some(entry) => entry.actor.address().get_id() == captured.address().get_id(),
+                // Forget removes a terminal actor even if its cleanup was
+                // unconfirmed. Only this SAME physical owner's complete
+                // cleanup proof can replace its canonical live custody.
+                None => {
+                    captured.address().get_status() == ractor::ActorStatus::Stopped
+                        && captured.terminal().cleanup().is_some_and(|cleanup| {
+                            cleanup.actor() == captured.identity() && cleanup.is_confirmed()
+                        })
+                }
+            }
         }) {
             return;
         }
