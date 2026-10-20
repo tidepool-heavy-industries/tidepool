@@ -803,6 +803,10 @@ struct SourceCompilerHolds {
     leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceCompilerTransaction {
+    pub(super) fn origin(&self) -> &crate::CompilerTransactionOrigin {
+        &self.origin
+    }
+
     pub(super) fn admit(
         &self,
         target: Option<Arc<super::RuntimeLexicalScopeLease>>,
