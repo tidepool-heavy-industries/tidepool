@@ -10403,11 +10403,34 @@ where
                 "resident cell preparation did not retain its checked World output".into(),
             ));
         };
-        let demanded_bindings = world_output
-            .demanded_session_bindings()
-            .iter()
-            .map(|id| tidepool_repr::VarId(id.raw()))
-            .collect::<Vec<_>>();
+        let compiler_binding_ids = world_output.demanded_session_bindings()
+            .iter().map(|id| id.raw()).collect::<Vec<_>>();
+        let mut existing_ids = std::collections::BTreeSet::new();
+        let mut prior_stage_ids = std::collections::BTreeSet::new();
+        for issued in program.items() {
+            let item = issued.checked_item();
+            let stage = item.world_selected_runtime_inputs().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "checked World item lacks its stage runtime-input proof".into(),
+                )
+            })?;
+            if stage.stage_first_ordinal() != item.index() {
+                continue;
+            }
+            for input in stage.inputs() {
+                match input.origin() {
+                    tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::BaseWorld
+                    | tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::CellOperand => {
+                        existing_ids.insert(input.session_var().raw());
+                    }
+                    tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::PriorStage { .. } => {
+                        prior_stage_ids.insert(input.session_var().raw());
+                    }
+                }
+            }
+        }
+        let demanded_bindings = existing_ids.into_iter().map(tidepool_repr::VarId).collect::<Vec<_>>();
+        let prior_stage_binding_ids = prior_stage_ids.into_iter().collect::<Vec<_>>();
         let logical_world = *world_output.logical().logical_id();
         let output_certificate = *world_output.certificate_sha256();
         let item_capabilities = program
@@ -10446,6 +10469,10 @@ where
                 tracing::debug!(target: "exomonad_harness::timing",
                     logical_world = ?logical_world,
                     output_certificate = ?output_certificate,
+                    compiler_demanded_runtime_roots = compiler_binding_ids.len(),
+                    compiler_demanded_binding_ids = ?compiler_binding_ids,
+                    prior_stage_runtime_roots = prior_stage_binding_ids.len(),
+                    prior_stage_binding_ids = ?prior_stage_binding_ids,
                     demanded_runtime_roots = demanded_bindings.len(),
                     demanded_binding_ids = ?demanded_bindings.iter().map(|id| id.0).collect::<Vec<_>>(),
                     leased_runtime_roots = retained.len(),
