@@ -33,14 +33,6 @@ pub enum InspectionQuery {
         module: String,
         expanded: bool,
     },
-    /// Module enumeration whose rendered entry list stops at `budget` names.
-    /// No query plan constructs this in the current delivery; it is retained
-    /// for the pending non-compiling public-module export route.
-    BrowseBounded {
-        module: String,
-        expanded: bool,
-        budget: usize,
-    },
     StructuredInfo {
         query: NameQuery,
         provenance: ScopeProvenance,
@@ -81,18 +73,6 @@ impl PartialEq for InspectionQuery {
                     expanded: right_expanded,
                 },
             ) => left == right && left_expanded == right_expanded,
-            (
-                Self::BrowseBounded {
-                    module: left,
-                    expanded: left_expanded,
-                    budget: left_budget,
-                },
-                Self::BrowseBounded {
-                    module: right,
-                    expanded: right_expanded,
-                    budget: right_budget,
-                },
-            ) => left == right && left_expanded == right_expanded && left_budget == right_budget,
             (
                 Self::StructuredInfo {
                     query: left,
@@ -142,8 +122,8 @@ pub struct NameQuery {
 }
 
 /// Full provenance for diagnostics and wire answers. Deliberately not
-/// `PartialEq`: staleness is decided by [`ViewIdentity`] (`same_view`), and a
-/// structural comparison would silently reintroduce the scope-label bug.
+/// `PartialEq`: staleness is decided by `same_view`, and a structural
+/// comparison would silently reintroduce the scope-label bug.
 #[derive(Clone, Debug)]
 pub struct ScopeProvenance {
     pub scope: NameScope,
@@ -151,24 +131,7 @@ pub struct ScopeProvenance {
     pub fingerprint: String,
 }
 
-/// The part of a compile view that decides whether two answers describe the
-/// same view. `scope` is a presentation label: the same generation and content
-/// can be reported under a current or a public-module label depending on which
-/// entry point asked, and that difference alone is not staleness.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ViewIdentity {
-    pub generation: u64,
-    pub fingerprint: String,
-}
-
 impl ScopeProvenance {
-    pub fn view_identity(&self) -> ViewIdentity {
-        ViewIdentity {
-            generation: self.generation,
-            fingerprint: self.fingerprint.clone(),
-        }
-    }
-
     /// Staleness compares only the view identity. Keep the full provenance for
     /// diagnostics such as `ScopeChanged { before, after }`.
     pub fn same_view(&self, other: &Self) -> bool {
@@ -1079,7 +1042,6 @@ fn run_inspection_batch(
             InspectionQuery::Info(_)
                 | InspectionQuery::ScopeBrowse
                 | InspectionQuery::Browse { .. }
-                | InspectionQuery::BrowseBounded { .. }
                 | InspectionQuery::StructuredInfo { .. }
                 | InspectionQuery::StructuredType { .. }
         );
@@ -1097,7 +1059,6 @@ fn run_inspection_batch(
             | InspectionQuery::TypeSearchBounded { .. }
             | InspectionQuery::ScopeBrowse
             | InspectionQuery::Browse { .. }
-            | InspectionQuery::BrowseBounded { .. }
             | InspectionQuery::StructuredInfo { .. }
             | InspectionQuery::StructuredType { .. } => &[],
         };
@@ -1139,13 +1100,6 @@ fn run_inspection_batch(
                 }
                 InspectionQuery::Browse { module, expanded } => {
                     command.inspect_browse(module, *expanded);
-                }
-                InspectionQuery::BrowseBounded {
-                    module,
-                    expanded,
-                    budget,
-                } => {
-                    command.inspect_browse_bounded(module, *expanded, budget_u32(*budget)?);
                 }
                 InspectionQuery::StructuredInfo { query, provenance } => {
                     command.inspect_structured_info(structured_request(query, provenance));
