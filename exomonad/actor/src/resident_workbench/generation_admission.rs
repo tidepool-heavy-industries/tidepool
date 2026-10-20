@@ -685,7 +685,7 @@ impl GenerationDependency {
         };
         match self
             .runtime_admission()
-            .fence_with(self.runtime_lease(), compare)
+            .fence_with(self.runtime_lease().original_source(), compare)
         {
             Ok(Ok(fence)) => super::ActorGenerationRetirementCutoff::Fenced(retain(fence)),
             Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Refused(error))) => {
@@ -799,7 +799,7 @@ impl GenerationRetirementFence {
         };
         fence
             .fence
-            .reopen_with(fence.dependency.runtime_lease(), settle)?
+            .reopen_with(fence.dependency.runtime_lease().original_source(), settle)?
             .map(|_reopened| ())
     }
 }
@@ -818,7 +818,7 @@ impl GenerationFence {
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
         let lease = self.dependency.runtime_lease();
         self.fence
-            .reopen_with(lease, |reopen| {
+            .reopen_with(lease.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -1499,7 +1499,7 @@ mod tests {
                 assert_eq!(parent_fence.pending_claims(), 0);
                 assert_eq!(parent_fence.unconfirmed_claims(), 0);
                 parent_fence
-                    .reopen_with(parent.runtime_lease(), |reopen| {
+                    .reopen_with(parent.runtime_lease().original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     })

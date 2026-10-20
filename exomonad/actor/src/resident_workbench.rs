@@ -2334,7 +2334,7 @@ impl PublicationFence {
         let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        fence.reopen_with(target, settle)?.map(|_reopened| ())
+        fence.reopen_with(target.original_source(), settle)?.map(|_reopened| ())
     }
 }
 
@@ -19083,7 +19083,7 @@ pub(crate) mod request_tests {
                 }
                 assert_world_hot_work(&refusal.snapshot(), WorldEnsureExpectation::RefusedBeforeEnsure);
                 fence
-                    .reopen_with(lease, |reopen| {
+                    .reopen_with(lease.original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     })
@@ -19182,7 +19182,7 @@ pub(crate) mod request_tests {
                     results.push((label, session.install_inspection_world_if_current(&completed, reference, &original)));
                     assert_eq!(session.public_visibility_snapshot_in(context.placement.lexical_scope), before);
                     assert!(matches!(completed.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
-                    fence.reopen_with(lease, |reopen| {
+                    fence.reopen_with(lease.original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     }).unwrap().unwrap();
