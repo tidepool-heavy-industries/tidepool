@@ -9351,12 +9351,18 @@ fn main() {{
             let oldest = pending.admission_id.0;
             // Accepted on slot 0, but no physical request can execute there
             // until the completed predecessor sends END after its host work.
-            pending.stream.write_all(&[TRANSACTION_REQUEST]).unwrap();
-            pending
-                .stream
-                .write_all(&encode_request(dir.path(), &argv))
-                .unwrap();
-            pending.stream.flush().unwrap();
+            let pending_control = pending.stream.try_clone().unwrap();
+            let pending_directory = dir.path().to_owned();
+            let pending_argv = argv.clone();
+            let pending_request = std::thread::spawn(move || {
+                let response = execute_test_transaction_request(
+                    &mut pending,
+                    &pending_directory,
+                    &pending_argv,
+                );
+                let close = end_transaction(&mut pending);
+                (response, close)
+            });
             end_transaction(&mut spill).unwrap();
             drop(spill);
             let mut newer = Vec::new();
@@ -9371,12 +9377,6 @@ fn main() {{
                 );
                 end_transaction(&mut transaction).unwrap();
             }
-            pending.stream.set_nonblocking(true).unwrap();
-            assert_eq!(
-                pending.stream.read(&mut [0]).unwrap_err().kind(),
-                io::ErrorKind::WouldBlock
-            );
-            pending.stream.set_nonblocking(false).unwrap();
             let rows: Vec<serde_json::Value> = trace
                 .text()
                 .lines()
@@ -9407,15 +9407,18 @@ fn main() {{
             assert_eq!(fifo_first, oldest);
             assert_ne!(fifo_first, newer[0]);
             if cancel_pending {
-                pending.stream.shutdown(std::net::Shutdown::Both).unwrap();
-                drop(pending);
+                pending_control.shutdown(std::net::Shutdown::Both).unwrap();
                 end_transaction(&mut host).unwrap();
+                let (response, close) = pending_request.join().unwrap();
+                assert!(response.is_err());
+                assert!(close.is_err());
             } else {
                 end_transaction(&mut host).unwrap();
-                assert!(decode_output(&mut pending.stream).unwrap().status.success());
-                end_transaction(&mut pending).unwrap();
-                drop(pending);
+                let (response, close) = pending_request.join().unwrap();
+                assert!(response.unwrap().status.success());
+                assert!(matches!(close.unwrap(), DaemonClose::Clean(_)));
             }
+            drop(pending_control);
             // END neither replaces a completed body nor changes the epoch.
             assert!(host_reply.status.success());
             assert_eq!(preflight(&socket).unwrap().epoch, binding.epoch);
