@@ -416,6 +416,17 @@ impl From<super::SourceAdmissionError> for CellCheckFailure {
     }
 }
 
+impl From<super::SessionError> for CellCheckFailure {
+    fn from(error: super::SessionError) -> Self {
+        match error {
+            super::SessionError::Compile(error) => error.into(),
+            super::SessionError::SourceAdmission(error) => error.into(),
+            super::SessionError::Io(error) => CompileError::Io(error).into(),
+            error => CompileError::ExtractFailed(error.to_string()).into(),
+        }
+    }
+}
+
 impl From<std::io::Error> for CellCheckFailure {
     fn from(error: std::io::Error) -> Self {
         CompileError::from(error).into()
@@ -3413,7 +3424,7 @@ fn prepare_cell_program_admitted_inner(
         })?;
         let program = tidepool_toolchain::artifacts::prepare_world_cell_program(output.clone())?;
         admission.prepare_declaration_projections(program.checked_cell(), settlement)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            .map_err(CellCheckFailure::from)?;
         let mut checked = decode_cell_out(
             program.checked_cell().observations(),
             &reservation.plan().recipe().source,
@@ -3587,9 +3598,8 @@ fn prepare_cell_program_admitted_inner(
     checked.warnings = report.diagnostics;
     admission_timing.finish(true);
     drop(admission_span);
-    tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.declaration_projections", inclusive = true)
-        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell(), settlement))
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    admission.prepare_declaration_projections(program.checked_cell(), settlement)
+        .map_err(CellCheckFailure::from)?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission.clone());
     Ok(PreparedRuntimeCell {
