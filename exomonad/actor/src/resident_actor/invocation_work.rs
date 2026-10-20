@@ -19,11 +19,7 @@ pub(crate) struct InvocationWork {
 
 pub(crate) use crate::termination::ExecutionSourceBindingError as InvocationSourceBindingError;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum GenerationCompilerSource {
-    Dependent,
-    Unclassified,
-}
+pub(crate) use crate::termination::GenerationCompilerSource;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationInvocationState {
@@ -358,21 +354,12 @@ impl InvocationWork {
             }
         }
         for (registration, compiler) in compilers.into_iter().enumerate() {
-            let origin = compiler.source_origin();
-            if origin.is_none_or(|origin| origin.is_unclassified() || origin.depends_on(dependency))
-            {
-                let close = compiler.observation();
-                if !close.is_confirmed() {
-                    record(GenerationInvocationState::Compiler {
-                        registration,
-                        close,
-                        source: if origin.is_none_or(|origin| origin.is_unclassified()) {
-                            GenerationCompilerSource::Unclassified
-                        } else {
-                            GenerationCompilerSource::Dependent
-                        },
-                    });
-                }
+            if let Some(observation) = compiler.generation_observation(dependency, registration) {
+                record(GenerationInvocationState::Compiler {
+                    registration: observation.registration,
+                    close: observation.close,
+                    source: observation.source,
+                });
             }
         }
         for form in forms {

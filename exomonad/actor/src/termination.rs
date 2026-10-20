@@ -243,6 +243,19 @@ pub(crate) enum ExecutionSourceBindingError {
     DifferentSource,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationCompilerSource {
+    Dependent,
+    Unclassified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GenerationCompilerObservation {
+    pub(crate) registration: usize,
+    pub(crate) close: CompilerWorkClose,
+    pub(crate) source: GenerationCompilerSource,
+}
+
 impl ExecutionSourceOrigin {
     fn same_issuer(&self, other: &Self) -> bool {
         match (self, other) {
@@ -313,6 +326,28 @@ enum CompilerWorkPurpose {
 impl CompilerWorkRegistration {
     pub(crate) fn source_origin(&self) -> Option<&ExecutionSourceOrigin> {
         self.source.get()
+    }
+
+    pub(crate) fn generation_observation(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+        registration: usize,
+    ) -> Option<GenerationCompilerObservation> {
+        let origin = self.source_origin();
+        if origin.is_some_and(|origin| !origin.is_unclassified() && !origin.depends_on(dependency))
+        {
+            return None;
+        }
+        let close = self.observation();
+        (!close.is_confirmed()).then(|| GenerationCompilerObservation {
+            registration,
+            close,
+            source: if origin.is_none_or(|origin| origin.is_unclassified()) {
+                GenerationCompilerSource::Unclassified
+            } else {
+                GenerationCompilerSource::Dependent
+            },
+        })
     }
 
     pub(crate) fn observation(&self) -> CompilerWorkClose {
@@ -1424,6 +1459,22 @@ impl RetainedActorExit {
             .compilers
             .iter()
             .map(CompilerWorkRegistration::observation)
+            .collect()
+    }
+
+    pub(crate) fn generation_compiler_observations(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+    ) -> Vec<GenerationCompilerObservation> {
+        self.state
+            .cleanup
+            .lock()
+            .compilers
+            .iter()
+            .enumerate()
+            .filter_map(|(registration, compiler)| {
+                compiler.generation_observation(dependency, registration)
+            })
             .collect()
     }
 
