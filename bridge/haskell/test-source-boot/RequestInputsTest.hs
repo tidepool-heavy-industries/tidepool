@@ -78,6 +78,8 @@ import Tidepool.ExactScope
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration
+  , WorldObservationProfile(..), worldLexicalObservation, worldObservationProfile
+  , worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
   , worldInputsSources, worldSourceDomainSha256
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
