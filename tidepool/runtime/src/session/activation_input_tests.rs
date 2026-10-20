@@ -303,7 +303,33 @@ impl InputFixture {
     }
 
     fn fresh(&self) -> TestSession {
-        Self::fresh_in(self.session, &self.root, &self.recipe)
+        let library = SessionLib::open(
+            self.session,
+            self.root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(self.recipe.include.clone());
+        let original = self
+            .producer
+            .published_source_original_selection(
+                self.producer
+                    .ordinary_original_compile_input()
+                    .unwrap()
+                    .original_input_identity(),
+                &tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "Tidepool.Agent.Ref.Internal".into(),
+                },
+            )
+            .expect("producer issues its actual RunRequest source selection");
+        Self::fresh_with_selected_receiver(
+            library,
+            &self.recipe,
+            include_str!("fixtures/activation-input-receiver.hs"),
+            2,
+            Some(original),
+        )
     }
 
     fn fresh_in(session: SessionId, root: &tempfile::TempDir, recipe: &InputRecipe) -> TestSession {
@@ -328,6 +354,16 @@ impl InputFixture {
         receiver_source: &str,
         binding_count: usize,
     ) -> TestSession {
+        Self::fresh_with_selected_receiver(library, recipe, receiver_source, binding_count, None)
+    }
+
+    fn fresh_with_selected_receiver(
+        library: SessionLib,
+        recipe: &InputRecipe,
+        receiver_source: &str,
+        binding_count: usize,
+        original: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
+    ) -> TestSession {
         let mut resident = TestSession::unbootstrapped(
             frunk::HNil,
             EmptyOutput,
@@ -348,6 +384,17 @@ impl InputFixture {
                 .begin_private_execution(ScopeId::ROOT)),
             Err(SessionError::MissingPublishedCompilerWorld(ScopeId::ROOT))
         ));
+        if let Some(original) = original {
+            let public = resident.public_scope();
+            let staged = source_action(&mut resident, |resident, _| {
+                resident.stage_published_source_originals_in(public, original)
+            })
+            .expect("stage the same producer's original closure for the receiver World");
+            source_action(&mut resident, |resident, _| {
+                resident.publish_source_originals(staged)
+            })
+            .expect("publish the producer-issued selection before World capture");
+        }
         resident.bootstrap_world(recipe);
         let previous_context = resident.run_context();
         let execution = begin_fixture_execution(&mut resident);
