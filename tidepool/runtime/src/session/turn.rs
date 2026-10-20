@@ -3080,9 +3080,16 @@ pub struct PreparedRuntimeCell {
     origin: crate::CompilerTransactionOrigin,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
-    offer: AppliedModuleCandidateOffer,
-    root: Arc<tempfile::TempDir>,
-    stderr: Vec<u8>,
+    evidence: PreparedRuntimeCellEvidence,
+}
+
+enum PreparedRuntimeCellEvidence {
+    Finite {
+        offer: AppliedModuleCandidateOffer,
+        root: Arc<tempfile::TempDir>,
+        stderr: Vec<u8>,
+    },
+    World(Arc<tidepool_toolchain::compiler_world::CheckedWorldCellProgram>),
 }
 
 // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -3105,6 +3112,29 @@ pub fn plan_world_cell_admitted(
     let command = extract_cmd()?;
     let endpoint = bind_extract_cmd(&command)?;
     tidepool_toolchain::compiler_world::plan_cell(&endpoint, world, recipe)
+}
+
+pub struct PreparedWorldCellPlan {
+    origin: crate::CompilerTransactionOrigin,
+    plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+}
+
+pub fn prepare_world_cell_plan_admitted(
+    source: &super::RuntimeSourceCompilerTransaction,
+    world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Result<PreparedWorldCellPlan, super::WorldInspectionError> {
+    let origin = crate::CompilerTransactionOrigin::current().ok_or(
+        CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
+    )?;
+    Ok(PreparedWorldCellPlan { origin, plan: plan_world_cell_admitted(source, world, recipe)? })
+}
+
+pub fn finish_world_cell_plan_admitted(
+    settled: crate::CompilerTransactionSettled<Result<PreparedWorldCellPlan, super::WorldInspectionError>>,
+) -> Result<Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>, super::WorldInspectionError> {
+    super::inspection::finish_world_operation(settled, |prepared| &prepared.origin)
+        .map(|(prepared, _)| prepared.plan)
 }
 
 pub fn prepare_cell_program_admitted(
@@ -3198,13 +3228,14 @@ impl PreparedRuntimeCell {
     > {
         let program = cancellation
             .run_sync(|| self.program.seal(cancellation))
-            .map_err(|error| {
-                self.offer.retain_failure(
-                    self.root.path(),
-                    self.offer.command(),
-                    &self.stderr,
-                    error,
-                )
+            .map_err(|error| match &self.evidence {
+                PreparedRuntimeCellEvidence::Finite { offer, root, stderr } => {
+                    offer.retain_failure(root.path(), offer.command(), stderr, error)
+                }
+                PreparedRuntimeCellEvidence::World(program) => {
+                    tracing::debug!(target: "exomonad_harness::timing", certificate = ?program.certificate_sha256(), "world cell executable seal refused");
+                    error
+                }
             })?;
         Ok((self.checked, program))
     }
@@ -3304,17 +3335,30 @@ fn prepare_cell_program_admitted_inner(
         )
         .into());
     }
-    // A held-world reservation carries parser expectations only. The SAME
-    // certifier's checked-program/item issuer has not landed in this tree:
-    // `compiler_world::CheckedWorldCellProgram` exposes observations and
-    // demand rows, but no runtime-facing constructor for the `CellProgram`
-    // and checked items this preparer returns. Refuse before any compiler
-    // work rather than rebuilding a finite baseline view.
-    if admission.world_reservation().is_some() {
-        return Err(CompileError::ExtractFailed(
-            super::SessionError::WorldCellCheckedProgramCapabilityMissing.to_string(),
-        )
-        .into());
+    if let Some(reservation) = admission.world_reservation() {
+        let reference = admission.world_source_reference()
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let revision = reference.sha256().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let selection = tidepool_toolchain::compiler_world::WorldSourceSelection::new(
+            *reference.sha256(), revision,
+        )?;
+        let command = extract_cmd()?;
+        let endpoint = bind_extract_cmd(&command)?;
+        let output = tidepool_toolchain::compiler_world::admit_world_cell_program(
+            &endpoint, reservation.clone(), selection.clone(), selection, &origin,
+        )?.map_err(|refusal| CompileError::ExtractFailed(format!("compiler world cell preparation refused: {refusal:?}")))?;
+        let program = tidepool_toolchain::artifacts::prepare_world_cell_program(output.clone())?;
+        let mut checked = decode_cell_out(
+            program.checked_cell().observations(),
+            &reservation.plan().recipe().source,
+            admission.initial_value_generation().0,
+            "",
+        )?;
+        checked.authority = Some(program.checked_cell().clone());
+        checked.admission = Some(admission);
+        tracing::debug!(target: "exomonad_harness::timing", logical_world = ?output.logical().logical_id(), certificate = ?output.certificate_sha256(), origin = ?output.origin(), "world cell compiler output prepared");
+        return Ok(PreparedRuntimeCell { origin, checked, program,
+            evidence: PreparedRuntimeCellEvidence::World(output) });
     }
     let finite_failure =
         |error: super::SessionError| CompileError::ExtractFailed(error.to_string());
@@ -3481,9 +3525,7 @@ fn prepare_cell_program_admitted_inner(
         origin,
         checked,
         program,
-        offer,
-        root: scratch,
-        stderr: run.output.stderr,
+        evidence: PreparedRuntimeCellEvidence::Finite { offer, root: scratch, stderr: run.output.stderr },
     })
 }
 

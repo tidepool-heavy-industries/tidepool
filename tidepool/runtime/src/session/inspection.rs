@@ -426,6 +426,12 @@ pub struct CompletedCompilerWorld {
     pub(super) cancellation: crate::HostAdmissionCancellation,
 }
 
+impl CompletedCompilerWorld {
+    pub fn world(&self) -> &std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld> {
+        &self.association.world
+    }
+}
+
 pub fn run_admitted_compiler_world(
     owner: &super::RuntimeSourceCompilerTransaction,
     admitted: AdmittedInspectionWorld,
@@ -475,7 +481,7 @@ pub fn finish_admitted_compiler_world(
     })
 }
 
-fn finish_world_operation<T>(
+pub(super) fn finish_world_operation<T>(
     settled: crate::CompilerTransactionSettled<Result<T, WorldInspectionError>>,
     origin: impl Fn(&T) -> &crate::CompilerTransactionOrigin,
 ) -> Result<(T, crate::HostAdmissionCancellation), WorldInspectionError> {

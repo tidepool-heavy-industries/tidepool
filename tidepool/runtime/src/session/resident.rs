@@ -3847,6 +3847,18 @@ where
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
+    pub fn admit_world_planned_host_carrier_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        binding: String,
+        expected: HostBindingType,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+    }
+
+    /// Admit one compiler-issued binder reserved for a native host payload.
     pub fn admit_host_carrier_cell_in(
         &mut self,
         scope: ScopeId,
