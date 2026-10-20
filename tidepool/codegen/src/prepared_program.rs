@@ -23,8 +23,8 @@ use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
     Architecture, CertifiedGroup, CertifiedGroupCode, DefinitionsView, Endianness, GlobalId,
-    LinkedProgram, PreparedProgram, ResultContract, RuntimeRep, Signature, TargetDescriptor,
-    ValueId,
+    LinkedProgram, PackageGroupCode, PreparedProgram, ResultContract, RuntimeRep, Signature,
+    TargetDescriptor, ValueId,
 };
 use tidepool_repr::DataConId;
 
@@ -713,6 +713,33 @@ impl CompiledProgram {
         )?;
         registry.get_or_compile_literal_group(group, &literals, host_entries, || {
             Self::compile_group_code_with_literals(group, &literals, host_entries).map(Arc::new)
+        })
+    }
+
+    /// Prepare package definitions without issuing HOME source provenance or
+    /// host entry adapters. Installation supplies fresh machine-local imports.
+    pub fn prepare_package_group_code(
+        group: &PackageGroupCode,
+        owners: &[Option<LiteralOwner>],
+        packages: &BTreeMap<tidepool_repr::execution_schema::SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Arc<Self>, CompileError> {
+        let literals = package_literals::GroupPackageLiterals::select_immutable(
+            &group.definitions(),
+            owners,
+            packages,
+            sources,
+        )?;
+        registry.get_or_compile_literal_package_group(group, &literals, || {
+            Self::compile_definitions_with_literals(
+                group.definitions(),
+                &mut DescriptorInterner::default(),
+                &Arc::new(static_bytes::PinnedBytes::empty()),
+                &literals,
+                HostEntries::DefinitionsOnly,
+            )
+            .map(Arc::new)
         })
     }
 
