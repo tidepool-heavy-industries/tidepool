@@ -2040,6 +2040,69 @@ fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
     .unwrap();
     assert_eq!(coverage.admissions, 3);
     assert_eq!(coverage.projections, 1);
+    {
+        let inventory = ArtifactInventory::default();
+        let diamond = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                catalog.entries(true, false),
+                &catalog.selection(&catalog.group_closure(&root_groups(0))),
+            )
+            .unwrap();
+        let chosen = diamond
+            .select_roots(vec![catalog.originals[0].descriptor.id])
+            .unwrap();
+        let key = catalog.key((2, 3));
+        let descendants = chosen
+            .capture_graph_selection()
+            .native_groups
+            .into_iter()
+            .filter(|group| {
+                group.binding.artifact() == key.artifact
+                    && group.original_ordinal == key.original_ordinal
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(descendants.len(), 1);
+        let descendant = descendants[0];
+        assert!(!chosen
+            .roots()
+            .contains(&ArtifactBindingNode::Group(descendant)));
+        let unrelated = inventory
+            .admit_recovery_selection(
+                &chosen,
+                catalog.entries(true, false),
+                &catalog.selection(&catalog.group_closure(&root_groups(2))),
+            )
+            .unwrap();
+        assert!(!unrelated
+            .roots()
+            .contains(&ArtifactBindingNode::Group(descendant)));
+        let explicit = inventory
+            .admit_recovery_selection(
+                &unrelated,
+                catalog.entries(true, false),
+                &catalog.selection(&catalog.group_closure(&root_groups(6))),
+            )
+            .unwrap();
+        let promoted = explicit
+            .roots()
+            .iter()
+            .filter_map(|root| match root {
+                ArtifactBindingNode::Group(group)
+                    if group.binding.artifact() == key.artifact
+                        && group.original_ordinal == key.original_ordinal =>
+                {
+                    Some(*group)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            promoted,
+            vec![descendant],
+            "explicit selection promotes the same retained descendant"
+        );
+    }
     let inventory = ArtifactInventory::default();
     let parent = View {
         inventory: 0,
