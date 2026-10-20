@@ -11,7 +11,7 @@ module Tidepool.CompilerProducts
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , stagedOriginalBinders, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , publishStagedOriginalProducts, retainStagedProgramProducts
   , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
   , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
@@ -55,7 +55,7 @@ import System.Mem.StableName (makeStableName)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders
-  , encodeCertifiedItemProducts, sourceProductSha256 )
+  , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, sourceProductSha256 )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -740,6 +740,18 @@ writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _
   let name = "certified-products.cbor"
   BS.writeFile (directory </> name) bytes
   pure name
+
+writeCertifiedSegmentItemProductsWithInputs
+  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram
+  -> IO (FilePath,Set.Set (SymbolIdentity,Word64))
+writeCertifiedSegmentItemProductsWithInputs prepared (StagedOriginalProducts originals _ _ _ _) directory program = do
+  context <- maybe (fail "item output lacks its segment original certification") pure
+    (certifiedTargetContext originals)
+  (bytes,inputs) <- encodeCertifiedItemProductsWithInputs
+    (prHscEnv (pprPipelineResult prepared)) context program >>= either fail pure
+  let name = "certified-products.cbor"
+  BS.writeFile (directory </> name) bytes
+  pure (name,inputs)
 
 publishStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO CertifiedOriginalProducts
 publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes outputs _) = do

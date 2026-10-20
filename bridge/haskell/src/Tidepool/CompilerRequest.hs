@@ -40,7 +40,7 @@ import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, CompilerExecutor, compilerExecutionGrant
   , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
-  ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
+  ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
   , StagedOriginalProducts, stagedOriginalBinders, withPriorStagedOriginalProducts
@@ -766,7 +766,8 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   { preparedWorldStageItems :: [PreparedWorldCellItem]
   , preparedWorldStagePlan :: CellSourcePlan
   , preparedWorldStageSource :: String
-  , preparedWorldStageInputs :: [WorldCellInputReference]
+  , preparedWorldStageCompilerInputs :: [WorldCellInputReference]
+  , preparedWorldStageExecutionInputs :: Set.Set (SymbolIdentity,Word64)
   , preparedWorldStageFiles :: [(FilePath,BS.ByteString)]
   , preparedWorldStageTypedPlans :: [TypedSegmentPlan]
   , preparedWorldStageReceipt :: Encoding
@@ -841,13 +842,17 @@ prepareWorldCellQuestion bound question = do
                   finalized = initial {cellPlanItems = concatMap (cellPlanItems . preparedWorldStagePlan) stages}
                   observations = encodeCellOut finalized [] (mapMaybe preparedWorldCellObservation items)
                     (concatMap preparedWorldStageSource stages)
-                  inputs = Set.toAscList (Set.fromList (concatMap preparedWorldStageInputs stages))
+                  compilerInputs = Set.toAscList (Set.fromList (concatMap preparedWorldStageCompilerInputs stages))
+                  executionInputs = Set.unions (map preparedWorldStageExecutionInputs stages)
+                  compilerInputKeys = Set.fromList (map worldCellInputReferenceBinding compilerInputs)
                   common = concatMap preparedWorldStageFiles stages
                   plans = concatMap preparedWorldStageTypedPlans stages
               unless (map (\item -> let (ordinal,_,_) = preparedWorldCellItemManifest item in ordinal) items
                     == map fst (heldWorldCellSlots preparation)
-                  && Map.size (Map.fromList common) == length common)
+                  && Map.size (Map.fromList common) == length common
+                  && executionInputs `Set.isSubsetOf` compilerInputKeys)
                 (throwIO WorldCellCorrupt)
+              inputs <- either throwIO pure (selectWorldCellExecutionInputReferences executionInputs compilerInputs)
               writeResult (Right items) observations inputs common plans (map preparedWorldStageReceipt stages)
               pure (Right (map preparedWorldStageCompletion stages))
             Left failure -> case fromException failure of
@@ -955,7 +960,7 @@ prepareWorldCellQuestion bound question = do
           signaturesByItem
         products <- maybe (fail "world cell has no actual original inventory") pure context
         staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result))) originalInterfaces stageDirectory prepared products
-        preparedItems <- forM correlated $ \correlatedItem -> do
+        preparedItemsWithInputs <- forM correlated $ \correlatedItem -> do
           let item = worldCellItemTyped correlatedItem
               sourceItem = worldCellItemParsed correlatedItem
               artifact = worldCellItemArtifact correlatedItem
@@ -970,7 +975,7 @@ prepareWorldCellQuestion bound question = do
           createDirectoryIfMissing True child
           sidecarFiles <- writePreparedSidecars InlineYieldSites child binds Nothing (map T.pack (prWarnings result)) [output]
           programFiles <- writePreparedArtifacts child [output]
-          productFile <- writeCertifiedSegmentItemProducts prepared staged child (paProgram output)
+          (productFile,executionInputs) <- writeCertifiedSegmentItemProductsWithInputs prepared staged child (paProgram output)
           let turnFile = "turn.cbor"
           BS.writeFile (child </> turnFile) (encodeTurnOut turn)
           valueFiles <- case worldCellItemInterface correlatedItem of
@@ -1003,13 +1008,15 @@ prepareWorldCellQuestion bound question = do
                 (case typedObservationLift value of PureObservation -> ExpressionPure; EffectfulObservation -> ExpressionEffectful)
                 (showSDoc (hsc_dflags (prHscEnv result)) (ppr (typedObservationValueType value)))
                 (nominalHeadsOfType (typedObservationValueType value))) (typedItemObservation item)
-          pure (PreparedWorldCellItem (fromIntegral ordinal,generation,SHA256.hash description) observation)
+          pure (PreparedWorldCellItem (fromIntegral ordinal,generation,SHA256.hash description) observation,executionInputs)
         -- Actual certification completes before exposing any private item table.
         -- Nothing here adopts a runtime value or updates an actor-current world.
         _ <- publishStagedOriginalProducts prepared staged
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
-          finalized rendered preparedItems [typedPlan] completion prepared staged
+          finalized rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared staged
+          (Set.unions (map snd preparedItemsWithInputs) `Set.difference`
+            Set.fromList (Map.toList producedGenerations))
     prepareDeclaration preparation prior stageDirectory initial matchedSlots = do
       (ordinal,generation,kind,sourceItem) <- case (matchedSlots,cellPlanItems initial) of
         ([(ordinal,PlannedDeclaration generation)],[item]) -> pure (ordinal,generation,"declaration",item)
@@ -1066,8 +1073,8 @@ prepareWorldCellQuestion bound question = do
         BS.writeFile (child </> "world-item.cbor") description
         let item = PreparedWorldCellItem (ordinal,generation,SHA256.hash description) Nothing
         finishStage stageDirectory identity [fromIntegral ordinal] finalized (plannedSource original)
-          [item] [] completion prepared staged
-    finishStage stageDirectory identity ordinals finalized rendered preparedItems plans completion prepared staged = do
+          [item] [] completion prepared staged Set.empty
+    finishStage stageDirectory identity ordinals finalized rendered preparedItems plans completion prepared staged executionInputs = do
         validateDependencyEvidence (preparedFreshDependencies prepared)
         inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
           (preparedCompilationWorldInputs completion)
@@ -1115,7 +1122,8 @@ prepareWorldCellQuestion bound question = do
           { preparedWorldStageItems = preparedItems
           , preparedWorldStagePlan = finalized
           , preparedWorldStageSource = rendered
-          , preparedWorldStageInputs = worldCellInputReferences inputFacts
+          , preparedWorldStageCompilerInputs = worldCellCompilerInputReferences inputFacts
+          , preparedWorldStageExecutionInputs = executionInputs
           , preparedWorldStageFiles = (sourceReceiptName,SHA256.hash sourceEnvelope):common
           , preparedWorldStageTypedPlans = plans
           , preparedWorldStageReceipt = stageReceipt

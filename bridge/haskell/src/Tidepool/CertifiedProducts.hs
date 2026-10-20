@@ -4,6 +4,7 @@ module Tidepool.CertifiedProducts
   ( encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
   , CertifiedProductKind(..), TargetCertificationContext
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
+  , encodeCertifiedItemProductsWithInputs
   , certifiedContextBinders
   , resolvePackageGlobal, homeInterfaceUsageOwners, sourceProductSha256 ) where
 
@@ -77,6 +78,7 @@ data TargetCertificationContext = TargetCertificationContext
   , targetBinderAvailability :: Set.Set SymbolIdentity
   , targetNativeOwners :: Set.Set (T.Text,T.Text)
   , targetInterfaceSeals :: Map.Map (T.Text,T.Text) T.Text
+  , targetGroupWitnesses :: Map.Map BinderOwner [GlobalWitness]
   }
 
 certifiedContextBinders :: TargetCertificationContext -> Set.Set SymbolIdentity
@@ -421,12 +423,19 @@ encodeCertifiedOriginalProductsWithPrior prior originalInterfaces kind retained 
               packageConflicts = Map.intersectionWith (\(_,left) (_,right) -> left /= right) currentPackages priorPackages
               borrowedSeals = Map.fromList
                 [( (unit,name),sha) | product <- products, (unit,name,sha) <- productInterfaces product]
+              groupWitnesses = Map.fromList
+                [((productUnit product,productModule product,productVersion product,candidateGroupOrdinal group),witnesses)
+                | (product,group,witnesses) <- moduleRows]
               context = TargetCertificationContext ownerMap homeModules
                 (Map.union currentPackages priorPackages)
                 (Set.union (Set.fromList (map fst binders)) (maybe Set.empty targetBinderAvailability prior))
                 (Set.union nativeOwners (maybe Set.empty targetNativeOwners prior))
                 (Map.union borrowedSeals (Map.union (Map.map Set.findMin interfaceSeals) previousSeals))
+                (Map.union groupWitnesses (maybe Map.empty targetGroupWitnesses prior))
           pure $ do
+            if Map.size groupWitnesses /= length moduleRows
+              then Left "duplicate certified native group coordinate"
+              else Right ()
             if or (Map.elems packageConflicts)
               then Left "prior native package owner changed its captured interface"
               else Right ()
@@ -446,7 +455,39 @@ encodeCertifiedOriginalProductsWithPrior prior originalInterfaces kind retained 
 -- An item adds only the facts selected by its own executable projection.
 encodeCertifiedItemProducts :: HscEnv -> TargetCertificationContext -> WireProgram
   -> IO (Either String BS.ByteString)
-encodeCertifiedItemProducts env context program = do
+encodeCertifiedItemProducts env context program =
+  fmap (fmap fst) (certifyItemProducts env context program)
+
+-- Selection consumes the same witnesses that issue the item certificate.
+-- Compiler-only names outside this executable closure create no value demand.
+encodeCertifiedItemProductsWithInputs :: HscEnv -> TargetCertificationContext -> WireProgram
+  -> IO (Either String (BS.ByteString,Set.Set (SymbolIdentity,Word64)))
+encodeCertifiedItemProductsWithInputs env context program = do
+  certified <- certifyItemProducts env context program
+  pure $ do
+    (bytes,witnesses) <- certified
+    inputs <- retainedInputClosure context witnesses
+    pure (bytes,inputs)
+
+retainedInputClosure :: TargetCertificationContext -> [GlobalWitness]
+  -> Either String (Set.Set (SymbolIdentity,Word64))
+retainedInputClosure context = visit Set.empty Set.empty
+  where
+    visit _ inputs [] = Right inputs
+    visit seen inputs ((identity,_,_,_,owner):pending) = case owner of
+      RetainedOwner generation -> visit seen (Set.insert (identity,generation) inputs) pending
+      PackageOwner _ _ _ (Just generation) -> visit seen (Set.insert (identity,generation) inputs) pending
+      PackageOwner _ _ _ Nothing -> visit seen inputs pending
+      SourceOwner unit name version ordinal ->
+        let coordinate = (unit,name,version,ordinal) in
+        if coordinate `Set.member` seen then visit seen inputs pending
+        else case Map.lookup coordinate (targetGroupWitnesses context) of
+          Nothing -> Left "executable input demand lacks its certified native group"
+          Just witnesses -> visit (Set.insert coordinate seen) inputs (witnesses ++ pending)
+
+certifyItemProducts :: HscEnv -> TargetCertificationContext -> WireProgram
+  -> IO (Either String (BS.ByteString,[GlobalWitness]))
+certifyItemProducts env context program = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage,_) <- newPackageGlobalResolver timing env
@@ -474,10 +515,11 @@ encodeCertifiedItemProducts env context program = do
   pure $ do
     witnesses <- sequence globals
     additions <- catMaybes <$> sequence validated
-    Right $ toStrictByteString $ array [encodeString "TPCERT",encodeWord 10,
+    let bytes = toStrictByteString $ array [encodeString "TPCERT",encodeWord 10,
       array [encodeString "segment-item",list encodeFullWitness witnesses,
         list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
           encodeString (T.pack path),encodeString seal]) additions]]
+    Right (bytes,witnesses)
 
 encodeFullWitness :: GlobalWitness -> Encoding
 encodeFullWitness (identity,rep,signature,evaluated,owner) = array
