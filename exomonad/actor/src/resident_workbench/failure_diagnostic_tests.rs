@@ -186,20 +186,21 @@ fn renderer_production_keeps_action_and_unconfirmed_close_together() {
         ),
     );
     let error = ResidentActorWorkbenchError::RendererProduction {
-        failure: RendererProductionFailure::CloseUnconfirmed {
+        failure: Arc::new(RendererProductionFailure::CloseUnconfirmed {
             close: close.clone(),
             action_error: Some(ActivationRendererFailure::from(
                 CompileError::ExtractFailed("primary renderer action".into()),
             )),
-        },
+        }),
+        producer_join: None,
     };
-    let ResidentActorWorkbenchError::RendererProduction {
-        failure:
-            RendererProductionFailure::CloseUnconfirmed {
-                close: retained_close,
-                action_error: Some(ActivationRendererFailure::Frontend(primary)),
-            },
-    } = &error
+    let ResidentActorWorkbenchError::RendererProduction { failure, .. } = &error else {
+        panic!("renderer failure")
+    };
+    let RendererProductionFailure::CloseUnconfirmed {
+        close: retained_close,
+        action_error: Some(ActivationRendererFailure::Frontend(primary)),
+    } = failure.as_ref()
     else {
         panic!("compound renderer failure lost its typed action and close facts")
     };
@@ -229,13 +230,14 @@ fn renderer_production_keeps_action_and_publication_refusal_together() {
     use tidepool_runtime::session::RendererProductionFailure;
 
     let error = ResidentActorWorkbenchError::RendererProduction {
-        failure: RendererProductionFailure::Publication {
+        failure: Arc::new(RendererProductionFailure::Publication {
             error: tidepool_runtime::CompilerTransactionPublicationError::DifferentOwner,
             close: tidepool_runtime::CompilerTransactionClose::NotStarted,
             action_error: Some(ActivationRendererFailure::from(
                 CompileError::ExtractFailed("primary renderer action".into()),
             )),
-        },
+        }),
+        producer_join: None,
     };
     let diagnostic = error
         .failure_diagnostic()

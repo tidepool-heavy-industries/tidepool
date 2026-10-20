@@ -6447,21 +6447,28 @@ fn renderer_production_diagnostic(
         RendererProductionFailure::Compile(error) => {
             return activation_renderer_failure_diagnostic(error)
         }
+        RendererProductionFailure::ProducerLost { .. } => None,
         RendererProductionFailure::CloseUnconfirmed { action_error, .. }
-        | RendererProductionFailure::Publication { action_error, .. } => {
-            action_error.as_ref().and_then(activation_renderer_failure_diagnostic)
-        }
+        | RendererProductionFailure::Publication { action_error, .. } => action_error
+            .as_ref()
+            .and_then(activation_renderer_failure_diagnostic),
     };
     let mut secondary = match failure {
+        RendererProductionFailure::ProducerLost { .. } => {
+            tidepool_toolchain::failclass::FailureEnvelope::new(
+                FailureClass::Infra,
+                tidepool_toolchain::failclass::Phase::Compile,
+                failure.to_string(),
+            )
+        }
         RendererProductionFailure::CloseUnconfirmed { close, .. } => {
             let mut envelope = tidepool_toolchain::failclass::FailureEnvelope::new(
                 FailureClass::Infra,
                 tidepool_toolchain::failclass::Phase::Compile,
                 format!("compiler close is unconfirmed: {close:?}"),
             );
-            envelope.cause = Some(
-                tidepool_toolchain::failclass::CompileFailureCause::CompilerCloseUnconfirmed,
-            );
+            envelope.cause =
+                Some(tidepool_toolchain::failclass::CompileFailureCause::CompilerCloseUnconfirmed);
             envelope
         }
         RendererProductionFailure::Publication { error, close, .. } => {
@@ -6598,11 +6605,14 @@ pub enum ResidentActorWorkbenchError {
     /// Native renderer production failed with a primary action error and/or a
     /// secondary close/publication obligation. Both facts remain visible to
     /// recovery and presentation; this is not ordinary compile evidence.
-    #[error("activation renderer production failed: {failure}")]
+    #[error("activation renderer production failed: {failure}{}", producer_join.as_ref().map(|error| format!("; producer task: {error}")).unwrap_or_default())]
     RendererProduction {
-        failure: tidepool_runtime::session::RendererProductionFailure<
-            tidepool_runtime::session::turn::ActivationRendererFailure,
+        failure: Arc<
+            tidepool_runtime::session::RendererProductionFailure<
+                tidepool_runtime::session::turn::ActivationRendererFailure,
+            >,
         >,
+        producer_join: Option<tokio::task::JoinError>,
     },
     #[error("could not mount the typed completion input: {0}")]
     InputMount(String),
@@ -6667,7 +6677,7 @@ impl ResidentActorWorkbenchError {
             Self::Resident(error) | Self::Delivered(error) => {
                 resident_prepared_failure_kind(error)
             }
-            Self::RendererProduction { failure } => match failure {
+            Self::RendererProduction { failure, .. } => match failure.as_ref() {
                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => {
                     activation_renderer_failure_kind(error)
                 }
@@ -6678,7 +6688,10 @@ impl ResidentActorWorkbenchError {
                 | tidepool_runtime::session::RendererProductionFailure::Publication {
                     action_error,
                     ..
-                } => action_error.as_ref().and_then(activation_renderer_failure_kind),
+                } => action_error
+                    .as_ref()
+                    .and_then(activation_renderer_failure_kind),
+                tidepool_runtime::session::RendererProductionFailure::ProducerLost { .. } => None,
             },
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.execution_failure_kind(),
@@ -6694,9 +6707,10 @@ impl ResidentActorWorkbenchError {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),
-            Self::RendererProduction { failure } => matches!(
-                failure,
-                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
+            Self::RendererProduction { failure, .. } => matches!(
+                failure.as_ref(),
+                tidepool_runtime::session::RendererProductionFailure::ProducerLost { .. }
+                    | tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
                     | tidepool_runtime::session::RendererProductionFailure::Publication { .. }
             ),
             Self::Resident(ResidentError::Session(
@@ -6732,7 +6746,7 @@ impl ResidentActorWorkbenchError {
             Self::Compile(error) => Some(activation_compile_diagnostic(error)),
             Self::CellCheck(failure) => Some(activation_compile_diagnostic(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
-            Self::RendererProduction { failure } => renderer_production_diagnostic(failure),
+            Self::RendererProduction { failure, .. } => renderer_production_diagnostic(failure),
             Self::PublicationSettlement { failure } => Some(tidepool_toolchain::failclass::FailureEnvelope::new(
                 FailureClass::Infra,
                 tidepool_toolchain::failclass::Phase::Install,
@@ -6762,12 +6776,17 @@ impl ResidentActorWorkbenchError {
             Self::Resident(error) | Self::Delivered(error) => {
                 error.is_language_failure() || error.is_observation_budget_exhausted()
             }
-            Self::RendererProduction { failure } => match failure {
+            Self::RendererProduction { failure, .. } => match failure.as_ref() {
                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => {
                     activation_renderer_failure_is_presentation_failure(error)
                 }
-                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
-                | tidepool_runtime::session::RendererProductionFailure::Publication { .. } => false,
+                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed {
+                    ..
+                }
+                | tidepool_runtime::session::RendererProductionFailure::Publication { .. }
+                | tidepool_runtime::session::RendererProductionFailure::ProducerLost { .. } => {
+                    false
+                }
             },
             _ => false,
         }
@@ -6784,12 +6803,17 @@ impl ResidentActorWorkbenchError {
             Self::Resident(error) | Self::Delivered(error) => {
                 error.is_observation_budget_exhausted()
             }
-            Self::RendererProduction { failure } => match failure {
+            Self::RendererProduction { failure, .. } => match failure.as_ref() {
                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => {
                     activation_renderer_failure_is_budget_exhausted(error)
                 }
-                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
-                | tidepool_runtime::session::RendererProductionFailure::Publication { .. } => false,
+                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed {
+                    ..
+                }
+                | tidepool_runtime::session::RendererProductionFailure::Publication { .. }
+                | tidepool_runtime::session::RendererProductionFailure::ProducerLost { .. } => {
+                    false
+                }
             },
             _ => false,
         }
@@ -8464,14 +8488,8 @@ where
         let specialized = loop {
             match renderer_access {
                 tidepool_runtime::session::RendererAccess::Ready(renderer) => break Ok(renderer),
-                tidepool_runtime::session::RendererAccess::CloseUnconfirmed => {
-                    break Err(tidepool_runtime::session::RendererProductionFailure::Compile(
-                        tidepool_runtime::session::turn::ActivationRendererFailure::from(
-                            CompileError::ExtractFailed(
-                                "shared activation renderer compiler close is unconfirmed".into(),
-                            ),
-                        ),
-                    ));
+                tidepool_runtime::session::RendererAccess::Terminal(failure) => {
+                    break Err((failure, None))
                 }
                 tidepool_runtime::session::RendererAccess::Wait(waiter) => {
                     #[cfg(test)]
@@ -8482,6 +8500,7 @@ where
                     renderer_access = waiter.wait().await;
                 }
                 tidepool_runtime::session::RendererAccess::Produce(mut producer) => {
+                    let producer_waiter = producer.waiter();
                     let compiler_work = crate::capabilities::CompilerOwnerScope::current()
                         .and_then(|scope| {
                             scope
@@ -8519,11 +8538,11 @@ where
                             // The affine compiler ticket has closed before Ready or
                             // Empty is published, even if the async waiter vanished.
                             let result = result.map_err(|error| {
-                                tidepool_runtime::session::RendererProductionFailure::Compile(
+                                Arc::new(tidepool_runtime::session::RendererProductionFailure::Compile(
                                     tidepool_runtime::session::turn::ActivationRendererFailure::from(
                                         tidepool_runtime::session::PreparedRuntimeError::from(error),
                                     ),
-                                )
+                                ))
                             })?;
                             let settled = producer.settle_native(result);
                             #[cfg(test)]
@@ -8531,63 +8550,77 @@ where
                                 if let Some(observer) = producer_observer {
                                     observer(ActivationPublicationObservation::RendererSealed)
                                         .map_err(|error| {
-                                            tidepool_runtime::session::RendererProductionFailure::Compile(
+                                            Arc::new(tidepool_runtime::session::RendererProductionFailure::Compile(
                                                 tidepool_runtime::session::turn::ActivationRendererFailure::from(
                                                     CompileError::ExtractFailed(error.to_string()),
                                                 ),
-                                            )
+                                            ))
                                         })?;
                                 }
                             }
                             settled
                         }))
-                        .await
-                        .map_err(|error| committed(ResidentActorWorkbenchError::Join(error)))?;
+                        .await;
                     cancel_on_drop.0 = None;
-                    break compiled;
+                    break match compiled {
+                        Ok(result) => result.map_err(|failure| (failure, None)),
+                        Err(error) => match producer_waiter.failure() {
+                            Some(failure) => Err((failure, Some(error))),
+                            None => {
+                                return Err(committed(ResidentActorWorkbenchError::Join(error)))
+                            }
+                        },
+                    };
                 }
             }
         };
-        #[cfg(test)]
-        if specialized.is_ok() {
-            if let Some(observer) = &renderer_observer {
-                observer(ActivationPublicationObservation::RendererSelected(
-                    &admission,
-                ))
-                .map_err(committed)?;
+        let preview = match specialized {
+            Err((failure, producer_join)) => {
+                if matches!(failure.as_ref(), tidepool_runtime::session::RendererProductionFailure::Compile(
+                    tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(primary)
+                ) if matches!(primary.error, CompileError::Diagnostics(_)))
+                {
+                    (
+                        ActivationPreviewOutcome::Unavailable(
+                            ActivationPreviewUnavailable::Language,
+                        ),
+                        input_binding,
+                        admission,
+                    )
+                } else {
+                    return Err(committed(ResidentActorWorkbenchError::RendererProduction {
+                        failure,
+                        producer_join,
+                    }));
+                }
             }
-        }
-        let preview = self.access.with_compiler_machine(context.clone(), move |session, _, _, settlement| {
+            Ok(renderer) => {
+                #[cfg(test)]
+                if let Some(observer) = &renderer_observer {
+                    observer(ActivationPublicationObservation::RendererSelected(
+                        &admission,
+                    ))
+                    .map_err(committed)?;
+                }
+                let preview = self.access.with_compiler_machine(context.clone(), move |session, _, _, settlement| {
             session.validate_activation_preview_admission(&admission)
                 .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
-            let compiled = match specialized {
-                Ok(renderer) => match tidepool_runtime::session::turn::bind_activation_renderer(admission.clone(), &renderer) {
-                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Ready(compiled)) => compiled,
-                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Opaque) => {
-                        return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
-                    }
-                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable) => {
-                        return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable), input_binding, admission));
-                    }
-                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => {
-                        return Err(committed(ResidentActorWorkbenchError::Resident(error)));
-                    }
-                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => {
-                        return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error }));
-                    }
-                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => {
-                        return Err(committed(ResidentActorWorkbenchError::Resident(error.into())));
-                    }
-                },
-                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure))) if matches!(failure.error, CompileError::Diagnostics(_)) => {
-                    return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Language), input_binding, admission));
+            let compiled = match tidepool_runtime::session::turn::bind_activation_renderer(admission.clone(), &renderer) {
+                Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Ready(compiled)) => compiled,
+                Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Opaque) => {
+                    return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
                 }
-                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure))) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
-                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error))) => return Err(committed(ResidentActorWorkbenchError::Resident(error.into()))),
-                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error))) => return Err(committed(ResidentActorWorkbenchError::Resident(error))),
-                Err(failure @ (tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
-                    | tidepool_runtime::session::RendererProductionFailure::Publication { .. })) => {
-                    return Err(committed(ResidentActorWorkbenchError::RendererProduction { failure }));
+                Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable) => {
+                    return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable), input_binding, admission));
+                }
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => {
+                    return Err(committed(ResidentActorWorkbenchError::Resident(error)));
+                }
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => {
+                    return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error }));
+                }
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => {
+                    return Err(committed(ResidentActorWorkbenchError::Resident(error.into())));
                 }
             };
                 let preview = match session.run_activation_preview(compiled, settlement) {
@@ -8625,6 +8658,9 @@ where
                 };
                 Ok((preview, input_binding, admission))
         }).await.map_err(committed)?;
+                preview
+            }
+        };
         let (preview, input_binding, admission) = preview;
         let input = match preview {
             ActivationPreviewOutcome::Rendered { text, omitted } => bounded_activation_text(
@@ -28881,6 +28917,153 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap()
                 .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn renderer_producer_loss_preserves_shared_terminal_cause_for_current_and_later_observers(
+    ) {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                source.bind_preparation(preparation_client),
+                None,
+            );
+            let (mut producer, producer_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (mut waiter, waiter_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (mut later, later_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (started, started_seen) = tokio::sync::oneshot::channel();
+            let started = Mutex::new(Some(started));
+            let (resume, held) = std::sync::mpsc::channel();
+            let held = Mutex::new(held);
+            let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = producers.clone();
+            producer.activation_preview_observer = Some(Arc::new(move |event| {
+                if matches!(event, ActivationPublicationObservation::RendererProducer) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started.lock().take().unwrap().send(()).unwrap();
+                    held.lock().recv_timeout(Duration::from_secs(60)).unwrap();
+                    panic!("controlled renderer producer loss");
+                }
+                Ok(())
+            }));
+            let (waiting, waiting_seen) = tokio::sync::oneshot::channel();
+            let waiting = Mutex::new(Some(waiting));
+            waiter.activation_preview_observer = Some(Arc::new(move |event| {
+                if matches!(event, ActivationPublicationObservation::RendererWaiting) {
+                    if let Some(waiting) = waiting.lock().take() {
+                        let _ = waiting.send(());
+                    }
+                }
+                Ok(())
+            }));
+            let counted = producers.clone();
+            later.activation_preview_observer = Some(Arc::new(move |event| {
+                if matches!(event, ActivationPublicationObservation::RendererProducer) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(())
+            }));
+            let producer_input = inputs.remove(0);
+            let waiter_input = inputs.remove(0);
+            let later_input = inputs.remove(0);
+            let owner = crate::capabilities::CompilerOwnerScope::current().unwrap();
+            let producer_task = tokio::spawn(owner.clone().scope(async move {
+                producer
+                    .mount_activation_input(
+                        producer_context,
+                        producer_input,
+                        None,
+                        "()".into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(60), started_seen)
+                .await
+                .unwrap()
+                .unwrap();
+            let waiter_task = tokio::spawn(owner.scope(async move {
+                waiter
+                    .mount_activation_input(
+                        waiter_context,
+                        waiter_input,
+                        None,
+                        "()".into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(60), waiting_seen)
+                .await
+                .unwrap()
+                .unwrap();
+            resume.send(()).unwrap();
+            let producer_error = producer_task.await.unwrap().unwrap_err();
+            let waiter_error = waiter_task.await.unwrap().unwrap_err();
+            let later_error = later
+                .mount_activation_input(
+                    later_context,
+                    later_input,
+                    None,
+                    "()".into(),
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .unwrap_err();
+            fn failure(
+                error: &ResidentActorWorkbenchError,
+            ) -> (
+                &Arc<
+                    tidepool_runtime::session::RendererProductionFailure<
+                        tidepool_runtime::session::turn::ActivationRendererFailure,
+                    >,
+                >,
+                Option<&tokio::task::JoinError>,
+            ) {
+                assert!(error.requires_recovery());
+                assert!(!error.is_tool_presentation_failure());
+                assert_eq!(
+                    error.failure_diagnostic().unwrap().class,
+                    FailureClass::Infra
+                );
+                match error {
+                    ResidentActorWorkbenchError::ActivationBindingCommitted { source, .. } => {
+                        failure(source)
+                    }
+                    ResidentActorWorkbenchError::RendererProduction {
+                        failure,
+                        producer_join,
+                    } => (failure, producer_join.as_ref()),
+                    error => panic!("lost typed terminal renderer failure: {error:?}"),
+                }
+            }
+            let (produced, join) = failure(&producer_error);
+            assert!(join.is_some_and(tokio::task::JoinError::is_panic));
+            assert!(producer_error
+                .to_string()
+                .contains("controlled renderer producer loss"));
+            let (waited, join) = failure(&waiter_error);
+            assert!(join.is_none());
+            let (observed_later, join) = failure(&later_error);
+            assert!(join.is_none());
+            assert!(matches!(
+                produced.as_ref(),
+                tidepool_runtime::session::RendererProductionFailure::ProducerLost { .. }
+            ));
+            assert!(Arc::ptr_eq(produced, waited));
+            assert!(Arc::ptr_eq(produced, observed_later));
+            assert_eq!(producers.load(std::sync::atomic::Ordering::SeqCst), 1);
         })
         .await;
     }

@@ -5915,34 +5915,104 @@ fn compile_activation_preview(
             let outcome = outcome.map_err(|error| {
                 turn::ActivationRendererFailure::from(super::PreparedRuntimeError::from(error))
             })?;
-            producer
-                .settle_native(outcome)
-                .map_err(|failure| match failure {
+            producer.settle_native(outcome).map_err(|failure| {
+                match Arc::try_unwrap(failure).unwrap_or_else(|failure| {
+                    panic!("semantic fixture cannot recover terminal renderer failure: {failure}")
+                }) {
                     RendererProductionFailure::Compile(error) => error,
-                    RendererProductionFailure::Publication {
-                        error,
-                        action_error,
-                        ..
-                    } => action_error.unwrap_or_else(|| CompileError::from(error).into()),
-                    RendererProductionFailure::CloseUnconfirmed {
-                        close,
-                        action_error,
-                    } => action_error.unwrap_or_else(|| {
-                        CompileError::ExtractFailed(format!(
-                            "renderer close is unconfirmed: {close:?}"
-                        ))
-                        .into()
-                    }),
-                })?
+                    failure => panic!(
+                        "semantic fixture cannot recover terminal renderer failure: {failure}"
+                    ),
+                }
+            })?
         }
         RendererAccess::Wait(_) => {
             panic!("synchronous semantic fixture has no concurrent producer")
         }
-        RendererAccess::CloseUnconfirmed => {
+        RendererAccess::Terminal(_) => {
             panic!("semantic fixture has no unconfirmed native close")
         }
     };
     turn::bind_activation_renderer(admission, &renderer).map_err(Into::into)
+}
+
+#[tokio::test]
+async fn activation_renderer_actual_retirement_retains_terminal_cause_for_observers() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-package.hs"),
+        false,
+        SessionId(1742),
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let (input, interface) = issued_input(&mut resident, &hole, site, fixture.recipe.clone());
+    let mounted = mount_original(&mut resident, input, interface);
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let template = turn::assemble_activation_preview_module(512);
+    let RendererAccess::Produce(mut producer) = admission.acquire_renderer(&template, 512).unwrap()
+    else {
+        panic!("cold renderer must have one producer");
+    };
+    let RendererAccess::Wait(waiter) = admission.acquire_renderer(&template, 512).unwrap() else {
+        panic!("current observer must wait for the actual producer");
+    };
+    let cancellation = crate::CompilerTransactionCancellation::new();
+    let before = tidepool_extract_cmd::extract_spawn_count();
+    let outcome = admission
+        .source_lease()
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            cancellation.clone(),
+            None,
+            |_| {},
+            |source, settlement| {
+                producer.begin_native().unwrap();
+                let prepared = turn::compile_activation_renderer(
+                    source,
+                    &admission,
+                    &template,
+                    512,
+                    &fixture.recipe.include,
+                    settlement,
+                )
+                .expect("actual renderer compilation must reach the response before cancellation");
+                assert!(matches!(
+                    &prepared.value,
+                    Ok(SharedActivationRenderer::Renderable(_))
+                ));
+                cancellation.cancel();
+                Ok::<_, turn::ActivationRendererFailure>(prepared)
+            },
+        )
+        .unwrap();
+    let close = outcome.close().clone();
+    assert!(
+        matches!(close, crate::CompilerTransactionClose::Retired(_)),
+        "actual cancellation after compiler response must retain retirement: {close:?}"
+    );
+    assert!(close.resources_retired());
+    let failure = producer.settle_native(outcome).unwrap_err();
+    assert!(
+        matches!(failure.as_ref(), RendererProductionFailure::CloseUnconfirmed {
+        close: observed, action_error: None,
+    } if observed == &close)
+    );
+    let RendererAccess::Terminal(waited) = waiter.wait().await else {
+        panic!("retired producer observer")
+    };
+    let RendererAccess::Terminal(later) = admission.acquire_renderer(&template, 512).unwrap()
+    else {
+        panic!("retired production must never admit another producer");
+    };
+    assert!(Arc::ptr_eq(&failure, &waited));
+    assert!(Arc::ptr_eq(&failure, &later));
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
 }
 
 #[test]
