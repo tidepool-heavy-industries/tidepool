@@ -39,17 +39,37 @@ impl RetirementDiagnosticEvidence {
     pub(crate) fn from_refusal(
         refusal: &crate::resident_workbench::ActorGenerationPublicationRefusal,
     ) -> Self {
-        let (detail, diagnostic) = match refusal.outcome().as_ref() {
-            Ok(crate::resident_workbench::ActorGenerationCommit::Refused(detail)) => {
-                (detail.to_string(), detail.failure_diagnostic())
-            }
+        Self::from_outcome(refusal.outcome().as_ref(), refusal.observation())
+    }
+
+    pub(crate) fn from_settlement(
+        settlement: &crate::resident_workbench::ActorGenerationPublicationSettlement,
+    ) -> Option<Self> {
+        let (outcome, observation) = settlement.diagnostic_outcome()?;
+        Some(Self::from_outcome(outcome, observation))
+    }
+
+    fn from_outcome(
+        outcome: &Result<
+            crate::resident_workbench::ActorGenerationCommit,
+            ResidentActorWorkbenchError,
+        >,
+        observation: crate::resident_workbench::ActorGenerationPublicationRefusalObservation,
+    ) -> Self {
+        let (detail, diagnostic) = match outcome {
+            Ok(
+                crate::resident_workbench::ActorGenerationCommit::Refused(detail)
+                | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail),
+            ) => (detail.to_string(), detail.failure_diagnostic()),
             Err(error) => (error.to_string(), error.failure_diagnostic()),
-            _ => unreachable!("an unpublished refusal retains its original refusal or error"),
+            Ok(crate::resident_workbench::ActorGenerationCommit::Published { .. }) => {
+                unreachable!("successful publication has no failure diagnostic")
+            }
         };
         Self {
             detail,
             diagnostic,
-            observation: refusal.observation(),
+            observation,
             retirement: None,
         }
     }
@@ -112,6 +132,12 @@ pub(crate) struct RecordedRetirementDiagnostic {
 pub(crate) struct RecordedRetirementDiagnosticObservation {
     operation: WorkbenchOperationId,
     evidence: Arc<RetirementDiagnosticEvidence>,
+}
+
+impl RecordedRetirementDiagnosticObservation {
+    pub(crate) fn detail(&self) -> &str {
+        &self.evidence.detail
+    }
 }
 
 impl WorkbenchOperationDiagnosticOwner {

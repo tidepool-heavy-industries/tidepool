@@ -2331,6 +2331,21 @@ pub(crate) enum ActorGenerationPublicationSettlement {
     Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
 }
 
+impl ActorGenerationPublicationSettlement {
+    pub(crate) fn diagnostic_outcome(
+        &self,
+    ) -> Option<(
+        &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+        ActorGenerationPublicationRefusalObservation,
+    )> {
+        let outcome = match self {
+            Self::Unpublished(refusal) => refusal.outcome(),
+            Self::Settled(outcome) => outcome,
+        };
+        publication_failure_observation(outcome).map(|observation| (outcome.as_ref(), observation))
+    }
+}
+
 /// Causal metadata only: no source leases, compiler products, or error Arcs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ActorGenerationPublicationRefusalObservation {
@@ -2426,31 +2441,8 @@ impl ActorGenerationPublicationRefusal {
     }
 
     pub(crate) fn observation(&self) -> ActorGenerationPublicationRefusalObservation {
-        match self.outcome.as_ref() {
-            Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Detail(_))) => {
-                ActorGenerationPublicationRefusalObservation::Refused
-            }
-            Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))) => {
-                ActorGenerationPublicationRefusalObservation::Failed {
-                    cause: publication_session_failure_cause(
-                        error,
-                        ActorPublicationFailureCause::Resident,
-                    ),
-                    execution: None,
-                    requires_recovery: session_error_requires_recovery(error),
-                }
-            }
-            Err(error) => ActorGenerationPublicationRefusalObservation::Failed {
-                cause: error.publication_failure_cause(),
-                execution: error.execution_failure_kind(),
-                requires_recovery: error.requires_recovery(),
-            },
-            Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_)) => {
-                unreachable!(
-                    "the publisher issues refusal custody only for a known unpublished body"
-                )
-            }
-        }
+        publication_failure_observation(self.outcome.as_ref())
+            .expect("an unpublished refusal retains its original refusal or error")
     }
 
     pub(crate) fn into_settled_diagnostic(
@@ -2480,6 +2472,48 @@ impl ActorGenerationPublicationRefusal {
                 },
             )
     }
+}
+
+fn publication_failure_observation(
+    outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+) -> Option<ActorGenerationPublicationRefusalObservation> {
+    use ActorGenerationPublicationRefusalObservation as Observation;
+    Some(match outcome {
+        Ok(ActorGenerationCommit::Published { .. }) => return None,
+        Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Detail(_))) => {
+            Observation::Refused
+        }
+        Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))) => {
+            Observation::Failed {
+                cause: publication_session_failure_cause(
+                    error,
+                    ActorPublicationFailureCause::Resident,
+                ),
+                execution: None,
+                requires_recovery: session_error_requires_recovery(error),
+            }
+        }
+        Ok(ActorGenerationCommit::Unconfirmed(issue)) => Observation::Failed {
+            cause: match issue {
+                ActorGenerationPublicationIssue::Detail(_) => {
+                    ActorPublicationFailureCause::PublicationSettlement
+                }
+                ActorGenerationPublicationIssue::Durable(error) => {
+                    publication_session_failure_cause(
+                        error,
+                        ActorPublicationFailureCause::PublicationSettlement,
+                    )
+                }
+            },
+            execution: None,
+            requires_recovery: true,
+        },
+        Err(error) => Observation::Failed {
+            cause: error.publication_failure_cause(),
+            execution: error.execution_failure_kind(),
+            requires_recovery: error.requires_recovery(),
+        },
+    })
 }
 
 /// Checkout completion and source settlement are distinct observations. An
