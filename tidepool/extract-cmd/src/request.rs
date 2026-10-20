@@ -25,7 +25,11 @@ pub enum ExactInputsAcquisition {
     Resident(String),
     /// Strict cold-world descriptor; input descriptors retain their existing owner.
     Complete(PathBuf),
-    Successor { predecessor: String, realization: String, descriptor: PathBuf },
+    Successor {
+        predecessor: String,
+        realization: String,
+        descriptor: PathBuf,
+    },
 }
 
 impl ExactInputsRequest {
@@ -35,7 +39,15 @@ impl ExactInputsRequest {
             && match &self.acquisition {
                 ExactInputsAcquisition::Resident(reference) => valid(reference),
                 ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
-                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => valid_world_identity(predecessor) && valid(realization) && descriptor.to_str().is_some_and(valid),
+                ExactInputsAcquisition::Successor {
+                    predecessor,
+                    realization,
+                    descriptor,
+                } => {
+                    valid_world_identity(predecessor)
+                        && valid(realization)
+                        && descriptor.to_str().is_some_and(valid)
+                }
             }
     }
 }
@@ -174,8 +186,12 @@ pub struct WorldCellOperandRequest {
 }
 
 impl WorldCellOperandRequest {
-    fn valid(&self) -> bool { valid_cell_path(&self.descriptor) }
-    fn encoded_len(&self) -> usize { 4 + self.descriptor.as_os_str().len() + 32 }
+    fn valid(&self) -> bool {
+        valid_cell_path(&self.descriptor)
+    }
+    fn encoded_len(&self) -> usize {
+        4 + self.descriptor.as_os_str().len() + 32
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,7 +218,10 @@ impl WorldCellPlanRequest {
         if !valid_world_identity(&self.world)
             || !valid_reference(&self.realization)
             || !self.recipe.valid()
-            || self.operand.as_ref().is_some_and(|operand| !operand.valid())
+            || self
+                .operand
+                .as_ref()
+                .is_some_and(|operand| !operand.valid())
             || !valid_cell_path(&self.output)
         {
             return Err(ProtocolError::InvalidWorldCell);
@@ -214,7 +233,11 @@ impl WorldCellPlanRequest {
                 + 4
                 + self.realization.len()
                 + self.recipe.encoded_len()
-                + 1 + self.operand.as_ref().map_or(0, WorldCellOperandRequest::encoded_len)
+                + 1
+                + self
+                    .operand
+                    .as_ref()
+                    .map_or(0, WorldCellOperandRequest::encoded_len)
                 + 4
                 + self.output.as_os_str().len(),
         )
@@ -364,7 +387,8 @@ impl WorldCellPrepareRequest {
                 + 4
                 + realization.len()
                 + recipe.encoded_len()
-                + 1 + operand.map_or(0, WorldCellOperandRequest::encoded_len)
+                + 1
+                + operand.map_or(0, WorldCellOperandRequest::encoded_len)
                 + 8
                 + 4
                 + plan.len()
@@ -1027,7 +1051,11 @@ impl ExtractRequest {
                     let acquisition = match decoder.byte()? {
                         0 => ExactInputsAcquisition::Resident(decoder.string()?),
                         1 => ExactInputsAcquisition::Complete(PathBuf::from(decoder.os_string()?)),
-                        2 => ExactInputsAcquisition::Successor { predecessor: decoder.string()?, realization: decoder.string()?, descriptor: PathBuf::from(decoder.os_string()?) },
+                        2 => ExactInputsAcquisition::Successor {
+                            predecessor: decoder.string()?,
+                            realization: decoder.string()?,
+                            descriptor: PathBuf::from(decoder.os_string()?),
+                        },
                         _ => return Err(ProtocolError::InvalidExactInputs),
                     };
                     Field::EnsureExactInputs(ExactInputsRequest { root, acquisition })
@@ -1057,7 +1085,10 @@ impl ExtractRequest {
                     let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let operand = match decoder.byte()? {
                         0 => None,
-                        1 => Some(WorldCellOperandRequest { descriptor: PathBuf::from(decoder.cell_string(65536)?), sha256: decoder.fixed()? }),
+                        1 => Some(WorldCellOperandRequest {
+                            descriptor: PathBuf::from(decoder.cell_string(65536)?),
+                            sha256: decoder.fixed()?,
+                        }),
                         _ => return Err(ProtocolError::InvalidWorldCell),
                     };
                     let output = PathBuf::from(decoder.cell_string(65536)?);
@@ -1076,7 +1107,10 @@ impl ExtractRequest {
                     let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let operand = match decoder.byte()? {
                         0 => None,
-                        1 => Some(WorldCellOperandRequest { descriptor: PathBuf::from(decoder.cell_string(65536)?), sha256: decoder.fixed()? }),
+                        1 => Some(WorldCellOperandRequest {
+                            descriptor: PathBuf::from(decoder.cell_string(65536)?),
+                            sha256: decoder.fixed()?,
+                        }),
                         _ => return Err(ProtocolError::InvalidWorldCell),
                     };
                     let plan = decoder.cell_frame(8 << 20)?.to_vec();
@@ -2031,7 +2065,11 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             encode_world_cell_recipe(out, &request.recipe);
             match &request.operand {
                 None => out.push(0),
-                Some(operand) => { out.push(1); push_frame(out, operand.descriptor.as_os_str()); out.extend_from_slice(&operand.sha256); }
+                Some(operand) => {
+                    out.push(1);
+                    push_frame(out, operand.descriptor.as_os_str());
+                    out.extend_from_slice(&operand.sha256);
+                }
             }
             push_frame(out, request.output.as_os_str());
         }
@@ -2042,7 +2080,11 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             encode_world_cell_recipe(out, &request.recipe);
             match &request.operand {
                 None => out.push(0),
-                Some(operand) => { out.push(1); push_frame(out, operand.descriptor.as_os_str()); out.extend_from_slice(&operand.sha256); }
+                Some(operand) => {
+                    out.push(1);
+                    push_frame(out, operand.descriptor.as_os_str());
+                    out.extend_from_slice(&operand.sha256);
+                }
             }
             push_u32(out, request.plan.len());
             out.extend_from_slice(&request.plan);
@@ -2095,7 +2137,11 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                     out.push(1);
                     push_frame(out, path.as_os_str());
                 }
-                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => {
+                ExactInputsAcquisition::Successor {
+                    predecessor,
+                    realization,
+                    descriptor,
+                } => {
                     out.push(2);
                     push_frame(out, OsStr::new(predecessor));
                     push_frame(out, OsStr::new(realization));
@@ -3178,7 +3224,8 @@ mod tests {
         }
         // The optional descriptor and target scope survive both independent operations.
         let operand = WorldCellOperandRequest {
-            descriptor: "operand.cbor".into(), sha256: [37; 32],
+            descriptor: "operand.cbor".into(),
+            sha256: [37; 32],
         };
         let mut with_operand = plan.clone();
         with_operand.operand = Some(operand.clone());
@@ -3186,18 +3233,28 @@ mod tests {
         request.world_cell_plan(with_operand.clone()).unwrap();
         let bytes = request.encode();
         let decoded = ExtractRequest::decode(&bytes).unwrap();
-        let [Field::WorldCellPlan(actual)] = decoded.fields.as_slice() else { panic!("plan"); };
+        let [Field::WorldCellPlan(actual)] = decoded.fields.as_slice() else {
+            panic!("plan");
+        };
         assert_eq!(actual, &with_operand);
         let mut with_operand = prepare.clone();
         with_operand.operand = Some(operand);
         let mut request = ExtractRequest::default();
         request.world_cell_prepare(with_operand.clone()).unwrap();
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
-        let [Field::WorldCellPrepare(actual)] = decoded.fields.as_slice() else { panic!("prepare"); };
+        let [Field::WorldCellPrepare(actual)] = decoded.fields.as_slice() else {
+            panic!("prepare");
+        };
         assert_eq!(actual, &with_operand);
         let mut invalid = plan.clone();
-        invalid.operand = Some(WorldCellOperandRequest { descriptor: "".into(), sha256: [0;32] });
-        assert_eq!(invalid.validate_transport(), Err(ProtocolError::InvalidWorldCell));
+        invalid.operand = Some(WorldCellOperandRequest {
+            descriptor: "".into(),
+            sha256: [0; 32],
+        });
+        assert_eq!(
+            invalid.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
         let mut bad_recipes = Vec::new();
         let mut value = plan.clone();
         Arc::make_mut(&mut value.recipe).source = "λ".repeat((1 << 20) + 1);
@@ -3349,6 +3406,7 @@ mod tests {
             world: "a".repeat(64),
             realization: "held".into(),
             recipe,
+            operand: None,
             output: "plan.cbor".into(),
         }) {
             Err(failure) => failure,
@@ -3591,7 +3649,12 @@ mod tests {
     #[test]
     fn worker_request_flag_matches_the_haskell_encoder() {
         let haskell = include_str!("../../../bridge/haskell/src/Tidepool/ExtractRequest.hs");
-        let version: u32 = haskell.lines().find_map(|line| line.strip_prefix("workerRequestVersion = ")).expect("owning worker grammar version").parse().unwrap();
+        let version: u32 = haskell
+            .lines()
+            .find_map(|line| line.strip_prefix("workerRequestVersion = "))
+            .expect("owning worker grammar version")
+            .parse()
+            .unwrap();
         assert_eq!(format!("--worker-request-v{version}"), WORKER_REQUEST_FLAG);
         assert_eq!(format!("TPREQ{version:03}").as_bytes(), MAGIC);
     }
