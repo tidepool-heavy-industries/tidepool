@@ -1080,6 +1080,30 @@ pub(in crate::resident_actor) struct Fixture {
 }
 
 impl Fixture {
+    pub(in crate::resident_actor) async fn assert_generation_compilers(
+        &self,
+        fence: &crate::resident_workbench::generation_admission::GenerationFence,
+        expected: &[(usize, crate::termination::GenerationCompilerSource)],
+    ) {
+        let observed = self.directory.generation_population(fence).await.unwrap();
+        assert_eq!(observed.compilers.len(), expected.len());
+        for (registration, source) in expected {
+            let compiler = observed
+                .compilers
+                .iter()
+                .find(|observation| observation.compiler.registration == *registration)
+                .unwrap();
+            assert_eq!(
+                compiler.owner,
+                crate::local_actor::run_control::GenerationCompilerOwner::Actor(
+                    self.actor.identity()
+                )
+            );
+            assert_eq!(compiler.compiler.close, crate::CompilerWorkClose::Pending);
+            assert_eq!(&compiler.compiler.source, source);
+        }
+    }
+
     pub(in crate::resident_actor) async fn seal_membership(&self) {
         self.directory.seal().await.unwrap();
     }
