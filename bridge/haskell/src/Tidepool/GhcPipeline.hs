@@ -114,7 +114,7 @@ import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, Type
 import Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, moduleInputOccurrences, prepareSegmentDemand, prepareModuleDemand
   , ParsedModuleDemand, segmentModuleDemand, moduleDemandMatchesSource
-  , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope )
+  , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -310,6 +310,8 @@ import Tidepool.ExactScope
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
+  , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
+  , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
   , WorldTypeClosureEntry, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryInterfaceBody, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs
   , WorldInputsFailure(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -511,7 +513,7 @@ preparedDependencies
   :: HscEnv -> PipelineVariant -> DependencyEvidence -> Maybe ExactCompilation
   -> IO PreparedDependencies
 preparedDependencies _ variant fresh exact
-  | Just (WorldSourceInputBasis _ facts _ _) <- pvWorldSources variant = case exact of
+  | Just (WorldSourceInputBasis _ facts _ _ _) <- pvWorldSources variant = case exact of
       Nothing -> pure (WorldScoped fresh (worldInputsIdentityBytes facts)
         (worldSourceDomainSha256 (worldInputsSources facts)))
       Just _ -> throwIO CheckedPurposeMismatch
@@ -1233,7 +1235,7 @@ data PipelineVariant = PipelineVariant
 -- explicit selected-source receipt leaves the compile; no callback owns a world.
 data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFacts
   (IORef (Maybe WorldSourceSelection))
-  ParsedModuleDemand
+  ParsedModuleDemand [(ExactIfaceArtifact,ModIface)]
 
 data WorldSourceSelection = WorldSourceSelection (Maybe SourceSelectedOriginals)
   [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])] [WorldTypeClosureEntry]
@@ -2012,7 +2014,6 @@ frameWorldQuery body
 -- actual canonical producer of the world borrowed by this operation.
 planHeldWorldCell :: DynFlags -> WorldInputFacts -> WorldCellRecipe -> Maybe WorldCellOperandRequest -> IO BS.ByteString
 planHeldWorldCell flags facts recipe operand = do
-  when (isJust operand) (throwIO WorldCellUnsupported)
   plan <- parseWorldCellPlan flags recipe
   let bytes = encodeHeldWorldCellPlan facts recipe operand plan
   _ <- evaluate (BS.length bytes)
@@ -2050,7 +2051,6 @@ instance Exception WorldCellRefusal
 
 validateHeldWorldCell :: DynFlags -> WorldInputFacts -> WorldCellPrepareRequest -> IO (Either WorldCellRefusal CellSourcePlan)
 validateHeldWorldCell flags facts question = do
-  when (isJust (worldCellPrepareOperand question)) (throwIO WorldCellUnsupported)
   timing <- readTimingEnabled
   emitCount timing "world.cell.admission_parses" 1
   plan <- parseWorldCellPlan flags (worldCellPrepareRecipe question)
@@ -2072,10 +2072,10 @@ validateHeldWorldCell flags facts question = do
 -- nothing is published into the universe's source/original/recovery indexes.
 compileHeldWorldCell :: IO () -> Maybe CompilerProducerIdentity -> CompilerUniverse -> HscEnv -> Bool -> IORef InterpreterAttemptState
   -> HeldCompilerWorld -> CompilerExecutionGrant -> CompilerExecutor -> WorldCellPrepareRequest
-  -> WorldCellPrefix -> Int -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
+  -> IORef (Maybe WorldCellOperandInputs) -> WorldCellPrefix -> Int -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
   -> Ghc (CompletedCompilerResult result)
 compileHeldWorldCell guard producer universe baseEnv timing attempt
-    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) preparedRef) grant executor question prefix offset selection retained purpose path = do
+    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) preparedRef) grant executor question operandRef prefix offset selection retained purpose path = do
   -- Dependency completions use one closed compiler route. Caller-composed
   -- purpose wrappers cannot silently widen the retained dependency policy.
   unless (closedWorldCellPurpose purpose) (liftIO (throwIO WorldCellUnsupported))
@@ -2100,10 +2100,28 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
       Just plan -> segmentModuleDemand <$> prepareSegmentDemand plan effective capturedSource
       Nothing | isJust (worldPlannedDeclaration purpose) -> prepareModuleDemand effective capturedSource
       _ -> Left UnprovedRootAbstraction
+  -- Captured only after this issued stage has passed source policy and the
+  -- parsed no-execution proof. The admission retains the same sealed operand
+  -- across stages and retries; it never becomes a public World binding.
+  operandEnvironment <- getSession
+  operand <- liftIO $ case worldCellPrepareOperand question of
+    Nothing -> pure Nothing
+    Just (WorldCellOperandRequest descriptor sha) -> do
+      cached <- readIORef operandRef
+      case cached of
+        Just value -> pure (Just value)
+        Nothing -> do
+          value <- readWorldCellOperandWithOwner (universeOriginalInputs universe) operandEnvironment facts descriptor sha
+          writeIORef operandRef (Just value)
+          pure (Just value)
   initialBase <- getSession
   initial <- liftIO (hydrateWorldCellPrefix initialBase prefix)
-  setSession initial
-  declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) initial facts)
+  (withOperand,operandProjection) <- liftIO (hydrateWorldCellOperand initial operand)
+  let operandInterfaces = maybe [] (\(WorldCellOperandProjection value iface _ _) ->
+        [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems (worldCellOperandTypes value)]
+        ++ [(worldCellOperandInterface value,iface)]) operandProjection
+  setSession withOperand
+  declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) withOperand facts)
   (current,verifiedDeclaration) <- either (\reason -> liftIO $ do
     emitWorldAcquisitionRejection "world declaration type input" path reason
     throwIO WorldCellCorrupt) pure declarationInputs
@@ -2118,10 +2136,15 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
             ready <- hydrateWorldCellResolvedInputs environment resolved
             pure (ready,resolved)
           Nothing -> do
-            let WorldCellPrefix _ _ _ demandScope _ _ = prefix
+            let WorldCellPrefix _ _ _ baseScope _ _ = prefix
+            demandScope <- case operandProjection of
+              Just projection@(WorldCellOperandProjection value _ _ name) -> either (const (throwIO WorldCellCorrupt)) pure $
+                associateSegmentDemandName name (operandAlias value) (WorldOperandBinding projection) baseScope
+              Nothing -> pure baseScope
             emitCount timing "world.cell.demand_resolutions" 1
+            available <- hydrateExactScope environment operandInterfaces
             (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts path
-              offset sourceOwners environment demandScope parsedDemand
+              offset sourceOwners available demandScope parsedDemand
             writeIORef resolvedRef (Just resolved)
             pure (ready,resolved)
       policyFor resolved = retainedContext
@@ -2137,8 +2160,9 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   let cycle = worldDependencyCycle dependencies universe attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
+        , pvDownsweepExcludes=maybe [] (pure . mkModuleName . exactModule . worldCellOperandInterface) operand
         , pvWorldOriginalBindings=worldCellPrefixOriginalBindings prefix
-        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand)
+        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces)
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- pvTransformParsed variant target environment summary parsed
             if ms_mod_name summary /= target then pure annotated else do
@@ -2175,6 +2199,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
     unless unchanged (liftIO (throwIO WorldCellUnavailable))
   selectedTypeBodies <- liftIO $ do
     let entries = worldResolvedTypes resolved ++ sourceTypes ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
+          ++ maybe [] (Map.elems . worldCellOperandTypes) operand
         selected = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,worldTypeEntryInterfaceBody entry))
           | entry <- entries, let artifact = worldTypeEntryArtifact entry]
     unless (all (\entry -> let artifact = worldTypeEntryArtifact entry in
@@ -2343,7 +2368,7 @@ worldPreparedResult _ _ = Nothing
 
 -- The private constructor keeps the origin and its seal correlated. A World
 -- row CID and a captured prior-stage interface hash never share an untagged slot.
-data WorldCellInputOrigin = WorldBaseInput | WorldPriorInput Word64 Word64
+data WorldCellInputOrigin = WorldBaseInput | WorldPriorInput Word64 Word64 | WorldOperandInput
   deriving (Eq,Ord)
 data WorldCellInputReference = WorldCellInputReference WorldCellInputOrigin String SymbolIdentity Word64 Word64 Word64 BS.ByteString
   deriving (Eq,Ord)
@@ -2371,6 +2396,7 @@ encodeWorldCellInputReference :: WorldCellInputReference -> WorldEncoding.Encodi
 encodeWorldCellInputReference (WorldCellInputReference origin occurrence symbol variable scope generation seal) =
   WorldEncoding.encodeListLen 7 <> (case origin of
     WorldBaseInput -> WorldEncoding.encodeListLen 1 <> WorldEncoding.encodeWord 0
+    WorldOperandInput -> WorldEncoding.encodeListLen 1 <> WorldEncoding.encodeWord 2
     WorldPriorInput producer consumer -> WorldEncoding.encodeListLen 3 <> WorldEncoding.encodeWord 1
       <> WorldEncoding.encodeWord64 producer <> WorldEncoding.encodeWord64 consumer)
   <> WorldEncoding.encodeString (Text.pack occurrence) <> encodeSymbol symbol
@@ -2380,15 +2406,55 @@ encodeWorldCellInputReference (WorldCellInputReference origin occurrence symbol 
 data WorldStagedValue = WorldStagedValue Word64 SymbolIdentity Word64 Word64 Word64
   ExactIfaceArtifact ModIface CapturedSessionInterface HomeModInfo
 data WorldDemandBinding = WorldBaseBinding WorldBinding | WorldPriorBinding WorldStagedValue
+  | WorldOperandBinding WorldCellOperandProjection
+
+-- Issued together from one installed interface; the Name and capture cannot
+-- be supplied independently of the sealed operation input.
+data WorldCellOperandProjection = WorldCellOperandProjection WorldCellOperandInputs ModIface CapturedSessionInterface Name
+
+operandAlias :: WorldCellOperandInputs -> String
+operandAlias operand = case worldCellOperandExposure operand of
+  WorldInputOperand -> "input"
+  WorldSessionInputOperand -> "sessionInput"
+
+worldNeedsAlias :: WorldDemandBinding -> Bool
+worldNeedsAlias (WorldOperandBinding _) = False
+worldNeedsAlias _ = True
+
+-- Source-less type availability is required even when the helper is unused.
+-- The exact exported Name is only a reverse demand association; no GRE or
+-- executable input obligation is issued by installing this interface.
+hydrateWorldCellOperand :: HscEnv -> Maybe WorldCellOperandInputs
+  -> IO (HscEnv,Maybe WorldCellOperandProjection)
+hydrateWorldCellOperand environment Nothing = pure (environment,Nothing)
+hydrateWorldCellOperand environment (Just operand) = do
+  let artifact = worldCellOperandInterface operand
+  selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
+  typed <- hydrateExactScope environment
+    [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems (worldCellOperandTypes operand)]
+  (ready,_,capture) <- injectCapturedSessionIfaceWithBindings selected (worldCellOperandBody operand)
+    (worldCellOperandPackages operand) (exactRequirements artifact) typed
+  home <- maybe (throwIO WorldCellCorrupt) pure (lookupHpt (hsc_HPT ready) (mkModuleName (exactModule artifact)))
+  unless (mi_module (hm_iface home) == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact)))
+    (throwIO WorldCellCorrupt)
+  name <- case [name | exported <- mi_exports (hm_iface home),name <- availNames exported
+      , nameSymbolIdentity "value" name == Just (worldBindingSymbol (worldCellOperandBinding operand))] of
+    [actual] -> pure actual
+    _ -> throwIO WorldCellCorrupt
+  registerSessionInterfaceLocation (exactPath artifact) selected ready
+  pure (ready,Just (WorldCellOperandProjection operand (hm_iface home) capture name))
 
 worldDemandSymbol :: WorldDemandBinding -> SymbolIdentity
 worldDemandSymbol (WorldBaseBinding binding) = worldBindingSymbol binding
+worldDemandSymbol (WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = worldBindingSymbol (worldCellOperandBinding operand)
 worldDemandSymbol (WorldPriorBinding (WorldStagedValue _ symbol _ _ _ _ _ _ _)) = symbol
 worldDemandGeneration :: WorldDemandBinding -> Word64
 worldDemandGeneration (WorldBaseBinding binding) = worldBindingGeneration binding
+worldDemandGeneration (WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = worldBindingGeneration (worldCellOperandBinding operand)
 worldDemandGeneration (WorldPriorBinding (WorldStagedValue _ _ _ _ generation _ _ _ _)) = generation
 worldDemandArtifact :: WorldDemandBinding -> ExactIfaceArtifact
 worldDemandArtifact (WorldBaseBinding binding) = worldBindingInterfaceArtifact binding
+worldDemandArtifact (WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = worldCellOperandInterface operand
 worldDemandArtifact (WorldPriorBinding (WorldStagedValue _ _ _ _ _ artifact _ _ _)) = artifact
 
 -- A request-local result of actual demand under the target's dependency HPT.
@@ -2417,6 +2483,10 @@ worldResolvedReferences (WorldCellResolvedInputs inputs consumer _ _ _ _) = map 
     reference (name,WorldBaseBinding binding) = WorldCellInputReference WorldBaseInput name
       (worldBindingSymbol binding) (worldBindingSessionVar binding) (worldBindingScope binding)
       (worldBindingGeneration binding) (worldBindingRowFactCID (worldBindingRow binding))
+    reference (name,WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = let binding = worldCellOperandBinding operand in
+      WorldCellInputReference WorldOperandInput name
+        (worldBindingSymbol binding) (worldBindingSessionVar binding) (worldBindingScope binding)
+        (worldBindingGeneration binding) (worldBindingRowFactCID (worldBindingRow binding))
     reference (name,WorldPriorBinding (WorldStagedValue producer symbol variable scope generation _ _ capture _)) =
       WorldCellInputReference (WorldPriorInput producer (fromIntegral consumer)) name symbol variable scope generation
         (SHA256.hash (snd (capturedSessionInterface capture)))
@@ -2425,13 +2495,14 @@ hydrateWorldCellResolvedInputs :: HscEnv -> WorldCellResolvedInputs -> IO HscEnv
 hydrateWorldCellResolvedInputs environment (WorldCellResolvedInputs inputs _ types interfaces _ _) = do
   ready <- hydrateExactScope environment
     ([(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- types] ++ interfaces)
-  let requested = [(name,worldDemandSymbol binding,worldDemandArtifact binding) | (name,binding) <- inputs]
+  let requested = [(name,worldDemandSymbol binding,worldDemandArtifact binding) | (name,binding) <- inputs, worldNeedsAlias binding]
   fst <$> (hydrateCompletedValueAliases requested interfaces ready >>= either reject pure)
   where reject reason = emitWorldAcquisitionRejection "world value rehydration" "<target input projection>" reason
           >> throwIO WorldCellCorrupt
 
 resolveWorldCellInputs :: ExactInputOwner -> WorldInputFacts -> FilePath -> Int -> Set.Set (String,String)
-  -> HscEnv -> SegmentDemandScope WorldDemandBinding -> ParsedModuleDemand -> IO (HscEnv,WorldCellResolvedInputs)
+  -> HscEnv -> SegmentDemandScope WorldDemandBinding -> ParsedModuleDemand
+  -> IO (HscEnv,WorldCellResolvedInputs)
 resolveWorldCellInputs owner facts path consumer sourceOwners environment scope parsedDemand = do
   demand <- moduleInputOccurrences environment scope parsedDemand
   demanded <- either (\failure -> do
@@ -2445,6 +2516,8 @@ resolveWorldCellInputs owner facts path consumer sourceOwners environment scope 
   (_,bodies,typeInputs) <- either reject pure readback
   let inputs = demanded
       prior = [value | (_,WorldPriorBinding value) <- inputs]
+      operands = [value | (_,WorldOperandBinding value) <- inputs]
+      allTypes = Map.unions (typeInputs:[worldCellOperandTypes value | WorldCellOperandProjection value _ _ _ <- operands])
   unless (all (\(WorldStagedValue producer _ _ _ _ _ _ _ _) -> producer < fromIntegral consumer) prior)
     (reject "prior value is not before the consuming stage")
   -- Value owners must never be source summaries: adding their retained policy
@@ -2454,7 +2527,7 @@ resolveWorldCellInputs owner facts path consumer sourceOwners environment scope 
         in (Text.unpack (symbolUnit symbol),Text.unpack (symbolModule symbol)) `Set.notMember` sourceOwners) inputs)
     (reject "selected value owner is also a source module")
   withTypes <- hydrateExactScope environment
-    [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems typeInputs]
+    [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems allTypes]
   (injected,reversedCaptures,reversedInterfaces) <- foldM (\(current,captures,interfaces) (artifact,body,packages) -> do
     selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
     (ready,_,captured) <- injectCapturedSessionIfaceWithBindings selected body packages (exactRequirements artifact) current
@@ -2466,10 +2539,14 @@ resolveWorldCellInputs owner facts path consumer sourceOwners environment scope 
         | WorldStagedValue _ _ _ _ _ artifact iface _ _ <- prior])
       priorCaptures = Map.elems (Map.fromList [(fst (capturedSessionInterface capture),capture)
         | WorldStagedValue _ _ _ _ _ _ _ capture _ <- prior])
-      interfaces = reverse reversedInterfaces ++ priorInterfaces
-      requested = [(name,worldDemandSymbol binding,worldDemandArtifact binding) | (name,binding) <- inputs]
+      operandInterfaces = [(worldCellOperandInterface value,iface)
+        | WorldCellOperandProjection value iface _ _ <- take 1 operands]
+      interfaces = reverse reversedInterfaces ++ priorInterfaces ++ operandInterfaces
+      requested = [(name,worldDemandSymbol binding,worldDemandArtifact binding) | (name,binding) <- inputs, worldNeedsAlias binding]
   (hydrated,aliases) <- hydrateCompletedValueAliases requested interfaces injected >>= either reject pure
-  let resolved = WorldCellResolvedInputs inputs consumer (Map.elems typeInputs) interfaces (reverse reversedCaptures ++ priorCaptures) aliases
+  let operandCaptures = [capture | WorldCellOperandProjection _ _ capture _ <- take 1 operands]
+  let resolved = WorldCellResolvedInputs inputs consumer (Map.elems allTypes) interfaces
+        (reverse reversedCaptures ++ priorCaptures ++ operandCaptures) aliases
       generations = worldResolvedGenerations resolved
   unless (all (\(_,binding) -> Map.lookup (worldDemandSymbol binding) generations == Just (worldDemandGeneration binding)) inputs)
     (throwIO WorldCellCorrupt)
@@ -3589,7 +3666,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       then Just <$> liftIO (targetModuleFor modGraphDownsweep path)
       else pure Nothing
     targetQuoteProof <- case (pvWorldSources variant,capturedTarget,policyTarget) of
-      (Just (WorldSourceInputBasis _ _ _ proof),Just bytes,Just owner)
+      (Just (WorldSourceInputBasis _ _ _ proof _),Just bytes,Just owner)
         | moduleDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
         | otherwise -> liftIO (throwIO WorldCellCorrupt)
       (Nothing,_,_) -> pure Nothing
@@ -3959,9 +4036,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let sourceOrder = [summary
           | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
           , ms_hsc_src summary == HsSrcFile]
-    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts receipt _) -> do
+    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts receipt _ privateInputs) -> do
       when (isJust (pvExactScope variant)) (liftIO (throwIO WorldCellCorrupt))
-      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts modGraphRaw)
+      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts privateInputs modGraphRaw)
       liftIO (writeIORef receipt (Just selected))
       pure selected
     sourceSelection <- case pvExactScope variant of
@@ -6211,7 +6288,7 @@ withResidentPipelineSelectedRequests baseIncludes useRequests =
 -- may be observed after close, but cannot authorize another scope or allowance.
 data HeldWorldCellAdmission = HeldWorldCellAdmission (IORef CompilerPhase)
   HeldWorldQueryBinding WorldCellPrepareRequest CellSourcePlan CompilerExecutionGrant CompilerExecutor
-  (IORef WorldCellPrefix)
+  (IORef WorldCellPrefix) (IORef (Maybe WorldCellOperandInputs))
 
 -- Private compiler facts from successfully completed earlier stages. They grant
 -- neither runtime values nor permission to publish a partial cell.
@@ -6252,10 +6329,10 @@ worldCellStagePurpose (HeldWorldCellStage _ _ _ (WorldRenderedTyped _ purpose _)
 worldCellStagePurpose (HeldWorldCellStage _ _ _ (WorldRenderedOriginal _ purpose _)) = purpose
 
 heldWorldCellQuestion :: HeldWorldCellAdmission -> WorldCellPrepareRequest
-heldWorldCellQuestion (HeldWorldCellAdmission _ _ question _ _ _ _) = question
+heldWorldCellQuestion (HeldWorldCellAdmission _ _ question _ _ _ _ _) = question
 
 heldWorldCellPlan :: HeldWorldCellAdmission -> CellSourcePlan
-heldWorldCellPlan (HeldWorldCellAdmission _ _ _ plan _ _ _) = plan
+heldWorldCellPlan (HeldWorldCellAdmission _ _ _ plan _ _ _ _) = plan
 
 heldWorldCellSlots :: HeldWorldCellAdmission -> [(Word64,PlannedCellSlot)]
 heldWorldCellSlots = worldCellPrepareSlots . heldWorldCellQuestion
@@ -6754,10 +6831,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                         RetainedGeneratedImport [mkModuleName (exactModule artifact)]]
                                   inherited = prologueImports (cellPlanPrologue lexical) ++ selectedDeclaration
                               prefix <- newIORef (WorldCellPrefix 0 emptyHomePackageTable [] basis inherited WorldStagePending)
+                              operand <- newIORef Nothing
                               pure (Right (HeldWorldCellAdmission phase
-                                (HeldWorldQueryBinding (worldInputsIdentity facts) issued) question plan grant executor prefix))
+                                (HeldWorldQueryBinding (worldInputsIdentity facts) issued) question plan grant executor prefix operand))
                     _ -> pure (Left WorldCellUnavailable)
-                prepareWorldCellStage (HeldWorldCellAdmission issuingPhase expected question plan _ executor prefixRef) = runGuarded $ do
+                prepareWorldCellStage (HeldWorldCellAdmission issuingPhase expected question plan _ executor prefixRef _) = runGuarded $ do
                   unless (issuingPhase == phase) (throwIO CheckedPurposeMismatch)
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
@@ -6785,7 +6863,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                 compileWorldCell :: forall result. HeldWorldCellAdmission
                   -> PipelineSelection result -> Set.Set SymbolIdentity
                   -> IO (CompletedCompilerResult result)
-                compileWorldCell (HeldWorldCellAdmission issuingPhase expected question _ grant executor prefixRef)
+                compileWorldCell (HeldWorldCellAdmission issuingPhase expected question _ grant executor prefixRef operandRef)
                     selection retained = runGuarded $ do
                   unless (issuingPhase == phase) (throwIO CheckedPurposeMismatch)
                   requireCompilerExecutorOpen executor
@@ -6810,7 +6888,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                           selected <- readIORef universe
                           bracket (reflectGhc getSession session) (\original -> reflectGhc (setSession original) session) $ \_ -> do
                             result <- reflectGhc (compileHeldWorldCell requireReady producer selected baseEnv timing interpreterAttempt world grant executor
-                              question prefix offset selection retained purpose path) session
+                              question operandRef prefix offset selection retained purpose path) session
                               `catch` \failure@(GeneratedInstanceRejection _ rejected) -> do
                                 let retry = retryCellInstancePlan rejected current
                                 when (retry /= current) $
@@ -6821,7 +6899,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             writeIORef prefixRef advanced
                             pure result
                     _ -> throwIO WorldCellUnavailable
-                commitWorldDependencies (HeldWorldCellAdmission issuingPhase expected question _ _ executor _)
+                commitWorldDependencies (HeldWorldCellAdmission issuingPhase expected question _ _ executor _ _)
                     pending@(PendingWorldDependencies issuingExecutor _ _ _ _) = runGuarded $ do
                   unless (issuingPhase == phase && sameCompilerExecutor executor issuingExecutor)
                     (throwIO CheckedPurposeMismatch)
@@ -7791,9 +7869,9 @@ withHeldWorldSourceRefusal action = reifyGhc $ \session ->
       emitWorldAcquisitionRejection "world source import" "<held captured source>" (show failure)
       throwIO WorldCellUnavailable
 
-captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> ModuleGraph
+captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> [(ExactIfaceArtifact,ModIface)] -> ModuleGraph
   -> Ghc WorldSourceSelection
-captureHeldWorldSourceSelection owner facts graph = do
+captureHeldWorldSourceSelection owner facts privateInputs graph = do
   let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
       demanded = Set.fromList [ownerKey (ms_mod summary)
         | ModuleNode _ summary <- mgModSummaries' graph
@@ -7810,9 +7888,9 @@ captureHeldWorldSourceSelection owner facts graph = do
         liftIO (emitWorldAcquisitionRejection "world source import" "<held Context association>" reason)
         liftIO (throwIO WorldCellUnsupported)
       Right inputs -> pure inputs
-    let artifacts = [worldTypeEntryArtifact entry | entry <- Map.elems typeEntries]
+    let artifacts = [worldTypeEntryArtifact entry | entry <- Map.elems typeEntries] ++ map fst privateInputs
         interfaces = [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry)
-          | entry <- Map.elems typeEntries]
+          | entry <- Map.elems typeEntries] ++ privateInputs
         proofs = Map.map worldSourceEntryProof entries
         readPackages key = maybe (throwIO (ExecutionSourcePackageChanged key))
           (pure . worldSourceEntryPackages) (Map.lookup key entries)
