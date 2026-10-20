@@ -8337,16 +8337,14 @@ mod module_product_tests {
                     Arc::from(&b"native-world-source"[..]),
                     root,
                 )?);
-                let source = WorldSourceSelection::new(
-                    *sources.seal(),
-                    "native-world-source",
-                )?;
+                let source = WorldSourceSelection::new(*sources.seal(), "native-world-source")?;
                 let inputs = ModuleCandidateOffer::compiler_world_inputs(
                     None,
                     CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                     sources,
                     crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
-                        Vec::new(), None,
+                        Vec::new(),
+                        None,
                     )?,
                 )?;
                 let world = crate::compiler_world::open_world(inputs, &endpoint)?;
@@ -8398,6 +8396,21 @@ mod module_product_tests {
                         "actual World producer refused: {refusal:?}"
                     ))
                 })?;
+                let binding =
+                    crate::declaration_context::WorldSourceCompilationBinding::from_output(
+                        &checked, 0,
+                    )?;
+                let identity =
+                    crate::declaration_context::WorldCompilationIdentity::from_binding(&binding);
+                let base = checked.reservation().plan().world();
+                let domain = base.restoration().captured_source_domain();
+                assert!(identity.matches_source_recipe(base.logical_id(), domain));
+                let mut wrong_base = *base.logical_id();
+                wrong_base[0] ^= 1;
+                let mut wrong_domain = *domain;
+                wrong_domain[0] ^= 1;
+                assert!(!identity.matches_source_recipe(&wrong_base, domain));
+                assert!(!identity.matches_source_recipe(base.logical_id(), &wrong_domain));
                 let prepared = prepare_world_cell_program(checked)?;
                 Ok::<_, CompileError>((prepared, origin))
             },

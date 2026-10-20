@@ -6622,18 +6622,31 @@ impl PartialEq for WorldSourceCompilationBinding {
 /// with the checked program that issued the binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorldCompilationIdentity {
+    base_world_identity: [u8; 32],
+    captured_source_domain: [u8; 32],
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
     segment_digest: String,
 }
 
 impl WorldCompilationIdentity {
-    fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
+    pub(crate) fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
         Self {
+            base_world_identity: *binding.reservation.plan().world().logical_id(),
+            captured_source_domain: *binding
+                .reservation
+                .plan()
+                .world()
+                .restoration()
+                .captured_source_domain(),
             plan_receipt_sha256: binding.plan_receipt_sha256,
             product_context_sha256: binding.product_context_sha256,
             segment_digest: binding.segment.digest().to_owned(),
         }
+    }
+
+    pub(crate) fn matches_source_recipe(&self, base: &[u8; 32], domain: &[u8; 32]) -> bool {
+        self.base_world_identity == *base && self.captured_source_domain == *domain
     }
 
     #[cfg(test)]
@@ -6643,6 +6656,8 @@ impl WorldCompilationIdentity {
         segment_digest: impl Into<String>,
     ) -> Self {
         Self {
+            base_world_identity: plan_receipt_sha256,
+            captured_source_domain: product_context_sha256,
             plan_receipt_sha256,
             product_context_sha256,
             segment_digest: segment_digest.into(),
@@ -7362,6 +7377,10 @@ impl ExactSourceAdmission {
 }
 
 impl<'a> ExactProductAdmission<'a> {
+    pub(crate) fn compilation_binding(&self) -> ProductCompilationBinding<'a> {
+        self.compilation_binding
+    }
+
     pub(crate) fn program_source_lexical(&self) -> &'a [ExactLexicalNode] {
         self.facts.source_lexical
     }

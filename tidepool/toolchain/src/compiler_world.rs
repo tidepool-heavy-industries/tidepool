@@ -748,6 +748,10 @@ impl fmt::Debug for CompilerWorldRestoration {
 }
 
 impl CompilerWorldRestoration {
+    pub(crate) fn captured_source_domain(&self) -> &[u8; 32] {
+        self.inputs.sources.seal()
+    }
+
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.logical_id
     }
@@ -3976,7 +3980,11 @@ mod answer_tests {
         )
         .unwrap();
         assert_eq!(cold.primary_context.snapshot().producer_sha256(), [0; 32]);
-        let (bound, root, blocks) = cold.materialize_primary(&endpoint).unwrap();
+        let (bound, root, blocks) = cold
+            .materialize_primary(
+                CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256(),
+            )
+            .unwrap();
         assert_eq!(bound.snapshot().producer_sha256(), canonical);
         // The original published owner remains unchanged. Inspect the actual
         // production materializer's root through its independent reader.
@@ -3994,7 +4002,15 @@ mod answer_tests {
             CompilerWorldLexicalSurface::from_publication(Vec::new(), None).unwrap(),
         )
         .unwrap();
-        assert_eq!(issued.materialize_primary(&endpoint).unwrap().1, root);
+        assert_eq!(
+            issued
+                .materialize_primary(
+                    CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
+                )
+                .unwrap()
+                .1,
+            root
+        );
         let wrong = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             Some(Arc::new(
                 (*cold.primary_context).clone().admit_producer(raw).unwrap(),
@@ -4004,7 +4020,11 @@ mod answer_tests {
             CompilerWorldLexicalSurface::from_publication(Vec::new(), None).unwrap(),
         )
         .unwrap();
-        assert!(wrong.materialize_primary(&endpoint).is_err());
+        assert!(wrong
+            .materialize_primary(
+                CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
+            )
+            .is_err());
     }
 
     #[test]
