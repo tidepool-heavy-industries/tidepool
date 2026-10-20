@@ -2674,14 +2674,13 @@ admitWorldRows state producer acquisition offered = do
   -- Available custody can include historical originals unrelated to the
   -- selected semantic rows. Only those rows select images for capture; passive
   -- images neither authorize types nor require access to their DATA endpoints.
-  selectedImages <- mapM (selectWorldRowImage producer images) offered
+  selectedParts <- mapM (selectWorldRowParts producer images) offered
   retained <- if null offered then pure [] else do
     RetainedOriginalInputs values _ _ _ _ <- readMVar state
     pure values
   let available = foldl' (\content (_,more) -> mergeCapturedOriginalContent content more)
         emptyCapturedOriginalContent retained
-  originals <- continueRequestInputs available
-    [reference | OriginalInputImage _ _ _ parts <- selectedImages, (_,reference) <- parts]
+  originals <- continueRequestInputs available (concat selectedParts)
   (rows,_) <- withCapturedRequestInputTokens originals $ \readToken -> do
     let verified artifact cap sha = do
           token <- readToken artifact cap
@@ -4038,9 +4037,11 @@ worldSemanticRowEncoding producer ((row@(iface,_,_),evidence),image) = do
     <> foldMap (\(ownerUnit,ownerName) -> E.encodeListLen 2 <> text ownerUnit <> text ownerName) required)
   where text = E.encodeString . T.pack
 
-selectWorldRowImage :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO OriginalInputImage
-selectWorldRowImage producer images ((row@(iface,packages,packageSha),evidence),expectedImage) = case matching of
-  [image] -> pure image
+selectWorldRowParts :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO [OriginalInputReference]
+selectWorldRowParts producer images ((row@(iface,packages,packageSha),evidence),expectedImage) = case matching of
+  [OriginalInputImage _ _ _ parts] -> pure
+    [reference | (kind,reference) <- parts
+      , (kind,originalInputPath reference,originalInputSha256 reference) `elem` expected]
   _ -> worldCorrupt "world interface row lacks one exact owned input image"
   where
     expected = [(InputInterface,exactPath iface,exactSha256 iface),(InputPackages,packages,packageSha)]
