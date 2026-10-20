@@ -604,7 +604,15 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       WorldCellPrepare query -> request { requestWorldCellPrepare = Just query }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v24"
+workerRequestFlag = "--worker-request-v" ++ show workerRequestVersion
+
+-- The launcher flag and byte framing describe the same grammar version.
+workerRequestVersion :: Int
+workerRequestVersion = 25
+
+workerRequestMagic :: BS.ByteString
+workerRequestMagic = TE.encodeUtf8 (T.pack ("TPREQ" ++ replicate (3 - length version) '0' ++ version))
+  where version = show workerRequestVersion
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -663,7 +671,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ025"
+  if magic /= workerRequestMagic
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -683,7 +691,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ025" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = workerRequestMagic <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
