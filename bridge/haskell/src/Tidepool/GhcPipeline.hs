@@ -266,7 +266,7 @@ import Tidepool.Timing
   , WorldRetentionEvent(..), emitWorldRetention
   , readMemoTraceEnabled, MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
   , emitMemoCycleGraph, emitMemoMissTrace )
-import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
+import Tidepool.PreparedStg (PreparedModule, pmModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
   , PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
@@ -1243,6 +1243,7 @@ data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFac
 
 data WorldSourceSelection = WorldSourceSelection (Maybe SourceSelectedOriginals)
   [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])] [WorldTypeClosureEntry]
+  (Map.Map (String,String) CanonicalInterfaceAdmission)
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
@@ -2407,7 +2408,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         pending <- liftIO (stageHeldWorldDependencies executor dependencies withAliases final path)
         recovery <- liftIO (worldDependencyRecovery dependencies)
         selected <- liftIO (readIORef importsRef >>= maybe (throwIO WorldCellCorrupt) pure)
-        let WorldSourceSelection sourceSelection _ _ = selected
+        let WorldSourceSelection sourceSelection _ _ _ = selected
         forM_ sourceSelection $ \value -> do
           unchanged <- liftIO (revalidateSourceSelectedOriginals value)
           unless unchanged (liftIO (throwIO WorldCellUnavailable))
@@ -2417,7 +2418,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       result <- runStage selection
       final <- getSession
       resolved <- liftIO requireResolved
-      (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes) <- completeDependencies
+      (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes _) <- completeDependencies
       selectedTypeBodies <- liftIO $ do
         let entries = worldResolvedTypes resolved ++ sourceTypes ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
               ++ maybe [] (Map.elems . worldCellOperandTypes) operand
@@ -4303,7 +4304,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       (pvExactScope variant)
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
-          Just (WorldSourceSelection selected imports _) ->
+          Just (WorldSourceSelection selected imports _ _) ->
             let owners = Set.fromList [key | value <- maybe [] pure selected,(key,_,_,_) <- selectedOriginalRows value]
                 (ordinary,_) = sourceEvidenceGraphFor
                   (Map.fromList [(mkModuleName name,unit) | (unit,name) <- Set.toAscList owners]) modGraphRaw
@@ -4334,13 +4335,20 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               ModuleInterfaceAdmission (admittedCandidateProof admitted))
             | admitted <- Map.elems acceptedCandidates
             , let original = admittedCandidateOriginal admitted]
-        -- Genuine candidate admission declines an owner already present in the
-        -- exact interface closure. Enforce that contract before combining proof
-        -- owners; map precedence cannot choose between competing admissions.
-        duplicateCanonicalOwners = Map.keys (Map.intersection exactCanonicalInterfaces candidateCanonicalInterfaces)
-        selectedCanonicalInterfaces = Map.union exactCanonicalInterfaces candidateCanonicalInterfaces
+        worldCanonicalInterfaces = case worldSources of
+          Nothing -> Map.empty
+          Just (WorldSourceSelection _ _ _ selected) -> selected
+        -- Every admission remains paired with its actual issuer. Map precedence
+        -- cannot select between independently admitted proofs of the same owner.
+        duplicateCanonicalOwners = Set.toAscList (Set.unions
+          [ Map.keysSet (Map.intersection exactCanonicalInterfaces candidateCanonicalInterfaces)
+          , Map.keysSet (Map.intersection exactCanonicalInterfaces worldCanonicalInterfaces)
+          , Map.keysSet (Map.intersection candidateCanonicalInterfaces worldCanonicalInterfaces)
+          ])
+        selectedCanonicalInterfaces = Map.unions
+          [exactCanonicalInterfaces,candidateCanonicalInterfaces,worldCanonicalInterfaces]
     unless (null duplicateCanonicalOwners) $ liftIO $ fail
-      ("admitted candidate duplicates an exact canonical owner: " ++ show duplicateCanonicalOwners)
+      ("canonical interface admissions duplicate an owner: " ++ show duplicateCanonicalOwners)
     -- One dependency-order decision combines current admitted originals with
     -- source memo validation. An offered name or a previous HPT entry cannot
     -- substitute for this cycle's accepted candidate proof.
@@ -5660,7 +5668,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 matches owner = let (unit,name) = key owner in requested == unit ++ ":" ++ name
                 summaries graph owner = [summary | ModuleNode _ summary <- mgModSummaries' graph
                   , ms_mod summary == owner]
-                selectedSources = [owner | WorldSourceSelection selected _ _ <- maybe [] pure worldSources
+                selectedSources = [owner | WorldSourceSelection selected _ _ _ <- maybe [] pure worldSources
                   , selection <- maybe [] pure selected,(owner,_,_,_) <- selectedOriginalRows selection]
                 observed owner = [case observation of
                     CachedObservation _ entry -> "memo:" ++ show (gmeCycle entry)
@@ -8178,7 +8186,7 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
         , worldHasSelectedPrimary facts (ownerKey (ms_mod summary))
         , not (worldHasSelectedSource facts (ownerKey (ms_mod summary)))]
   unless (null unsupported) (liftIO (throwIO WorldCellUnsupported))
-  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor Map.empty graph)) []) else do
+  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor Map.empty graph)) [] Map.empty) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs owner initial facts (Set.toAscList demanded))
     (entries,typeEntries) <- case captured of
@@ -8227,7 +8235,10 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
           ,exactSha256 (worldSourceEntryArtifact entry)
           ,canonicalSourceSha256 (worldSourceEntryProof entry))
           | (key,entry) <- Map.toAscList entries,key `Set.member` selectedKeys]
-    pure (WorldSourceSelection (Just (SourceSelectedOriginals claims evidence)) imports (Map.elems typeEntries))
+        selectedProofs = Map.map (ModuleInterfaceAdmission . worldSourceEntryProof)
+          (Map.restrictKeys entries selectedKeys)
+    pure (WorldSourceSelection (Just (SourceSelectedOriginals claims evidence)) imports
+      (Map.elems typeEntries) selectedProofs)
 
 data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
