@@ -34,8 +34,13 @@ demandScopeChecks = do
     runGhc (Just libdir) $ do
       initial <- getSessionDynFlags
       forM_ controls $ \(name,root,aliases,expected) -> do
-        source <- liftIO (readFile
-          ("test-cell-splitter/fixtures/demand-scope" </> name ++ ".hs"))
+        source <- liftIO $ case name of
+          "DeclarationModule" -> pure (unlines
+            ["module DeclarationModule where", "data Box = Box Int", "refer = old"])
+          "DeclarationQuote" -> pure (unlines
+            ["{-# LANGUAGE QuasiQuotes #-}", "module DeclarationQuote where"
+            ,"[doesNotExist| refuse before rename |]"])
+          _ -> readFile ("test-cell-splitter/fixtures/demand-scope" </> name ++ ".hs")
         actual <- liftIO (sourceModuleFlags initial source)
           >>= either (liftIO . fail . show) pure
         _ <- setSessionDynFlags actual {backend=noBackend,ghcLink=NoLink}
@@ -44,25 +49,38 @@ demandScopeChecks = do
           let path = directory </> name ++ ".hs"
               bindings = Map.fromList (zip aliases [0 :: Int ..])
           writeFile path source
-          plan <- either (fail . show) pure
-            (typedSegmentPlan (replicate 64 '0') root
-              [TypedItemPlan 0 "item" 1 (LetItem "marker" [])])
           recipe <- generatedCheckingTemplateRecipe actual (CheckedTemplateImports [] [])
             source source path name >>= either fail pure
           captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
           scope <- newSegmentDemandScope environment bindings
-          case prepareSegmentDemand plan actual captured of
+          case prepareModuleDemand actual captured of
             Left _ | expected == ParseRefusal -> pure ()
             Left failure -> fail (name ++ ": parsing refused " ++ show failure)
             Right _ | expected == ParseRefusal -> fail (name ++ ": quote passed the parser gate")
             Right parsed -> do
               let sealedPath = capturedGeneratedScaffoldPath captured
                   sealedBytes = capturedGeneratedScaffoldBytes captured
-              unless (segmentDemandMatchesSource parsed sealedPath sealedBytes
-                  && not (segmentDemandMatchesSource parsed (sealedPath ++ ".other") sealedBytes)
-                  && not (segmentDemandMatchesSource parsed sealedPath (sealedBytes <> BS.singleton 0)))
+              unless (moduleDemandMatchesSource parsed sealedPath sealedBytes
+                  && not (moduleDemandMatchesSource parsed (sealedPath ++ ".other") sealedBytes)
+                  && not (moduleDemandMatchesSource parsed sealedPath (sealedBytes <> BS.singleton 0)))
                 (fail (name ++ ": quote proof lost its exact source identity"))
-              demanded <- typedSegmentInputOccurrences environment scope parsed
+              demanded <- moduleInputOccurrences environment scope parsed
+              if name == "ScopeControl" then do
+                let makePlan checker = either (fail . show) pure
+                      (typedSegmentPlan (replicate 64 '0') checker
+                        [TypedItemPlan 0 "item" 1 (LetItem "marker" [])])
+                plan <- makePlan root
+                typed <- either (fail . show) pure (prepareSegmentDemand plan actual captured)
+                typedDemand <- typedSegmentInputOccurrences environment scope typed
+                unless (typedDemand == demanded
+                    && moduleDemandMatchesSource (segmentModuleDemand typed) sealedPath sealedBytes
+                    && segmentDemandMatchesSource typed sealedPath sealedBytes)
+                  (fail "typed root wrapper changed its module proof or demand")
+                wrong <- makePlan "missingTypedCheckerRoot"
+                case prepareSegmentDemand wrong actual captured of
+                  Left UnprovedRootAbstraction -> pure ()
+                  _ -> fail "typed root wrapper admitted a plan without its unique checker root"
+              else pure ()
               case (expected,demanded) of
                 (Bindings names,Right selected) | map fst selected == names -> pure ()
                 (RenameRefusal,Left (InputDemandRenameRejected diagnostic))
@@ -73,8 +91,8 @@ demandScopeChecks = do
                 let nextBindings = Map.mapMaybe id (Map.union (Map.fromList changes)
                       (Map.map Just previousBindings))
                 rebuilt <- newSegmentDemandScope environment nextBindings
-                incrementalDemand <- typedSegmentInputOccurrences environment updated parsed
-                rebuiltDemand <- typedSegmentInputOccurrences environment rebuilt parsed
+                incrementalDemand <- moduleInputOccurrences environment updated parsed
+                rebuiltDemand <- moduleInputOccurrences environment rebuilt parsed
                 unless (incrementalDemand == rebuiltDemand)
                   (fail (name ++ ": alias delta differs from a fresh GHC scope"))
                 pure (updated,nextBindings)) (scope,bindings)
@@ -112,4 +130,6 @@ controls =
   , ("RenameError","root",["old"],RenameRefusal)
   , ("MissingImport","root",["old"],RenameRefusal)
   , ("ActualQuote","root",[],ParseRefusal)
+  , ("DeclarationModule","",["old"],Bindings ["old"])
+  , ("DeclarationQuote","",[],ParseRefusal)
   ]
