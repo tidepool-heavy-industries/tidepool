@@ -1900,6 +1900,8 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     access: ResidentMachineAccess<H, O>,
     state: Arc<InstalledToolsState>,
     owner: ActorPublicationOwner,
+    #[cfg(test)]
+    settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
 
 #[derive(Clone)]
@@ -2489,6 +2491,10 @@ where
             Ok(outcome) => outcome,
             Err(error) => return Err(error),
         };
+        #[cfg(test)]
+        if let Some(probe) = &self.settlement_probe {
+            probe.wait();
+        }
         owner.complete(outcome)
     }
 }
@@ -3180,6 +3186,8 @@ where
             access: self.access.sharing(),
             state,
             owner,
+            #[cfg(test)]
+            settlement_probe: None,
         }
     }
 }
@@ -20228,7 +20236,7 @@ pub(crate) mod request_tests {
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
         with_test_compiler_owner(|preparation_client|
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), None),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), None, None),
         ).await
     }
 
@@ -20244,29 +20252,127 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) {
         with_test_compiler_owner(|_|
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Durable)),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Durable), None),
         ).await;
     }
 
     #[tokio::test]
     async fn quoted_source_original_survives_ephemeral_generation_replacement() {
         with_test_compiler_owner(|preparation_client|
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Ephemeral)),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Ephemeral), None),
         ).await
+    }
+
+    #[tokio::test]
+    async fn actual_publisher_owner_loss_after_visibility_retains_external_prerequisite() {
+        for bootstrap in [true, false] {
+            with_test_compiler_owner(|client| async move {
+                quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                    client, Some(crate::ActorPersistencePolicy::Ephemeral), Some(bootstrap),
+                ).await;
+            }).await;
+        }
+    }
+
+    async fn assert_real_publisher_owner_loss(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        prepared: PreparedActorGeneration,
+    ) {
+        let parent = prepared
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .prerequisite()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let target = prepared
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .clone();
+        let terminal = crate::CompilerPreparationOwner::new();
+        let mut publisher = workbench.generation_publisher(
+            state.clone(),
+            ActorPublicationOwner::Preparation(terminal.client()),
+        );
+        let (entered, observed) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::channel();
+        publisher.settlement_probe = Some(Arc::new(PublicationSettlementProbe {
+            entered,
+            release: Mutex::new(released),
+            unwind: false,
+        }));
+        let close = std::thread::spawn(move || {
+            observed
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap();
+            let fence = parent.runtime_admission().fence().unwrap();
+            assert_eq!(fence.pending_claims(), 1);
+            drop(terminal);
+            release.send(()).unwrap();
+            fence
+        });
+        let result = publisher
+            .publish(
+                prepared,
+                tidepool_runtime::session::PublicationDecision::new(),
+                ActorGenerationPublication::Terminal,
+            )
+            .await;
+        let parent_fence = close.join().unwrap();
+        let Err(error @ ResidentActorWorkbenchError::PublicationSettlement { .. }) = result else {
+            panic!("lost publication owner must retain uncertainty")
+        };
+        assert!(error.requires_recovery());
+        let ResidentActorWorkbenchError::PublicationSettlement { failure } = error else {
+            unreachable!()
+        };
+        assert!(matches!(
+            failure.outcome,
+            Ok(ActorGenerationCommit::Published { .. })
+        ));
+        assert!(matches!(
+            failure.settlement,
+            PublicationSettlementError::OwnerUnavailable
+        ));
+        assert!(
+            matches!(&state.0.lock().availability, InstalledToolsAvailability::GenerationUnavailable(generation) if generation.dependency().same_prepared(&target))
+        );
+        assert_eq!(parent_fence.pending_claims(), 0);
+        assert_eq!(parent_fence.unconfirmed_claims(), 1);
+        assert!(target.runtime_lease().admit_source().is_err());
     }
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
+        publication_owner_loss: Option<bool>,
     ) {
         let mut recovery = None;
-        let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
+        let (mut session, mut context, source, session_root) = host_mount_fixture_with_lib(|lib| {
             let fixture =
                 crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
             tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
             recovery = Some(fixture);
         });
         let recovery = recovery.unwrap();
+        if publication_owner_loss.is_some() {
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let parent = generation_admission::GenerationDependency::new(
+                crate::ActorRef::first(crate::ActorId(99)),
+                tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                crate::CheckpointSourceLayer::default(),
+                &lease,
+                None,
+            );
+            context.source_dependency = generation_admission::SourceDependency::World(
+                generation_admission::BootstrapWorld::new(Some(parent)),
+            );
+        }
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
             context.actor.incarnation.0,
@@ -20721,6 +20827,10 @@ pub(crate) mod request_tests {
                 restored_decodes: 0,
             };
             assert_eq!(prepared.installation_work, expected_work);
+            if publication_owner_loss == Some(true) {
+                assert_real_publisher_owner_loss(&workbench, state, prepared).await;
+                return;
+            }
             let initial = match workbench
                 .generation_publisher(
                     state.clone(),
@@ -21014,6 +21124,10 @@ pub(crate) mod request_tests {
                 revision,
                 "an unrelated public owner forces the prepared replacement to rebase"
             );
+            if publication_owner_loss == Some(false) {
+                assert_real_publisher_owner_loss(&workbench, state, prepared).await;
+                return;
+            }
             let replacement = match workbench
                 .generation_publisher(
                     state.clone(),
