@@ -9,10 +9,10 @@ use crate::resident_workbench::generation_admission::{
 use crate::resident_workbench::{
     ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationCommit,
     ActorGenerationPublicationDiscard, ActorGenerationPublicationOperation,
-    ActorGenerationPublicationRefusal, ActorGenerationPublicationSettlement,
-    ActorGenerationRetirementCutoff, ActorGenerationRetirementPreparation,
-    ActorGenerationRetirementPreparationOutcome, ActorPublicationAttemptObserver,
-    PreparedActorGeneration, ReservedActorGeneration,
+    ActorGenerationPublicationRefusal, ActorGenerationPublicationRefusalObservation,
+    ActorGenerationPublicationSettlement, ActorGenerationRetirementCutoff,
+    ActorGenerationRetirementPreparation, ActorGenerationRetirementPreparationOutcome,
+    ActorPublicationAttemptObserver, PreparedActorGeneration, ReservedActorGeneration,
 };
 
 pub(super) enum GenerationRetirementRecord {
@@ -21,11 +21,11 @@ pub(super) enum GenerationRetirementRecord {
     Completed(GenerationRetirementCompletion),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum GenerationRetirementCompletion {
     UnreservedRefused,
     AReopened {
-        outcome: preparation::PublicationOutcomeObservation,
+        outcome: ActorGenerationPublicationRefusalObservation,
         nonstart: Option<preparation::PublicationNonStartKind>,
     },
 }
@@ -88,8 +88,20 @@ enum GenerationPublicationCustody {
         refusal: ActorGenerationPublicationRefusal,
         settlement_error: Option<Arc<ResidentActorWorkbenchError>>,
     },
+    SourceRestoredPending(PublicationSourceRestoredPending),
     Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
     ProducerLostAfterExecute,
+}
+
+enum PublicationSourceRestoredPending {
+    Unpublished {
+        refusal: ActorGenerationPublicationRefusal,
+        observation: ActorGenerationPublicationRefusalObservation,
+    },
+    NotStarted {
+        reserved: ReservedActorGeneration,
+        reason: preparation::PublicationNonStart,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -171,6 +183,11 @@ pub(super) enum GenerationRetirementBeginFailure {
 
 pub(super) enum RetainedGenerationRetirementRecord {
     Active(RetainedGenerationRetirement),
+    SourcesSettled {
+        actor: ActorRef,
+        completion: GenerationRetirementCompletion,
+        cutoff: GenerationRetirementCutoffPhase,
+    },
     Completed {
         actor: ActorRef,
         completion: GenerationRetirementCompletion,
@@ -316,8 +333,23 @@ impl GenerationPublicationCustody {
                 settlement_error,
             } if settlement_error.is_none() => {
                 match reserved.refuse_retirement(fence, "publication worker did not execute") {
+                    Ok(())
+                        if matches!(reason, preparation::PublicationNonStart::SpawnFailed(_)) =>
+                    {
+                        let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
+                        let Self::NotStarted {
+                            reserved, reason, ..
+                        } = old
+                        else {
+                            return None;
+                        };
+                        *self = Self::SourceRestoredPending(
+                            PublicationSourceRestoredPending::NotStarted { reserved, reason },
+                        );
+                        None
+                    }
                     Ok(()) => Some(GenerationRetirementCompletion::AReopened {
-                        outcome: preparation::PublicationOutcomeObservation::Refused,
+                        outcome: ActorGenerationPublicationRefusalObservation::Refused,
                         nonstart: Some(reason.kind()),
                     }),
                     Err(error) => {
@@ -330,16 +362,31 @@ impl GenerationPublicationCustody {
                 refusal,
                 settlement_error,
             } if settlement_error.is_none() => {
-                let outcome = match refusal.outcome().as_ref() {
-                    Ok(ActorGenerationCommit::Refused(_)) => {
-                        preparation::PublicationOutcomeObservation::Refused
-                    }
-                    Err(_) => preparation::PublicationOutcomeObservation::Failed,
-                    _ => return None,
-                };
+                let observation = refusal.observation();
                 match refusal.refuse_retirement(fence) {
+                    Ok(())
+                        if matches!(
+                            observation,
+                            ActorGenerationPublicationRefusalObservation::Failed { .. }
+                        ) =>
+                    {
+                        // The original diagnostic must reach its real journal
+                        // consumer; source restoration alone cannot erase it or
+                        // resolve an independent recovery obligation.
+                        let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
+                        let Self::Unpublished { refusal, .. } = old else {
+                            return None;
+                        };
+                        *self = Self::SourceRestoredPending(
+                            PublicationSourceRestoredPending::Unpublished {
+                                refusal,
+                                observation,
+                            },
+                        );
+                        None
+                    }
                     Ok(()) => Some(GenerationRetirementCompletion::AReopened {
-                        outcome,
+                        outcome: observation,
                         nonstart: None,
                     }),
                     Err(error) => {
@@ -370,11 +417,37 @@ impl RunControlNativeRecovery<'_> {
             };
             if let Some(completion) = custody.reconcile(cutoff) {
                 let actor = attempt.actor;
+                // Unlike live RunState, this terminal parcel is now the
+                // retained owner of its capture's actual cleanup callbacks.
+                // Move that capture into SourcesSettled before releasing B.
                 let displaced = std::mem::replace(
                     record,
-                    RetainedGenerationRetirementRecord::Completed { actor, completion },
+                    RetainedGenerationRetirementRecord::Completed {
+                        actor,
+                        completion: GenerationRetirementCompletion::UnreservedRefused,
+                    },
                 );
-                drop(displaced);
+                match displaced {
+                    RetainedGenerationRetirementRecord::Active(RetainedGenerationRetirement {
+                        actor,
+                        candidate,
+                        expected,
+                        phase:
+                            RetainedGenerationRetirementPhase::Publication {
+                                observer,
+                                cutoff,
+                                custody,
+                            },
+                    }) => {
+                        *record = RetainedGenerationRetirementRecord::SourcesSettled {
+                            actor,
+                            completion,
+                            cutoff,
+                        };
+                        drop((candidate, expected, observer, custody));
+                    }
+                    other => *record = other,
+                }
             }
         }
     }
@@ -398,6 +471,17 @@ impl RunState {
     ) -> Option<ActorRef> {
         self.reservations.iter().find_map(|(actor, record)| {
             let attempt = record.retirement.active()?;
+            if matches!(
+                &attempt.phase,
+                GenerationRetirementPhase::Publication {
+                    custody: GenerationPublicationCustody::SourceRestoredPending(_),
+                    ..
+                }
+            ) {
+                // A is already reopened. This phase owns only the independent
+                // recovery obligation and cannot freeze/stop its prior closure.
+                return None;
+            }
             let (GenerationRetirementPhase::Reserved {
                 cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
                 ..
@@ -540,7 +624,10 @@ impl RunState {
         myself: &RactorRef<RunControlMessage>,
         actor: ActorRef,
         observer: ActorPublicationAttemptObserver,
-    ) -> Result<(), GenerationPublicationDispatchFailure> {
+    ) -> Result<
+        Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
+        GenerationPublicationDispatchFailure,
+    > {
         let supervisor = self
             .preparation_supervisor
             .clone()
@@ -584,7 +671,10 @@ impl RunState {
         attempt.phase = GenerationRetirementPhase::Publication {
             observer,
             cutoff,
-            custody: GenerationPublicationCustody::Waiting { receiver, terminal },
+            custody: GenerationPublicationCustody::Waiting {
+                receiver,
+                terminal: terminal.clone(),
+            },
         };
         let transfer = preparation::PublicationTransfer::new(operation, writer);
         if let Err(ractor::MessagingErr::SendErr(PreparationMessage::PublishGeneration(transfer))) =
@@ -592,7 +682,7 @@ impl RunState {
         {
             transfer.return_unstarted(preparation::PublicationNonStart::SupervisorSendFailed);
         }
-        Ok(())
+        Ok(terminal)
     }
 
     pub(super) fn generation_publication_ready(
@@ -1698,6 +1788,8 @@ mod retirement_retention_tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationRetirementNativeControl {
     PublicationBodyRefusal,
+    WorkerLiveRefusal,
+    WorkerNativeLossAfterBody,
     BeforeSend,
     QueuedBeforeReceive,
     KillAfterReserve,

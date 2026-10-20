@@ -254,6 +254,7 @@ enum NativeRecoveryObservation {
     Retained {
         attempts: usize,
         completed: usize,
+        sources_settled: usize,
         worker_transfers: usize,
         resource_transfers: usize,
     },
@@ -294,6 +295,8 @@ impl RunControlNativeCleanup {
                             )
                         })
                         .count(),
+                    sources_settled: custody.attempts.iter().filter(|record|
+                        matches!(record, generation::RetainedGenerationRetirementRecord::SourcesSettled { .. })).count(),
                     worker_transfers: custody.worker_transfers.len(),
                     resource_transfers: custody.resource_transfers.len(),
                 },
@@ -784,7 +787,17 @@ pub(super) enum RunControlMessage {
     DispatchCancelledGenerationPublication {
         actor: ActorRef,
         observer: crate::resident_workbench::ActorPublicationAttemptObserver,
-        reply: oneshot::Sender<Result<(), generation::GenerationPublicationDispatchFailure>>,
+        reply: oneshot::Sender<
+            Result<
+                Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
+                generation::GenerationPublicationDispatchFailure,
+            >,
+        >,
+    },
+    #[cfg(test)]
+    ObserveGenerationRetirementCompletion {
+        actor: ActorRef,
+        reply: oneshot::Sender<Option<generation::GenerationRetirementCompletion>>,
     },
     GenerationPopulation {
         dependency: GenerationDependency,
@@ -1266,12 +1279,32 @@ impl Actor for RunControl {
                 let outcome = state.begin_generation_retirement(&myself, preparation, inventory);
                 let _ = reply.send(outcome);
             }
+            #[cfg(test)]
+            RunControlMessage::ObserveGenerationRetirementCompletion { actor, reply } => {
+                let outcome =
+                    state
+                        .reservations
+                        .get(&actor)
+                        .and_then(|record| match &record.retirement {
+                            generation::GenerationRetirementRecord::Completed(completion) => {
+                                Some(completion.clone())
+                            }
+                            _ => None,
+                        });
+                let _ = reply.send(outcome);
+            }
             RunControlMessage::GenerationPublicationReady { actor, observer } => {
                 state.generation_publication_ready(actor, observer);
             }
             #[cfg(test)]
-            RunControlMessage::DispatchCancelledGenerationPublication { actor, observer, reply } => {
-                let _ = reply.send(state.dispatch_cancelled_generation_publication(&myself, actor, observer));
+            RunControlMessage::DispatchCancelledGenerationPublication {
+                actor,
+                observer,
+                reply,
+            } => {
+                let _ = reply.send(
+                    state.dispatch_cancelled_generation_publication(&myself, actor, observer),
+                );
             }
             RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
                 state.capture_generation_retirement(actor, observer);

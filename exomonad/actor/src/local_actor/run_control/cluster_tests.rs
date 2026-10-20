@@ -12,6 +12,7 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
         NativeRecoveryObservation::Retained {
             attempts: 0,
             completed: 0,
+            sources_settled: 0,
             worker_transfers: 0,
             resource_transfers: 0
         }
@@ -28,6 +29,7 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
         NativeRecoveryObservation::Retained {
             attempts: 0,
             completed: 0,
+            sources_settled: 0,
             worker_transfers: 0,
             resource_transfers: 0
         }
@@ -48,6 +50,7 @@ async fn native_cleanup_retains_owner_loss_after_handler_panic() {
         NativeRecoveryObservation::Retained {
             attempts: 0,
             completed: 0,
+            sources_settled: 0,
             worker_transfers: 0,
             resource_transfers: 0
         }
@@ -58,6 +61,7 @@ async fn native_cleanup_retains_owner_loss_after_handler_panic() {
         NativeRecoveryObservation::Retained {
             attempts: 0,
             completed: 0,
+            sources_settled: 0,
             worker_transfers: 0,
             resource_transfers: 0
         }
@@ -91,6 +95,7 @@ async fn native_recovery_checkout_requires_actual_owner_loss_and_returns_on_canc
         NativeRecoveryObservation::Retained {
             attempts: 0,
             completed: 0,
+            sources_settled: 0,
             worker_transfers: 0,
             resource_transfers: 0,
         }

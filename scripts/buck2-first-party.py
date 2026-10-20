@@ -1826,6 +1826,8 @@ tidepool_buildscript_run(
                     "resident_workbench::request_tests::actual_retirement_waiter_loss_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership",
                     "resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard",
+                    "resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body",
+                    "resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result",
                 ]
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
@@ -1863,6 +1865,23 @@ tidepool_buildscript_run(
                     "    expected_count = 1,", "    ignored = True,",
                     "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                     '    case_compiler_modes = {' + json.dumps(capture_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                publication_workers = [
+                    "resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body",
+                    "resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result",
+                ]
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_worker_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(publication_workers, 8), "    ],",
+                    "    expected_count = 2,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in publication_workers
+                    ) + "},",
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))

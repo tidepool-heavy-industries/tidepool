@@ -22072,6 +22072,32 @@ pub(crate) mod request_tests {
         }).await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_linked_publication_worker_settles_cancelled_body() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerLiveRefusal,
+                )),
+            ).await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_native_recovery_consumes_same_linked_publication_result() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerNativeLossAfterBody,
+                )),
+            ).await;
+        }).await;
+    }
+
     async fn assert_real_publisher_checkout_loss(
         workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<InstalledToolsState>,
