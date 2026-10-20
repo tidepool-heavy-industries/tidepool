@@ -230,11 +230,14 @@ materializeCanonicalOriginalView directory index env input summary = do
   validateCandidateCompilerViewProfile summary
   iface <- if backendGeneratesCode (backend (ms_hspp_opts summary))
     then do
+      timing <- readTimingEnabled
+      emitCount timing "world.cell.canonical_make_view_core_reads" 1
       captured <- captureCanonicalProofs Nothing [(canonicalOriginalProof input,ExecutableInterfaceUse)]
       proof <- case captured of
         [issued] -> pure issued
         _ -> throwIO CandidateCoreMissing
       bytes <- readAdmittedCore (ModuleInterfaceAdmission proof)
+      emitCount timing "world.cell.canonical_make_view_core_bytes" (fromIntegral (BS.length bytes))
       attachFinalizedCore env (canonicalOriginalHome input) bytes
         >>= either (throwIO . CandidateCoreDecodeFailure) pure
     else pure (set_mi_extra_decls Nothing (hm_iface (canonicalOriginalHome input)))

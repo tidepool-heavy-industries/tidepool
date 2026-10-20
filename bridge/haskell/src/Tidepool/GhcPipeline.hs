@@ -3455,8 +3455,16 @@ data LoadedModule = LoadedModule
   { loadedSummary :: ModSummary
   , loadedFacts :: ModuleFacts
   , loadedOutput :: ModuleOutput
-  , loadedFinalized :: FinalizedModule
+  , loadedAcquisition :: AcquiredOriginalProduct
   }
+
+loadedFinalized :: LoadedModule -> FinalizedModule
+loadedFinalized = acquiredOriginalFinalization . loadedAcquisition
+
+freshLoadedModule :: ModSummary -> ModuleFacts -> ModuleOutput -> FinalizedModule -> LoadedModule
+freshLoadedModule summary facts output original = LoadedModule summary facts output
+  (FreshCompletion (FreshSourceAdmission (ms_mod summary) (ms_hsc_src summary)
+    (ms_hs_hash summary) (ml_hs_file (ms_location summary))) original)
 
 data CanonicalFrontendFailure
   = CustomLoadPhaseHook
@@ -3989,16 +3997,23 @@ data ModuleProduct = ModuleProduct
 -- The completion issuer chooses provenance once. A reused proof never gets
 -- attached later to a different source frontend's finalization.
 data AcquiredOriginalProduct
-  = FreshCompletion FinalizedModule
+  = FreshCompletion !FreshSourceAdmission FinalizedModule
   | ReusedCanonical AdmittedFinalizedOriginal
 
+-- Only the source completion issuer constructs this small ingress fact. Keep
+-- parsed trees and phase environments out of dormant product provenance.
+data FreshSourceAdmission = FreshSourceAdmission !Module !HscSource !Fingerprint !(Maybe FilePath)
+
 productFinalized :: ModuleProduct -> FinalizedModule
-productFinalized product' = case productAcquisition product' of
-  FreshCompletion original -> original
+productFinalized = acquiredOriginalFinalization . productAcquisition
+
+acquiredOriginalFinalization :: AcquiredOriginalProduct -> FinalizedModule
+acquiredOriginalFinalization acquisition = case acquisition of
+  FreshCompletion _ original -> original
   ReusedCanonical original -> admittedOriginalModule original
 
 data MemoPayload
-  = ValidationOnly ModuleFacts ModuleOutput FinalizedModule
+  = ValidationOnly ModuleFacts ModuleOutput AcquiredOriginalProduct
   | ExecutableProduct ModuleProduct
 
 data GutsMemoEntry = GutsMemoEntry
@@ -4065,28 +4080,27 @@ payloadProduct (ValidationOnly _ _ _) = Nothing
 payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
 
 payloadLoaded :: ModSummary -> MemoPayload -> LoadedModule
-payloadLoaded summary (ValidationOnly facts output finalized) =
-  LoadedModule summary facts output finalized
+payloadLoaded summary (ValidationOnly facts output acquisition) =
+  LoadedModule summary facts output acquisition
 payloadLoaded summary (ExecutableProduct product') =
-  LoadedModule summary (productFacts product') (productOutput product') (productFinalized product')
+  LoadedModule summary (productFacts product') (productOutput product') (productAcquisition product')
 
 payloadFinalized :: MemoPayload -> FinalizedModule
-payloadFinalized (ValidationOnly _ _ finalized) = finalized
+payloadFinalized (ValidationOnly _ _ acquisition) = acquiredOriginalFinalization acquisition
 payloadFinalized (ExecutableProduct product') = productFinalized product'
 
 payloadOwner :: MemoPayload -> Module
 payloadOwner (ValidationOnly _ output _) = moduleOutputModule output
 payloadOwner (ExecutableProduct product') = moduleOutputModule (productOutput product')
 
-requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
-  -> FinalizedModule -> Ghc ModuleProduct
-requireProduct facts output (Just prepared) finalized = pure ModuleProduct
-  { productFacts = facts
-  , productOutput = output
+requireProduct :: LoadedModule -> Maybe PreparedModule -> Ghc ModuleProduct
+requireProduct loaded (Just prepared) = pure ModuleProduct
+  { productFacts = loadedFacts loaded
+  , productOutput = loadedOutput loaded
   , productPrepared = prepared
-  , productAcquisition = FreshCompletion finalized
+  , productAcquisition = loadedAcquisition loaded
   }
-requireProduct _ _ Nothing _ = liftIO $ ioError $ userError
+requireProduct _ Nothing = liftIO $ ioError $ userError
     "executable compilation produced no prepared module"
 
 -- Resolved direct imports include unused, instance-only and compiler-inserted
@@ -4627,7 +4641,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let canonicalOriginalInputs = case worldSources of
           Just (WorldSourceSelection _ _ _ _ inputs) -> inputs
           Nothing -> Nothing
-        canonicalOriginalFor owner = canonicalOriginalInputs >>= (\inputs -> lookupCanonicalOriginalInput inputs owner)
+        canonicalOriginalFor summary
+          | ms_hsc_src summary == HsSrcFile = canonicalOriginalInputs >>=
+              (\inputs -> lookupCanonicalOriginalInput inputs (ms_mod summary))
+          | otherwise = Nothing
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->
@@ -4756,7 +4773,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           , ms_mod_name summary `Map.notMember` acceptedCandidates]
         freshSource summary = ms_hsc_src summary == HsSrcFile
           && ms_mod summary `Set.member` recompiledOwners
-          && isNothing (canonicalOriginalFor (ms_mod summary))
+          && isNothing (canonicalOriginalFor summary)
         sourceFlags = Map.fromList [(ms_mod summary, ms_hspp_opts summary) | summary <- sourceOrder]
         forceFreshSource summary
           | freshSource summary = summary
@@ -4983,7 +5000,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     canonicalViews <- fmap Map.fromList $ forM
       [(index,summary,input) | (index,ModuleNode _ summary) <- zip [0..] (mgModSummaries' loadGraph)
         , ms_hsc_src summary == HsSrcFile
-        , Just input <- [canonicalOriginalFor (ms_mod summary)]] $ \(index,summary,input) -> do
+        , Just input <- [canonicalOriginalFor summary]] $ \(index,summary,input) -> do
           installPreparedInterface (ms_mod_name summary) (canonicalOriginalHome input)
           view <- liftIO $ materializeCanonicalOriginalView compilerViewDirectory
             (index + Map.size candidateViews) certifiedEnv input summary
@@ -4995,7 +5012,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 , Just candidate <- Map.lookup (ms_mod_name summary) acceptedCandidates
                 , ms_mod summary == ms_mod (admittedCandidateSummary candidate) =
                     candidateViews Map.! ms_mod summary
-                | Just canonical <- Map.lookup (ms_mod summary) canonicalViews = canonical
+                | ms_hsc_src summary == HsSrcFile
+                , Just canonical <- Map.lookup (ms_mod summary) canonicalViews = canonical
                 | otherwise = summary
               flags = (canonicalizeDFlags original)
                 { backend = backend original, ghcLink = ghcLink original }
@@ -5092,7 +5110,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           finalized <- newFinalizedModule (pendingEnvironment pending)
             (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
             (pendingTidyGuts pending)
-          let loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
+          let loaded = freshLoadedModule (pendingSummary pending) (pendingFacts pending)
                 (pendingOutput pending) finalized
               name = ms_mod_name (pendingSummary pending)
           -- A candidate's bytecode may be needed by a splice. Its recompilation
@@ -5115,7 +5133,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 throwIO UnsupportedLoadBackend
               when (isJust (hscFrontendHook (hsc_hooks phaseEnv))) (throwIO CustomLoadFrontendHook)
               when (ms_mod_name summary `Map.member` acceptedCandidates
-                  || isJust (canonicalOriginalFor (ms_mod summary))) $
+                  || isJust (canonicalOriginalFor summary)) $
                 throwIO (CandidateFrontendReplayRefused (ms_mod_name summary))
               validateCandidateHomeInterfaces env
               -- GHC make supplies the dependency HPT for this exact phase.
@@ -5384,7 +5402,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       when (ms_mod summary /= targetOwner) $
         forM_ mMemoRef $ \ref -> liftIO $ modifyIORef' ref (Map.insert (ms_mod_name summary)
           (GutsMemoEntry (memoValidity summary (loadedFinalized loaded))
-            (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedFinalized loaded))
+            (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedAcquisition loaded))
             requestIdentity (memoDiagnosticWitnesses summary)))
     forM_ (Map.elems cachedOnly) $ \loaded -> do
       liftIO (publishLoadedFinalization loaded)
@@ -5563,7 +5581,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     front <- compileFront summary
                     (_, output, finalized) <- compileBack interfaceUse front
                     facts <- liftIO (frontFacts front)
-                    pure (LoadedModule (mfSummary front) facts output
+                    pure (freshLoadedModule (mfSummary front) facts output
                       finalized)
               rememberFinalized loaded = liftIO (publishLoadedFinalization loaded)
               observeCandidate modSum candidate = do
@@ -5701,10 +5719,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     output = ModuleOutput (ms_mod summary) (cg_binds guts) Nothing [] Nothing
                     facts = (hydratedModuleFacts (canonicalOriginalPackages input))
                       {moduleFactReferences=bindingModuleRefs (cg_binds guts)}
-                pure (LoadedModule summary facts output finalized)
-              rememberProductProvenance product' = do
-                canonical <- liftIO (Map.lookup (pmModule (productPrepared product')) <$> readIORef acquiredCanonicalOriginalsRef)
-                pure (maybe product' (\issued -> product' {productAcquisition=ReusedCanonical issued}) canonical)
+                pure (LoadedModule summary facts output (ReusedCanonical admitted))
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case bodyTier of
             OptimizeEveryModule -> do
@@ -5716,7 +5731,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     observation <- observeCandidate modSum candidate
                     recordExecutableValidity modSum True
                     pure observation
-                  Nothing | Just canonical <- canonicalOriginalFor (ms_mod modSum) ->
+                  Nothing | Just canonical <- canonicalOriginalFor modSum ->
                     pure (CanonicalObservation modSum canonical)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
@@ -5765,7 +5780,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         output = loadedOutput loaded
                         finalized = loadedFinalized loaded
                         prepared = Map.lookup (ms_mod_name summary) preparedByName
-                    moduleProduct <- requireProduct (loadedFacts loaded) output prepared finalized >>= rememberProductProvenance
+                    moduleProduct <- requireProduct loaded prepared
                     forM_ mMemoRef $ \ref -> liftIO (modifyIORef' ref
                       (Map.insert (ms_mod_name summary) (GutsMemoEntry
                         (memoValidity summary finalized)
@@ -5787,7 +5802,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 cpBeforeModule plan modSum
                 case Map.lookup (ms_mod_name modSum) acceptedCandidates of
                   Just candidate -> observeCandidate modSum candidate
-                  Nothing | Just canonical <- canonicalOriginalFor (ms_mod modSum) ->
+                  Nothing | Just canonical <- canonicalOriginalFor modSum ->
                     pure (CanonicalObservation modSum canonical)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
@@ -5888,8 +5903,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     PrepareStg -> case Map.lookup (ms_mod_name (loadedSummary loaded)) preparedByName of
                       Just prepared -> pure (Just prepared)
                       Nothing -> liftIO (ioError (userError "selected prepared module task is absent"))
-                  rememberExecutable modSum output prepared finalized moduleFacts = do
-                    moduleProduct <- requireProduct moduleFacts output prepared finalized >>= rememberProductProvenance
+                  rememberExecutable loaded prepared = do
+                    let modSum = loadedSummary loaded
+                        finalized = loadedFinalized loaded
+                    moduleProduct <- requireProduct loaded prepared
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert (ms_mod_name modSum)
@@ -5899,13 +5916,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
-                  compileReachable loaded moduleFacts = do
-                    let modSum = loadedSummary loaded
+                  compileReachable loaded = do
                     rememberFinalized loaded
                     let r = loadedOutput loaded
-                        finalized = loadedFinalized loaded
                     prepared <- prepareReachable loaded
-                    rememberExecutable modSum r prepared finalized moduleFacts
+                    rememberExecutable loaded prepared
                     pure [(r, prepared)]
                   validationOnly loaded moduleFacts = do
                     let modSum = loadedSummary loaded
@@ -5914,7 +5929,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         (Map.insert (ms_mod_name modSum)
                           (GutsMemoEntry
                             (memoValidity modSum (loadedFinalized loaded))
-                            (ValidationOnly moduleFacts (loadedOutput loaded) (loadedFinalized loaded))
+                            (ValidationOnly moduleFacts (loadedOutput loaded) (loadedAcquisition loaded))
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
@@ -5951,11 +5966,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
                       memoMissTrace modSum reason (Just entry)
-                      compileReachable (payloadLoaded modSum (gmePayload entry)) moduleFacts
-                    LoadedObservation loaded -> compileReachable loaded moduleFacts
+                      compileReachable (payloadLoaded modSum (gmePayload entry))
+                    LoadedObservation loaded -> compileReachable loaded
                     CanonicalObservation summary input -> do
                       loaded <- loadedCanonical summary input
-                      compileReachable loaded (loadedFacts loaded)
+                      compileReachable loaded
                     HydratedObservation _ _ _ -> do
                       recordExecutableValidity modSum True
                       pure []
