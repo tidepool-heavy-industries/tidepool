@@ -1100,6 +1100,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         })
         self.assertEqual(refusal['resource_env'], rooted['resource_env'])
         self.assertEqual(refusal['resources'], rooted['resources'])
+        capture = self.rule('exomonad/actor', 'actor_generation_retirement_capture_tests',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(capture['binary'], retirement['binary'])
+        self.assertEqual(capture['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership',
+        ])
+        self.assertEqual(capture['expected_count'], 1)
+        self.assertTrue(capture['ignored'])
+        self.assertEqual(capture['case_compiler_modes'], {
+            name: 'owned-resident' for name in capture['exact_tests']
+        })
+        self.assertEqual(capture['resource_env'], rooted['resource_env'])
+        self.assertEqual(capture['resources'], rooted['resources'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [

@@ -53,6 +53,20 @@ impl RunControlClient {
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
         let retained = self.native_cleanup.clone();
+        // This member is admitted under A's real gate. Installing A does not
+        // change the hosting actor's independent physical birth provenance.
+        let captured_reservation = if control == GenerationRetirementNativeControl::AfterCapture {
+            Some(
+                self.reserve_source_actor(
+                    &SourceDependency::Generation(expected.dependency().clone()),
+                    crate::Incarnation::FIRST,
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
         let mut acknowledged = None;
         let mut waiter = None;
         let mut pause_release = None;
@@ -215,12 +229,22 @@ impl RunControlClient {
                         capture.work,
                         GenerationRetirementWork::Unavailable
                     ));
-                    let GenerationCapturePhysicalClosure::Guarded { actors, cells } =
+                    let GenerationCapturePhysicalClosure::Guarded { actors, .. } =
                         &capture.physical_closure;
-                    assert!(actors.contains(&actor));
-                    assert!(capture.actors.iter().any(|captured| {
-                        captured.identity() == actor && cells.contains(&captured.address().get_id())
-                    }));
+                    let member = captured_reservation.as_ref().unwrap().identity();
+                    assert!(actors.contains(&member));
+                    assert!(capture
+                        .population
+                        .resources
+                        .iter()
+                        .any(|resource| resource.identity
+                            == GenerationResourceIdentity::Actor(member)));
+                    assert_eq!(capture.reservations.len(), 1);
+                    assert!(!actors.contains(&actor));
+                    assert!(!capture
+                        .actors
+                        .iter()
+                        .any(|captured| captured.identity() == actor));
                 }
                 (
                     _,
