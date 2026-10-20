@@ -11,7 +11,7 @@ module Tidepool.CompilerProducts
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , stagedOriginalBinders, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
-  , retainTypeInterfaceCaptures
+  , retainTypeInterfaceCaptures, retainedTypeInterfaceBody
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
   , publishStagedOriginalProducts, retainStagedProgramProducts
@@ -43,11 +43,12 @@ import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word64)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Types.Name (Name)
-import GHC.Types.Id (isDataConWorkId_maybe)
+import GHC.Types.Id (isDataConWorkId_maybe, isDataConWrapId_maybe)
+import GHC.Core.DataCon (dataConTyCon)
 import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Types.Avail (availNames)
 import GHC.Core.Class (classOpItems)
-import GHC.Core.TyCon (tyConClass_maybe)
+import GHC.Core.TyCon (tyConClass_maybe, isNewTyCon)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Core.PatSyn (patSynMatcher, patSynBuilder)
 import GHC.Types.Var (Id)
@@ -272,11 +273,23 @@ retainTypeInterfaceCaptures previous additions = do
         && exactSha256 artifact == artifactSha256 body)
       (Left "type interface capture differs from its owner or body seal")
     forM_ (Map.lookup key previous) $ \(old,oldBody) ->
-      unless ((exactUnit old,exactModule old,exactSha256 old,exactRequirements old)
-          == (exactUnit artifact,exactModule artifact,exactSha256 artifact,exactRequirements artifact)
+      unless (typeInterfaceIdentity old == typeInterfaceIdentity artifact
           && oldBody == body)
         (Left "type interface capture conflicts with its retained owner")
   pure (Map.union previous additions)
+
+retainedTypeInterfaceBody
+  :: Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+  -> ExactIfaceArtifact -> Maybe ArtifactBytes
+retainedTypeInterfaceBody retained artifact = do
+  (selected,body) <- Map.lookup (exactUnit artifact,exactModule artifact) retained
+  if typeInterfaceIdentity selected == typeInterfaceIdentity artifact
+      && artifactSha256 body == exactSha256 artifact
+    then Just body else Nothing
+
+typeInterfaceIdentity :: ExactIfaceArtifact -> (String,String,String,[(String,String)])
+typeInterfaceIdentity artifact =
+  (exactUnit artifact,exactModule artifact,exactSha256 artifact,exactRequirements artifact)
 
 data PreparedProductContext = PreparedProductContext
   { preparedProductInventory :: PreparedModuleProducts
@@ -717,8 +730,8 @@ newPreparedOriginalInterfaceArtifactsWithPrior prepared worldInputs prior direct
   unless (all (\(artifact,body) -> Map.lookup (exactUnit artifact,exactModule artifact) current == Just (artifact,body)) worldInterfaces)
     (fail "current type interface captures conflict")
   retained <- either fail pure (retainTypeInterfaceCaptures previous current)
-  let readRetained artifact = case Map.lookup (exactUnit artifact,exactModule artifact) retained of
-        Just (selected,body) | selected == artifact -> pure body
+  let readRetained artifact = case retainedTypeInterfaceBody retained artifact of
+        Just body -> pure body
         _ -> readOrdinary artifact
   newOriginalInterfaceArtifactsWithReader readRetained (prHscEnv result)
     (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared ++ map fst (Map.elems retained))
@@ -818,6 +831,10 @@ stagedDeclarationInputReferences prepared (StagedOriginalProducts originals _ _ 
       -- Constructor applications have structural representation; constructor
       -- workers cannot capture values and have no recoverable interface body.
       | isJust (isDataConWorkId_maybe identifier) = pure (Right [])
+      -- GHC's newtype workers and wrappers are DataConWrapIds with compulsory
+      -- cast unfoldings and no top-level binding (Id.Make, Newtype workers).
+      | Just constructor <- isDataConWrapId_maybe identifier
+      , isNewTyCon (dataConTyCon constructor) = pure (Right [])
       | otherwise = pure (Right [identifier])
     runtimeIds thing@(ATyCon tycon) = do
       implicit <- mapM runtimeIds (implicitTyThings thing)
