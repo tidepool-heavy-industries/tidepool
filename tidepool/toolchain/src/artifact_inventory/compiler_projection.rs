@@ -2336,59 +2336,63 @@ impl CompilerSourceSupport {
         let original = role
             .original()
             .ok_or_else(|| failure("published root lacks an original"))?;
-        if let CompilerInputRole::PublishedSourceOriginal {
-            native_authority, ..
-        } = role
-        {
-            let saved = native_authority.acquired()?;
-            if roots
-                .iter()
-                .any(|id| !saved.artifacts.contains_namespace_artifact(*id))
-            {
-                return Err(failure(
-                    "publication root is outside its native owner's namespace",
-                ));
-            }
+        if role.is_published_source_original() {
             let prior = self.publication_birth_support(root)?;
             let endorsement =
                 crate::declaration_context::PublishedOriginalEndorsement::from_acquired_support(
                     self, root,
                 )?;
-            return prior.publish_original(&endorsement);
-        }
-        let artifacts = match role {
-            CompilerInputRole::PublishedSourceOriginal { selection, .. } => {
-                self.artifacts.select_issued(roots, selection)?
+            // Validate the immutable issuer independently. Its roles and demand
+            // are historical evidence, not the receiving compiler projection.
+            prior.validate_publication_endorsement(&endorsement)?;
+            if roots
+                .iter()
+                .any(|id| !self.artifacts.contains_namespace_artifact(*id))
+            {
+                return Err(failure(
+                    "publication root is outside the current compiler namespace",
+                ));
             }
-            _ => self.artifacts.select_publication_roots(original, roots)?,
-        };
-        let ids = artifacts
-            .artifact_ids()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let projection = self.projection.project_roles(|owner, role| {
-            (owners.contains(owner) && ids.contains(&role.interface())).then(|| {
-                if owner == root && role.is_published_source_original() {
-                    role.clone()
-                } else if let Some(original) = role.original().filter(|id| ids.contains(id)) {
-                    CompilerInputRole::ReusableOriginal {
-                        interface: role.interface(),
-                        original,
+            return self
+                .source_support(owners)?
+                .retain_custody(prior.artifacts());
+        }
+        let artifacts = self.artifacts.select_publication_roots(original, roots)?;
+        let projection = self.projection.project_roles(|_, role| {
+            artifacts
+                .contains_namespace_artifact(role.interface())
+                .then(|| {
+                    if let Some(original) = role
+                        .original()
+                        .filter(|id| artifacts.contains_namespace_artifact(*id))
+                    {
+                        CompilerInputRole::ReusableOriginal {
+                            interface: role.interface(),
+                            original,
+                        }
+                    } else {
+                        CompilerInputRole::InterfaceOnly {
+                            interface: role.interface(),
+                        }
                     }
-                } else {
-                    CompilerInputRole::InterfaceOnly {
-                        interface: role.interface(),
-                    }
-                }
-            })
+                })
         });
-        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
+        let offers = self
+            .native_offers
+            .iter()
+            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
+                Ok(true) => Some(Ok(offer.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.rebuild_narrowed(projection, artifacts, offers)
     }
 
-    pub(crate) fn publish_original(
+    fn validate_publication_endorsement(
         &self,
         endorsement: &crate::declaration_context::PublishedOriginalEndorsement,
-    ) -> Result<Self, CompileError> {
+    ) -> Result<&CompilerInputRole, CompileError> {
         let role = endorsement.role();
         let previous = self
             .projection
@@ -2437,6 +2441,15 @@ impl CompilerSourceSupport {
                 "publication endorsement differs from its exact issuer",
             ));
         }
+        Ok(previous)
+    }
+
+    pub(crate) fn publish_original(
+        &self,
+        endorsement: &crate::declaration_context::PublishedOriginalEndorsement,
+    ) -> Result<Self, CompileError> {
+        let previous = self.validate_publication_endorsement(endorsement)?;
+        let role = endorsement.role();
         let carried = self
             .input_decisions
             .facts

@@ -24,6 +24,19 @@ fn fixture_with_helper_version(
     Arc<ArtifactEntry>,
     Arc<PublishedSourceOriginalSelection>,
 ) {
+    let (root, helper, publication, _) = fixture_with_source(initial, helper_version);
+    (root, helper, publication)
+}
+
+fn fixture_with_source(
+    initial: usize,
+    helper_version: u8,
+) -> (
+    Arc<ArtifactEntry>,
+    Arc<ArtifactEntry>,
+    Arc<PublishedSourceOriginalSelection>,
+    ExactDeclarationContext,
+) {
     let producer = [2; 32];
     let helper = Arc::new(
         ArtifactEntry::original(
@@ -89,6 +102,25 @@ fn fixture_with_helper_version(
     .remove(0)
     .product;
     let root = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+    let unrelated = Arc::new(
+        ArtifactEntry::original(
+            producer,
+            crate::certified_products::tests::recovered_witness_fixtures(&[
+                crate::certified_products::fixture_finalized_product(
+                    crate::certified_products::tests::original_groups_fixture(
+                        "HistoryUnrelated",
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                    ),
+                    producer,
+                ),
+            ])
+            .remove(0)
+            .product,
+        )
+        .unwrap(),
+    );
     let target = Arc::new(ArtifactEntry::canonical(
         crate::certified_products::fixture_module_interface(
             producer,
@@ -101,13 +133,22 @@ fn fixture_with_helper_version(
     let view = inventory
         .admit_recovery_selection(
             &inventory.empty_view(),
-            vec![root.clone(), helper.clone(), target.clone()],
+            vec![
+                root.clone(),
+                helper.clone(),
+                target.clone(),
+                unrelated.clone(),
+            ],
             &std::iter::once(NativeGroupKey {
                 artifact: root.descriptor.id,
                 original_ordinal: ORDINALS[initial],
             })
             .chain((initial != 0).then_some(NativeGroupKey {
                 artifact: helper.descriptor.id,
+                original_ordinal: 7,
+            }))
+            .chain(std::iter::once(NativeGroupKey {
+                artifact: unrelated.descriptor.id,
                 original_ordinal: 7,
             }))
             .collect(),
@@ -120,6 +161,7 @@ fn fixture_with_helper_version(
             root.clone(),
             helper.clone(),
             target.clone(),
+            unrelated.clone(),
         ])
         .unwrap(),
         vec![
@@ -135,12 +177,17 @@ fn fixture_with_helper_version(
                 owner: helper.descriptor.owner.clone(),
                 imports: vec![],
             },
+            ExactLexicalNode {
+                owner: unrelated.descriptor.owner.clone(),
+                imports: vec![],
+            },
         ],
         target.descriptor.owner.clone(),
         &[
             target.descriptor.owner.clone(),
             root.descriptor.owner.clone(),
             helper.descriptor.owner.clone(),
+            unrelated.descriptor.owner.clone(),
         ],
     )
     .unwrap();
@@ -151,10 +198,92 @@ fn fixture_with_helper_version(
             &root.descriptor.owner,
         )
         .unwrap();
-    (root, helper, publication)
+    assert!(
+        !publication
+            .context()
+            .artifact_view()
+            .artifact_ids()
+            .contains(&unrelated.descriptor.id),
+        "first birth excludes unrelated native custody and its ambient offer"
+    );
+    assert!(!publication
+        .context()
+        .compiler_input_roles()
+        .iter()
+        .any(|role| role.original() == Some(unrelated.descriptor.id)));
+    (root, helper, publication, issued)
 }
 
-fn restored_graph_roles(
+#[test]
+fn publication_reissue_keeps_birth_when_current_roles_change() {
+    let (root, helper, publication, source) = fixture_with_source(1, 1);
+    let source = source
+        .with_published_source_originals(&publication)
+        .unwrap();
+    let owners = BTreeSet::from([
+        root.descriptor.owner.clone(),
+        source.original_instance_target().unwrap().clone(),
+    ]);
+    let support = source
+        .compiler_source_support()
+        .source_support(&owners)
+        .unwrap();
+    let lexical = source
+        .lexical_graph()
+        .iter()
+        .filter(|node| node.owner != identity("fixture", "HistoryUnrelated"))
+        .cloned()
+        .collect();
+    let source = source
+        .rebuild(|facts| {
+            facts.compiler_support = support;
+            facts.lexical = facts.lexical.replace(lexical).unwrap();
+        })
+        .finish()
+        .unwrap();
+    assert!(source
+        .compiler_input_roles()
+        .iter()
+        .any(|role| role.interface()
+            == publication
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&helper.descriptor.owner]
+                .interface()
+            && role.original().is_none()));
+    let before = &publication
+        .context()
+        .compiler_input_projection()
+        .snapshot_roles()[&root.descriptor.owner];
+    let reissued = source
+        .issue_published_source_original(
+            "history-revision",
+            "history-input",
+            &root.descriptor.owner,
+        )
+        .unwrap();
+    assert_eq!(
+        &reissued
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[&root.descriptor.owner],
+        before
+    );
+    assert!(reissued
+        .context()
+        .compiler_input_roles()
+        .iter()
+        .all(|role| role.original() != Some(helper.descriptor.id)));
+    assert!(source
+        .issue_published_source_original(
+            "conflicting-revision",
+            "history-input",
+            &root.descriptor.owner,
+        )
+        .is_err());
+}
+
+pub(super) fn restored_graph_roles(
     context: &ExactDeclarationContext,
     roles: &[CompilerInputRole],
 ) -> Result<
@@ -249,11 +378,21 @@ fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
         projection.admit_role(owner, role).unwrap();
     }
     changed = changed.recover_fixture_projection(projection).unwrap();
-    let assert_missing_type_role = |context: &ExactDeclarationContext| {
-        let Err(CompileError::ArtifactInventory(error)) =
-            context.published_source_original_selections()
-        else {
-            panic!("incomplete publication must refuse its required type role")
+    let reopened = changed.published_source_original_selections().unwrap();
+    assert!(
+        reopened[0]
+            .context()
+            .compiler_input_roles()
+            .iter()
+            .any(|role| role.interface()
+                == context.compiler_input_projection().snapshot_roles()[&helper.descriptor.owner]
+                    .interface()
+                && role.original().is_none()),
+        "type dependencies survive independently of lexical imports"
+    );
+    let assert_missing_type_role = |result: Result<ExactDeclarationContext, CompileError>| {
+        let Err(CompileError::ArtifactInventory(error)) = result else {
+            panic!("incomplete publication must refuse its required type role: {result:?}")
         };
         assert_eq!(
             error.failure,
@@ -265,12 +404,61 @@ fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
             }
         );
     };
-    assert_missing_type_role(&changed);
-    // This deliberately malformed fixture authenticates graph/role evidence only;
-    // it is not a complete owner for compilation or snapshot continuation.
-    let (_scratch, _inventory, recovered) =
+    let mut incomplete = CompilerInputProjection::default();
+    incomplete
+        .admit_role(
+            root.descriptor.owner.clone(),
+            changed.compiler_input_projection().snapshot_roles()[&root.descriptor.owner].clone(),
+        )
+        .unwrap();
+    let canonical =
+        context.compiler_input_projection().snapshot_roles()[&helper.descriptor.owner].interface();
+    let mut graph = changed.artifact_view().capture_graph_selection();
+    graph.namespace.retain(|binding| {
+        binding.artifact != canonical && binding.artifact != helper.descriptor.id
+    });
+    let view = changed
+        .artifact_view()
+        .select_issued(
+            vec![root.descriptor.id],
+            &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                graph.clone(),
+            ),
+        )
+        .unwrap();
+    assert_missing_type_role(
+        recover_fixture_compiler_support(
+            incomplete,
+            view,
+            changed
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .cloned(),
+        )
+        .and_then(|support| {
+            changed
+                .clone()
+                .rebuild(|facts| facts.compiler_support = support)
+                .finish()
+        }),
+    );
+    let (_scratch, inventory, _) =
         restored_graph_roles(&changed, &changed.compiler_input_roles()).unwrap();
-    assert_missing_type_role(&recovered);
+    let mut snapshot = changed.snapshot();
+    snapshot.native_fact_owner = None;
+    snapshot.roles.remove(&helper.descriptor.owner);
+    snapshot.selection =
+        Arc::new(crate::exact_context::ExactSelectionSnapshot::from_graph_selection(&graph));
+    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+    let mut writer = crate::exact_context::Materializer::new(&store);
+    let written = writer.materialize_context(None, &snapshot).unwrap();
+    use fvm_ipld_blockstore::Blockstore;
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        store.put_keyed(&cid, &bytes).unwrap();
+    }
+    let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
+    assert_missing_type_role(inventory.context_for_expected_snapshot(written.root(), &decoded));
 }
 
 #[test]
@@ -283,7 +471,10 @@ fn published_role_refuses_missing_issuer_selection() {
         .into_iter()
         .position(|role| role.is_published_source_original())
         .expect("fixture publication carries an exact source selection");
-    roles[published].as_object_mut().unwrap().remove("selection");
+    roles[published]
+        .as_object_mut()
+        .unwrap()
+        .remove("selection");
     assert!(
         serde_json::from_value::<Vec<CompilerInputRole>>(roles).is_err(),
         "legacy publication facts cannot reconstruct the issuer's selection from broader custody"
@@ -338,6 +529,14 @@ proptest! {
             let reopened = context.published_source_original_selections().unwrap();
             prop_assert_eq!(reopened.len(), 1);
             prop_assert!(reopened[0].context().compiler_input_roles().contains(&expected_role));
+            prop_assert!(reopened[0].context().compiler_input_roles().iter()
+                .any(|role| role.interface() == canonical && role.original().is_none()),
+                "reopening must not restore the birth's withdrawn Original role");
+            prop_assert_eq!(reopened[0].context().artifact_view().selected_native_groups(),
+                context.artifact_view().selected_native_groups());
+            prop_assert_eq!(reopened[0].context().compiler_source_support()
+                .publication_birth_support(&root.descriptor.owner).unwrap()
+                .artifacts().capture_graph_selection(), expected_graph.clone());
 
             let store = fvm_ipld_blockstore::MemoryBlockstore::default();
             let mut writer = crate::exact_context::Materializer::new(&store);
@@ -361,8 +560,11 @@ proptest! {
             let acquired = crate::exact_context::hydrate_context(&store, persisted.root()).unwrap();
             context = inventory.context_for_expected_snapshot(persisted.root(), &acquired).unwrap();
             prop_assert_eq!(context.compiler_input_roles(), roles);
-            prop_assert!(context.published_source_original_selections().unwrap()[0]
-                .context().compiler_input_roles().contains(&expected_role));
+            let reopened = context.published_source_original_selections().unwrap();
+            prop_assert!(reopened[0].context().compiler_input_roles().contains(&expected_role));
+            prop_assert!(reopened[0].context().compiler_input_roles().iter()
+                .any(|role| role.interface() == canonical && role.original().is_none()),
+                "cold recovery must not restore the birth's withdrawn Original role");
         }
         // A separately authenticated native version with the same canonical
         // interface is still a real selected-original conflict, not type-only custody.
