@@ -89,7 +89,7 @@ nullary and returns the provenance a caller may pin
 Independently of the pin, the answer is checked after the compiler replies. The
 handler captures the compile-view provenance before the query, recomputes it
 afterward, and returns `ScopeChanged(before, after)` if the compile view moved,
-instead of returning the stale answer. For the six new verbs this decision lives
+instead of returning the stale answer. For the five new verbs this decision lives
 in the handler module: `entry_scope_refusal` refuses a pin that never matched at
 entry (`exomonad/actor/src/resident_workbench/compiler_query.rs:446-456`), and
 `compiler_query_answer` refuses a view that moved while the query ran
@@ -313,7 +313,7 @@ from (`exomonad/actor/src/mount.rs:731-743`):
 `ScopeChanged` is the stale-view refusal. It carries the provenance the caller
 pinned or that was captured before the query (`used`/`before`) and the
 provenance now current (`current`/`after`)
-(`bridge/protocol/src/effects/introspection.rs:489-495`). For the six new verbs
+(`bridge/protocol/src/effects/introspection.rs:489-495`). For the five new verbs
 the handler makes this decision in `entry_scope_refusal` and
 `compiler_query_answer`
 (`exomonad/actor/src/resident_workbench/compiler_query.rs:419-512`), before any
