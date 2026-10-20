@@ -893,8 +893,10 @@ pub struct CompilerWorld {
 
 #[derive(Clone, Debug)]
 struct WorldCellPosition {
+    original_base: [u8; 32],
     certificate: [u8; 32],
     next_item: usize,
+    total_items: usize,
 }
 
 impl CompilerWorld {
@@ -964,44 +966,98 @@ impl crate::checked_cell::CellProgram {
                 return Err(source_failure("runtime delta has another captured binder or row"));
             }
         }
-        let prior = &predecessor.restoration;
+        predecessor.project_bindings(
+            predecessor.restoration.inputs.bindings.query_scope,
+            additions.entries.into_iter().map(|(name, fact)| (name, Some(fact))),
+            Some(WorldCellPosition {
+                original_base: *program.logical().logical_id(),
+                certificate: *program.certificate_sha256(),
+                next_item: ordinal + 1,
+                total_items: program.items().len(),
+            }),
+        )
+    }
+}
+
+impl CompilerWorld {
+    /// Project the actual prepared runtime promotion onto the current public
+    /// compiler product. Runtime still owns source gates, binding publication
+    /// and the atomic installation of this prospective immutable product.
+    pub fn promote_private_bindings<'a>(
+        self: &Arc<Self>,
+        original_public: &Arc<Self>,
+        private: &Arc<Self>,
+        target_scope: u64,
+        visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let position = private.position.as_ref().ok_or_else(|| {
+            source_failure("private publication lacks a checked cell prefix")
+        })?;
+        if position.original_base != *original_public.logical_id()
+            || position.next_item != position.total_items
+            || private.restoration.producer != original_public.restoration.producer
+            || private.restoration.profile != original_public.restoration.profile
+            || self.restoration.producer != private.restoration.producer
+            || self.restoration.profile != private.restoration.profile
+        {
+            return Err(source_failure("private publication has an incomplete or foreign checked lineage"));
+        }
+        if self.restoration.inputs.bindings.query_scope != target_scope {
+            return Err(source_failure("public compiler projection belongs to another scope"));
+        }
+        let mut changes = BTreeMap::new();
+        for (name, binding) in visible_changes {
+            crate::host_work::checkpoint()?;
+            if name.is_empty() || name.contains('\0') || changes.contains_key(name) {
+                return Err(source_failure("invalid or duplicate promotion occurrence"));
+            }
+            let fact = match binding {
+                None => None,
+                Some((id, defining_scope)) => {
+                    let matches = |fact: &&WorldBindingFact| {
+                        fact.session_var == id && fact.defining_scope == defining_scope
+                    };
+                    let fact = private.restoration.inputs.bindings.entries.get(name)
+                        .filter(matches)
+                        .or_else(|| self.restoration.inputs.bindings.entries.get(name).filter(matches))
+                        .ok_or_else(|| source_failure("runtime promotion has no same issued compiler binding"))?;
+                    Some(fact.clone())
+                }
+            };
+            changes.insert(name.to_owned(), fact);
+        }
+        self.project_bindings(target_scope, changes, None)
+    }
+
+    fn project_bindings(
+        self: &Arc<Self>,
+        query_scope: u64,
+        changes: impl IntoIterator<Item = (String, Option<WorldBindingFact>)>,
+        position: Option<WorldCellPosition>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let prior = &self.restoration;
         let mut inputs = prior.inputs.clone();
+        inputs.bindings.query_scope = query_scope;
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         inputs.directory = directory.clone();
         let mut facts = prior.bindings.facts().clone();
         let mut row_roots = prior.binding_rows.clone();
-        let mut visible_changes = Vec::new();
+        let mut visible_changes = BTreeMap::new();
         let mut rows = WorldColdRows {
             producer: prior.producer, files: BTreeMap::new(), images: BTreeMap::new(),
             rows: BTreeMap::new(), arenas: Default::default(), diagnostics: None,
         };
         let mut materializer = Materializer::new(&prior.primary_blocks);
-        let current_row = match row.as_ref().filter(|_| !additions.entries.is_empty()) {
-            Some(row) => {
-                let (entry, parts) = row.world_type_parts()?;
-                let transport = rows.row(&entry, parts)?.0;
-                let semantic = world_semantic_row(&transport, &prior.producer)?;
-                let (_, receipt) = row.world_issuer();
-                let root = materializer.materialize_value(&world_array(vec![
-                    semantic, world_blob(row.certified_interface().artifact_id().0), world_blob(receipt),
-                ])).map_err(|error| source_failure(error.to_string()))?;
-                let owner = row.owner().module_name();
-                row_roots.insert(owner.clone(), root);
-                inputs.visible_rows.insert(owner, row.clone());
-                visible_changes.push(world_array(vec![
-                    world_text(entry.descriptor.owner.unit.clone()),
-                    world_text(entry.descriptor.owner.module.clone()), transport,
-                ]));
-                Some(root)
-            }
-            None => None,
-        };
-        for (occurrence, fact) in additions.entries {
-            if let Some(old) = inputs.bindings.entries.get(&occurrence) {
-                inputs.bindings.metadata_bytes = inputs.bindings.metadata_bytes.saturating_sub(
+        // Remove all touched heads first, then add their resulting actual
+        // selections. A row shared by several changed names is issued once.
+        let changes: Vec<_> = changes.into_iter().collect();
+        for (occurrence, _) in &changes {
+            if let Some(old) = inputs.bindings.entries.remove(occurrence) {
+                inputs.bindings.metadata_bytes = inputs.bindings.metadata_bytes.checked_sub(
                     binding_metadata_bound([occurrence.len(), old.symbol.unit.len(), old.symbol.module.len(),
                         old.symbol.namespace.len(), old.symbol.occurrence.len()],
-                        old.symbol.record_parent.as_ref().map_or(0, String::len))?);
+                        old.symbol.record_parent.as_ref().map_or(0, String::len))?)
+                    .ok_or_else(|| source_failure("predecessor binding metadata charge underflow"))?;
                 let owner = old.row.owner().module_name();
                 let users = inputs.bindings.row_users.get(&owner).copied()
                     .ok_or_else(|| source_failure("predecessor binding has no row custody count"))?;
@@ -1009,36 +1065,62 @@ impl crate::checked_cell::CellProgram {
                     inputs.bindings.row_users.remove(&owner);
                     inputs.visible_rows.remove(&owner);
                     row_roots.remove(&owner);
-                    visible_changes.push(world_array(vec![
-                        world_text(old.symbol.unit.clone()), world_text(old.symbol.module.clone()),
-                        ciborium::value::Value::Null,
-                    ]));
+                    visible_changes.insert((old.symbol.unit.clone(), old.symbol.module.clone()),
+                        ciborium::value::Value::Null);
                 } else {
                     inputs.bindings.row_users.insert(owner, users - 1);
                 }
+                facts.remove(occurrence);
             }
+        }
+        for (occurrence, fact) in changes {
+            let Some(fact) = fact else { continue; };
             let owner = fact.row.owner().module_name();
+            if let Some(selected) = inputs.visible_rows.get(&owner) {
+                if !selected.same_world_type_row(&fact.row) {
+                    return Err(source_failure("promotion selects competing checked rows for one owner"));
+                }
+            } else if let Some(selected) = prior.inputs.visible_rows.get(&owner)
+                .filter(|selected| selected.same_world_type_row(&fact.row))
+            {
+                let root = prior.binding_rows.get(&owner).ok_or_else(|| {
+                    source_failure("predecessor checked row lacks its semantic root")
+                })?;
+                inputs.visible_rows.insert(owner.clone(), selected.clone());
+                row_roots.insert(owner.clone(), *root);
+                visible_changes.remove(&(fact.symbol.unit.clone(), fact.symbol.module.clone()));
+            } else {
+                let (entry, parts) = fact.row.world_type_parts()?;
+                let transport = rows.row(&entry, parts)?.0;
+                let semantic = world_semantic_row(&transport, &prior.producer)?;
+                let (_, receipt) = fact.row.world_issuer();
+                let root = materializer.materialize_value(&world_array(vec![
+                    semantic, world_blob(fact.row.certified_interface().artifact_id().0), world_blob(receipt),
+                ])).map_err(|error| source_failure(error.to_string()))?;
+                row_roots.insert(owner.clone(), root);
+                inputs.visible_rows.insert(owner.clone(), fact.row.clone());
+                visible_changes.insert((entry.descriptor.owner.unit.clone(), entry.descriptor.owner.module.clone()), transport);
+            }
             let users = inputs.bindings.row_users.get(&owner).copied().unwrap_or(0);
-            inputs.bindings.row_users.insert(owner, users + 1);
+            inputs.bindings.row_users.insert(owner.clone(), users.checked_add(1).ok_or_else(source_size_failure)?);
             let symbol = &fact.symbol;
             inputs.bindings.metadata_bytes = inputs.bindings.metadata_bytes.checked_add(
                 binding_metadata_bound([occurrence.len(), symbol.unit.len(), symbol.module.len(),
                     symbol.namespace.len(), symbol.occurrence.len()],
                     symbol.record_parent.as_ref().map_or(0, String::len))?
             ).ok_or_else(source_size_failure)?;
-            if inputs.bindings.metadata_bytes > capture_allowance()? {
-                return Err(binding_capture_refusal(inputs.bindings.metadata_bytes, capture_allowance()?));
+            let allowance = capture_allowance()?;
+            if inputs.bindings.metadata_bytes > allowance {
+                return Err(binding_capture_refusal(inputs.bindings.metadata_bytes, allowance));
             }
             facts.insert(occurrence.clone(), (
                 (symbol.unit.clone(), symbol.module.clone(), symbol.namespace.clone(),
                  symbol.occurrence.clone(), symbol.record_parent.clone()),
                 fact.session_var.raw(), fact.defining_scope, fact.row.owner().gen.0,
-                current_row.ok_or_else(|| source_failure("captured binder lacks its row root"))?,
+                *row_roots.get(&owner).ok_or_else(|| source_failure("captured binder lacks its row root"))?,
             ));
             inputs.bindings.entries.insert(occurrence, fact);
         }
-        // Existing references share immutable HAMT paths; only this item's
-        // binding edits and row bytes are encoded and linked on settlement.
         let bindings = materializer.materialize_map(Some(&prior.bindings), &facts)
             .map_err(|error| source_failure(error.to_string()))?;
         let staged = materializer.finish().map_err(|error| source_failure(error.to_string()))?;
@@ -1051,18 +1133,19 @@ impl crate::checked_cell::CellProgram {
                 bindings: *bindings.root().cid(), lexical: prior.lexical_root })
             .map_err(|error| source_failure(error.to_string()))?;
         let product = world_restoration_product(&roots, inputs.sources.seal(), &prior.producer,
-            &prior.profile, inputs.bindings.query_scope)?;
+            &prior.profile, query_scope)?;
         let logical_id = world_digest(&product);
         let files: Vec<_> = rows.files.into_values().collect();
         let acquisition = rows.arenas.acquisition(rows.images.into_values().collect())?;
         let descriptor = directory.path().join("successor.cbor");
         std::fs::write(&descriptor, world_bytes(&world_array(vec![
             world_text("TPCWSUCC4"), world_blob(&product), world_array(changed_blocks),
-            world_array(Vec::new()), world_array(visible_changes), acquisition,
+            world_array(Vec::new()), world_array(visible_changes.into_iter().map(|((unit,module), row)| {
+                world_array(vec![world_text(unit), world_text(module), row])
+            }).collect()), acquisition,
         ]))?)?;
-        // The descriptor exports only this delta. Current checked rows retain
-        // their own immutable input slices; cold recovery regenerates transport
-        // from those owners, independently of all predecessor descriptors.
+        // Only the changed transport is retained. Each current immutable row
+        // owns the bytes needed for cold recovery after every ancestor drops.
         let input_files = files.iter().cloned().collect();
         let restoration = Arc::new(CompilerWorldRestoration {
             logical_id, inputs, product: product.into(), primary_root: prior.primary_root.clone(),
@@ -1070,12 +1153,10 @@ impl crate::checked_cell::CellProgram {
             primary_compiler_inputs: prior.primary_compiler_inputs.clone(), bindings,
             binding_rows: row_roots, lexical_root: prior.lexical_root,
             producer: prior.producer, profile: prior.profile, descriptor, input_files,
-            successor: Some(WorldSuccessorAcquisition { predecessor: *predecessor.logical_id(),
-                realization: predecessor.realization.clone(), files, cold: Mutex::new(None) }),
+            successor: Some(WorldSuccessorAcquisition { predecessor: *self.logical_id(),
+                realization: self.realization.clone(), files, cold: Mutex::new(None) }),
         });
-        Ok(Arc::new(CompilerWorld { restoration, realization: Arc::new(Mutex::new(None)),
-            position: Some(WorldCellPosition { certificate: *program.certificate_sha256(),
-                next_item: ordinal + 1 }) }))
+        Ok(Arc::new(CompilerWorld { restoration, realization: Arc::new(Mutex::new(None)), position }))
     }
 }
 
