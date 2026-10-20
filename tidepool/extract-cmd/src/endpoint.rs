@@ -1540,13 +1540,6 @@ impl CompilerEndpoint {
         self.transaction_with_cancellation_timeout(workload, cancellation, DIRECT_HANDSHAKE_TIMEOUT)
     }
 
-    #[tracing::instrument(
-        target = "exomonad_harness::timing",
-        name = "compiler_transaction.begin",
-        level = "debug",
-        skip_all,
-        fields(inclusive = true)
-    )]
     fn transaction_with_cancellation_timeout(
         self,
         workload: CompileWorkload,
@@ -1556,6 +1549,13 @@ impl CompilerEndpoint {
         self.transaction_with_cancellation_timeout_hint(workload, cancellation, timeout, None)
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "compiler_transaction.begin",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     fn transaction_with_cancellation_timeout_hint(
         self,
         workload: CompileWorkload,
