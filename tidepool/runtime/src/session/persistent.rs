@@ -4033,6 +4033,13 @@ impl PersistentSession {
             public_visibility_epochs,
             ..
         } = self;
+        let world_promotion = promoted_world.as_ref().map(|published| (
+            *world_execution.as_ref().expect("World promotion has its original execution").world()
+                .expect("World execution was selected").private.world.logical_id(),
+            *lib.as_ref().expect("preflight library").tips.get(&public_scope)
+                .and_then(|tip| tip.inspection_world.as_ref()).expect("prepared public World").world.logical_id(),
+            *published.world.logical_id(),
+        ));
         let outcome = lib
             .as_mut()
             .expect("preflight library")
@@ -4044,6 +4051,13 @@ impl PersistentSession {
                         .get_mut(&public_scope)
                         .expect("the prepared public World association exists")
                         .inspection_world = Some(world);
+                    if let Some((private_world, predecessor_world, published_world)) = world_promotion {
+                        tracing::debug!(target: "exomonad_harness::timing",
+                            private_world = ?private_world,
+                            predecessor_world = ?predecessor_world,
+                            published_world = ?published_world,
+                            "checked World public promotion installed");
+                    }
                 }
             });
         match &outcome {

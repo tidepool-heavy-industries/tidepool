@@ -2915,6 +2915,7 @@ impl CheckedWorldCellProgram {
             output_certificate = ?certificate_sha256,
             visible_bindings = plan.world().restoration.inputs.bindings.entries.len(),
             demanded_runtime_roots = output.demanded_session_bindings.len(),
+            demanded_binding_ids = ?output.demanded_session_bindings.iter().map(|id| id.raw()).collect::<Vec<_>>(),
             retained_type_rows = output.demanded_rows.len(),
             "checked World cell output admitted");
         Ok(Self {
