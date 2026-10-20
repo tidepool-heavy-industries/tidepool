@@ -113,7 +113,7 @@ import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodec
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
-import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse)
+import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures)
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
@@ -1666,9 +1666,13 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             reference <- case ready of
               ExactInputsReady _ realization -> pure realization
               other -> fail ("real preparation could not acquire its captured world: " ++ show other)
+            -- The component template uses session/dialect.rs:EVAL_PRAGMAS.
+            -- Its explicit Prelude import supplies this small template's
+            -- lexical base under the shipped NoImplicitPrelude dialect.
             let template = unlines
-                  ["{-# LANGUAGE DataKinds, QuasiQuotes #-}","{{CELL_PRAGMAS}}","module CellCheck where"
-                  ,"import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
+                  ["{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
+                  ,"{{CELL_PRAGMAS}}","module CellCheck where"
+                  ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
                   ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
                   ,"__tidepoolInEffectRow = id"
                   ,"{{CELL_DECLS}}"
@@ -1751,11 +1755,11 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                     , domain == worldSourceDomainSha256 (worldInputsSources facts) -> pure ()
                   _ -> fail "World native certificate lost its actual base/source-domain recipe provenance"
                 itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
-                  Right (remaining,TList [TString "TPCWPREP4",_,_,_
+                  Right (remaining,TList [TString "TPCWPREP5",_,_,_
                     ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
-                    ,_,TList [],TList common,TList [_]
+                    ,_,TList common,TList [_]
                     ,TList [TList [identity@(TList [TString "exec",TString _]),TList [TInt 0]
-                      ,TList refs]]]) | BL.null remaining -> do
+                      ,TList refs,TList []]]]) | BL.null remaining -> do
                         unless (map (\entry -> case entry of
                             TList [TString name,TBytes _] -> T.unpack name
                             _ -> "") refs == map ("stage-0/" ++)
@@ -1845,7 +1849,16 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"  readPublishedDefault :: value -> Int"
                           ,"  readPublishedDefault _ = defaultBaseStage"]
                         ,[(0,PlannedBind 51),(1,PlannedDeclaration 52)]
-                        ,["exec","declaration"])] $ \(label,source,caseSlots,kinds) -> do
+                        ,["exec","declaration"])
+                      ,("transitive-publication",unlines ["let transitiveBaseStage = (7 :: Int)"
+                          ,"readFirstStage :: Int -> Int"
+                          ,"readFirstStage value = value + transitiveBaseStage"
+                          ,"let unrelatedStage = ()"
+                          ,"readLaterStage :: Int -> Int"
+                          ,"readLaterStage value = readFirstStage value"]
+                        ,[(0,PlannedBind 61),(1,PlannedDeclaration 62)
+                          ,(2,PlannedBind 63),(3,PlannedDeclaration 64)]
+                        ,["exec","declaration","exec","declaration"])] $ \(label,source,caseSlots,kinds) -> do
                       let ownRecipe = recipe {worldCellSource=source}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
@@ -1864,15 +1877,22 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           (fail "ordered World lost an actual stage completion")
                         bytes <- BS.readFile (worldCellPrepareOutput ownPrepare)
                         case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
-                          Right (remaining,TList [TString "TPCWPREP4",_,_,_
-                            ,TList [TString "prepared",TList completed],_,TList inputRefs,_,TList typed,TList stages])
+                          Right (remaining,TList [TString "TPCWPREP5",_,_,_
+                            ,TList [TString "prepared",TList completed],_,_,TList typed,TList stages])
                               | BL.null remaining -> do
                                 let stageKind entry = case entry of
-                                      TList [TList (TString kind:_),TList _,TList _] -> kind
+                                      TList [TList (TString kind:_),TList _,TList _,TList _] -> kind
                                       _ -> "invalid"
                                     stageOrdinals entry = case entry of
-                                      TList [_,TList ordinals,_] -> ordinals
+                                      TList [_,TList ordinals,_,TList _] -> ordinals
                                       _ -> []
+                                    stageReferences entry = case entry of
+                                      TList [_,_,_,TList references] -> references
+                                      _ -> []
+                                    referencesAt ordinal = case drop ordinal stages of
+                                      entry:_ -> stageReferences entry
+                                      _ -> []
+                                    inputRefs = concatMap stageReferences stages
                                     capturedByDeclaration entry = case entry of
                                       TList [TList [TInt 1,TInt 0,TInt 1],_,_,_,_,_,_] -> True
                                       _ -> False
@@ -1881,10 +1901,22 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                                     && length completed == length caseSlots
                                     && length typed == length (filter (== "exec") kinds))
                                   (fail "ordered World changed stage kind, global ordinal, or executable-plan coverage")
-                                unless (if label `elem` ["mixed","publication","default-publication"]
-                                    then any capturedByDeclaration inputRefs
+                                unless (if label `elem` ["mixed","publication","default-publication","transitive-publication"]
+                                    then any capturedByDeclaration (referencesAt 1)
                                     else null inputRefs)
                                   (fail "World execution inputs lost their actual native closure or original capture stage")
+                                when (label == "mixed") $ do
+                                  let direct entry = case entry of
+                                        TList [TList [TInt 1,TInt 0,TInt 2],_,_,_,_,_,_] -> True
+                                        _ -> False
+                                  unless (any direct (referencesAt 2)
+                                      && not (any capturedByDeclaration (referencesAt 2)))
+                                    (fail "World stage failed to prefer its genuine current capture")
+                                when (label == "transitive-publication") $
+                                  unless (not (null (referencesAt 1))
+                                      && referencesAt 3 == referencesAt 1
+                                      && null (referencesAt 0) && null (referencesAt 2))
+                                    (fail "later publication did not reuse the exact earlier selected capture")
                           _ -> fail "ordered World omitted its terminal stage table"
                         forM_ caseSlots $ \(ordinal,slot) -> case slot of
                           PlannedBind _ -> pure ()
@@ -1912,7 +1944,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 6 1)
+      unless (admissionParses == replicate 7 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
@@ -3000,4 +3032,25 @@ freshOutputSealSetLaws = withScratch $ \work -> do
     Right _ -> fail "seal union accepted conflicting content for one path"
   _ <- either fail pure (appendFreshOutputSeals emptyFreshOutputSeals first)
   _ <- either fail pure (appendFreshOutputSeals second emptyFreshOutputSeals)
-  pure ()
+  -- TYPE custody and output ownership have distinct identities: moving an
+  -- unchanged type interface preserves its issued descriptor, while an output
+  -- path still refuses a changed body above. Neither comparison grants native
+  -- implementation authority.
+  let body = captureArtifactBytes firstBytes
+      artifact = ExactIfaceArtifact "main" "CapturedType" firstPath (artifactSha256 body)
+        [("main","RequiredType")]
+      previous = Map.singleton ("main","CapturedType") (artifact,body)
+      relocated = artifact {exactPath=secondPath}
+      additions value = Map.singleton ("main","CapturedType") value
+      requireConflict value = case retainTypeInterfaceCaptures previous (additions value) of
+        Left _ -> pure ()
+        Right _ -> fail "retained TYPE custody accepted a changed owner, body, seal or requirement"
+  kept <- either fail pure (retainTypeInterfaceCaptures previous (additions (relocated,body)))
+  unless (kept == previous) (fail "TYPE relocation replaced the already-issued descriptor")
+  let different = captureArtifactBytes conflictingBytes
+  requireConflict (relocated {exactSha256=artifactSha256 different},different)
+  requireConflict (relocated {exactSha256=artifactSha256 different},body)
+  requireConflict (relocated {exactRequirements=[]},body)
+  requireConflict (relocated {exactModule="ForeignType"},body)
+  fresh <- either fail pure (retainTypeInterfaceCaptures Map.empty (additions (artifact,body)))
+  unless (fresh == previous) (fail "fresh TYPE custody lost its actual issued capture")

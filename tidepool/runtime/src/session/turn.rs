@@ -3064,6 +3064,7 @@ fn compile_cell_program_admitted_work_controls(
 /// No endpoint or compiler lease survives in this host admission owner.
 pub struct PreparedRuntimeCell {
     origin: crate::CompilerTransactionOrigin,
+    source_origin: super::resident::CapturedSourceOrigin,
     admission: Arc<super::RuntimeCellAdmission>,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
@@ -3075,12 +3076,16 @@ pub struct PreparedRuntimeCell {
 /// evidence alone cannot construct this inseparable pairing.
 #[derive(Clone, Debug)]
 pub struct SettledCellProgram {
+    source_origin: super::resident::CapturedSourceOrigin,
     admission: Arc<super::RuntimeCellAdmission>,
     program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     cancellation: crate::HostAdmissionCancellation,
 }
 
 impl SettledCellProgram {
+    pub(super) fn captured_source_origin(&self) -> &super::resident::CapturedSourceOrigin {
+        &self.source_origin
+    }
     pub fn program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
         &self.program
     }
@@ -3188,8 +3193,8 @@ pub fn prepare_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
-    admission.admit_compiler_preparation(source)?;
     prepare_cell_program_admitted_inner(
+        source,
         admission,
         #[cfg(test)]
         CellProgramAudit::None,
@@ -3293,6 +3298,7 @@ impl PreparedRuntimeCell {
         Ok((
             self.checked,
             SettledCellProgram {
+                source_origin: self.source_origin,
                 admission: self.admission,
                 program,
                 cancellation: cancellation.clone(),
@@ -3315,8 +3321,8 @@ fn compile_cell_program_admitted_inner(
         None,
         |close| settlement.borrow_mut()(close),
         |owner, _| {
-            owner.admit(None)?;
             prepare_cell_program_admitted_inner(
+                owner,
                 admission,
                 #[cfg(test)]
                 audit,
@@ -3379,10 +3385,13 @@ fn compile_cell_program_admitted_inner(
 
 #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
 fn prepare_cell_program_admitted_inner(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
     #[cfg(test)] audit: CellProgramAudit<'_>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    admission.admit_compiler_preparation(source)?;
+    let source_origin = super::resident::CapturedSourceOrigin::capture(source)?;
     let origin = crate::CompilerTransactionOrigin::current().ok_or(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
@@ -3435,6 +3444,7 @@ fn prepare_cell_program_admitted_inner(
         tracing::debug!(target: "exomonad_harness::timing", logical_world = ?output.logical().logical_id(), certificate = ?output.certificate_sha256(), origin = ?output.origin(), "world cell compiler output prepared");
         return Ok(PreparedRuntimeCell {
             origin,
+            source_origin,
             admission,
             checked,
             program,
@@ -3603,6 +3613,7 @@ fn prepare_cell_program_admitted_inner(
     checked.admission = Some(admission.clone());
     Ok(PreparedRuntimeCell {
         origin,
+        source_origin,
         admission,
         checked,
         program,
@@ -5191,6 +5202,9 @@ fn decode_export_item(v: &CborValue) -> Result<ExportItem, CompileError> {
         ("EValue", 2) => Ok(ExportItem::Value {
             name: cbor_expect_text(&arr[1], "EValue name")?.to_string(),
         }),
+        ("EPattern", 2) => Ok(ExportItem::Pattern {
+            name: cbor_expect_text(&arr[1], "EPattern name")?.to_string(),
+        }),
         ("EType", 3) => Ok(ExportItem::Type {
             name: cbor_expect_text(&arr[1], "EType name")?.to_string(),
             cons: decode_string_array(&arr[2], "EType cons")?,
@@ -5773,6 +5787,7 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
     };
     match (tag, fields.len()) {
         ("EValue", 2) => Ok(ExportItem::Value { name: name()? }),
+        ("EPattern", 2) => Ok(ExportItem::Pattern { name: name()? }),
         ("EType", 3) => Ok(ExportItem::Type {
             name: name()?,
             cons: children()?,
@@ -10868,6 +10883,20 @@ mod tests {
         .unwrap();
         assert_eq!(cs[0].kind, TurnKind::Expr);
         assert!(cs[0].binders.is_empty());
+    }
+
+    #[test]
+    fn pattern_export_wire_preserves_constructor_namespace() {
+        let classified = parse_classify_json(
+            r#"{"verdicts":[{"kind":"decl","binders":["PublishedPattern"],"items":[["EPattern","PublishedPattern"]]}]}"#,
+            1,
+        ).unwrap();
+        let expected = ExportItem::Pattern { name: "PublishedPattern".into() };
+        assert_eq!(classified[0].items, vec![expected.clone()]);
+        let value = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into())]);
+        assert_eq!(decode_export_item(&value).unwrap(), expected);
+        let extra = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into()), CborValue::Null]);
+        assert!(decode_export_item(&extra).is_err());
     }
 
     #[test]

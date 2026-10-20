@@ -9,7 +9,7 @@ use tidepool_toolchain::declaration_join::{
     DeclarationExport, ExactModuleIdentity, ExportIdentity,
 };
 
-use super::lexical_projection::{issue_projection, DeclarationProjectionBaseline};
+use super::lexical_projection::{DeclarationProjectionBaseline, issue_projection};
 use super::{CertifiedDeclarationProjection, ExportItem, SessionCompileView};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,21 +62,25 @@ impl ExactExportSurface {
         baseline: DeclarationProjectionBaseline,
         mut exports: Vec<DeclarationExport>,
         includes: Vec<PathBuf>,
-    ) -> Self {
+    ) -> Result<Self, crate::CompileError> {
         for export in &mut exports {
             export.children.sort();
         }
         exports.sort_by(|left, right| left.head.cmp(&right.head));
-        Self {
+        let items = exports
+            .iter()
+            .map(ExportItem::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
             session,
             source,
-            items: exports.iter().map(ExportItem::from).collect(),
+            items,
             authority: ExportAuthority::Certified {
                 baseline: Arc::new(baseline),
                 exports,
                 includes,
             },
-        }
+        })
     }
 
     pub fn session(&self) -> SessionId {
@@ -315,6 +319,8 @@ pub enum ExactFacadeError {
 pub enum ExactExportError {
     #[error("selected declaration exports have no compiler-certified original identities")]
     UncertifiedExports,
+    #[error("selected compiler-certified exports have an unsupported runtime projection")]
+    UnsupportedCertifiedExports,
     #[error("session has no declaration plane")]
     NoDeclarationPlane,
     #[error("scope {0:?} is not live")]
@@ -332,7 +338,16 @@ fn render_legacy_facade(identity: &FacadeIdentity, surface: &ExactExportSurface)
         .iter()
         .map(ExportItem::render_entry)
         .collect::<Vec<_>>();
-    let mut source = format!("-- GENERATED — source-only export membrane.\n{{-# LANGUAGE NoImplicitPrelude, ExplicitNamespaces, TypeOperators #-}}\nmodule {}", identity.module_name());
+    let pattern_pragma = if surface
+        .items
+        .iter()
+        .any(|item| matches!(item, ExportItem::Pattern { .. }))
+    {
+        "{-# LANGUAGE PatternSynonyms #-}\n"
+    } else {
+        ""
+    };
+    let mut source = format!("-- GENERATED — source-only export membrane.\n{{-# LANGUAGE NoImplicitPrelude, ExplicitNamespaces, TypeOperators #-}}\n{pattern_pragma}module {}", identity.module_name());
     if entries.is_empty() {
         source.push_str(" () where\n");
         return source;
@@ -432,7 +447,7 @@ mod tests {
     #[test]
     fn inherited_certified_facade_subset_preserves_original_owners_and_default_visibility() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
-        use tidepool_toolchain::artifacts::{compile_invocation_in_context, CompileInvocation};
+        use tidepool_toolchain::artifacts::{CompileInvocation, compile_invocation_in_context};
         use tidepool_toolchain::declaration_join::ExactModuleIdentity;
 
         let root = tempfile::tempdir().unwrap();
@@ -806,6 +821,22 @@ mod tests {
                 "retired refusals and pure reads must precede compiler effects"
             );
         });
+    }
+
+    #[test]
+    fn legacy_pattern_facade_owns_namespace_syntax() {
+        let surface = ExactExportSurface::legacy(
+            SessionId(8),
+            Some(SessionModule::lib(Generation(4))),
+            vec![ExportItem::Pattern {
+                name: ":~:".into(),
+            }],
+        );
+        let identity = FacadeIdentity::for_legacy_surface(&surface);
+        let rendered = render_legacy_facade(&identity, &surface);
+        assert!(rendered.contains("{-# LANGUAGE PatternSynonyms #-}"));
+        assert!(rendered.contains("( pattern (:~:)\n"));
+        assert!(rendered.contains("import Tidepool.Session.Lib.G4 (pattern (:~:))"));
     }
 
     #[test]

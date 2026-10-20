@@ -75,6 +75,7 @@ tests = testGroup "cell-splitter"
   , testCase "interfaceMeasurementDiagnostics" interfaceMeasurementDiagnostics
   , testCase "multilineLetCompilation" multilineLetCompilation
   , testCase "ambiguousOccurrenceHintCompilation" ambiguousOccurrenceHintCompilation
+  , testCase "optional structural display capability" optionalStructuralDisplayCapability
   , testCase "ordinary structural display" $
       requiredInput "TIDEPOOL_TEST_EFFECTS_DIR" >>= structuralDisplayCompilation OrdinaryDisplayTest
   , testCase "explicit Generic derivation recovery" explicitGenericDerivationRecovery

@@ -61,11 +61,11 @@ use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
-    resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
-    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, RequestReceiverEntry,
-    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
-    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind, TurnResult,
+    resident_cell_check_template, resident_workbench_templates, BoundBinder, CellCheck,
+    CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload, OutputSink, ParsedBlock,
+    RequestReceiverEntry, ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentResumeError, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
+    TurnResult,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_turn, TurnRequest};
@@ -2043,7 +2043,7 @@ impl ReservedActorGeneration {
         self.guard.refuse_unstarted().map_err(|settlement| {
             ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                    outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned()))),
                     settlement,
                 }),
             }
@@ -2060,7 +2060,7 @@ impl ReservedActorGeneration {
             .map_err(
                 |settlement| ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned()))),
                         settlement,
                     }),
                 },
@@ -2137,15 +2137,30 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     owner: ActorPublicationOwner,
     #[cfg(test)]
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
+    #[cfg(test)]
+    disposal_probe: Option<PublicationDisposalProbe>,
+}
+
+#[cfg(test)]
+struct PublicationDisposalProbe {
+    disposed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl Drop for PublicationDisposalProbe {
+    fn drop(&mut self) {
+        self.disposed
+            .store(true, std::sync::atomic::Ordering::Release);
+        panic!("controlled publication disposer panic");
+    }
 }
 
 type GenerationPublicationAction = Box<
     dyn FnOnce(
             ReservedActorGeneration,
-        ) -> futures_util::future::BoxFuture<
-            'static,
-            Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
-        > + Send,
+        )
+            -> futures_util::future::BoxFuture<'static, ActorGenerationPublicationSettlement>
+        + Send,
 >;
 
 type GenerationReservationAction = Box<
@@ -2253,9 +2268,90 @@ impl ActorGenerationPublicationOperation {
         )
     }
 
-    pub(crate) async fn run(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+    pub(crate) async fn run(self) -> ActorGenerationPublicationSettlement {
         let Self { reserved, publish } = self;
         publish(reserved).await
+    }
+}
+
+/// The observed outcome carries no settlement authority. Only `Unpublished`
+/// retains the original armed guard needed to restore a held retirement fence.
+#[must_use]
+pub(crate) enum ActorGenerationPublicationSettlement {
+    Unpublished(ActorGenerationPublicationRefusal),
+    Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
+}
+
+#[must_use]
+pub(crate) struct ActorGenerationPublicationRefusal {
+    guard: ActorPublicationGuard,
+    outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
+}
+
+impl ActorGenerationPublicationRefusal {
+    pub(crate) fn outcome(
+        &self,
+    ) -> &Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>> {
+        &self.outcome
+    }
+
+    pub(crate) fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.guard
+            .refuse_retirement(original)
+            .map_err(
+                |settlement| ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: self.outcome.clone(),
+                        settlement,
+                    }),
+                },
+            )
+    }
+}
+
+/// Checkout completion and source settlement are distinct observations. An
+/// unobserved body never grants the right to reopen either source.
+enum PublicationBodyCompletion {
+    Observed {
+        guard: ActorPublicationGuard,
+        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    },
+    Unobserved {
+        guard: ActorPublicationGuard,
+        primary: ResidentActorWorkbenchError,
+    },
+    Terminal(Result<ActorGenerationCommit, ResidentActorWorkbenchError>),
+}
+
+impl PublicationBodyCompletion {
+    fn complete(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        match self {
+            Self::Observed { guard, outcome } => guard.complete(outcome),
+            Self::Unobserved { guard, primary } => Err(guard.unobserved(primary)),
+            Self::Terminal(outcome) => outcome,
+        }
+    }
+
+    fn for_retirement(self) -> ActorGenerationPublicationSettlement {
+        match self {
+            Self::Observed { guard, outcome }
+                if matches!(&guard.settlement, ActorPublicationState::Armed(_))
+                    && guard.known_unpublished(&outcome) =>
+            {
+                ActorGenerationPublicationSettlement::Unpublished(
+                    ActorGenerationPublicationRefusal {
+                        guard,
+                        outcome: Arc::new(outcome),
+                    },
+                )
+            }
+            completion => {
+                ActorGenerationPublicationSettlement::Settled(Arc::new(completion.complete()))
+            }
+        }
     }
 }
 
@@ -2356,7 +2452,8 @@ enum RetirementSettlementStage {
 impl PublicationFence {
     fn publication_view(
         &self,
-    ) -> Result<tidepool_runtime::session::RuntimeSourcePublicationView, PublicationSettlementError> {
+    ) -> Result<tidepool_runtime::session::RuntimeSourcePublicationView, PublicationSettlementError>
+    {
         match self {
             Self::Held(fence) => Ok(fence.publication_view()),
             Self::ReopenAttempted => Err(PublicationSettlementError::ReopenAttempted),
@@ -2373,7 +2470,9 @@ impl PublicationFence {
         let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        fence.reopen_with(target.original_source(), settle)?.map(|_reopened| ())
+        fence
+            .reopen_with(target.original_source(), settle)?
+            .map(|_reopened| ())
     }
 }
 
@@ -2483,21 +2582,28 @@ impl ActorPublicationGuard {
         }))
     }
 
-    fn complete(
-        self,
-        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
-    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+    fn known_unpublished(
+        &self,
+        outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    ) -> bool {
         let no_commit_claim = matches!(
             self.decision.phase(),
             tidepool_runtime::session::PublicationPhase::Running
                 | tidepool_runtime::session::PublicationPhase::CancellationRequested
                 | tidepool_runtime::session::PublicationPhase::Terminated
         );
-        let known_unpublished = no_commit_claim
+        no_commit_claim
             && !matches!(
-                &outcome,
+                outcome,
                 Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
-            );
+            )
+    }
+
+    fn complete(
+        self,
+        outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let known_unpublished = self.known_unpublished(&outcome);
         let settlement = if known_unpublished {
             self.refused()
         } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
@@ -2507,7 +2613,7 @@ impl ActorPublicationGuard {
         } else {
             return Err(ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome,
+                    outcome: Arc::new(outcome),
                     settlement: PublicationSettlementError::PublicationUnconfirmed,
                 }),
             });
@@ -2515,7 +2621,7 @@ impl ActorPublicationGuard {
         if let Err(settlement) = settlement {
             return Err(ResidentActorWorkbenchError::PublicationSettlement {
                 failure: Box::new(ActorPublicationSettlementFailure {
-                    outcome,
+                    outcome: Arc::new(outcome),
                     settlement,
                 }),
             });
@@ -2526,7 +2632,7 @@ impl ActorPublicationGuard {
     fn unobserved(self, primary: ResidentActorWorkbenchError) -> ResidentActorWorkbenchError {
         ResidentActorWorkbenchError::PublicationSettlement {
             failure: Box::new(ActorPublicationSettlementFailure {
-                outcome: Err(primary),
+                outcome: Arc::new(Err(primary)),
                 settlement: PublicationSettlementError::BodyUnobserved,
             }),
         }
@@ -2540,7 +2646,9 @@ impl ActorPublicationGuard {
             ActorPublicationState::Armed(PublicationAuthority::TargetFence { fence, .. }) => {
                 fence.publication_view()?
             }
-            ActorPublicationState::Settled => return Err(PublicationSettlementError::ReopenAttempted),
+            ActorPublicationState::Settled => {
+                return Err(PublicationSettlementError::ReopenAttempted)
+            }
         };
         Ok(ActorPublicationVisibility {
             state: self.state.clone(),
@@ -2559,9 +2667,9 @@ impl ActorPublicationGuard {
     fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
         ResidentActorWorkbenchError::PublicationSettlement {
             failure: Box::new(ActorPublicationSettlementFailure {
-                outcome: Ok(ActorGenerationCommit::Refused(
+                outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
                     "generation cutoff was refused".into(),
-                )),
+                ))),
                 settlement: PublicationSettlementError::Retirement {
                     stage: RetirementSettlementStage::Original,
                     source: Box::new(error),
@@ -2879,6 +2987,13 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    #[cfg(test)]
+    fn with_disposal_probe(mut self, disposed: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        assert!(self.disposal_probe.is_none());
+        self.disposal_probe = Some(PublicationDisposalProbe { disposed });
+        self
+    }
+
     pub(crate) fn into_retirement_preparation(
         self,
         prepared: PreparedActorGeneration,
@@ -2911,7 +3026,11 @@ where
         ActorGenerationPublicationOperation {
             reserved,
             publish: Box::new(move |reserved| {
-                Box::pin(async move { compiler.scope(self.publish_reserved(reserved)).await })
+                Box::pin(async move {
+                    compiler
+                        .scope(async { self.run_publication_body(reserved).await.for_retirement() })
+                        .await
+                })
             }),
         }
     }
@@ -2982,15 +3101,22 @@ where
         &self,
         reserved: ReservedActorGeneration,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        self.run_publication_body(reserved).await.complete()
+    }
+
+    async fn run_publication_body(
+        &self,
+        reserved: ReservedActorGeneration,
+    ) -> PublicationBodyCompletion {
         let ReservedActorGeneration {
             prepared,
             guard: owner,
             publication_kind,
         } = reserved;
         if !matches!(&owner.settlement, ActorPublicationState::Armed(_)) {
-            return Ok(ActorGenerationCommit::Refused(
+            return PublicationBodyCompletion::Terminal(Ok(ActorGenerationCommit::Refused(
                 "publication reservation already settled".into(),
-            ));
+            )));
         }
         let machine_owner = {
             let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
@@ -2998,22 +3124,27 @@ where
         };
         if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner)
         {
-            return owner.complete(Ok(ActorGenerationCommit::Refused(
-                "publication reservation belongs to another publisher".into(),
-            )));
+            return PublicationBodyCompletion::Observed {
+                guard: owner,
+                outcome: Ok(ActorGenerationCommit::Refused(
+                    "publication reservation belongs to another publisher".into(),
+                )),
+            };
         }
         let publication = owner.decision.clone();
         let visibility = match owner.visibility() {
             Ok(visibility) => visibility,
             Err(settlement) => {
-                return Err(ResidentActorWorkbenchError::PublicationSettlement {
-                    failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Ok(ActorGenerationCommit::Refused(
-                            "publication has no armed source fence".into(),
-                        )),
-                        settlement,
-                    }),
-                });
+                return PublicationBodyCompletion::Terminal(Err(
+                    ResidentActorWorkbenchError::PublicationSettlement {
+                        failure: Box::new(ActorPublicationSettlementFailure {
+                            outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
+                                "publication has no armed source fence".into(),
+                            ))),
+                            settlement,
+                        }),
+                    },
+                ));
             }
         };
         // The affine phase/fence owner is outside checkout, including cancellation
@@ -3120,13 +3251,21 @@ where
         }).await;
         let outcome = match completed {
             Ok(outcome) => outcome,
-            Err(error) => return Err(owner.unobserved(error)),
+            Err(primary) => {
+                return PublicationBodyCompletion::Unobserved {
+                    guard: owner,
+                    primary,
+                };
+            }
         };
         #[cfg(test)]
         if let Some(probe) = &self.settlement_probe {
             probe.wait();
         }
-        owner.complete(outcome)
+        PublicationBodyCompletion::Observed {
+            guard: owner,
+            outcome,
+        }
     }
 }
 
@@ -3154,7 +3293,7 @@ impl ActorGenerationCommit {
             outcome @ Self::Unconfirmed(_) => {
                 Err(ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Ok(outcome),
+                        outcome: Arc::new(Ok(outcome)),
                         settlement: PublicationSettlementError::PublicationUnconfirmed,
                     }),
                 })
@@ -3166,7 +3305,7 @@ impl ActorGenerationCommit {
 /// A primary publication outcome and its independent failed source settlement.
 /// The outcome stays typed until the actor's final diagnostic boundary.
 pub struct ActorPublicationSettlementFailure {
-    outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
     settlement: PublicationSettlementError,
 }
 
@@ -3182,7 +3321,7 @@ impl std::fmt::Debug for ActorPublicationSettlementFailure {
 
 impl std::fmt::Display for ActorPublicationSettlementFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.outcome {
+        match self.outcome.as_ref() {
             Ok(ActorGenerationCommit::Published { generation, .. }) => {
                 write!(formatter, "generation {:?} became visible", generation.id())?;
             }
@@ -3647,7 +3786,8 @@ where
             .as_ref()
             .and_then(|_| observed.lease.tools.as_ref())
             .and_then(|tools| tools._source_original.clone());
-        let preparing = self.access
+        let preparing = self
+            .access
             .with_continuation_machine(context, move |session, context, _, _| {
                 let _source_claim = context.source_dependency().claim()?;
                 let mut next_context = context.clone();
@@ -3697,10 +3837,8 @@ where
                         }
                         installation = observed.lease;
                         if let Some(selection) = source {
-                            let pending = session.stage_published_source_originals_in(
-                                scope.scope(),
-                                selection,
-                            )?;
+                            let pending = session
+                                .stage_published_source_originals_in(scope.scope(), selection)?;
                             session.publish_source_originals(pending)?;
                         }
                         PreparedGenerationCommit::Ephemeral {
@@ -3845,7 +3983,10 @@ where
             .with_compiler_machine(context.clone(), move |session, _, _, _| {
                 let admitted = match &preparing.commit {
                     PreparedGenerationCommit::Durable { prepared, .. } => session
-                        .capture_notebook_generation_world(prepared, preparing.scope.original_source())
+                        .capture_notebook_generation_world(
+                            prepared,
+                            preparing.scope.original_source(),
+                        )
                         .map_err(ResidentError::Session)?,
                     _ => session
                         .capture_inspection_world_in(
@@ -3949,6 +4090,8 @@ where
             owner,
             #[cfg(test)]
             settlement_probe: None,
+            #[cfg(test)]
+            disposal_probe: None,
         }
     }
 }
@@ -5457,7 +5600,67 @@ pub(crate) enum ActivationInputPublication {
     },
 }
 
+#[derive(Clone)]
+struct PrivateInspectionContext {
+    actor: tidepool_runtime::session::InspectionActorObservation,
+    imports: SourceImports,
+    preamble: Arc<str>,
+    inputs: tidepool_runtime::session::RuntimeCompileInputs,
+}
+
+impl PrivateInspectionContext {
+    fn capture(
+        source: &ActorWorkbenchSource,
+        context: &crate::ActorSessionContext,
+        request: Option<&RequestWorkbenchScope>,
+    ) -> Result<Self, ResidentActorWorkbenchError> {
+        Ok(Self {
+            actor: ActorWorkbenchSource::inspection_actor(context, request),
+            imports: source.template_imports(context),
+            preamble: source.preamble.clone(),
+            inputs: source.compile_inputs(context)?,
+        })
+    }
+
+    fn matches(&self, current: &Self) -> bool {
+        fn same_annotations(
+            left: Option<&tidepool_runtime::session::RequestCompileAnnotations>,
+            right: Option<&tidepool_runtime::session::RequestCompileAnnotations>,
+        ) -> bool {
+            match (left, right) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.helper_recipe() == right.helper_recipe()
+                        && Arc::ptr_eq(left.evidence(), right.evidence())
+                }
+                _ => false,
+            }
+        }
+        self.actor == current.actor
+            && same_annotations(self.inputs.annotations(), current.inputs.annotations())
+            && self.same_environment(current)
+    }
+
+    fn same_environment(&self, current: &Self) -> bool {
+        self.imports == current.imports
+            && self.preamble == current.preamble
+            && self.inputs.projections().len() == current.inputs.projections().len()
+            && self
+                .inputs
+                .projections()
+                .iter()
+                .zip(current.inputs.projections())
+                .all(|(left, right)| Arc::ptr_eq(left, right))
+    }
+}
+
+pub(crate) struct CapturedObservationScaffold {
+    scaffold: Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
+    inspection: PrivateInspectionContext,
+}
+
 pub(crate) struct ExecutionPrivateScope {
+    inspection: Option<PrivateInspectionContext>,
     pub owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
     pub public_scope: tidepool_codegen::scope::ScopeId,
     pub private_scope: tidepool_codegen::scope::ScopeId,
@@ -7395,6 +7598,15 @@ pub enum ResidentActorWorkbenchError {
     ActivationPreviewSuspended { cleanup: Option<ResidentError> },
     #[error("could not inspect the saved value: {0}")]
     Inspection(String),
+    #[error("inspection scope changed before consumption: {before:?} -> {after:?}")]
+    InspectionScopeChanged {
+        before: tidepool_runtime::session::ScopeProvenance,
+        after: tidepool_runtime::session::ScopeProvenance,
+    },
+    #[error("inspection world unavailable: {0}")]
+    InspectionWorldUnavailable(String),
+    #[error("inspection world rejected the query: {0:?}")]
+    InspectionWorldRejected(tidepool_toolchain::compiler_world::WorldQueryRejection),
     #[error("completed result observation failed: {detail}")]
     CompletedResultObservation {
         detail: String,
@@ -7443,6 +7655,7 @@ impl ResidentActorWorkbenchError {
             }
             Self::PublicationSettlement { failure } => failure
                 .outcome
+                .as_ref()
                 .as_ref()
                 .err()
                 .and_then(|primary| primary.execution_failure_kind()),
@@ -9579,12 +9792,10 @@ where
     pub(crate) async fn capture_observation_scaffold(
         &self,
         context: &crate::ActorSessionContext,
-    ) -> Result<
-        Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
-        ResidentActorWorkbenchError,
-    > {
+    ) -> Result<CapturedObservationScaffold, ResidentActorWorkbenchError> {
         let input = self.capture_cell_input_type(context).await?;
-        self.access
+        let scaffold = self
+            .access
             .source
             .config
             .clone()
@@ -9593,24 +9804,30 @@ where
                 context,
                 tidepool_toolchain::compiler_world::WorldObservationProfile::Workbench,
                 input.as_ref(),
-            )
+            )?;
+        Ok(CapturedObservationScaffold {
+            scaffold,
+            inspection: PrivateInspectionContext::capture(
+                &self.access.source.config,
+                context,
+                self.request_scope.as_ref(),
+            )?,
+        })
     }
 
     pub(crate) fn capture_activation_observation_scaffold(
         &self,
         context: &crate::ActorSessionContext,
         input: &tidepool_runtime::session::RuntimeActivationInput,
-    ) -> Result<
-        Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
-        ResidentActorWorkbenchError,
-    > {
+    ) -> Result<CapturedObservationScaffold, ResidentActorWorkbenchError> {
         let prototype = input.type_prototype();
         let input = HostInputType {
             binding: HostInputBinding::Activation,
             signature: Arc::new(prototype.signature().clone()),
             context: prototype.context().clone(),
         };
-        self.access
+        let scaffold = self
+            .access
             .source
             .config
             .clone()
@@ -9619,7 +9836,15 @@ where
                 context,
                 tidepool_toolchain::compiler_world::WorldObservationProfile::Workbench,
                 Some(&input),
-            )
+            )?;
+        Ok(CapturedObservationScaffold {
+            scaffold,
+            inspection: PrivateInspectionContext::capture(
+                &self.access.source.config,
+                context,
+                self.request_scope.as_ref(),
+            )?,
+        })
     }
 
     /// Retain only the existing checked TYPE owner before private admission.
@@ -10061,25 +10286,36 @@ where
             }
         };
         let specification = self.world_cell_recipe(
-            &context, cell_source, &purpose,
+            &context,
+            cell_source,
+            &purpose,
             leased_input.as_ref().map(|guard| guard.mounted_input()),
         )?;
         let (cell_operand, leased_input) = if let Some(input) = leased_input {
-            let execution = purpose.execution().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "a cell input requires its private execution owner".into(),
-                )
-            })?.admission.clone();
-            self.access.with_compiler_machine(context.clone(), move |session, _, _, _| {
-                let write = input.write.as_ref().ok_or_else(|| {
+            let execution = purpose
+                .execution()
+                .ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
-                        "the mounted cell input lost its pending write".into(),
+                        "a cell input requires its private execution owner".into(),
                     )
-                })?;
-                let operand = session.world_cell_operand_for_input(execution, write)
-                    .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
-                Ok((Some(operand), Some(input)))
-            }).await?
+                })?
+                .admission
+                .clone();
+            self.access
+                .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                    let write = input.write.as_ref().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "the mounted cell input lost its pending write".into(),
+                        )
+                    })?;
+                    let operand = session
+                        .world_cell_operand_for_input(execution, write)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    Ok((Some(operand), Some(input)))
+                })
+                .await?
         } else {
             (None, None)
         };
@@ -10176,10 +10412,21 @@ where
                 "resident cell preparation did not retain its checked World output".into(),
             ));
         };
-        let demanded_bindings = world_output
+        let compiler_binding_ids = world_output
             .demanded_session_bindings()
             .iter()
+            .map(|id| id.raw())
+            .collect::<Vec<_>>();
+        let runtime_demand = world_output.runtime_binding_demand();
+        let demanded_bindings = runtime_demand
+            .existing()
+            .iter()
             .map(|id| tidepool_repr::VarId(id.raw()))
+            .collect::<Vec<_>>();
+        let prior_stage_binding_ids = runtime_demand
+            .prior_stage()
+            .iter()
+            .map(|id| id.raw())
             .collect::<Vec<_>>();
         let logical_world = *world_output.logical().logical_id();
         let output_certificate = *world_output.certificate_sha256();
@@ -10214,11 +10461,27 @@ where
             .access
             .with_machine(context, move |session, _, _| {
                 let bindings = session.lease_bindings(&demanded_bindings);
-                let mut retained = bindings.retained_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>();
+                let mut retained = bindings
+                    .retained_bindings()
+                    .iter()
+                    .map(|id| id.raw())
+                    .collect::<Vec<_>>();
                 retained.sort_unstable();
+                if demanded_bindings
+                    .iter()
+                    .any(|expected| retained.binary_search(&expected.0).is_err())
+                {
+                    return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                        tidepool_runtime::session::SessionError::StaleStagedDeclaration,
+                    )));
+                }
                 tracing::debug!(target: "exomonad_harness::timing",
                     logical_world = ?logical_world,
                     output_certificate = ?output_certificate,
+                    compiler_demanded_runtime_roots = compiler_binding_ids.len(),
+                    compiler_demanded_binding_ids = ?compiler_binding_ids,
+                    prior_stage_runtime_roots = prior_stage_binding_ids.len(),
+                    prior_stage_binding_ids = ?prior_stage_binding_ids,
                     demanded_runtime_roots = demanded_bindings.len(),
                     demanded_binding_ids = ?demanded_bindings.iter().map(|id| id.0).collect::<Vec<_>>(),
                     leased_runtime_roots = retained.len(),
@@ -10244,14 +10507,132 @@ where
         context: crate::ActorSessionContext,
         discovery: crate::status_tool::StatusDiscovery,
     ) -> Result<String, ResidentActorWorkbenchError> {
-        let request_scope = self.request_scope.clone();
+        match discovery {
+            crate::status_tool::StatusDiscovery::Recovery => {
+                self.access
+                    .with_machine(context, |session, _, _| Ok(render_recovery_status(session)))
+                    .await
+            }
+            crate::status_tool::StatusDiscovery::Bindings => self.binding_status(context).await,
+        }
+    }
+
+    async fn binding_status(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<String, ResidentActorWorkbenchError> {
+        use compiler_query::FinishedScopedWorldInspection as F;
+        use tidepool_toolchain::compiler_world::WorldObservationQuestion as Q;
 
         let source = self.access.source.config.clone();
+        let snapshot_source = source.clone();
+        let request_scope = self.request_scope.clone();
+        let snapshot_request = request_scope.clone();
+        let (mut bindings, expected) = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
+                let expected = if bindings
+                    .iter()
+                    .any(|binding| binding.type_query().is_some())
+                {
+                    match snapshot_source.inspection_provenance(
+                        session,
+                        context,
+                        snapshot_request.as_ref(),
+                        tidepool_runtime::session::NameScope::Current,
+                    ) {
+                        Ok(provenance) => Some(provenance),
+                        Err(ResidentActorWorkbenchError::CompileView(
+                            ActorCompileViewError::UnobservedSourceIdentity,
+                        )) => None,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    None
+                };
+                Ok((bindings, expected))
+            })
+            .await?;
+        let Some(expected) = expected else {
+            return Ok(render_binding_status(&bindings));
+        };
+        let mut observations = Vec::new();
+        // Bindings is the requested visible scope listing. Recovery and other
+        // status views never enter this enrichment path. Existing live-value
+        // metadata is not a compiler query, even when its type is unknown.
+        for (index, binding) in bindings.iter().enumerate() {
+            let Some(expression) = binding.type_query() else {
+                continue;
+            };
+            let expression = expression.to_owned();
+            let inspected = match self
+                .query_scoped_world(
+                    context.clone(),
+                    Q::Expression(expression.clone()),
+                    Some(expected.clone()),
+                )
+                .await
+            {
+                Ok(inspected) => Some(inspected),
+                Err(error) if compiler_query::is_expression_rejection(&error) => None,
+                Err(error) => return Err(error),
+            };
+            observations.push((index, expression, inspected));
+        }
         self.access
-            .with_compiler_machine(context, move |session, context, _, settlement| {
-                let source = source.for_workbench(context, request_scope.as_ref());
-                run_status_discovery(session, context, &source, discovery, settlement)?
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            .with_machine(context, move |session, context, _| {
+                let current = source.inspection_provenance(
+                    session,
+                    context,
+                    request_scope.as_ref(),
+                    tidepool_runtime::session::NameScope::Current,
+                )?;
+                if !expected.same_view(&current) {
+                    return Err(ResidentActorWorkbenchError::InspectionScopeChanged {
+                        before: expected,
+                        after: current,
+                    });
+                }
+                let mut retained = Vec::new();
+                for (index, expression, inspected) in observations {
+                    let Some(inspected) = inspected else {
+                        continue;
+                    };
+                    let display = match compiler_query::finish_scoped_world_inspection(
+                        session,
+                        context,
+                        &source,
+                        request_scope.as_ref(),
+                        inspected,
+                    )? {
+                        F::ScopeChanged { before, after } => {
+                            return Err(ResidentActorWorkbenchError::InspectionScopeChanged {
+                                before,
+                                after,
+                            })
+                        }
+                        F::CompilerUnavailable(detail) => {
+                            return Err(ResidentActorWorkbenchError::InspectionWorldUnavailable(
+                                detail,
+                            ))
+                        }
+                        F::QueryError(_) => None,
+                        F::Answer { outcome, .. } => status_binding_type(&expression, outcome)?,
+                    };
+                    if let Some(display) = display {
+                        let binding = &mut bindings[index];
+                        if let Some(generation) = binding.defining_generation() {
+                            retained.push((binding.name.clone(), generation, display.clone()));
+                        }
+                        binding.type_display = Some(display);
+                    }
+                }
+                // No declaration metadata is changed until the entire observed
+                // snapshot passed its final source/view checks.
+                session
+                    .retain_declaration_value_types_in(context.placement.lexical_scope, &retained);
+                Ok(render_binding_status(&bindings))
             })
             .await
     }
@@ -10429,133 +10810,7 @@ where
                 )
                 .await;
         }
-        let source = self.access.source.config.clone();
-        let request_scope = self.request_scope.clone();
-        let snapshot_request_scope = request_scope.clone();
-        let snapshot_source = source.clone();
-        let query_scope = query.scope.clone();
-        let snapshot = self
-            .access
-            .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &snapshot_source)?;
-                let provenance =
-                    match snapshot_source.inspection_provenance(session, context, snapshot_request_scope.as_ref(), query_scope) {
-                        Ok(provenance) => provenance,
-                        Err(error) => {
-                            return Ok(Err(StructuredIntrospectionAnswer::QueryError(
-                                unobserved_inspection_source(error)?,
-                            )))
-                        }
-                    };
-                let inputs = session
-                    .capture_inspection_inputs(view.session_view())
-                    .map_err(|error| error.to_string());
-                Ok(Ok((view, provenance, inputs)))
-            })
-            .await?;
-        let (compile_view, provenance, inputs) = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(answer) => {
-                return self
-                    .access
-                    .with_continuation_machine(context, move |session, _, _, settlement| {
-                        session
-                            .resume_classified(hole, answer, settlement)
-                            .map_err(classify_resumption)
-                    })
-                    .await
-            }
-        };
-        let request_query = match kind {
-            StructuredInspectionKind::Info => InspectionQuery::StructuredInfo {
-                query: query.clone(),
-                provenance: provenance.clone(),
-            },
-            StructuredInspectionKind::Type => InspectionQuery::StructuredType {
-                query: query.clone(),
-                provenance: provenance.clone(),
-            },
-        };
-        let compiler_source = source.clone();
-        let effects = context.haskell_effects_alias.clone();
-        self.access
-            .log_include_roots_if_changed(context.placement.session, context.source_layer.as_ref());
-        let inspection_span = tracing::info_span!(
-            "compile_blocking",
-            actor = %context.actor,
-            session = %context.placement.session,
-            operation = "structured_introspection",
-        );
-        // Enter the span only for the synchronous call that captures it —
-        // an `Entered` guard is not `Send` and must not live across the
-        // `.await` below.
-        let compiler_work =
-            crate::capabilities::CompilerOwnerScope::current().and_then(|scope| {
-                scope
-                    .with_source_dependency(context.source_dependency())
-                    .admit_work()
-            })?;
-        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
-        let spawn = {
-            let _entered = inspection_span.enter();
-            spawn_blocking_in_span(move || {
-                compiler_work.run(|settlement| {
-                    let inputs = inputs?;
-                    let prepared = compiler_source.prepare(&compile_view);
-                    let include = prepared
-                        .include
-                        .iter()
-                        .map(PathBuf::as_path)
-                        .collect::<Vec<_>>();
-                    run_admitted_inspections(
-                        InspectionRequest {
-                            exact_context: compile_view.exact_compile_context(),
-                            preamble: &prepared.preamble,
-                            imports: &prepared.imports,
-                            include: &include,
-                            session_root: compile_view.session_root(),
-                            inject_modules: &prepared.injected,
-                            queries: &[request_query],
-                            effects: Some(&effects),
-                        },
-                        compile_view.session_view(),
-                        &inputs,
-                        settlement,
-                    )
-                    .map_err(|error| error.to_string())
-                    .and_then(|mut results| {
-                        if results.len() == 1 {
-                            Ok(results.remove(0))
-                        } else {
-                            Err(format!(
-                                "inspection returned {} results for one query",
-                                results.len()
-                            ))
-                        }
-                    })
-                })
-            })
-        };
-        let inspected = crate::call_timing::timed_compile(spawn)
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)?;
-
-        cancel_on_drop.0 = None;
-        self.access
-            .with_continuation_machine(context, move |session, context, _, settlement| {
-                let answer =
-                    match source.inspection_provenance(session, context, request_scope.as_ref(), query.scope.clone()) {
-                        Ok(current) => {
-                            structured_introspection_answer(kind, inspected, provenance, current)
-                        }
-                        Err(error) => StructuredIntrospectionAnswer::QueryError(
-                            unobserved_inspection_source(error)?,
-                        ),
-                    };
-                session
-                    .resume_classified(hole, answer, settlement)
-                    .map_err(classify_resumption)
-            })
+        self.resume_scoped_structured_introspection(context, hole, query, kind)
             .await
     }
 
@@ -10583,9 +10838,17 @@ where
                             "world query lacks retained source evidence".into(),
                         )
                     })?;
-                    let original_source = context.source_dependency().source_lease()?.original_source().clone();
-                    let observation_pin =
-                        view_source.inspection_scope(session, context, request_scope.as_ref(), query_scope)?;
+                    let original_source = context
+                        .source_dependency()
+                        .source_lease()?
+                        .original_source()
+                        .clone();
+                    let observation_pin = view_source.inspection_scope(
+                        session,
+                        context,
+                        request_scope.as_ref(),
+                        query_scope,
+                    )?;
                     let admitted = session
                         .capture_inspection_world_in(
                             context.placement.lexical_scope,
@@ -11508,13 +11771,29 @@ where
         context: crate::ActorSessionContext,
         owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
-        observation: Option<Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>>,
+        observation: Option<CapturedObservationScaffold>,
     ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
         if !owner.matches_context(&context) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "private admission requires its original public owner".into(),
             ));
         }
+        let (observation, inspection) = match observation {
+            Some(captured) => {
+                let current =
+                    PrivateInspectionContext::capture(&self.access.source.config, &context, None)?;
+                if !captured.inspection.actor.same_actor_context(&current.actor)
+                    || !captured.inspection.same_environment(&current)
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "observation scaffold differs from its admitted actor/source context"
+                            .into(),
+                    ));
+                }
+                (Some(captured.scaffold), Some(captured.inspection))
+            }
+            None => (None, None),
+        };
         self.access
             .with_compiler_world(context, observation, move |session, context, _world| {
                 let public_scope = context.placement.lexical_scope;
@@ -11540,6 +11819,7 @@ where
                     .clone();
                 let private_scope = admission.private_scope();
                 Ok(ExecutionPrivateScope {
+                    inspection,
                     owner,
                     public_scope,
                     private_scope,
@@ -15372,7 +15652,11 @@ where
                         "compiler world lacks retained source evidence".into(),
                     )
                 })?;
-                let original = context.source_dependency().source_lease()?.original_source().clone();
+                let original = context
+                    .source_dependency()
+                    .source_lease()?
+                    .original_source()
+                    .clone();
                 session
                     .capture_inspection_world_in(
                         context.placement.lexical_scope,
@@ -15418,7 +15702,11 @@ where
                     "compiler world lost retained source evidence".into(),
                 )
             })?;
-            let original = context.source_dependency().source_lease()?.original_source().clone();
+            let original = context
+                .source_dependency()
+                .source_lease()?
+                .original_source()
+                .clone();
             if !session.install_compiler_world_if_current(
                 &completed,
                 &evidence.reference,
@@ -16001,77 +16289,56 @@ fn generated_binds_verdict(binders: &[String]) -> TurnClassification {
     }
 }
 
-fn run_status_discovery<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    command: crate::status_tool::StatusDiscovery,
-    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<Result<String, String>, ResidentActorWorkbenchError>
+fn status_binding_type(
+    expression: &str,
+    outcome: tidepool_toolchain::compiler_world::WorldObservationOutcome,
+) -> Result<Option<String>, ResidentActorWorkbenchError> {
+    use tidepool_toolchain::compiler_world::{
+        WorldObservationOutcome as O, WorldQueryRejection as R,
+    };
+    use tidepool_toolchain::inspection::ScopedReply;
+    match outcome {
+        O::Rejected(R::Unsupported) | O::Answer(ScopedReply::Error(_)) => Ok(None),
+        O::Rejected(reason @ (R::Unavailable | R::Corrupt)) => {
+            Err(ResidentActorWorkbenchError::InspectionWorldRejected(reason))
+        }
+        O::Answer(ScopedReply::Expression {
+            expression: actual,
+            display,
+            ..
+        }) if actual == expression => Ok(Some(display)),
+        O::Answer(_) => Err(ResidentActorWorkbenchError::InspectionWorldUnavailable(
+            "status type answer differs from its admitted expression".into(),
+        )),
+    }
+}
+
+fn render_binding_status(bindings: &[tidepool_runtime::session::WorkbenchBinding]) -> String {
+    if bindings.is_empty() {
+        return "no persistent bindings".into();
+    }
+    bindings
+        .iter()
+        .map(|binding| {
+            let display = binding
+                .type_display
+                .as_deref()
+                .unwrap_or("<type unavailable>");
+            format!("{} :: {display} [{}]", binding.name, binding.kind.label())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_recovery_status<H, O>(session: &ResidentSession<H, O>) -> String
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    match command {
-        crate::status_tool::StatusDiscovery::Bindings => {
-            let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
-            let queries = bindings
-                .iter()
-                .filter_map(|binding| binding.type_query())
-                .map(|expression| InspectionQuery::TypeOf(expression.to_owned()))
-                .collect::<Vec<_>>();
-            let inspected = if queries.is_empty() {
-                Vec::new()
-            } else {
-                inspect_actor_batch(session, context, source, &queries, settlement)?
-            };
-            let retained = bindings
-                .iter()
-                .filter(|binding| binding.type_query().is_some())
-                .zip(inspected.iter())
-                .filter_map(|(binding, result)| {
-                    let Ok(tidepool_runtime::session::InspectionResult::Type { display, .. }) =
-                        result
-                    else {
-                        return None;
-                    };
-                    Some((
-                        binding.name.clone(),
-                        binding.defining_generation()?,
-                        display.clone(),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            session.retain_declaration_value_types_in(context.placement.lexical_scope, &retained);
-            let mut inspected = inspected.into_iter();
-            let lines = bindings
-                .into_iter()
-                .map(|binding| {
-                    let needs_inspection = binding.type_query().is_some();
-                    let kind = binding.kind.label();
-                    let rendered = match binding.type_display {
-                        Some(type_display) => format!("{} :: {type_display}", binding.name),
-                        None if needs_inspection => inspected
-                            .next()
-                            .and_then(Result::ok)
-                            .map(|result| result.render())
-                            .unwrap_or_else(|| format!("{} :: <type unavailable>", binding.name)),
-                        None => format!("{} :: <type unavailable>", binding.name),
-                    };
-                    format!("{rendered} [{kind}]")
-                })
-                .collect::<Vec<_>>();
-            Ok(Ok(if lines.is_empty() {
-                "no persistent bindings".into()
-            } else {
-                lines.join("\n")
-            }))
-        }
-        crate::status_tool::StatusDiscovery::Recovery => {
-            let Some(report) = session.declaration_recovery_report() else {
-                return Ok(Ok("declaration recovery is not configured".into()));
-            };
-            let mut lines = vec![format!(
+    let Some(report) = session.declaration_recovery_report() else {
+        return "declaration recovery is not configured".into();
+    };
+    let mut lines = vec![format!(
                 "declaration recovery: source_session={}; successor_session={}; restored={}; unavailable_bindings={}; durability_unconfirmed={}",
                 report.source_session,
                 report.successor_session,
@@ -16079,124 +16346,19 @@ where
                 report.unavailable_bindings.len(),
                 report.durability_unconfirmed,
             )];
-            lines.extend(report.restored.iter().map(|item| {
-                format!(
-                    "restored generation {} module {}",
-                    item.generation, item.module
-                )
-            }));
-            lines.extend(report.unavailable_bindings.iter().map(|item| {
-                format!(
-                    "unavailable binding {} session {} variable {}",
-                    item.name, item.session, item.variable
-                )
-            }));
-            Ok(Ok(lines.join("\n")))
-        }
-    }
-}
-
-fn inspect_actor_batch<H, O>(
-    session: &ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    queries: &[InspectionQuery],
-    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<
-    Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
-    ResidentActorWorkbenchError,
->
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    if queries.is_empty() {
-        return Ok(Vec::new());
-    }
-    if queries.iter().all(|query| matches!(query,
-        InspectionQuery::StructuredInfo { query, .. } | InspectionQuery::StructuredType { query, .. }
-            if matches!(query.scope, tidepool_runtime::session::NameScope::PublicModule(_))))
-    {
-        return Ok(queries.iter().map(|query| {
-            let error = tidepool_runtime::session::QueryError::Unsupported(
-                "public-module structured inspection requires the off-checkout world route".into());
-            Ok(match query {
-                InspectionQuery::StructuredInfo { .. } => tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error)),
-                InspectionQuery::StructuredType { .. } => tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
-                _ => unreachable!("pure public-module structured batch"),
-            })
-        }).collect());
-    }
-    let compile_view = actor_compile_view(session, context, source)?;
-    let inputs = session
-        .capture_inspection_inputs(compile_view.session_view())
-        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
-    inspect_compile_view(
-        &compile_view,
-        &inputs,
-        source,
-        queries,
-        &context.haskell_effects_alias,
-        settlement,
-    )
-}
-
-fn inspect_compile_view(
-    compile_view: &crate::ActorCompileView,
-    inputs: &tidepool_runtime::session::AdmittedInspectionInputs,
-    source: &ActorWorkbenchSource,
-    queries: &[InspectionQuery],
-    effects: &tidepool_runtime::session::HaskellTypeSource,
-    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<
-    Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
-    ResidentActorWorkbenchError,
-> {
-    let prepared = source.prepare(compile_view);
-    let include_refs = prepared
-        .include
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    match run_admitted_inspections(
-        InspectionRequest {
-            exact_context: compile_view.exact_compile_context(),
-            preamble: &prepared.preamble,
-            imports: &prepared.imports,
-            include: &include_refs,
-            session_root: compile_view.session_root(),
-            inject_modules: &prepared.injected,
-            queries,
-            effects: Some(effects),
-        },
-        compile_view.session_view(),
-        inputs,
-        settlement,
-    ) {
-        Ok(results) if results.len() == queries.len() => Ok(results
-            .into_iter()
-            .map(|result| match result {
-                tidepool_runtime::session::InspectionResult::NotFound { .. }
-                | tidepool_runtime::session::InspectionResult::ModuleNotFound { .. }
-                | tidepool_runtime::session::InspectionResult::Rejected { .. } => {
-                    Err(result.render())
-                }
-                _ => Ok(result),
-            })
-            .collect()),
-        Ok(results) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-            format!(
-                "inspection returned {} results for {} queries",
-                results.len(),
-                queries.len()
-            )
-            .into(),
-        )),
-        Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
-            Ok(vec![Err(classify_compile(&error).message)])
-        }
-        Err(error) => Err(ResidentActorWorkbenchError::Compile(error)),
-    }
+    lines.extend(report.restored.iter().map(|item| {
+        format!(
+            "restored generation {} module {}",
+            item.generation, item.module
+        )
+    }));
+    lines.extend(report.unavailable_bindings.iter().map(|item| {
+        format!(
+            "unavailable binding {} session {} variable {}",
+            item.name, item.session, item.variable
+        )
+    }));
+    lines.join("\n")
 }
 
 fn unobserved_inspection_source(
@@ -16250,42 +16412,6 @@ fn world_introspection_answer(
         WorldAnswer::Rejected(reason) => StructuredIntrospectionAnswer::CompilerUnavailable(
             format!("compiler world refused the query: {reason:?}"),
         ),
-    }
-}
-
-fn structured_introspection_answer(
-    kind: StructuredInspectionKind,
-    inspected: Result<tidepool_runtime::session::InspectionResult, String>,
-    provenance: tidepool_runtime::session::ScopeProvenance,
-    current: tidepool_runtime::session::ScopeProvenance,
-) -> StructuredIntrospectionAnswer {
-    if !current.same_view(&provenance) {
-        return StructuredIntrospectionAnswer::ScopeChanged {
-            before: provenance,
-            after: current,
-        };
-    }
-    match (kind, inspected) {
-        (
-            StructuredInspectionKind::Info,
-            Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Info(info),
-        (
-            StructuredInspectionKind::Type,
-            Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Type(info),
-        (
-            _,
-            Ok(
-                tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error))
-                | tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
-            ),
-        ) => StructuredIntrospectionAnswer::QueryError(error),
-        (_, Ok(result)) => StructuredIntrospectionAnswer::CompilerUnavailable(format!(
-            "unexpected structured inspection result: {}",
-            result.render()
-        )),
-        (_, Err(detail)) => StructuredIntrospectionAnswer::CompilerUnavailable(detail),
     }
 }
 
@@ -16416,6 +16542,49 @@ pub(crate) mod request_tests {
             crate::Reasoning::ArgonReasoning(crate::ArgonEffort::EffortMedium),
         );
         assert_ne!(same_type, observe(&changed, &first));
+    }
+
+    #[test]
+    fn private_query_context_preserves_exact_invocation_facts() {
+        let descriptor = crate::ActorDescriptor::new(
+            "private observation",
+            crate::ActorPlacement {
+                session: tidepool_repr::SessionId(17),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+            },
+        );
+        let context = descriptor.session_context(crate::ActorRef::first(crate::ActorId(7)));
+        let source = ActorWorkbenchSource::new("module Expr where\n", Vec::new());
+        let request = |id| RequestWorkbenchScope {
+            request: crate::RequestId(id),
+            response: ResponseExpectation::new("Int"),
+        };
+        let first = request(41);
+        let original = PrivateInspectionContext::capture(&source, &context, Some(&first)).unwrap();
+        assert!(original.matches(
+            &PrivateInspectionContext::capture(&source.clone(), &context.clone(), Some(&first))
+                .unwrap()
+        ));
+        assert!(!original.matches(
+            &PrivateInspectionContext::capture(&source, &context, Some(&request(42))).unwrap()
+        ));
+        let mut changed = context.clone();
+        changed.haskell_effects_alias = "'[OtherEffect]".into();
+        assert!(!original
+            .matches(&PrivateInspectionContext::capture(&source, &changed, Some(&first)).unwrap()));
+        let mut changed_source = source.clone();
+        changed_source.preamble = "module Expr where\nchanged :: Int\nchanged = 1\n".into();
+        assert!(!original.matches(
+            &PrivateInspectionContext::capture(&changed_source, &context, Some(&first)).unwrap()
+        ));
+        changed_source = source.clone();
+        changed_source
+            .workbench_imports
+            .extend_text("qualified Data.Maybe");
+        assert!(!original.matches(
+            &PrivateInspectionContext::capture(&changed_source, &context, Some(&first)).unwrap()
+        ));
     }
 
     #[test]
@@ -18799,7 +18968,11 @@ pub(crate) mod request_tests {
             .access
             .with_machine(context, move |session, context, _| {
                 observation.scope(|| {
-                    let original = context.source_dependency().source_lease()?.original_source().clone();
+                    let original = context
+                        .source_dependency()
+                        .source_lease()?
+                        .original_source()
+                        .clone();
                     assert!(session.install_inspection_world_if_current(
                         &completed,
                         &source.generation_evidence().unwrap().reference,
@@ -18871,6 +19044,17 @@ pub(crate) mod request_tests {
             ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
             crate::ActorSessionContext,
         ) {
+            self.private_with_input(Some(serde_json::json!({"greeting": "hi"})))
+                .await
+        }
+
+        async fn private_with_input(
+            &self,
+            input: Option<serde_json::Value>,
+        ) -> (
+            ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            crate::ActorSessionContext,
+        ) {
             let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
             let (mut context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
                 self.public.clone(),
@@ -18882,7 +19066,7 @@ pub(crate) mod request_tests {
             let frontend = self
                 .workbench
                 .shared_view()
-                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
+                .with_json_input(input)
                 .with_compilation_authority(authority);
             let observation = frontend.capture_observation_scaffold(&context).await
                 .expect("the production public preflight settles the input TYPE prototype");
@@ -19039,6 +19223,135 @@ pub(crate) mod request_tests {
             "successful parser work confirms END; owner preflight refusal submits no request"
         );
         (result, input)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn world_declaration_publication_retains_operand_after_failed_later_cell() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client, 7).await;
+            let (declaration, context) = fixture.private().await;
+            declaration
+                .execute_cell_for_test(
+                    context.clone(),
+                    include_str!("fixtures/world-declaration-captured-input.hs"),
+                )
+                .await
+                .expect("the actual declaration-only World cell captures its hidden operand");
+            declaration
+                .publish_completed_cell_for_test(context)
+                .await
+                .expect("the completed declaration publishes through the actual actor World owner");
+            drop(declaration);
+
+            let (invocation, context) = fixture
+                .private_with_input(Some(serde_json::json!({"greeting": "different"})))
+                .await;
+            invocation
+                .execute_cell_for_test(
+                    context.clone(),
+                    &format!(
+                        "import qualified Data.Maybe as RetainedMaybe\n{}",
+                        include_str!("fixtures/world-declaration-invoke-captured-input.hs")
+                    ),
+                )
+                .await
+                .expect("later execution uses the original captured input under a different current input");
+            invocation
+                .publish_completed_cell_for_test(context)
+                .await
+                .unwrap();
+            drop(invocation);
+
+            let before = fixture
+                .workbench
+                .access
+                .with_machine(fixture.public.clone(), |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let view = session.compile_view_in(scope).unwrap();
+                    assert!(view.persistent_imports().source_lines().iter().any(|line|
+                        line == "import qualified Data.Maybe as RetainedMaybe"));
+                    assert!(session.current_binding_in(scope, "observed").is_some());
+                    assert!(session.current_decl_heads_in(scope).iter().any(|(name, _)|
+                        name == "capturedGreeting"));
+                    Ok((
+                        view,
+                        session.public_visibility_snapshot_in(scope),
+                        session.workbench_bindings_in(scope),
+                        session.current_decl_heads_in(scope),
+                    ))
+                })
+                .await
+                .unwrap();
+            let world_before = installed_world_query(
+                &fixture.workbench,
+                fixture.public.clone(),
+                fixture.captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Info,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            )
+            .await;
+
+            let (failed, context) = fixture.private_with_input(None).await;
+            let error = match failed
+                .prepare_cell(
+                    context,
+                    include_str!("fixtures/world-declaration-type-failure.hs").into(),
+                )
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("the ill-typed declaration unexpectedly prepared"),
+            };
+            let ResidentActorWorkbenchError::CellCheck(failure) = error else {
+                panic!("the authored type error lost its typed compiler refusal: {error:?}");
+            };
+            assert_eq!(classify_compile(&failure.error).class, FailureClass::UserHaskell);
+            drop(failed);
+            fixture
+                .workbench
+                .access
+                .with_machine(fixture.public.clone(), move |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let view = session.compile_view_in(scope).unwrap();
+                    assert!(view.is_current_for(&before.0) && before.0.is_current_for(&view),
+                        "failed preparation must preserve the published namespace and exact inputs");
+                    assert!(session.public_visibility_snapshot_in(scope) == before.1,
+                        "failed preparation must not publish a visibility revision");
+                    assert_eq!(session.workbench_bindings_in(scope), before.2);
+                    assert_eq!(session.current_decl_heads_in(scope), before.3);
+                    assert!(session.current_binding_in(scope, "neverPublished").is_none());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let world_after = installed_world_query(
+                &fixture.workbench,
+                fixture.public.clone(),
+                fixture.captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Info,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            )
+            .await;
+            assert_eq!(world_after.provenance().fingerprint, world_before.provenance().fingerprint,
+                "the failed later cell must preserve the logical public World");
+
+            let (retained, context) = fixture.private_with_input(None).await;
+            retained
+                .execute_cell_for_test(
+                    context.clone(),
+                    include_str!("fixtures/world-declaration-invoke-after-failure.hs"),
+                )
+                .await
+                .expect("published closure, binding and import still execute after failure without a new input");
+            retained
+                .publish_completed_cell_for_test(context)
+                .await
+                .unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -19302,7 +19615,11 @@ pub(crate) mod request_tests {
                     let source = tidepool_runtime::session::GenerationArtifactReference::capture(
                         b"checked binding capture".to_vec(),
                     );
-                    let original = context.source_dependency().source_lease()?.original_source().clone();
+                    let original = context
+                        .source_dependency()
+                        .source_lease()?
+                        .original_source()
+                        .clone();
                     let observation = HostWorkObservation::new();
                     let admitted = observation
                         .scope(|| session.capture_inspection_world_in(scope, &source, &original))
@@ -19435,7 +19752,11 @@ pub(crate) mod request_tests {
             let answer = frontend
                 .access
                 .with_machine(frontend_context.clone(), move |session, context, _| {
-                    let original = context.source_dependency().source_lease()?.original_source().clone();
+                    let original = context
+                        .source_dependency()
+                        .source_lease()?
+                        .original_source()
+                        .clone();
                     let admitted = session
                         .capture_inspection_world_in(
                             context.placement.lexical_scope,
@@ -20054,94 +20375,158 @@ pub(crate) mod request_tests {
     }
 
     #[test]
-    fn public_module_batch_refuses_before_checked_preparation() {
-        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
-        let session_id = tidepool_repr::SessionId(44_201);
-        let (session, _root) = bare_session_at(session_id);
-        let context = crate::ActorSessionContext {
-            source_dependency: generation_admission::SourceDependency::Unqualified,
-            actor: crate::ActorRef::first(crate::ActorId(1)),
-            placement: crate::ActorPlacement {
-                session: session_id,
-                resource_scope: RealmId::ROOT,
-                lexical_scope: ScopeId::ROOT,
-            },
-            effect_policy: tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-            live_payload: tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            source_imports: crate::ActorSourceImports::default(),
-            haskell_effects_alias: "'[]".into(),
-            current_model: None,
-            source_layer: Vec::new().into(),
-            ..crate::ActorDescriptor::new(
-                "fixture",
-                crate::ActorPlacement {
-                    session: session_id,
-                    resource_scope: RealmId::ROOT,
-                    lexical_scope: ScopeId::ROOT,
-                },
-            )
-            .admit_independent_world()
-            .session_context(crate::ActorRef::first(crate::ActorId(1)))
+    fn binding_status_keeps_world_refusal_distinct_from_unknown_type() {
+        use tidepool_toolchain::compiler_world::{
+            WorldObservationOutcome as O, WorldQueryRejection as R,
         };
-        let source = ActorWorkbenchSource::new("unused", Vec::new());
-        let query = tidepool_runtime::session::NameQuery {
-            scope: tidepool_runtime::session::NameScope::PublicModule("Data.Maybe".into()),
-            namespace: tidepool_runtime::session::NameNamespace::Value,
-            name: "isJust".into(),
-        };
-        let provenance = tidepool_runtime::session::ScopeProvenance {
-            scope: query.scope.clone(),
-            generation: 0,
-            fingerprint: "unused".into(),
-        };
-        let queries = [
-            InspectionQuery::StructuredInfo {
-                query: query.clone(),
-                provenance: provenance.clone(),
-            },
-            InspectionQuery::StructuredType { query, provenance },
-        ];
-        let observation = HostWorkObservation::new();
-        let results = observation
-            .scope(|| {
-                tidepool_testing::with_settlement(|settlement| {
-                    inspect_actor_batch(&session, &context, &source, &queries, settlement)
-                })
-            })
-            .unwrap();
         assert!(matches!(
-            &results[..],
-            [
-                Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(
-                    Err(tidepool_runtime::session::QueryError::Unsupported(_))
-                )),
-                Ok(tidepool_runtime::session::InspectionResult::StructuredType(
-                    Err(tidepool_runtime::session::QueryError::Unsupported(_))
-                ))
-            ]
+            status_binding_type("answer", O::Rejected(R::Unsupported)),
+            Ok(None)
         ));
-        for kind in [
-            HostWorkCounter::ActorCompileViewCapture,
-            HostWorkCounter::CompileViewCapture,
-            HostWorkCounter::InspectionInputCapture,
-            HostWorkCounter::ActorSourcePrepare,
-        ] {
-            assert_eq!(observation.snapshot().get(kind), 0);
+        for reason in [R::Unavailable, R::Corrupt] {
+            assert!(matches!(status_binding_type("answer", O::Rejected(reason)),
+                Err(ResidentActorWorkbenchError::InspectionWorldRejected(actual)) if actual == reason));
         }
+        assert!(matches!(
+            status_binding_type(
+                "answer",
+                O::Answer(tidepool_toolchain::inspection::ScopedReply::Error(
+                    tidepool_runtime::session::QueryError::Unsupported("no type".into())
+                ))
+            ),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn binding_status_preserves_retained_type_text_and_unknown_values() {
+        use tidepool_runtime::session::WorkbenchBinding as B;
+        let bindings = [
+            B::typed_declaration("poly".into(), "forall a.  a ->\n  a".into()),
+            B::materialized("live".into(), Some("Int".into())),
+            B::materialized("unknown".into(), None),
+        ];
+        assert_eq!(render_binding_status(&bindings),
+            "poly :: forall a.  a ->\n  a [declaration]\nlive :: Int [live value]\nunknown :: <type unavailable> [live value]");
+        assert_eq!(render_binding_status(&[]), "no persistent bindings");
+    }
+
+    #[tokio::test]
+    async fn status_recovery_and_empty_bindings_do_not_admit_compiler_work() {
+        let owner = crate::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench =
+            ResidentActorWorkbench::new(machines, source.bind_preparation(owner.client()), None);
+        workbench_runner_for_test(&workbench)
+            .adopt_final_source_scope(context.clone())
+            .await
+            .unwrap();
+        assert!(
+            crate::ActorCompilerCloseOwner::current().is_err(),
+            "no compiler invocation scope installed"
+        );
+        let spawns = tidepool_extract_cmd::extract_spawn_count();
+        let absent = workbench
+            .query_scoped_world(
+                context.clone(),
+                tidepool_toolchain::compiler_world::WorldObservationQuestion::Expression(
+                    "()".into(),
+                ),
+                None,
+            )
+            .await
+            .expect("representational source absence is a typed query refusal");
+        assert!(matches!(
+            absent,
+            compiler_query::ScopedWorldInspection::Unsupported(_)
+        ));
+        assert_eq!(
+            workbench
+                .status_discovery(
+                    context.clone(),
+                    crate::status_tool::StatusDiscovery::Recovery
+                )
+                .await
+                .unwrap(),
+            "declaration recovery is not configured"
+        );
+        assert_eq!(
+            workbench
+                .status_discovery(context, crate::status_tool::StatusDiscovery::Bindings)
+                .await
+                .unwrap(),
+            "no persistent bindings"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), spawns);
+        drop(workbench);
+        owner.close();
+        assert!(cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(5))
+            .await
+            .is_confirmed());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn binding_status_rejects_actual_world_answer_after_publication() {
+        with_test_compiler_owner(|client| async move {
+            use compiler_query::{FinishedScopedWorldInspection as F, ScopedWorldInspection};
+            use tidepool_toolchain::compiler_world::{WorldObservationOutcome as O, WorldObservationQuestion as Q};
+            use tidepool_toolchain::inspection::ScopedReply;
+            let fixture = RootedWorldInputTest::new(client, 7).await;
+            let completed = fixture.workbench.query_scoped_world(
+                fixture.public.clone(), Q::Expression("(7 :: Int)".into()), None,
+            ).await.expect("actual scoped query completes before the publication");
+            assert!(matches!(&completed, ScopedWorldInspection::Completed(value)
+                if matches!(value.answer(), O::Answer(ScopedReply::Expression { display, .. }) if display == "Int")));
+            let layers: crate::ActorSourceLayerResolver = fixture.source_owner.clone();
+            let descriptor = crate::ActorDescriptor::new("status publication", fixture.public.placement);
+            let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&fixture.public, &descriptor, None).unwrap();
+            let private = Arc::new(workbench_runner_for_test(&fixture.workbench).begin_private_execution(
+                fixture.public.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(), None,
+            ).await.unwrap());
+            let mut context = fixture.public.clone();
+            context.placement.lexical_scope = private.private_scope;
+            let (writer_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                context, fixture.captured.clone(), None, Some(&layers),
+            ).expect("the actual source issuer admits the private writer");
+            let writer = fixture.workbench.shared_view().with_compilation_authority(authority).with_private_execution(private);
+            writer.execute_cell_for_test(writer_context.clone(), "let statusRace = (9 :: Int)").await.unwrap();
+            writer.publish_completed_cell_for_test(writer_context).await.unwrap();
+            let source = fixture.workbench.access.source.config.clone();
+            let request_scope = fixture.workbench.request_scope.clone();
+            fixture.workbench.access.with_machine(fixture.public.clone(), move |session, context, _| {
+                let before = session.workbench_bindings_in(context.placement.lexical_scope);
+                assert!(before.iter().any(|binding| binding.name == "statusRace"));
+                let before_metadata = before.iter().map(|binding|
+                    (binding.name.clone(), binding.defining_generation(), binding.type_display.clone())
+                ).collect::<Vec<_>>();
+                let checked = compiler_query::finish_scoped_world_inspection(
+                    session, context, &source, request_scope.as_ref(), completed,
+                )?;
+                assert!(matches!(checked, F::ScopeChanged { before, after } if !before.same_view(&after)));
+                let after_metadata = session.workbench_bindings_in(context.placement.lexical_scope).iter().map(|binding|
+                    (binding.name.clone(), binding.defining_generation(), binding.type_display.clone())
+                ).collect::<Vec<_>>();
+                assert_eq!(after_metadata, before_metadata, "stale completion must not attach a type to any current generation");
+                Ok(())
+            }).await.unwrap();
+            let spawns = tidepool_extract_cmd::extract_spawn_count();
+            let text = fixture.workbench.status_discovery(fixture.public.clone(), crate::status_tool::StatusDiscovery::Bindings).await.unwrap();
+            assert!(text.contains("statusRace :: Int [live value]"), "{text}");
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), spawns,
+                "the actual published value's retained display requires no compiler query");
+        }).await;
     }
 
     #[test]
     fn collected_introspection_projection_rejects_missing_nominal_constructor() {
         let table = tidepool_test_data::standard_datacon_table();
-        let provenance = current_provenance(1, "same");
-        let error = structured_introspection_answer(
-            StructuredInspectionKind::Info,
-            Err("compiler unavailable".into()),
-            provenance.clone(),
-            provenance,
-        )
-        .to_value(&table)
-        .unwrap_err();
+        let error =
+            StructuredIntrospectionAnswer::CompilerUnavailable("compiler unavailable".into())
+                .to_value(&table)
+                .unwrap_err();
         assert!(matches!(
             error,
             BridgeError::UnknownDataConName(ref name)
@@ -20152,15 +20537,9 @@ pub(crate) mod request_tests {
     #[test]
     fn structured_introspection_compiler_failure_is_a_typed_left() {
         let table = introspection_error_table();
-        let provenance = current_provenance(7, "same");
-        let answer = structured_introspection_answer(
-            StructuredInspectionKind::Info,
-            Err("ghc unavailable".into()),
-            provenance.clone(),
-            provenance,
-        )
-        .to_value(&table)
-        .unwrap();
+        let answer = StructuredIntrospectionAnswer::CompilerUnavailable("ghc unavailable".into())
+            .to_value(&table)
+            .unwrap();
         assert!(matches!(
             answer,
             HaskellValue::Con(left, ref fields)
@@ -20174,14 +20553,9 @@ pub(crate) mod request_tests {
         let table = introspection_error_table();
         let before = current_provenance(7, "before");
         let after = current_provenance(8, "after");
-        let answer = structured_introspection_answer(
-            StructuredInspectionKind::Type,
-            Err("compiler result must be discarded".into()),
-            before,
-            after,
-        )
-        .to_value(&table)
-        .unwrap();
+        let answer = StructuredIntrospectionAnswer::ScopeChanged { before, after }
+            .to_value(&table)
+            .unwrap();
         assert!(matches!(
             answer,
             HaskellValue::Con(left, ref fields)
@@ -22366,6 +22740,7 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn quoted_source_original_survives_coherent_generation_replacement() {
         with_test_compiler_owner(
             quoted_source_original_survives_coherent_generation_replacement_with_preparation_client,
@@ -22400,7 +22775,7 @@ pub(crate) mod request_tests {
             panic!("startup must retain its typed publication obligation");
         };
         assert!(matches!(
-            failure.outcome,
+            failure.outcome.as_ref(),
             Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed == detail
         ));
         assert!(matches!(
@@ -22412,7 +22787,10 @@ pub(crate) mod request_tests {
             .err()
             .expect("ordinary refusal cannot finish startup");
         assert!(!refusal.requires_recovery());
-        assert!(matches!(refusal, ResidentActorWorkbenchError::ActorProtocol(_)));
+        assert!(matches!(
+            refusal,
+            ResidentActorWorkbenchError::ActorProtocol(_)
+        ));
     }
 
     #[derive(Clone, Copy)]
@@ -22422,6 +22800,9 @@ pub(crate) mod request_tests {
         BootstrapCheckoutRetired,
         ReplacementCheckoutRetired,
         ReplacementFrozenSource,
+        RetirementNativeOwnerLoss(
+            crate::local_actor::run_control::GenerationRetirementNativeControl,
+        ),
     }
 
     impl PublicationFailureControl {
@@ -22541,6 +22922,32 @@ pub(crate) mod request_tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_owner_loss_after_reservation_retains_frozen_candidate() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserve,
+                )),
+            ).await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserveDisposalPanic,
+                )),
+            ).await;
+        }).await;
+    }
+
     async fn assert_real_publisher_checkout_loss(
         workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<InstalledToolsState>,
@@ -22588,7 +22995,7 @@ pub(crate) mod request_tests {
         assert!(error.requires_recovery());
         assert!(
             matches!(&error, ResidentActorWorkbenchError::PublicationSettlement { failure }
-            if matches!(failure.outcome, Err(ResidentActorWorkbenchError::Checkout(_)))
+            if matches!(failure.outcome.as_ref(), Err(ResidentActorWorkbenchError::Checkout(_)))
                 && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
         );
         let diagnostic = error.to_string();
@@ -22611,6 +23018,9 @@ pub(crate) mod request_tests {
         control: PublicationFailureControl,
     ) {
         match control {
+            PublicationFailureControl::RetirementNativeOwnerLoss(_) => {
+                unreachable!("native controls use their actual directory owner")
+            }
             PublicationFailureControl::BootstrapOwnerLoss
             | PublicationFailureControl::ReplacementOwnerLoss => {
                 assert_real_publisher_owner_loss(workbench, state, prepared).await;
@@ -22815,7 +23225,7 @@ pub(crate) mod request_tests {
             unreachable!()
         };
         assert!(matches!(
-            failure.outcome,
+            failure.outcome.as_ref(),
             Ok(ActorGenerationCommit::Published { .. })
         ));
         assert!(matches!(
@@ -22835,13 +23245,29 @@ pub(crate) mod request_tests {
         generation_replacement: Option<crate::ActorPersistencePolicy>,
         publication_failure: Option<PublicationFailureControl>,
     ) {
+        let native_owner_control = matches!(
+            publication_failure,
+            Some(PublicationFailureControl::RetirementNativeOwnerLoss(_))
+        );
         let mut recovery = None;
-        let (mut session, mut context, source, session_root) = host_mount_fixture_with_lib(|lib| {
+        let configure = |lib: &mut tidepool_runtime::session::SessionLib| {
             let fixture =
                 crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
             tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
             recovery = Some(fixture);
-        });
+        };
+        let (mut session, mut context, source, session_root) = if native_owner_control {
+            host_mount_fixture_with_effects(
+                configure,
+                &[
+                    tidepool_mcp::notifications_decl(),
+                    tidepool_mcp::sleep_decl(),
+                ],
+                "'[Notifications, Sleep]",
+            )
+        } else {
+            host_mount_fixture_with_lib(configure)
+        };
         let recovery = recovery.unwrap();
         if publication_failure.is_some() {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
@@ -22855,6 +23281,24 @@ pub(crate) mod request_tests {
             context.source_dependency = generation_admission::SourceDependency::World(
                 generation_admission::BootstrapWorld::new(Some(parent)),
             );
+        }
+        let native_descriptor = native_owner_control.then(|| {
+            crate::ActorDescriptor::new("quoted replacement", context.placement)
+                .with_actor_path(tidepool_repr::ActorPath::parse("root/quoted-original").unwrap())
+                .with_persistence_policy(generation_replacement.unwrap())
+                .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(vec![
+                    crate::ActorEffectKey::Notifications,
+                    crate::ActorEffectKey::Sleep,
+                ]))
+                .with_source_dependency(context.source_dependency().clone())
+        });
+        if let Some(descriptor) = &native_descriptor {
+            let issued = descriptor.session_context(context.actor);
+            assert_eq!(
+                issued, context,
+                "the real host and descriptor agree before A preparation"
+            );
+            context = issued;
         }
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
@@ -22969,145 +23413,6 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap();
         }
-        let warmed = if generation_replacement.is_some() {
-            source
-                .prepare_source_toolset(
-                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    generation_source.clone(),
-                    &[],
-                    &[],
-                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                )
-                .await
-                .unwrap()
-        } else {
-            workbench
-                .prepare_toolset_only(
-                    context.clone(),
-                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    Vec::new(),
-                )
-                .await
-                .unwrap()
-        };
-        let warm_executions =
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
-        let public_selection = warmed
-            .prepared
-            .entry
-            .compiled()
-            .published_source_original_selection(
-                &warmed.prepared.source_revision,
-                &tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                    unit: "main".into(),
-                    module: "QuotedAgentSpec".into(),
-                },
-            )
-            .unwrap();
-        if generation_replacement.is_none() {
-            assert_published_source_scope_histories(Arc::clone(&public_selection));
-        }
-        let warm_view = workbench
-            .access
-            .with_machine(context.clone(), |session, context, _| {
-                Ok(session
-                    .compile_view_in(context.placement.lexical_scope)
-                    .unwrap())
-            })
-            .await
-            .unwrap();
-        assert!(warm_view.exact_declaration_context().is_none());
-        let first = Arc::new(if generation_replacement.is_some() {
-            workbench
-                .install_tools_action(
-                    context.clone(),
-                    1,
-                    vec![],
-                    warmed.effects.clone(),
-                    InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
-                    ToolInstallationPurpose::InitialTools,
-                )
-                .await
-                .unwrap()
-                .tools
-        } else {
-            workbench
-                .prepare_tools(context.clone(), 1, vec![])
-                .await
-                .unwrap()
-        });
-        if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral) {
-            let lease = InstalledToolLease::new(
-                context.actor,
-                generation_source.clone(),
-                Some(first.clone()),
-            );
-            let installation =
-                PersistedActorInstallation::capture(&lease, &source_reference).unwrap();
-            assert_restore_preparation_stops_with_its_run(
-                source.config().clone(),
-                generation_source.clone(),
-                installation,
-            )
-            .await;
-        }
-        let initial_originals = workbench
-            .access
-            .with_machine(context.clone(), |session, context, _| {
-                let view = session
-                    .compile_view_in(context.placement.lexical_scope)
-                    .unwrap();
-                Ok(view
-                    .exact_declaration_context()
-                    .expect("initial installation publishes its issued original")
-                    .published_source_original_selections()
-                    .map_err(ResidentActorWorkbenchError::Compile)?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(initial_originals.len(), 1);
-        assert_eq!(
-            initial_originals[0].public_root(),
-            public_selection.public_root()
-        );
-        assert_eq!(initial_originals[0].revision(), public_selection.revision());
-        assert_eq!(
-            initial_originals[0].context().semantic_sha256(),
-            public_selection.context().semantic_sha256(),
-            "ordinary installation carries the exact completed original before durability"
-        );
-        workbench
-            .access
-            .with_machine(context.clone(), {
-                let owner = owner.clone();
-                move |session, context, _| {
-                    session
-                        .initialize_durable_public_scope(owner, context.placement.lexical_scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
-                }
-            })
-            .await
-            .unwrap();
-        let installed_view = workbench
-            .access
-            .with_machine(context.clone(), |session, context, _| {
-                Ok(session
-                    .compile_view_in(context.placement.lexical_scope)
-                    .unwrap())
-            })
-            .await
-            .unwrap();
-        assert_ne!(
-            installed_view, warm_view,
-            "same-tip installation invalidates the warm view"
-        );
-        assert!(installed_view.exact_declaration_context().is_some());
-        assert!(
-            warm_view.exact_declaration_context().is_none(),
-            "earlier capture remains immutable"
-        );
         let recover_context = || {
             let mut lib = tidepool_runtime::session::SessionLib::open(
                 tidepool_repr::SessionId(8_141),
@@ -23123,812 +23428,1129 @@ pub(crate) mod request_tests {
             let scope = recovered.recover_public_scope(&owner).unwrap();
             recovered.compile_view_in(scope).unwrap()
         };
-        let generation_zero_recovered = recover_context();
-        assert_eq!(generation_zero_recovered.library(), None);
-        assert_eq!(
-            generation_zero_recovered
-                .exact_declaration_context()
-                .unwrap()
-                .semantic_sha256(),
-            installed_view
-                .exact_declaration_context()
-                .unwrap()
-                .semantic_sha256(),
-            "generation-zero recovery restores the issued original policy"
-        );
-
-        assert!(Arc::ptr_eq(
-            &warmed.prepared,
-            &first.code.prepared().expect("source-prepared installation")
-        ));
-        assert_eq!(first.revision(), Some(warmed.source_revision()));
-        let resolved = first.resolved_spec().unwrap();
-        assert!(std::ptr::eq(resolved, &warmed.prepared.resolved));
-        assert_eq!(
-            resolved.checked_module().as_deref(),
-            Some("QuotedAgentSpec")
-        );
-        assert_eq!(
-            first.provenance(),
-            format!(
-                "install=1 revision={} {}",
-                warmed.source_revision(),
-                resolved.describe()
-            )
-        );
-        let completed_executions =
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
-        assert!(
-            !completed_executions.is_empty(),
-            "the original compiler executes the actual local quoter"
-        );
-        assert_eq!(
-            completed_executions, warm_executions,
-            "the actual installation reuses immutable readiness without another compiler turn"
-        );
-        let proof = first
-            .code
-            .prepared()
-            .expect("source-prepared installation")
-            .entry
-            .compiled()
-            .ordinary_original_compile_input()
-            .unwrap();
-        assert!(
-            proof.replay_eligible_identity().is_none(),
-            "quotation remains ineligible for ordinary source replay"
-        );
-        assert_ne!(
-            proof.source_replay_eligibility(),
-            tidepool_toolchain::artifacts::SourceReplayEligibility::Eligible
-        );
-        let stale_installation = workbench
-            .access
-            .with_machine(context.clone(), {
-                let selection = Arc::clone(&public_selection);
-                move |session, context, _| {
-                    session
-                        .stage_published_source_originals_in(
-                            context.placement.lexical_scope,
-                            selection,
-                        )
-                        .map_err(ResidentActorWorkbenchError::Resident)
-                }
-            })
-            .await
-            .unwrap();
-        let second_bootstrap = workbench
-            .access
-            .with_machine(context.clone(), {
-                let owner = owner.clone();
-                move |session, context, _| {
-                    session
-                        .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
-                }
-            })
-            .await
-            .unwrap();
-        let second = Arc::new(if generation_replacement.is_some() {
-            workbench
-                .install_tools_action(
-                    context.clone(),
-                    2,
-                    vec![],
-                    warmed.effects.clone(),
-                    InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
-                    ToolInstallationPurpose::InitialTools,
-                )
-                .await
-                .unwrap()
-                .tools
-        } else {
-            workbench
-                .prepare_tools(context.clone(), 2, vec![])
-                .await
-                .unwrap()
-        });
-        workbench
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                session
-                    .publish_durable_public_bootstrap(second_bootstrap)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-            })
-            .await
-            .unwrap();
-        workbench
-            .access
-            .with_machine(context.clone(), move |session, context, _| {
-                let before = session
-                    .compile_view_in(context.placement.lexical_scope)
-                    .unwrap();
-                assert!(matches!(
-                    session.publish_source_originals(stale_installation),
-                    Err(ResidentError::Session(
-                        tidepool_runtime::session::SessionError::StaleStagedDeclaration
-                    ))
-                ));
-                assert_eq!(
-                    session
-                        .compile_view_in(context.placement.lexical_scope)
-                        .unwrap(),
-                    before
-                );
-                Ok(())
-            })
-            .await
-            .unwrap();
-
-        assert!(Arc::ptr_eq(
-            &first.code.prepared().expect("source-prepared installation"),
-            &second
-                .code
-                .prepared()
-                .expect("source-prepared installation")
-        ));
-        assert_ne!(
-            first._installation_scope.scope(),
-            second._installation_scope.scope()
-        );
-        assert_eq!(
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
-            completed_executions
-        );
-        assert_eq!(first.surface(), second.surface());
-        if generation_replacement.is_some() {
-            // Replacement publishes its own issued source base without inheriting the notebook.
-            let descriptor = crate::ActorDescriptor::new("quoted replacement", context.placement)
-                .with_actor_path(tidepool_repr::ActorPath::parse("root/quoted-original").unwrap())
-                .with_persistence_policy(generation_replacement.unwrap());
-            let state = Arc::new(InstalledToolsState::default());
-            let installation = InstalledToolLease::new(
-                context.actor,
-                generation_source.clone(),
-                Some(second.clone()),
-            );
-            assert_eq!(
-                state.install_bootstrap(
-                    BootstrapExpectation::Available(&installation),
-                    installation.clone()
-                ),
-                Err(BootstrapInstallationError::Changed)
-            );
-            assert!(state.snapshot().is_none());
-            state
-                .install_bootstrap(BootstrapExpectation::Empty, installation.clone())
-                .unwrap();
-            assert_eq!(
-                state.install_bootstrap(BootstrapExpectation::Empty, installation.clone()),
-                Err(BootstrapInstallationError::Changed)
-            );
-            let stale_bootstrap = InstalledToolLease::new(
-                context.actor,
-                generation_source.clone(),
-                Some(first.clone()),
-            );
-            assert_eq!(
-                state.install_bootstrap(
-                    BootstrapExpectation::Available(&stale_bootstrap),
-                    installation.clone()
-                ),
-                Err(BootstrapInstallationError::Changed)
-            );
-            assert!(state.current().unwrap().same_installation(&installation));
-            state
-                .install_bootstrap(
-                    BootstrapExpectation::Available(&installation),
-                    installation.clone(),
-                )
-                .unwrap();
-            let prompts = tidepool_runtime::session::ComposedPromptSnapshot::capture(
-                "quoted generation".into(),
-            );
-            let prepared = workbench
-                .prepare_initial_generation(
-                    state.clone(),
-                    context.clone(),
-                    descriptor.clone(),
-                    installation.clone(),
-                    prompts.clone(),
-                )
-                .await
-                .unwrap();
-            let expected_work = InstallationObservationWork {
-                captures: 1,
-                encodings: usize::from(
-                    descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable,
-                ),
-                restored_decodes: 0,
+        let install_quoted_tools = async {
+            let warmed = if generation_replacement.is_some() {
+                source
+                    .prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        generation_source.clone(),
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                workbench
+                    .prepare_toolset_only(
+                        context.clone(),
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap()
             };
-            assert_eq!(prepared.installation_work, expected_work);
-            if let Some(control) = publication_failure.filter(|control| control.bootstrap()) {
-                assert_real_publisher_failure(&workbench, state, prepared, control).await;
-                return;
-            }
-            let initial = match workbench
-                .generation_publisher(
-                    state.clone(),
-                    ActorPublicationOwner::Preparation(preparation_client.clone()),
+            let warm_executions =
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+            let public_selection = warmed
+                .prepared
+                .entry
+                .compiled()
+                .published_source_original_selection(
+                    &warmed.prepared.source_revision,
+                    &tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                        unit: "main".into(),
+                        module: "QuotedAgentSpec".into(),
+                    },
                 )
-                .publish(
-                    prepared,
-                    tidepool_runtime::session::PublicationDecision::new(),
-                    ActorGenerationPublication::Terminal,
-                )
-                .await
-                .unwrap()
-            {
-                ActorGenerationCommit::Published { generation, .. } => generation,
-                _ => panic!("initial generation must publish"),
-            };
-            assert_eq!(
-                state.install_bootstrap(
-                    BootstrapExpectation::Available(&installation),
-                    installation.clone()
-                ),
-                Err(BootstrapInstallationError::PublishedGeneration)
-            );
-            assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
-            if let Some(selected) = &initial.durable {
-                // The stored reference is produced by real generation publication;
-                // this control does not manufacture native or source authority.
-                let mut observed = installation.clone().observe_generation().unwrap();
-                observed
-                    .verify_restored(&selected.references, &prompts)
-                    .unwrap();
-                assert_eq!(
-                    observed.work,
-                    InstallationObservationWork {
-                        captures: 1,
-                        encodings: 0,
-                        restored_decodes: 1,
-                    }
-                );
-                assert!(observed.lease.same_installation(&installation));
-                let mut corrupt = selected.references.clone();
-                corrupt.installation =
-                    tidepool_runtime::session::GenerationArtifactReference::capture(
-                        b"not installation json".to_vec(),
-                    );
-                assert!(observed.verify_restored(&corrupt, &prompts).is_err());
-                assert!(observed.lease.same_installation(&installation));
-                assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
-                let source_bytes = observed.source.bytes().as_ptr();
-                let encoded = observed.into_durable_references(prompts.clone()).unwrap();
-                assert_eq!(
-                    encoded.references.source.bytes().as_ptr(),
-                    source_bytes,
-                    "durable projection moves the exact observed source bytes"
-                );
-                assert!(encoded.lease.same_installation(&installation));
-                encoded
-                    .lease
-                    .verify_recovered_generation(&encoded.references)
-                    .unwrap();
+                .unwrap();
+            if generation_replacement.is_none() {
+                assert_published_source_scope_histories(Arc::clone(&public_selection));
             }
-            let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
-            let (before, before_visibility) = workbench
+            let warm_view = workbench
                 .access
                 .with_machine(context.clone(), |session, context, _| {
-                    Ok((
-                        session
-                            .compile_view_in(context.placement.lexical_scope)
-                            .unwrap(),
-                        session
-                            .public_visibility_snapshot_in(context.placement.lexical_scope)
-                            .unwrap(),
-                    ))
+                    Ok(session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap())
                 })
                 .await
                 .unwrap();
-            let before_commit = before.clone();
-            let candidate = Arc::new(
+            assert!(warm_view.exact_declaration_context().is_none());
+            let first = Arc::new(if generation_replacement.is_some() {
                 workbench
                     .install_tools_action(
                         context.clone(),
-                        7,
+                        1,
                         vec![],
                         warmed.effects.clone(),
                         InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
-                        ToolInstallationPurpose::CandidateTools,
+                        ToolInstallationPurpose::InitialTools,
                     )
                     .await
                     .unwrap()
-                    .tools,
-            );
-            let next_installation =
-                InstalledToolLease::new(context.actor, generation_source.clone(), Some(candidate));
-            for cancelled in [false, true] {
-                let rejected = workbench
-                    .prepare_actor_generation(
-                        context.clone(),
-                        descriptor.clone(),
-                        ActorRequestSnapshot::Generation(initial.clone()),
-                        next_installation.clone(),
-                        prompts.clone(),
-                    )
+                    .tools
+            } else {
+                workbench
+                    .prepare_tools(context.clone(), 1, vec![])
                     .await
-                    .unwrap();
-                assert_eq!(rejected.installation_work, expected_work);
-                let rejected_scope = rejected.candidate.scope.clone();
-                let decision = tidepool_runtime::session::PublicationDecision::new();
-                if cancelled {
-                    decision.request_cancellation();
-                }
-                let domain = tidepool_runtime::session::RecoveryDomainId::Root;
-                let revision = recovery
-                    .store
-                    .read_domain(domain)
                     .unwrap()
-                    .unwrap()
-                    .revision;
-                assert!(matches!(
+            });
+            if publication_failure.is_some() {
+                let second = Arc::new(
                     workbench
-                        .generation_publisher(
-                            if cancelled {
-                                state.clone()
-                            } else {
-                                Arc::new(InstalledToolsState::default())
-                            },
-                            ActorPublicationOwner::Preparation(preparation_client.clone())
+                        .install_tools_action(
+                            context.clone(),
+                            2,
+                            vec![],
+                            warmed.effects.clone(),
+                            InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
+                            ToolInstallationPurpose::InitialTools,
                         )
-                        .publish(rejected, decision, ActorGenerationPublication::Terminal,)
                         .await
-                        .unwrap(),
-                    ActorGenerationCommit::Refused(_)
+                        .unwrap()
+                        .tools,
+                );
+                assert!(Arc::ptr_eq(
+                    &first.code.prepared().unwrap(),
+                    &warmed.prepared
                 ));
+                assert!(Arc::ptr_eq(
+                    &second.code.prepared().unwrap(),
+                    &warmed.prepared
+                ));
+                assert_ne!(
+                    first._installation_scope.scope(),
+                    second._installation_scope.scope()
+                );
+                assert_eq!(first.surface(), second.surface());
+                let completed_executions =
+                    std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
                 assert_eq!(
-                    recovery
-                        .store
-                        .read_domain(domain)
-                        .unwrap()
-                        .unwrap()
-                        .revision,
-                    revision,
-                    "cancelled or unavailable publication owner writes no public manifest"
+                    completed_executions, warm_executions,
+                    "both actual component installations retain the same completed original"
                 );
-                let old = before.clone();
-                workbench
-                    .access
-                    .with_machine(context.clone(), move |session, context, _| {
-                        assert_eq!(
-                            session
-                                .compile_view_in(context.placement.lexical_scope)
-                                .unwrap(),
-                            old
-                        );
-                        assert!(session
-                            .compile_view_in(rejected_scope.scope())
-                            .unwrap()
-                            .exact_declaration_context()
-                            .is_none());
-                        Ok(())
-                    })
-                    .await
-                    .unwrap();
+                return (first, second, completed_executions, warmed, None);
             }
-            let foreign = workbench
-                .prepare_actor_generation(
-                    context.clone(),
-                    descriptor.clone(),
-                    ActorRequestSnapshot::Generation(initial.clone()),
-                    next_installation.clone(),
-                    prompts.clone(),
-                )
-                .await
-                .unwrap();
-            let foreign_owner =
-                ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
-                    Arc::new(ActorMachineRegistry::new()),
-                    source.clone(),
-                    None,
+            if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral) {
+                let lease = InstalledToolLease::new(
+                    context.actor,
+                    generation_source.clone(),
+                    Some(first.clone()),
                 );
-            assert!(matches!(
-                foreign_owner
-                    .generation_publisher(
-                        state.clone(),
-                        ActorPublicationOwner::Preparation(preparation_client.clone())
-                    )
-                    .publish(
-                        foreign,
-                        tidepool_runtime::session::PublicationDecision::new(),
-                        ActorGenerationPublication::Terminal,
-                    )
-                    .await
-                    .unwrap(),
-                ActorGenerationCommit::Refused(_)
-            ));
-            assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
-            let stale = workbench
-                .prepare_actor_generation(
-                    context.clone(),
-                    descriptor.clone(),
-                    ActorRequestSnapshot::Generation(initial.clone()),
-                    next_installation.clone(),
-                    prompts.clone(),
+                let installation =
+                    PersistedActorInstallation::capture(&lease, &source_reference).unwrap();
+                assert_restore_preparation_stops_with_its_run(
+                    source.config().clone(),
+                    generation_source.clone(),
+                    installation,
                 )
+                .await;
+            }
+            let initial_originals = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    let view = session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap();
+                    Ok(view
+                        .exact_declaration_context()
+                        .expect("initial installation publishes its issued original")
+                        .published_source_original_selections()
+                        .map_err(ResidentActorWorkbenchError::Compile)?)
+                })
                 .await
                 .unwrap();
-            state
-                .replace_explicit(
-                    &initial.installation,
-                    initial.installation.tools_arc().unwrap(),
-                )
+            assert_eq!(initial_originals.len(), 1);
+            assert_eq!(
+                initial_originals[0].public_root(),
+                public_selection.public_root()
+            );
+            assert_eq!(initial_originals[0].revision(), public_selection.revision());
+            let source_identity =
+                |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+                    let mut identities = context.compiler_input_roles().into_iter().filter_map(|role| {
+                    let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
+                        interface, original, source_revision, original_input_identity, selection_sha256, ..
+                    } = role else { return None; };
+                    Some((interface, original, source_revision, original_input_identity, selection_sha256))
+                }).collect::<Vec<_>>();
+                    identities.sort();
+                    identities
+                };
+            assert_eq!(
+                source_identity(initial_originals[0].context()),
+                source_identity(public_selection.context()),
+                "installation preserves the exact issued original selection"
+            );
+            assert!(public_selection
+                .context()
+                .artifact_view()
+                .selected_native_groups()
+                .is_subset(
+                    &initial_originals[0]
+                        .context()
+                        .artifact_view()
+                        .selected_native_groups()
+                ));
+            if publication_failure.is_none() {
+                assert_eq!(
+                    initial_originals[0].context().semantic_sha256(),
+                    public_selection.context().semantic_sha256(),
+                    "ordinary installation carries the exact completed original before durability"
+                );
+            }
+            workbench
+                .access
+                .with_machine(context.clone(), {
+                    let owner = owner.clone();
+                    move |session, context, _| {
+                        session
+                            .initialize_durable_public_scope(owner, context.placement.lexical_scope)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    }
+                })
+                .await
                 .unwrap();
-            let current = state.current_generation().unwrap();
-            assert!(!Arc::ptr_eq(&initial, &current));
-            assert!(matches!(
+            let installed_view = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok(session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            assert_ne!(
+                installed_view, warm_view,
+                "same-tip installation invalidates the warm view"
+            );
+            assert!(installed_view.exact_declaration_context().is_some());
+            assert!(
+                warm_view.exact_declaration_context().is_none(),
+                "earlier capture remains immutable"
+            );
+            let generation_zero_recovered = recover_context();
+            assert_eq!(generation_zero_recovered.library(), None);
+            assert_eq!(
+                generation_zero_recovered
+                    .exact_declaration_context()
+                    .unwrap()
+                    .semantic_sha256(),
+                installed_view
+                    .exact_declaration_context()
+                    .unwrap()
+                    .semantic_sha256(),
+                "generation-zero recovery restores the issued original policy"
+            );
+
+            assert!(Arc::ptr_eq(
+                &warmed.prepared,
+                &first.code.prepared().expect("source-prepared installation")
+            ));
+            assert_eq!(first.revision(), Some(warmed.source_revision()));
+            let resolved = first.resolved_spec().unwrap();
+            assert!(std::ptr::eq(resolved, &warmed.prepared.resolved));
+            assert_eq!(
+                resolved.checked_module().as_deref(),
+                Some("QuotedAgentSpec")
+            );
+            assert_eq!(
+                first.provenance(),
+                format!(
+                    "install=1 revision={} {}",
+                    warmed.source_revision(),
+                    resolved.describe()
+                )
+            );
+            let completed_executions =
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+            assert!(
+                !completed_executions.is_empty(),
+                "the original compiler executes the actual local quoter"
+            );
+            assert_eq!(
+                completed_executions, warm_executions,
+                "the actual installation reuses immutable readiness without another compiler turn"
+            );
+            let proof = first
+                .code
+                .prepared()
+                .expect("source-prepared installation")
+                .entry
+                .compiled()
+                .ordinary_original_compile_input()
+                .unwrap();
+            assert!(
+                proof.replay_eligible_identity().is_none(),
+                "quotation remains ineligible for ordinary source replay"
+            );
+            assert_ne!(
+                proof.source_replay_eligibility(),
+                tidepool_toolchain::artifacts::SourceReplayEligibility::Eligible
+            );
+            let stale_installation = workbench
+                .access
+                .with_machine(context.clone(), {
+                    let selection = Arc::clone(&public_selection);
+                    move |session, context, _| {
+                        session
+                            .stage_published_source_originals_in(
+                                context.placement.lexical_scope,
+                                selection,
+                            )
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    }
+                })
+                .await
+                .unwrap();
+            let second_bootstrap = workbench
+                .access
+                .with_machine(context.clone(), {
+                    let owner = owner.clone();
+                    move |session, context, _| {
+                        session
+                            .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    }
+                })
+                .await
+                .unwrap();
+            let second = Arc::new(if generation_replacement.is_some() {
                 workbench
-                    .generation_publisher(
-                        state.clone(),
-                        ActorPublicationOwner::Preparation(preparation_client.clone())
-                    )
-                    .publish(
-                        stale,
-                        tidepool_runtime::session::PublicationDecision::new(),
-                        ActorGenerationPublication::Terminal,
+                    .install_tools_action(
+                        context.clone(),
+                        2,
+                        vec![],
+                        warmed.effects.clone(),
+                        InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
+                        ToolInstallationPurpose::InitialTools,
                     )
                     .await
-                    .unwrap(),
-                ActorGenerationCommit::Refused(_)
-            ));
-            assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &current));
-            let prepared = workbench
-                .prepare_actor_generation(
-                    context.clone(),
-                    descriptor.clone(),
-                    ActorRequestSnapshot::Generation(current),
-                    next_installation.clone(),
-                    prompts.clone(),
-                )
+                    .unwrap()
+                    .tools
+            } else {
+                workbench
+                    .prepare_tools(context.clone(), 2, vec![])
+                    .await
+                    .unwrap()
+            });
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    session
+                        .publish_durable_public_bootstrap(second_bootstrap)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                })
                 .await
                 .unwrap();
-            assert_eq!(prepared.installation_work, expected_work);
-            let next_scope = prepared.candidate.scope.scope();
             workbench
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
+                    let before = session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap();
+                    assert!(matches!(
+                        session.publish_source_originals(stale_installation),
+                        Err(ResidentError::Session(
+                            tidepool_runtime::session::SessionError::StaleStagedDeclaration
+                        ))
+                    ));
                     assert_eq!(
                         session
                             .compile_view_in(context.placement.lexical_scope)
                             .unwrap(),
                         before
                     );
-                    assert!(session
-                        .compile_view_in(next_scope)
-                        .unwrap()
-                        .exact_declaration_context()
-                        .is_none());
                     Ok(())
                 })
                 .await
                 .unwrap();
-            let domain = tidepool_runtime::session::RecoveryDomainId::Root;
-            let revision = recovery
-                .store
-                .read_domain(domain)
-                .unwrap()
-                .unwrap()
-                .revision;
-            workbench
-                .access
-                .with_machine(context.clone(), |session, _, _| {
-                    let scope = session.mint_isolated_scope();
-                    let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
-                        &tidepool_repr::ActorPath::parse("root/unrelated-source-owner").unwrap(),
-                        1,
-                    )
-                    .unwrap();
-                    session
-                        .initialize_durable_public_scope(owner, scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })?;
-                    Ok(())
-                })
-                .await
-                .unwrap();
-            assert_ne!(
-                recovery
-                    .store
-                    .read_domain(domain)
-                    .unwrap()
-                    .unwrap()
-                    .revision,
-                revision,
-                "an unrelated public owner forces the prepared replacement to rebase"
-            );
-            if let Some(control) = publication_failure.filter(|control| !control.bootstrap()) {
-                assert_real_publisher_failure(&workbench, state, prepared, control).await;
-                return;
-            }
-            let replacement = match workbench
-                .generation_publisher(
-                    state.clone(),
-                    ActorPublicationOwner::Preparation(preparation_client.clone()),
-                )
-                .publish(
-                    prepared,
-                    tidepool_runtime::session::PublicationDecision::new(),
-                    ActorGenerationPublication::Terminal,
-                )
-                .await
-                .unwrap()
-            {
-                ActorGenerationCommit::Published { generation, .. } => generation,
-                _ => panic!("replacement must publish"),
-            };
-            crate::resident_actor::pinned_endpoint_generation_tests::assert_pinned_preflight(
-                ResidentActorRunner::new(Arc::clone(&workbench.access.machines), source.clone()),
-                descriptor.clone(),
-                state.clone(),
-                initial.clone(),
-                replacement.clone(),
-                pinned_endpoint.clone(),
-                source_issuer.clone(),
-            );
-            assert_ne!(replacement.scope.scope(), initial.scope.scope());
+
             assert!(Arc::ptr_eq(
-                pinned_endpoint.snapshot().generation().unwrap(),
-                &initial
-            ));
-            let current_endpoint = state.snapshot().unwrap().select("probe").unwrap();
-            assert!(Arc::ptr_eq(
-                current_endpoint.snapshot().generation().unwrap(),
-                &replacement
+                &first.code.prepared().expect("source-prepared installation"),
+                &second
+                    .code
+                    .prepared()
+                    .expect("source-prepared installation")
             ));
             assert_ne!(
-                pinned_endpoint
-                    .snapshot()
-                    .generation()
-                    .unwrap()
-                    .context
-                    .placement
-                    .lexical_scope,
-                current_endpoint
-                    .snapshot()
-                    .generation()
-                    .unwrap()
-                    .context
-                    .placement
-                    .lexical_scope,
+                first._installation_scope.scope(),
+                second._installation_scope.scope()
             );
-            let (private, private_context) = ResidentActorWorkbench::new(
-                Arc::clone(&workbench.access.machines),
-                source.clone(),
-                None,
-            )
-            .admit_private_cell_with_owner_for_test(
-                replacement.context.clone(),
-                replacement.public_owner.clone(),
-            )
-            .await
-            .unwrap();
-            private.execute_cell_for_test(private_context.clone(),
-            "import qualified QuotedAgentSpec as Replacement\nlet replacementSpec = Replacement.agentSpec @'[]").await.unwrap();
-            private
-                .publish_completed_cell_with_commit_for_test(
-                    private_context,
-                    if replacement.durable.is_some() {
-                        tidepool_runtime::session::PublicManifestCommit::Durable
-                    } else {
-                        tidepool_runtime::session::PublicManifestCommit::Ephemeral
-                    },
-                )
-                .await
-                .unwrap();
-            let old_scope = initial.scope.scope();
-            workbench
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    let old_view = session.compile_view_in(old_scope).unwrap();
-                    assert_eq!(
-                        old_view
-                            .exact_declaration_context()
-                            .unwrap()
-                            .semantic_sha256(),
-                        before_commit
-                            .exact_declaration_context()
-                            .unwrap()
-                            .semantic_sha256()
-                    );
-                    assert!(
-                        session.public_visibility_snapshot_in(old_scope).unwrap()
-                            == before_visibility,
-                        "replacement commit and import leave the previous notebook unchanged"
-                    );
-                    Ok(())
-                })
-                .await
-                .unwrap();
-            let replacement_view = workbench
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    Ok(session.compile_view_in(next_scope).unwrap())
-                })
-                .await
-                .unwrap();
-            assert!(replacement_view.exact_declaration_context().unwrap().compiler_input_roles().iter().any(|role|
-            matches!(role, tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal { .. })));
             assert_eq!(
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
-            completed_executions,
-            "first replacement import must consume the issued original without quotation replay"
-        );
-            if replacement.durable.is_some() {
-                let recovered_view = {
-                    let mut lib = tidepool_runtime::session::SessionLib::open(
-                        tidepool_repr::SessionId(8_143),
-                        session_root.path(),
-                        tidepool_runtime::session::ModuleEnv::standalone_default(),
-                    )
-                    .unwrap()
-                    .with_validation_include(roots.clone());
-                    tidepool_testing::with_settlement(|settlement| {
-                        recovery.reopen().attach_root(&mut lib, settlement)
-                    });
-                    let mut recovered =
-                        tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
-                    let scope = recovered
-                        .recover_public_scope(&replacement.durable.as_ref().unwrap().owner)
-                        .unwrap();
-                    recovered.compile_view_in(scope).unwrap()
-                };
-                let current_view = workbench
-                    .access
-                    .with_machine(context.clone(), move |session, _, _| {
-                        Ok(session.compile_view_in(next_scope).unwrap())
-                    })
-                    .await
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+                completed_executions
+            );
+            assert_eq!(first.surface(), second.surface());
+            (
+                first,
+                second,
+                completed_executions,
+                warmed,
+                Some(generation_zero_recovered),
+            )
+        };
+        let (first, second, completed_executions, warmed, generation_zero_recovered) =
+            install_quoted_tools.await;
+        let proof = first
+            .code
+            .prepared()
+            .unwrap()
+            .entry
+            .compiled()
+            .ordinary_original_compile_input()
+            .unwrap();
+        if generation_replacement.is_some() {
+            let replacement_publication_history = async {
+                // Replacement publishes its own issued source base without inheriting the notebook.
+                let descriptor = native_descriptor.clone().unwrap_or_else(|| {
+                    crate::ActorDescriptor::new("quoted replacement", context.placement)
+                        .with_actor_path(
+                            tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
+                        )
+                        .with_persistence_policy(generation_replacement.unwrap())
+                });
+                let state = Arc::new(InstalledToolsState::default());
+                let installation = InstalledToolLease::new(
+                    context.actor,
+                    generation_source.clone(),
+                    Some(second.clone()),
+                );
+                assert_eq!(
+                    state.install_bootstrap(
+                        BootstrapExpectation::Available(&installation),
+                        installation.clone()
+                    ),
+                    Err(BootstrapInstallationError::Changed)
+                );
+                assert!(state.snapshot().is_none());
+                state
+                    .install_bootstrap(BootstrapExpectation::Empty, installation.clone())
                     .unwrap();
                 assert_eq!(
-                recovered_view
-                    .exact_declaration_context()
-                    .unwrap()
-                    .semantic_sha256(),
-                current_view
-                    .exact_declaration_context()
-                    .unwrap()
-                    .semantic_sha256(),
-                "replacement context and its artifacts remain resolvable after rebase and restart"
-            );
-            }
-            let late_prepared = workbench
-                .prepare_actor_generation(
-                    context.clone(),
-                    descriptor.clone(),
-                    ActorRequestSnapshot::Generation(replacement.clone()),
-                    next_installation.clone(),
-                    prompts.clone(),
-                )
-                .await
-                .unwrap();
-            state.0.lock().availability =
-                InstalledToolsAvailability::GenerationUnavailable(replacement.clone());
-            assert!(
-                state.current_generation().is_none(),
-                "uncertainty is not bootstrap admission"
-            );
-            assert!(matches!(
-                state.observe(),
-                InstalledToolsObservation::SourceUnavailable(_)
-            ));
-            assert_eq!(
-                state.install_bootstrap(
-                    BootstrapExpectation::Available(&installation),
-                    installation.clone()
-                ),
-                Err(BootstrapInstallationError::UnconfirmedGeneration)
-            );
-            assert!(
-                matches!(&state.0.lock().availability, InstalledToolsAvailability::GenerationUnavailable(retained)
-                if Arc::ptr_eq(retained, &replacement))
-            );
-            drop(state.drain_retired());
-            let revision = recovery
-                .store
-                .read_domain(domain)
-                .unwrap()
-                .unwrap()
-                .revision;
-            let decision = tidepool_runtime::session::PublicationDecision::new();
-            assert!(matches!(
-                workbench
+                    state.install_bootstrap(BootstrapExpectation::Empty, installation.clone()),
+                    Err(BootstrapInstallationError::Changed)
+                );
+                let stale_bootstrap = InstalledToolLease::new(
+                    context.actor,
+                    generation_source.clone(),
+                    Some(first.clone()),
+                );
+                assert_eq!(
+                    state.install_bootstrap(
+                        BootstrapExpectation::Available(&stale_bootstrap),
+                        installation.clone()
+                    ),
+                    Err(BootstrapInstallationError::Changed)
+                );
+                assert!(state.current().unwrap().same_installation(&installation));
+                state
+                    .install_bootstrap(
+                        BootstrapExpectation::Available(&installation),
+                        installation.clone(),
+                    )
+                    .unwrap();
+                let prompts = tidepool_runtime::session::ComposedPromptSnapshot::capture(
+                    "quoted generation".into(),
+                );
+                let prepared = workbench
+                    .prepare_initial_generation(
+                        state.clone(),
+                        context.clone(),
+                        descriptor.clone(),
+                        installation.clone(),
+                        prompts.clone(),
+                    )
+                    .await
+                    .unwrap();
+                let expected_work = InstallationObservationWork {
+                    captures: 1,
+                    encodings: usize::from(
+                        descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable,
+                    ),
+                    restored_decodes: 0,
+                };
+                assert_eq!(prepared.installation_work, expected_work);
+                if let Some(control) = publication_failure.filter(|control| control.bootstrap()) {
+                    assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                    return;
+                }
+                let initial = match workbench
                     .generation_publisher(
                         state.clone(),
-                        ActorPublicationOwner::Preparation(preparation_client.clone())
+                        ActorPublicationOwner::Preparation(preparation_client.clone()),
                     )
                     .publish(
-                        late_prepared,
-                        decision.clone(),
+                        prepared,
+                        tidepool_runtime::session::PublicationDecision::new(),
                         ActorGenerationPublication::Terminal,
                     )
                     .await
-                    .unwrap(),
-                ActorGenerationCommit::Refused(_)
-            ));
-            assert!(matches!(state.observe(), InstalledToolsObservation::Empty));
-            assert_eq!(
-                decision.phase(),
-                tidepool_runtime::session::PublicationPhase::Running,
-                "released installation custody refuses late publication before a native claim"
-            );
-            assert_eq!(
-                recovery
-                    .store
-                    .read_domain(domain)
                     .unwrap()
-                    .unwrap()
-                    .revision,
-                revision,
-                "late publication cannot change the retained public generation"
+                {
+                    ActorGenerationCommit::Published { generation, .. } => generation,
+                    _ => panic!("initial generation must publish"),
+                };
+                assert_eq!(
+                    state.install_bootstrap(
+                        BootstrapExpectation::Available(&installation),
+                        installation.clone()
+                    ),
+                    Err(BootstrapInstallationError::PublishedGeneration)
+                );
+                assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+                if let Some(selected) = &initial.durable {
+                    // The stored reference is produced by real generation publication;
+                    // this control does not manufacture native or source authority.
+                    let mut observed = installation.clone().observe_generation().unwrap();
+                    observed
+                        .verify_restored(&selected.references, &prompts)
+                        .unwrap();
+                    assert_eq!(
+                        observed.work,
+                        InstallationObservationWork {
+                            captures: 1,
+                            encodings: 0,
+                            restored_decodes: 1,
+                        }
+                    );
+                    assert!(observed.lease.same_installation(&installation));
+                    let mut corrupt = selected.references.clone();
+                    corrupt.installation =
+                        tidepool_runtime::session::GenerationArtifactReference::capture(
+                            b"not installation json".to_vec(),
+                        );
+                    assert!(observed.verify_restored(&corrupt, &prompts).is_err());
+                    assert!(observed.lease.same_installation(&installation));
+                    assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+                    let source_bytes = observed.source.bytes().as_ptr();
+                    let encoded = observed.into_durable_references(prompts.clone()).unwrap();
+                    assert_eq!(
+                        encoded.references.source.bytes().as_ptr(),
+                        source_bytes,
+                        "durable projection moves the exact observed source bytes"
+                    );
+                    assert!(encoded.lease.same_installation(&installation));
+                    encoded
+                        .lease
+                        .verify_recovered_generation(&encoded.references)
+                        .unwrap();
+                }
+                let pinned_endpoint = state.snapshot().unwrap().select("probe").unwrap();
+                let (before, before_visibility) = workbench
+                    .access
+                    .with_machine(context.clone(), |session, context, _| {
+                        Ok((
+                            session
+                                .compile_view_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            session
+                                .public_visibility_snapshot_in(context.placement.lexical_scope)
+                                .unwrap(),
+                        ))
+                    })
+                    .await
+                    .unwrap();
+                let before_commit = before.clone();
+                let candidate = Arc::new(
+                    workbench
+                        .install_tools_action(
+                            context.clone(),
+                            7,
+                            vec![],
+                            warmed.effects.clone(),
+                            InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
+                            ToolInstallationPurpose::CandidateTools,
+                        )
+                        .await
+                        .unwrap()
+                        .tools,
+                );
+                let next_installation = InstalledToolLease::new(
+                    context.actor,
+                    generation_source.clone(),
+                    Some(candidate),
+                );
+                if let Some(control) = publication_failure.filter(|control| !control.bootstrap()) {
+                    let prepared = workbench
+                        .prepare_actor_generation(
+                            context.clone(),
+                            descriptor.clone(),
+                            ActorRequestSnapshot::Generation(initial.clone()),
+                            next_installation.clone(),
+                            prompts.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    if let PublicationFailureControl::RetirementNativeOwnerLoss(control) = control {
+                        generation_admission::assert_native_retirement_owner_control(
+                            &workbench,
+                            state,
+                            context.clone(),
+                            descriptor.clone(),
+                            initial.clone(),
+                            prepared,
+                            control,
+                        )
+                        .await;
+                    } else {
+                        assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                    }
+                    return;
+                }
+                let replacement_validation_history = async {
+                    for cancelled in [false, true] {
+                        let rejected = workbench
+                            .prepare_actor_generation(
+                                context.clone(),
+                                descriptor.clone(),
+                                ActorRequestSnapshot::Generation(initial.clone()),
+                                next_installation.clone(),
+                                prompts.clone(),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(rejected.installation_work, expected_work);
+                        let rejected_scope = rejected.candidate.scope.clone();
+                        let decision = tidepool_runtime::session::PublicationDecision::new();
+                        if cancelled {
+                            decision.request_cancellation();
+                        }
+                        let domain = tidepool_runtime::session::RecoveryDomainId::Root;
+                        let revision = recovery
+                            .store
+                            .read_domain(domain)
+                            .unwrap()
+                            .unwrap()
+                            .revision;
+                        assert!(matches!(
+                            workbench
+                                .generation_publisher(
+                                    if cancelled {
+                                        state.clone()
+                                    } else {
+                                        Arc::new(InstalledToolsState::default())
+                                    },
+                                    ActorPublicationOwner::Preparation(preparation_client.clone())
+                                )
+                                .publish(rejected, decision, ActorGenerationPublication::Terminal,)
+                                .await
+                                .unwrap(),
+                            ActorGenerationCommit::Refused(_)
+                        ));
+                        assert_eq!(
+                            recovery
+                                .store
+                                .read_domain(domain)
+                                .unwrap()
+                                .unwrap()
+                                .revision,
+                            revision,
+                            "cancelled or unavailable publication owner writes no public manifest"
+                        );
+                        let old = before.clone();
+                        workbench
+                            .access
+                            .with_machine(context.clone(), move |session, context, _| {
+                                assert_eq!(
+                                    session
+                                        .compile_view_in(context.placement.lexical_scope)
+                                        .unwrap(),
+                                    old
+                                );
+                                assert!(session
+                                    .compile_view_in(rejected_scope.scope())
+                                    .unwrap()
+                                    .exact_declaration_context()
+                                    .is_none());
+                                Ok(())
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    let foreign = workbench
+                        .prepare_actor_generation(
+                            context.clone(),
+                            descriptor.clone(),
+                            ActorRequestSnapshot::Generation(initial.clone()),
+                            next_installation.clone(),
+                            prompts.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    let foreign_owner = ResidentActorWorkbench::<
+                        frunk::HNil,
+                        tidepool_mcp::CapturedOutput,
+                    >::new(
+                        Arc::new(ActorMachineRegistry::new()), source.clone(), None
+                    );
+                    assert!(matches!(
+                        foreign_owner
+                            .generation_publisher(
+                                state.clone(),
+                                ActorPublicationOwner::Preparation(preparation_client.clone())
+                            )
+                            .publish(
+                                foreign,
+                                tidepool_runtime::session::PublicationDecision::new(),
+                                ActorGenerationPublication::Terminal,
+                            )
+                            .await
+                            .unwrap(),
+                        ActorGenerationCommit::Refused(_)
+                    ));
+                    assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &initial));
+                    let stale = workbench
+                        .prepare_actor_generation(
+                            context.clone(),
+                            descriptor.clone(),
+                            ActorRequestSnapshot::Generation(initial.clone()),
+                            next_installation.clone(),
+                            prompts.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    state
+                        .replace_explicit(
+                            &initial.installation,
+                            initial.installation.tools_arc().unwrap(),
+                        )
+                        .unwrap();
+                    let current = state.current_generation().unwrap();
+                    assert!(!Arc::ptr_eq(&initial, &current));
+                    assert!(matches!(
+                        workbench
+                            .generation_publisher(
+                                state.clone(),
+                                ActorPublicationOwner::Preparation(preparation_client.clone())
+                            )
+                            .publish(
+                                stale,
+                                tidepool_runtime::session::PublicationDecision::new(),
+                                ActorGenerationPublication::Terminal,
+                            )
+                            .await
+                            .unwrap(),
+                        ActorGenerationCommit::Refused(_)
+                    ));
+                    assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &current));
+                    let prepared = workbench
+                        .prepare_actor_generation(
+                            context.clone(),
+                            descriptor.clone(),
+                            ActorRequestSnapshot::Generation(current),
+                            next_installation.clone(),
+                            prompts.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(prepared.installation_work, expected_work);
+                    let next_scope = prepared.candidate.scope.scope();
+                    workbench
+                        .access
+                        .with_machine(context.clone(), move |session, context, _| {
+                            assert_eq!(
+                                session
+                                    .compile_view_in(context.placement.lexical_scope)
+                                    .unwrap(),
+                                before
+                            );
+                            assert!(session
+                                .compile_view_in(next_scope)
+                                .unwrap()
+                                .exact_declaration_context()
+                                .is_none());
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                    let domain = tidepool_runtime::session::RecoveryDomainId::Root;
+                    let revision = recovery
+                        .store
+                        .read_domain(domain)
+                        .unwrap()
+                        .unwrap()
+                        .revision;
+                    workbench
+                        .access
+                        .with_machine(context.clone(), |session, _, _| {
+                            let scope = session.mint_isolated_scope();
+                            let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+                                &tidepool_repr::ActorPath::parse("root/unrelated-source-owner")
+                                    .unwrap(),
+                                1,
+                            )
+                            .unwrap();
+                            session
+                                .initialize_durable_public_scope(owner, scope)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                                })?;
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                    assert_ne!(
+                        recovery
+                            .store
+                            .read_domain(domain)
+                            .unwrap()
+                            .unwrap()
+                            .revision,
+                        revision,
+                        "an unrelated public owner forces the prepared replacement to rebase"
+                    );
+                    let replacement = match workbench
+                        .generation_publisher(
+                            state.clone(),
+                            ActorPublicationOwner::Preparation(preparation_client.clone()),
+                        )
+                        .publish(
+                            prepared,
+                            tidepool_runtime::session::PublicationDecision::new(),
+                            ActorGenerationPublication::Terminal,
+                        )
+                        .await
+                        .unwrap()
+                    {
+                        ActorGenerationCommit::Published { generation, .. } => generation,
+                        _ => panic!("replacement must publish"),
+                    };
+                    crate::resident_actor::pinned_endpoint_generation_tests::assert_pinned_preflight(
+                        ResidentActorRunner::new(
+                            Arc::clone(&workbench.access.machines),
+                            source.clone(),
+                        ),
+                        descriptor.clone(),
+                        state.clone(),
+                        initial.clone(),
+                        replacement.clone(),
+                        pinned_endpoint.clone(),
+                        source_issuer.clone(),
+                    );
+                    assert_ne!(replacement.scope.scope(), initial.scope.scope());
+                    assert!(Arc::ptr_eq(
+                        pinned_endpoint.snapshot().generation().unwrap(),
+                        &initial
+                    ));
+                    let current_endpoint = state.snapshot().unwrap().select("probe").unwrap();
+                    assert!(Arc::ptr_eq(
+                        current_endpoint.snapshot().generation().unwrap(),
+                        &replacement
+                    ));
+                    assert_ne!(
+                        pinned_endpoint
+                            .snapshot()
+                            .generation()
+                            .unwrap()
+                            .context
+                            .placement
+                            .lexical_scope,
+                        current_endpoint
+                            .snapshot()
+                            .generation()
+                            .unwrap()
+                            .context
+                            .placement
+                            .lexical_scope,
+                    );
+                    let (private, private_context) = ResidentActorWorkbench::new(
+                        Arc::clone(&workbench.access.machines),
+                        source.clone(),
+                        None,
+                    )
+                    .admit_private_cell_with_owner_for_test(
+                        replacement.context.clone(),
+                        replacement.public_owner.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    private.execute_cell_for_test(private_context.clone(),
+                "import qualified QuotedAgentSpec as Replacement\nlet replacementSpec = Replacement.agentSpec @'[]").await.unwrap();
+                    private
+                        .publish_completed_cell_with_commit_for_test(
+                            private_context,
+                            if replacement.durable.is_some() {
+                                tidepool_runtime::session::PublicManifestCommit::Durable
+                            } else {
+                                tidepool_runtime::session::PublicManifestCommit::Ephemeral
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let old_scope = initial.scope.scope();
+                    workbench
+                        .access
+                        .with_machine(context.clone(), move |session, _, _| {
+                            let old_view = session.compile_view_in(old_scope).unwrap();
+                            assert_eq!(
+                                old_view
+                                    .exact_declaration_context()
+                                    .unwrap()
+                                    .semantic_sha256(),
+                                before_commit
+                                    .exact_declaration_context()
+                                    .unwrap()
+                                    .semantic_sha256()
+                            );
+                            assert!(
+                                session.public_visibility_snapshot_in(old_scope).unwrap()
+                                    == before_visibility,
+                                "replacement commit and import leave the previous notebook unchanged"
+                            );
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                    let replacement_view = workbench
+                        .access
+                        .with_machine(context.clone(), move |session, _, _| {
+                            Ok(session.compile_view_in(next_scope).unwrap())
+                        })
+                        .await
+                        .unwrap();
+                    assert!(replacement_view.exact_declaration_context().unwrap().compiler_input_roles().iter().any(|role|
+                matches!(role, tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal { .. })));
+                    assert_eq!(
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+                completed_executions,
+                "first replacement import must consume the issued original without quotation replay"
             );
-
+                    if replacement.durable.is_some() {
+                        let recovered_view = {
+                            let mut lib = tidepool_runtime::session::SessionLib::open(
+                                tidepool_repr::SessionId(8_143),
+                                session_root.path(),
+                                tidepool_runtime::session::ModuleEnv::standalone_default(),
+                            )
+                            .unwrap()
+                            .with_validation_include(roots.clone());
+                            tidepool_testing::with_settlement(|settlement| {
+                                recovery.reopen().attach_root(&mut lib, settlement)
+                            });
+                            let mut recovered =
+                                tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
+                            let scope = recovered
+                                .recover_public_scope(&replacement.durable.as_ref().unwrap().owner)
+                                .unwrap();
+                            recovered.compile_view_in(scope).unwrap()
+                        };
+                        let current_view = workbench
+                            .access
+                            .with_machine(context.clone(), move |session, _, _| {
+                                Ok(session.compile_view_in(next_scope).unwrap())
+                            })
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                    recovered_view
+                        .exact_declaration_context()
+                        .unwrap()
+                        .semantic_sha256(),
+                    current_view
+                        .exact_declaration_context()
+                        .unwrap()
+                        .semantic_sha256(),
+                    "replacement context and its artifacts remain resolvable after rebase and restart"
+                );
+                    }
+                    let late_prepared = workbench
+                        .prepare_actor_generation(
+                            context.clone(),
+                            descriptor.clone(),
+                            ActorRequestSnapshot::Generation(replacement.clone()),
+                            next_installation.clone(),
+                            prompts.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    state.0.lock().availability =
+                        InstalledToolsAvailability::GenerationUnavailable(replacement.clone());
+                    assert!(
+                        state.current_generation().is_none(),
+                        "uncertainty is not bootstrap admission"
+                    );
+                    assert!(matches!(
+                        state.observe(),
+                        InstalledToolsObservation::SourceUnavailable(_)
+                    ));
+                    assert_eq!(
+                        state.install_bootstrap(
+                            BootstrapExpectation::Available(&installation),
+                            installation.clone()
+                        ),
+                        Err(BootstrapInstallationError::UnconfirmedGeneration)
+                    );
+                    assert!(
+                        matches!(&state.0.lock().availability, InstalledToolsAvailability::GenerationUnavailable(retained)
+                    if Arc::ptr_eq(retained, &replacement))
+                    );
+                    drop(state.drain_retired());
+                    let revision = recovery
+                        .store
+                        .read_domain(domain)
+                        .unwrap()
+                        .unwrap()
+                        .revision;
+                    let decision = tidepool_runtime::session::PublicationDecision::new();
+                    assert!(matches!(
+                        workbench
+                            .generation_publisher(
+                                state.clone(),
+                                ActorPublicationOwner::Preparation(preparation_client.clone())
+                            )
+                            .publish(
+                                late_prepared,
+                                decision.clone(),
+                                ActorGenerationPublication::Terminal,
+                            )
+                            .await
+                            .unwrap(),
+                        ActorGenerationCommit::Refused(_)
+                    ));
+                    assert!(matches!(state.observe(), InstalledToolsObservation::Empty));
+                    assert_eq!(
+                        decision.phase(),
+                        tidepool_runtime::session::PublicationPhase::Running,
+                        "released installation custody refuses late publication before a native claim"
+                    );
+                    assert_eq!(
+                        recovery
+                            .store
+                            .read_domain(domain)
+                            .unwrap()
+                            .unwrap()
+                            .revision,
+                        revision,
+                        "late publication cannot change the retained public generation"
+                    );
+                };
+                replacement_validation_history.await;
+            };
+            replacement_publication_history.await;
             return;
         }
 
-        #[derive(Clone, Copy)]
-        enum CandidateOutcome {
-            Refused,
-            Cancelled,
-            Published,
-        }
-        let candidate_compiler_calls = tidepool_extract_cmd::extract_spawn_count();
-        for (index, outcome) in [
-            CandidateOutcome::Refused,
-            CandidateOutcome::Cancelled,
-            CandidateOutcome::Published,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let (before, visibility, handles, custody) = workbench
-                .access
-                .with_machine(context.clone(), |session, context, _| {
-                    Ok((
-                        session
-                            .compile_view_in(context.placement.lexical_scope)
-                            .unwrap(),
-                        session
-                            .public_visibility_snapshot_in(context.placement.lexical_scope)
-                            .unwrap(),
-                        session.value_handle_count(),
-                        session.outstanding_custody(),
-                    ))
-                })
-                .await
-                .unwrap();
-            let candidate = Arc::new(
-                workbench
-                    .prepare_candidate_tools(
-                        context.clone(),
-                        3 + index as u64,
-                        vec![],
-                        SourceImports::new(),
-                    )
+        let candidate_isolation_history = async {
+            #[derive(Clone, Copy)]
+            enum CandidateOutcome {
+                Refused,
+                Cancelled,
+                Published,
+            }
+            let candidate_compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+            for (index, outcome) in [
+                CandidateOutcome::Refused,
+                CandidateOutcome::Cancelled,
+                CandidateOutcome::Published,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (before, visibility, handles, custody) = workbench
+                    .access
+                    .with_machine(context.clone(), |session, context, _| {
+                        Ok((
+                            session
+                                .compile_view_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            session
+                                .public_visibility_snapshot_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            session.value_handle_count(),
+                            session.outstanding_custody(),
+                        ))
+                    })
                     .await
-                    .unwrap(),
-            );
-            let candidate_scope = candidate._installation_scope.scope();
-            assert!(
-                candidate._source_original.is_some(),
-                "the candidate retains its exact issued source selection privately"
-            );
-            assert!(Arc::ptr_eq(
-                candidate.code.prepared().unwrap(),
-                &warmed.prepared
-            ));
-            workbench
-                .access
-                .with_machine(context.clone(), {
-                    let before = before.clone();
-                    let visibility = visibility.clone();
-                    move |session, context, _| {
+                    .unwrap();
+                let candidate = Arc::new(
+                    workbench
+                        .prepare_candidate_tools(
+                            context.clone(),
+                            3 + index as u64,
+                            vec![],
+                            SourceImports::new(),
+                        )
+                        .await
+                        .unwrap(),
+                );
+                let candidate_scope = candidate._installation_scope.scope();
+                assert!(
+                    candidate._source_original.is_some(),
+                    "the candidate retains its exact issued source selection privately"
+                );
+                assert!(Arc::ptr_eq(
+                    candidate.code.prepared().unwrap(),
+                    &warmed.prepared
+                ));
+                workbench
+                    .access
+                    .with_machine(context.clone(), {
+                        let before = before.clone();
+                        let visibility = visibility.clone();
+                        move |session, context, _| {
+                            assert_eq!(
+                                session
+                                    .compile_view_in(context.placement.lexical_scope)
+                                    .unwrap(),
+                                before
+                            );
+                            assert_eq!(
+                                session
+                                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                                    .unwrap(),
+                                visibility
+                            );
+                            Ok(())
+                        }
+                    })
+                    .await
+                    .unwrap();
+                let source = crate::CheckpointSourceLayer::default();
+                let old = InstalledToolLease::new(
+                    context.actor,
+                    source.clone(),
+                    Some(Arc::clone(&first)),
+                );
+                let current = InstalledToolLease::new(
+                    context.actor,
+                    source.clone(),
+                    Some(Arc::clone(&second)),
+                );
+                let state = InstalledToolsState::default();
+                state
+                    .install_bootstrap(BootstrapExpectation::Empty, current.clone())
+                    .unwrap();
+                let decision = tidepool_runtime::session::PublicationDecision::new();
+                if matches!(outcome, CandidateOutcome::Cancelled) {
+                    decision.request_cancellation();
+                }
+                match outcome {
+                    CandidateOutcome::Refused => assert!(matches!(
+                        state.replace_explicit(&old, Arc::clone(&candidate)),
+                        Err(SpecReplacementError::Unavailable)
+                    )),
+                    CandidateOutcome::Cancelled => assert!(decision.claim_commit().is_none()),
+                    CandidateOutcome::Published => state
+                        .replace_explicit(&current, Arc::clone(&candidate))
+                        .unwrap(),
+                }
+                let expected = if matches!(outcome, CandidateOutcome::Published) {
+                    &candidate
+                } else {
+                    &second
+                };
+                assert!(Arc::ptr_eq(&state.current_tools().unwrap(), expected));
+                workbench
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
                         assert_eq!(
                             session
                                 .compile_view_in(context.placement.lexical_scope)
@@ -23942,123 +24564,78 @@ pub(crate) mod request_tests {
                             visibility
                         );
                         Ok(())
-                    }
-                })
-                .await
-                .unwrap();
-            let source = crate::CheckpointSourceLayer::default();
-            let old =
-                InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&first)));
-            let current =
-                InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&second)));
-            let state = InstalledToolsState::default();
-            state
-                .install_bootstrap(BootstrapExpectation::Empty, current.clone())
-                .unwrap();
-            let decision = tidepool_runtime::session::PublicationDecision::new();
-            if matches!(outcome, CandidateOutcome::Cancelled) {
-                decision.request_cancellation();
+                    })
+                    .await
+                    .unwrap();
+                drop(state.drain_retired());
+                drop(candidate);
+                wait_for_explicit_installation_cleanup(
+                    &workbench,
+                    context.clone(),
+                    handles,
+                    custody,
+                    Vec::new(),
+                    "source candidate settlement",
+                )
+                .await;
+                workbench
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        assert!(session
+                            .public_visibility_snapshot_in(candidate_scope)
+                            .is_none());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
             }
-            match outcome {
-                CandidateOutcome::Refused => assert!(matches!(
-                    state.replace_explicit(&old, Arc::clone(&candidate)),
-                    Err(SpecReplacementError::Unavailable)
-                )),
-                CandidateOutcome::Cancelled => assert!(decision.claim_commit().is_none()),
-                CandidateOutcome::Published => state
-                    .replace_explicit(&current, Arc::clone(&candidate))
-                    .unwrap(),
-            }
-            let expected = if matches!(outcome, CandidateOutcome::Published) {
-                &candidate
-            } else {
-                &second
-            };
-            assert!(Arc::ptr_eq(&state.current_tools().unwrap(), expected));
-            workbench
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    assert_eq!(
-                        session
-                            .compile_view_in(context.placement.lexical_scope)
-                            .unwrap(),
-                        before
-                    );
-                    assert_eq!(
-                        session
-                            .public_visibility_snapshot_in(context.placement.lexical_scope)
-                            .unwrap(),
-                        visibility
-                    );
-                    Ok(())
-                })
-                .await
-                .unwrap();
-            drop(state.drain_retired());
-            drop(candidate);
-            wait_for_explicit_installation_cleanup(
-                &workbench,
-                context.clone(),
-                handles,
-                custody,
-                Vec::new(),
-                "source candidate settlement",
-            )
-            .await;
-            workbench
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    assert!(session
-                        .public_visibility_snapshot_in(candidate_scope)
-                        .is_none());
-                    Ok(())
-                })
-                .await
-                .unwrap();
-        }
-        assert_eq!(
-            tidepool_extract_cmd::extract_spawn_count(),
-            candidate_compiler_calls,
-            "candidate preparation reuses the immutable original without compiler requests"
-        );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                candidate_compiler_calls,
+                "candidate preparation reuses the immutable original without compiler requests"
+            );
+        };
+        candidate_isolation_history.await;
 
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
             &first.code.prepared().expect("source-prepared installation"),
         ))
         .await;
-        let original_identity = proof.original_input_identity().to_owned();
-        let original_source = proof.original_source().to_owned();
-        let original_owner = tidepool_toolchain::extract_module_name(&original_source)
-            .expect("completed original source has its actual compiler owner");
+        let ordinary_successor_history = async {
+            let original_identity = proof.original_input_identity().to_owned();
+            let original_source = proof.original_source().to_owned();
+            let original_owner = tidepool_toolchain::extract_module_name(&original_source)
+                .expect("completed original source has its actual compiler owner");
 
-        std::fs::write(&quotation_input, "42").unwrap();
-        let public_owner = workbench
-            .access
-            .with_machine(context.clone(), {
-                let owner = owner.clone();
-                move |session, context, _| {
-                    let descriptor =
-                        crate::ActorDescriptor::new("quoted original", context.placement)
-                            .with_actor_path(
-                                tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
-                            )
-                            .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
-                    let readiness = session
-                        .durable_public_readiness(&owner, context.placement.lexical_scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })?;
-                    Ok(crate::resident_actor::WorkbenchPublicOwner::issue(
-                        context,
-                        &descriptor,
-                        Some(readiness),
-                    )
-                    .unwrap())
-                }
-            })
-            .await
-            .unwrap();
-        for cell in [
+            std::fs::write(&quotation_input, "42").unwrap();
+            let public_owner = workbench
+                .access
+                .with_machine(context.clone(), {
+                    let owner = owner.clone();
+                    move |session, context, _| {
+                        let descriptor =
+                            crate::ActorDescriptor::new("quoted original", context.placement)
+                                .with_actor_path(
+                                    tidepool_repr::ActorPath::parse("root/quoted-original")
+                                        .unwrap(),
+                                )
+                                .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+                        let readiness = session
+                            .durable_public_readiness(&owner, context.placement.lexical_scope)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })?;
+                        Ok(crate::resident_actor::WorkbenchPublicOwner::issue(
+                            context,
+                            &descriptor,
+                            Some(readiness),
+                        )
+                        .unwrap())
+                    }
+                })
+                .await
+                .unwrap();
+            for cell in [
             "import qualified QuotedAgentSpec as Frozen\nlet frozenSpec = Frozen.agentSpec @'[]",
             "preparedOriginalHistory :: Int\npreparedOriginalHistory = 41",
             "import qualified QuotedAgentSpec as Frozen\nlet repeatedSpec = Frozen.agentSpec @'[]",
@@ -24103,253 +24680,262 @@ pub(crate) mod request_tests {
                 "published imports and later declarations retain quotation41"
             );
         }
-        let (before_reinstall, before_visibility, bootstrap) = workbench
-            .access
-            .with_machine(context.clone(), {
-                let owner = owner.clone();
-                move |session, context, _| {
+            let (before_reinstall, before_visibility, bootstrap) = workbench
+                .access
+                .with_machine(context.clone(), {
+                    let owner = owner.clone();
+                    move |session, context, _| {
+                        let scope = context.placement.lexical_scope;
+                        let view = session.compile_view_in(scope).unwrap();
+                        let visibility = session.public_visibility_snapshot_in(scope).unwrap();
+                        assert!(
+                            !visibility.bindings.is_empty(),
+                            "published quoted-source cells establish binding winners"
+                        );
+                        let bootstrap = session
+                            .begin_durable_public_bootstrap(owner, scope)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })?;
+                        Ok((view, visibility, bootstrap))
+                    }
+                })
+                .await
+                .unwrap();
+            let before_reinstall_recovered = recover_context();
+            let reinstalled = workbench
+                .install_tools_action(
+                    context.clone(),
+                    10,
+                    Vec::new(),
+                    Vec::new(),
+                    InstalledToolCode::SourcePrepared(Arc::clone(&warmed.prepared)),
+                    ToolInstallationPurpose::RecoveredTools,
+                )
+                .await
+                .unwrap();
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
                     let scope = context.placement.lexical_scope;
-                    let view = session.compile_view_in(scope).unwrap();
-                    let visibility = session.public_visibility_snapshot_in(scope).unwrap();
-                    assert!(
-                        !visibility.bindings.is_empty(),
-                        "published quoted-source cells establish binding winners"
+                    assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
+                    assert_eq!(
+                        session.public_visibility_snapshot_in(scope).unwrap(),
+                        before_visibility
                     );
-                    let bootstrap = session
-                        .begin_durable_public_bootstrap(owner, scope)
+                    session
+                        .publish_durable_public_bootstrap(bootstrap)
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                         })?;
-                    Ok((view, visibility, bootstrap))
-                }
-            })
-            .await
-            .unwrap();
-        let before_reinstall_recovered = recover_context();
-        let reinstalled = workbench
-            .install_tools_action(
-                context.clone(),
-                10,
-                Vec::new(),
-                Vec::new(),
-                InstalledToolCode::SourcePrepared(Arc::clone(&warmed.prepared)),
-                ToolInstallationPurpose::RecoveredTools,
-            )
-            .await
-            .unwrap();
-        workbench
-            .access
-            .with_machine(context.clone(), move |session, context, _| {
-                let scope = context.placement.lexical_scope;
-                assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
-                assert_eq!(
-                    session.public_visibility_snapshot_in(scope).unwrap(),
-                    before_visibility
-                );
-                session
-                    .publish_durable_public_bootstrap(bootstrap)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
-                assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
-                assert_eq!(
-                    session.public_visibility_snapshot_in(scope).unwrap(),
-                    before_visibility
-                );
-                Ok(())
-            })
-            .await
-            .unwrap();
-        let after_reinstall_recovered = recover_context();
-        assert_eq!(
+                    assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
+                    assert_eq!(
+                        session.public_visibility_snapshot_in(scope).unwrap(),
+                        before_visibility
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let after_reinstall_recovered = recover_context();
+            assert_eq!(
             after_reinstall_recovered, before_reinstall_recovered,
             "native recovery installation preserves the exact durable compiler and binding surface"
         );
-        assert_eq!(
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
-            completed_executions
-        );
-        drop(reinstalled);
-        let before_failed_cell = workbench
-            .access
-            .with_machine(context.clone(), |session, context, _| {
-                Ok(session
-                    .compile_view_in(context.placement.lexical_scope)
-                    .unwrap())
-            })
-            .await
-            .unwrap();
-        let (failed, failed_context) = ResidentActorWorkbench::new(
-            Arc::clone(&workbench.access.machines),
-            source.clone(),
-            None,
-        )
-        .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
-        .await
-        .unwrap();
-        assert!(failed
-            .prepare_cell(
-                failed_context,
-                "preparedOriginalFailure :: Int\npreparedOriginalFailure = True".into(),
+            assert_eq!(
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+                completed_executions
+            );
+            drop(reinstalled);
+            let before_failed_cell = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok(session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            let (failed, failed_context) = ResidentActorWorkbench::new(
+                Arc::clone(&workbench.access.machines),
+                source.clone(),
+                None,
             )
-            .await
-            .is_err());
-        drop(failed);
-        let after_failed_cell = workbench
-            .access
-            .with_machine(context.clone(), |session, context, _| {
-                Ok(session
-                    .compile_view_in(context.placement.lexical_scope)
-                    .unwrap())
-            })
+            .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
             .await
             .unwrap();
-        assert_eq!(after_failed_cell, before_failed_cell);
-        let later_recovered = recover_context();
-        assert!(later_recovered.library().is_some());
-        assert_eq!(
-            later_recovered
-                .exact_declaration_context()
-                .unwrap()
-                .semantic_sha256(),
-            after_failed_cell
-                .exact_declaration_context()
-                .unwrap()
-                .semantic_sha256(),
-            "later declaration recovery preserves the original selection"
-        );
-        assert_eq!(generation_zero_recovered.library(), None);
-        assert_eq!(
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
-            completed_executions,
-        );
-        // An independent ordinary source request still executes the untracked quoter.
+            assert!(failed
+                .prepare_cell(
+                    failed_context,
+                    "preparedOriginalFailure :: Int\npreparedOriginalFailure = True".into(),
+                )
+                .await
+                .is_err());
+            drop(failed);
+            let after_failed_cell = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok(session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(after_failed_cell, before_failed_cell);
+            let later_recovered = recover_context();
+            assert!(later_recovered.library().is_some());
+            assert_eq!(
+                later_recovered
+                    .exact_declaration_context()
+                    .unwrap()
+                    .semantic_sha256(),
+                after_failed_cell
+                    .exact_declaration_context()
+                    .unwrap()
+                    .semantic_sha256(),
+                "later declaration recovery preserves the original selection"
+            );
+            assert_eq!(
+                generation_zero_recovered
+                    .as_ref()
+                    .expect("source history performed actual recovery")
+                    .library(),
+                None
+            );
+            assert_eq!(
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+                completed_executions,
+            );
+            // An independent ordinary source request still executes the untracked quoter.
 
-        let installation =
-            crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
-        let dispatcher_effects = format!(
-            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
-            installation.effect_row,
-        );
-        let mut imports = source.config.workbench_imports.clone();
-        imports.extend_text("qualified QuotedAgentSpec");
-        imports.extend_text("qualified Tidepool.Agent.Contract");
-        imports.extend_text("qualified Tidepool.Effects.Core");
-        imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
-        imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
-        let templates = resident_workbench_templates(
-            &source.config.preamble,
-            &dispatcher_effects,
-            &imports.template_text(),
-        );
-        let scratch = tempfile::tempdir().unwrap();
-        let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let ordinary = tidepool_testing::with_settlement(|settlement| {
-            tidepool_runtime::session::run_turn(
-                tidepool_runtime::session::TurnRequest {
-                    exact_context: None,
-                    session_id: None,
-                    turn_text: &installation.expression,
-                    templates: &templates,
-                    include: &include,
-                    session_root: scratch.path(),
-                    inject_modules: &[],
-                    gen: 1,
-                    verdict: Some(tidepool_runtime::session::TurnClassification {
-                        kind: tidepool_runtime::session::TurnKind::Bind,
-                        binders: Vec::new(),
-                        items: Vec::new(),
-                    }),
-                    target: None,
-                    retained_imports: &[],
-                },
-                settlement,
-            )
-        })
-        .unwrap();
-        let tidepool_runtime::session::TurnResult::Bind {
-            compiled,
-            wrapped_source,
-            ..
-        } = ordinary
-        else {
-            panic!("ordinary quotation request must complete its actual discarded bind")
-        };
-        let compiled = Arc::new(compiled);
-        let successor = compiled.ordinary_original_compile_input().unwrap();
-        assert_eq!(successor.original_source(), wrapped_source);
-        // The independent scratch scope belongs to a different generated
-        // scaffold. Exact input continuity includes that owner and its source;
-        // it is separate from the shared logical installer recipe.
-        let successor_owner = tidepool_toolchain::extract_module_name(successor.original_source())
-            .expect("fresh quotation source has its actual compiler owner");
-        assert_ne!(original_owner, successor_owner);
-        assert_ne!(original_source, successor.original_source());
-        assert_ne!(original_identity, successor.original_input_identity());
-        let retained = second
-            .code
-            .prepared()
-            .expect("source-prepared installation")
-            .entry
-            .compiled()
-            .ordinary_original_compile_input()
+            let installation =
+                crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
+            let dispatcher_effects = format!(
+                "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
+                installation.effect_row,
+            );
+            let mut imports = source.config.workbench_imports.clone();
+            imports.extend_text("qualified QuotedAgentSpec");
+            imports.extend_text("qualified Tidepool.Agent.Contract");
+            imports.extend_text("qualified Tidepool.Effects.Core");
+            imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
+            imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+            let templates = resident_workbench_templates(
+                &source.config.preamble,
+                &dispatcher_effects,
+                &imports.template_text(),
+            );
+            let scratch = tempfile::tempdir().unwrap();
+            let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let ordinary = tidepool_testing::with_settlement(|settlement| {
+                tidepool_runtime::session::run_turn(
+                    tidepool_runtime::session::TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: &installation.expression,
+                        templates: &templates,
+                        include: &include,
+                        session_root: scratch.path(),
+                        inject_modules: &[],
+                        gen: 1,
+                        verdict: Some(tidepool_runtime::session::TurnClassification {
+                            kind: tidepool_runtime::session::TurnKind::Bind,
+                            binders: Vec::new(),
+                            items: Vec::new(),
+                        }),
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
+            })
             .unwrap();
-        assert!(Arc::ptr_eq(proof, retained));
-        assert_eq!(retained.original_source(), original_source);
-        assert_eq!(
-            retained.original_input_identity(),
-            original_identity,
-            "a fresh quotation cannot replace the selected completed original proof"
-        );
-        assert!(successor.replay_eligible_identity().is_none());
-        let ordinary_executions =
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
-        assert!(ordinary_executions.lines().any(|input| input == "42"));
-        let before_native = tidepool_extract_cmd::extract_spawn_count();
-        let ready = tidepool_runtime::session::PreparedSourceEntry::prepare(
-            Arc::clone(&compiled),
-            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-        )
-        .unwrap();
-        let (ordinary_session, ordinary_context, _, _ordinary_root) = host_mount_fixture();
-        run_native_quoted_probe(
-            ordinary_session,
-            ordinary_context,
-            source.clone(),
-            &ready,
-            "42",
-        )
-        .await;
-        let (original_session, original_context, _, _original_root) = host_mount_fixture();
-        run_native_quoted_probe(
-            original_session,
-            original_context,
-            source.clone(),
-            &first
+            let tidepool_runtime::session::TurnResult::Bind {
+                compiled,
+                wrapped_source,
+                ..
+            } = ordinary
+            else {
+                panic!("ordinary quotation request must complete its actual discarded bind")
+            };
+            let compiled = Arc::new(compiled);
+            let successor = compiled.ordinary_original_compile_input().unwrap();
+            assert_eq!(successor.original_source(), wrapped_source);
+            // The independent scratch scope belongs to a different generated
+            // scaffold. Exact input continuity includes that owner and its source;
+            // it is separate from the shared logical installer recipe.
+            let successor_owner =
+                tidepool_toolchain::extract_module_name(successor.original_source())
+                    .expect("fresh quotation source has its actual compiler owner");
+            assert_ne!(original_owner, successor_owner);
+            assert_ne!(original_source, successor.original_source());
+            assert_ne!(original_identity, successor.original_input_identity());
+            let retained = second
                 .code
                 .prepared()
                 .expect("source-prepared installation")
-                .entry,
-            "41",
-        )
-        .await;
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_native);
-        assert_eq!(
-            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
-            ordinary_executions
-        );
-        workbench.access.with_machine(context, move |session, _, _| {
+                .entry
+                .compiled()
+                .ordinary_original_compile_input()
+                .unwrap();
+            assert!(Arc::ptr_eq(proof, retained));
+            assert_eq!(retained.original_source(), original_source);
+            assert_eq!(
+                retained.original_input_identity(),
+                original_identity,
+                "a fresh quotation cannot replace the selected completed original proof"
+            );
+            assert!(successor.replay_eligible_identity().is_none());
+            let ordinary_executions =
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
+            assert!(ordinary_executions.lines().any(|input| input == "42"));
+            let before_native = tidepool_extract_cmd::extract_spawn_count();
+            let ready = tidepool_runtime::session::PreparedSourceEntry::prepare(
+                Arc::clone(&compiled),
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            )
+            .unwrap();
+            let (ordinary_session, ordinary_context, _, _ordinary_root) = host_mount_fixture();
+            run_native_quoted_probe(
+                ordinary_session,
+                ordinary_context,
+                source.clone(),
+                &ready,
+                "42",
+            )
+            .await;
+            let (original_session, original_context, _, _original_root) = host_mount_fixture();
+            run_native_quoted_probe(
+                original_session,
+                original_context,
+                source.clone(),
+                &first
+                    .code
+                    .prepared()
+                    .expect("source-prepared installation")
+                    .entry,
+                "41",
+            )
+            .await;
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_native);
+            assert_eq!(
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+                ordinary_executions
+            );
+            workbench.access.with_machine(context, move |session, _, _| {
             let entry = session.prepare_startup_entry(compiled.code())?;
             assert!(entry.compile_input_identity().is_none(), "changed untracked quotation output cannot authorize durable successor continuity");
             Ok(())
         }).await.unwrap();
-        assert!(
-            std::fs::read_to_string(quotation_input.with_extension("executions"))
-                .unwrap()
-                .lines()
-                .count()
-                > completed_executions.lines().count()
-        );
+            assert!(
+                std::fs::read_to_string(quotation_input.with_extension("executions"))
+                    .unwrap()
+                    .lines()
+                    .count()
+                    > completed_executions.lines().count()
+            );
+        };
+        ordinary_successor_history.await;
     }
 
     async fn wait_for_explicit_installation_cleanup<H, O>(
@@ -30084,7 +30670,8 @@ pub(crate) mod request_tests {
             )
             .unwrap();
         let (checked, program) =
-            tidepool_runtime::session::turn::finish_cell_program_admitted(prepared_program).unwrap();
+            tidepool_runtime::session::turn::finish_cell_program_admitted(prepared_program)
+                .unwrap();
         eprintln!(
             "activation fixture receiver compilation: {:?}",
             receiver_compile_started.elapsed()
@@ -30096,15 +30683,10 @@ pub(crate) mod request_tests {
         );
         let item = program.items()[0].checked_item().clone();
         let prefix = fixture_setup(&mut session, &fixture_source, |session| {
-            session
-                .begin_cell_program(program)
-                .unwrap()
-                .unwrap()
+            session.begin_cell_program(program).unwrap().unwrap()
         });
         let reservation = fixture_setup(&mut session, &fixture_source, |session| {
-            session
-                .admit_checked_item(prefix.clone(), item)
-                .unwrap()
+            session.admit_checked_item(prefix.clone(), item).unwrap()
         });
         let TurnResult::Bind {
             compiled: receiver,
@@ -30308,6 +30890,7 @@ pub(crate) mod request_tests {
             let original = &self.prepared.execution;
             let decision = tidepool_runtime::session::PublicationDecision::new();
             let execution = Arc::new(ExecutionPrivateScope {
+                inspection: original.inspection.clone(),
                 owner: original.owner.clone(),
                 public_scope: original.public_scope,
                 private_scope: original.private_scope,

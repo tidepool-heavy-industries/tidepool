@@ -103,6 +103,53 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+#[test]
+fn prepared_declaration_projection_cost_depends_on_delta_not_binding_inventory() {
+    let mut costs = Vec::new();
+    for unrelated_count in [0, 2048] {
+        let mut tree = ScopeTree::new();
+        let target = tree.mint_isolated();
+        let unrelated_scope = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        for generation in 0..unrelated_count {
+            table
+                .bind_in(
+                    unrelated_scope,
+                    super::promotion_tests::entry(
+                        &format!("unrelated{generation}"),
+                        generation + 10,
+                    ),
+                )
+                .unwrap();
+        }
+        let removed = table
+            .bind_in(target, super::promotion_tests::entry("removed", 1))
+            .unwrap();
+        let remaining = table
+            .bind_in(target, super::promotion_tests::entry("remaining", 2))
+            .unwrap();
+        table.save_observation(removed, &[], 10);
+        table.save_observation(remaining, &[], 10);
+        let changes = table
+            .prepare_declaration_binding_changes_in(target, &[removed.var()], &["removed".into()])
+            .unwrap();
+        let (_, counts) = measure(|| {
+            let projection = table
+                .prepared_declaration_projection(&tree, None, &changes)
+                .unwrap();
+            black_box(projection.scope_witness());
+            assert_eq!(black_box(projection.visible_changes().count()), 1);
+        });
+        costs.push((
+            counts.allocations,
+            counts.allocated_bytes,
+            counts.reallocations,
+            counts.reallocated_bytes,
+        ));
+    }
+    assert_eq!(costs[0], costs[1]);
+}
+
 struct AllocationWindow;
 
 impl AllocationWindow {

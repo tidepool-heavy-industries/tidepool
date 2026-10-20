@@ -20,10 +20,9 @@ mod admission;
 mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
-    RuntimeSourcePublicationView,
-    SourceAdmissionError, SourceFenceTransitionFailure,
-    SourceAdmissionHook, SourceAdmissionPhase,
+    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim,
+    RuntimeSourcePublicationView, RuntimeSourceReopen, SourceAdmissionError, SourceAdmissionHook,
+    SourceAdmissionPhase, SourceFenceTransitionFailure,
 };
 mod binding_table;
 mod dialect;
@@ -84,12 +83,12 @@ pub use dialect::{
 
 pub use inspection::{
     finish_admitted_compiler_world, finish_admitted_world_inspection, run_admitted_compiler_world,
-    run_admitted_inspections, run_admitted_world_inspection, run_inspections,
-    AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo, CompletedCompilerWorld,
-    CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
-    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, InspectionScopeSnapshot, InspectionActorObservation, InspectionRequestIdentity, NameNamespace, NameQuery, NameScope,
-    QueryError,
+    run_admitted_inspections, run_admitted_world_inspection, run_admitted_world_scope_inspection,
+    run_inspections, AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo,
+    CompletedCompilerWorld, CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo,
+    IdentifierInfo, IdentifierNamespace, IdentifierRef, InfoEntry, InspectionActorObservation,
+    InspectionAvailability, InspectionQuery, InspectionRequest, InspectionRequestIdentity,
+    InspectionResult, InspectionScopeSnapshot, NameNamespace, NameQuery, NameScope, QueryError,
     ScopeBindingsAnswer, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
     WorldInspectionError, SCOPE_BINDING_LIMIT,
 };
@@ -104,8 +103,7 @@ pub use admission::{
     PrivateExecutionAdmission, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
     RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
-    RuntimeOriginalSource,
-    RuntimeWorldCellOperand,
+    RuntimeOriginalSource, RuntimeWorldCellOperand,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -442,8 +440,6 @@ pub enum SessionError {
     WorldCellCheckedProgramCapabilityMissing,
     #[error("world cell item {ordinal} requires a SAME-certified per-item successor capability")]
     WorldCellSuccessorCapabilityMissing { ordinal: usize },
-    #[error("world declaration publication requires its checked lexical promotion product")]
-    WorldCellDeclarationPublicationCapabilityMissing,
     #[error("world execution public semantic base changed before atomic installation")]
     WorldCellPublicationBaseStale,
     #[error("live value module {0:?} has no retained compiler-certified interface")]
@@ -1953,10 +1949,7 @@ impl SessionLib {
         selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
     ) {
         let sources = &mut self.tips.entry(scope).or_default().published_sources;
-        if !sources
-            .iter()
-            .any(|old| old.context() == selection.context())
-        {
+        if !sources.iter().any(|old| Arc::ptr_eq(old, &selection)) {
             sources.push(selection);
         }
     }
@@ -2249,13 +2242,14 @@ impl SessionLib {
             )
             .map_err(|_| ExactExportError::UncertifiedExports)?
             .ok_or(ExactExportError::UncertifiedExports)?;
-            Ok(ExactExportSurface::certified(
+            ExactExportSurface::certified(
                 self.id,
                 self.current_module_in(scope),
                 baseline,
                 exports,
                 self.extra_include.clone(),
-            ))
+            )
+            .map_err(|_| ExactExportError::UnsupportedCertifiedExports)
         } else {
             Ok(ExactExportSurface::legacy(
                 self.id,
@@ -2611,14 +2605,14 @@ impl SessionLib {
         staged: StagedDeclaration,
         visible_values: &[(SessionVarId, String)],
     ) -> Result<Generation, SessionError> {
-        self.admit_staged_declaration_in(staged, visible_values, |generation| generation)
+        self.admit_staged_declaration_in(staged, visible_values, |_, generation| generation)
     }
 
     fn admit_staged_declaration_in<T>(
         &mut self,
         staged: StagedDeclaration,
         visible_values: &[(SessionVarId, String)],
-        activate: impl FnOnce(Generation) -> T,
+        activate: impl FnOnce(&mut Self, Generation) -> T,
     ) -> Result<T, SessionError> {
         let slot_matches = if staged.reserved {
             staged.certified_authored.is_some()
@@ -2700,7 +2694,7 @@ impl SessionLib {
                     self.install_committed_recovery_graph(graph, receipt.state().clone());
                     self.log.activate_prepared_commit(prepared);
                     *self.tips.get_mut(&scope).expect("prepared authored tip") = tip;
-                    let value = activate(generation);
+                    let value = activate(self, generation);
                     let context = receipt
                         .installed_blocking()
                         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
@@ -2748,12 +2742,12 @@ impl SessionLib {
                 .tips
                 .get_mut(&staged.scope)
                 .expect("prepared authored tip") = tip;
-            let activated = activate(staged.generation);
+            let activated = activate(self, staged.generation);
             complete_native_transition(admission)?;
             return Ok(activated);
         }
         let generation = self.push_turn_in(staged.scope, staged.turn)?;
-        Ok(activate(generation))
+        Ok(activate(self, generation))
     }
 
     fn stage_private_authored_graph(
@@ -3170,6 +3164,7 @@ fn validate_rendered_module(
     for item in items {
         let term_names: &[String] = match item {
             ExportItem::Value { name } => std::slice::from_ref(name),
+            ExportItem::Pattern { .. } => &[],
             ExportItem::Type { cons, .. } => cons,
             ExportItem::Class { methods, .. } => methods,
         };

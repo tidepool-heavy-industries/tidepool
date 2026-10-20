@@ -278,7 +278,8 @@ impl InputFixture {
             resident.resume(publication, (), settlement)
         })
         .expect("settle owned result publication");
-        assert!(resident.discard_custody(captured.custody));
+        drop(captured.custody);
+        resident.settle_dropped_custody();
         outcome
     }
 
@@ -1566,8 +1567,10 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     assert!(receiver.parked_holes().is_empty());
     assert_eq!(receiver.stowed_roots_count(), 0);
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
-    assert!(receiver.discard_custody(imported));
-    assert!(receiver.discard_custody(runner));
+    drop(imported);
+    receiver.settle_dropped_custody();
+    drop(runner);
+    receiver.settle_dropped_custody();
     assert_eq!(receiver.outstanding_custody(), 0);
 }
 
@@ -1791,8 +1794,10 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     assert_eq!(input.input_type(), original.sites[&site].inputs[0].ty);
     assert!(Arc::ptr_eq(&input.custody.provenance, &parked));
-    assert!(destination.discard_custody(imported));
-    assert!(destination.discard_custody(repeated));
+    drop(imported);
+    destination.settle_dropped_custody();
+    drop(repeated);
+    destination.settle_dropped_custody();
     let mut remaining_holes = destination
         .parked_holes()
         .into_iter()
@@ -2244,15 +2249,20 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                         output.code(),
                         TurnInstallationAdmission::Compilation,
                     )
-                    .and_then(|admission| source.provenance_for(&admission))
+                    .and_then(|admission| {
+                        source
+                            .provenance_for(&admission)
+                            .map(|prepared| prepared.metadata)
+                    })
                     .unwrap()
             })
         })
         .collect::<Vec<_>>();
     for (output, retained) in outputs.iter().zip(&reobserved) {
-        let recomputed = CompiledProvenancePlan::build(&output.code())
+        let mut recomputed = CompiledProvenancePlan::build(&output.code())
             .unwrap()
             .instantiate(&source.display_owners);
+        Arc::make_mut(&mut recomputed).original_sources = NativeSourceCustody::default();
         assert_eq!(
             retained, &recomputed,
             "retained plan agrees with fresh selected-fact recomputation"
@@ -2389,7 +2399,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                         compiled.code(),
                         TurnInstallationAdmission::Compilation,
                     )
-                    .and_then(|admission| source.provenance_for(&admission))
+                    .and_then(|admission| {
+                        source
+                            .provenance_for(&admission)
+                            .map(|prepared| prepared.metadata)
+                    })
                     .unwrap()
                     .authenticated_inputs
                     .clone()
@@ -2415,7 +2429,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                             compiled.code(),
                             TurnInstallationAdmission::Compilation,
                         )
-                        .and_then(|admission| source.provenance_for(&admission))),
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
                     ))
@@ -2431,7 +2449,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                             compiled.code(),
                             TurnInstallationAdmission::Compilation,
                         )
-                        .and_then(|admission| source.provenance_for(&admission))),
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::SourceScopeAdmission
                     ))
@@ -2448,7 +2470,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                             compiled.code(),
                             TurnInstallationAdmission::Compilation,
                         )
-                        .and_then(|admission| source.provenance_for(&admission))
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })
                         .unwrap()
                         .authenticated_inputs
                         .clone()
@@ -3857,11 +3883,13 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
                     TurnInstallationAdmission::ActivationPreviewFresh(compiled.admission()),
                 )
                 .unwrap();
+            let provenance = resident.provenance_for(&admission).unwrap();
             resident.install_admitted_turn(
                 admission,
                 TurnImageAcquisition::Ready {
                     bundle: &incomplete,
                 },
+                provenance,
                 None,
             )
         });
@@ -6196,7 +6224,8 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
             input.input_type(),
             layout.input().signature().presentation()
         );
-        assert!(resident.discard_custody(input.custody));
+        drop(input.custody);
+        resident.settle_dropped_custody();
         assert!(matches!(
             fixture.resume_activation(&mut resident, activation),
             ResidentOutcome::Completed { .. }

@@ -571,7 +571,9 @@ impl SessionLib {
                 external_imports: SourceImports::new(),
                 sources: Vec::new(),
                 workbench_imports: SourceImports::from_specs(imports),
-                items: evidence.exports().iter().map(recovered_item).collect(),
+                items: evidence.exports().iter().map(ExportItem::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| invalid(error.to_string()))?,
                 value_types: BTreeMap::new(),
                 retracts: Vec::new(),
                 parent: None,
@@ -709,30 +711,6 @@ fn recovered_instances(
             .map(recovered_identity)
             .collect::<Option<_>>()?,
     })
-}
-
-fn recovered_item(export: &DeclarationExport) -> ExportItem {
-    match export.kind {
-        DeclarationKind::Value => ExportItem::Value {
-            name: export.head.occurrence.clone(),
-        },
-        DeclarationKind::Type => ExportItem::Type {
-            name: export.head.occurrence.clone(),
-            cons: export
-                .children
-                .iter()
-                .map(|child| child.occurrence.clone())
-                .collect(),
-        },
-        DeclarationKind::Class => ExportItem::Class {
-            name: export.head.occurrence.clone(),
-            methods: export
-                .children
-                .iter()
-                .map(|child| child.occurrence.clone())
-                .collect(),
-        },
-    }
 }
 
 /// Stage compiler facts through their owning scoped state. Absence has no

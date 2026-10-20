@@ -2057,13 +2057,31 @@ impl CheckedValueImportAuthority {
     /// checked program owner has already correlated each input reference with
     /// its current occurrence, runtime identity and original issuing row, and
     /// a raw preparation completion cannot reach this constructor.
-    pub(crate) fn from_world_output(
+    pub(crate) fn from_world_stage(
         program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
     ) -> Result<Self, CompileError> {
+        if !program
+            .stages()
+            .get(stage.index())
+            .is_some_and(|issued| Arc::ptr_eq(issued, stage))
+        {
+            return Err(failure(
+                "world value imports belong to another prepared stage",
+            ));
+        }
         let operation = program.validation().inventory.as_ref();
         let producer = program.reservation().plan().producer_sha256();
         let mut values = BTreeMap::<String, CapturedValueInterface>::new();
-        for original in program.demanded_rows() {
+        // The operation's actual operand is compiler availability even when
+        // this stage has no runtime demand for it. This does not alter the
+        // stage's selected runtime witnesses or native root custody.
+        let operand = program.reservation().plan().operand();
+        for original in stage
+            .demanded_rows()
+            .iter()
+            .chain(operand.map(|operand| operand.checked_row()))
+        {
             crate::host_work::checkpoint()?;
             operation
                 .charge(1)
@@ -4022,6 +4040,19 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn world_selected_runtime_inputs(
+        &self,
+    ) -> Option<crate::compiler_world::WorldCellRuntimeInputs<'_>> {
+        match &self.cell.specification {
+            CheckedCellSpecification::World { program, .. } => Some(
+                program
+                    .item(self.index)
+                    .expect("exact checked World item belongs to its program")
+                    .selected_runtime_inputs(),
+            ),
+            CheckedCellSpecification::Finite(_) => None,
+        }
+    }
     pub fn specification_digest(&self) -> [u8; 32] {
         self.cell.specification.specification_digest()
     }

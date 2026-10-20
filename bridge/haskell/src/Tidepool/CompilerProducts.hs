@@ -11,6 +11,7 @@ module Tidepool.CompilerProducts
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , stagedOriginalBinders, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
+  , retainTypeInterfaceCaptures, retainedTypeInterfaceBody
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
   , publishStagedOriginalProducts, retainStagedProgramProducts
@@ -42,11 +43,12 @@ import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word64)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Types.Name (Name)
-import GHC.Types.Id (isDataConWorkId_maybe)
+import GHC.Types.Id (isDataConWorkId_maybe, isDataConWrapId_maybe)
+import GHC.Core.DataCon (dataConTyCon)
 import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Types.Avail (availNames)
 import GHC.Core.Class (classOpItems)
-import GHC.Core.TyCon (tyConClass_maybe)
+import GHC.Core.TyCon (tyConClass_maybe, isNewTyCon)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Core.PatSyn (patSynMatcher, patSynBuilder)
 import GHC.Types.Var (Id)
@@ -253,8 +255,41 @@ stagedOriginalOutputFiles :: StagedOriginalProducts -> [(FilePath,String)]
 stagedOriginalOutputFiles (StagedOriginalProducts _ certificate bytes outputs _) =
   (certificate,shaHex bytes) : freshOutputSealFacts outputs
 
-stagedOriginalInterfaces :: StagedOriginalProducts -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
-stagedOriginalInterfaces (StagedOriginalProducts _ _ _ _ interfaces) = interfaces
+-- This index retains type bytes, not native group or original authority.
+-- Those remain in the same stage's certified TargetCertificationContext.
+stagedTypeInterfaces :: StagedOriginalProducts -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+stagedTypeInterfaces (StagedOriginalProducts _ _ _ _ interfaces) = interfaces
+
+-- A relocated view may borrow the already-issued type capture. Preserve its
+-- descriptor and compare semantic requirements and owned bytes, rather than
+-- treating the new packet's output directory as a new implementation.
+retainTypeInterfaceCaptures
+  :: Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+  -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+  -> Either String (Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes))
+retainTypeInterfaceCaptures previous additions = do
+  forM_ (Map.toAscList additions) $ \(key,(artifact,body)) -> do
+    unless (key == (exactUnit artifact,exactModule artifact)
+        && exactSha256 artifact == artifactSha256 body)
+      (Left "type interface capture differs from its owner or body seal")
+    forM_ (Map.lookup key previous) $ \(old,oldBody) ->
+      unless (typeInterfaceIdentity old == typeInterfaceIdentity artifact
+          && oldBody == body)
+        (Left "type interface capture conflicts with its retained owner")
+  pure (Map.union previous additions)
+
+retainedTypeInterfaceBody
+  :: Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+  -> ExactIfaceArtifact -> Maybe ArtifactBytes
+retainedTypeInterfaceBody retained artifact = do
+  (selected,body) <- Map.lookup (exactUnit artifact,exactModule artifact) retained
+  if typeInterfaceIdentity selected == typeInterfaceIdentity artifact
+      && artifactSha256 body == exactSha256 artifact
+    then Just body else Nothing
+
+typeInterfaceIdentity :: ExactIfaceArtifact -> (String,String,String,[(String,String)])
+typeInterfaceIdentity artifact =
+  (exactUnit artifact,exactModule artifact,exactSha256 artifact,exactRequirements artifact)
 
 data PreparedProductContext = PreparedProductContext
   { preparedProductInventory :: PreparedModuleProducts
@@ -690,15 +725,13 @@ newPreparedOriginalInterfaceArtifactsWithPrior
   -> FilePath -> IO OriginalInterfaceArtifacts
 newPreparedOriginalInterfaceArtifactsWithPrior prepared worldInputs prior directory = do
   let worldInterfaces = maybe [] worldCellTypeInterfaces worldInputs
-      previous = maybe Map.empty stagedOriginalInterfaces prior
+      previous = maybe Map.empty stagedTypeInterfaces prior
       current = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,body)) | (artifact,body) <- worldInterfaces]
-      retained = Map.union current previous
-  unless (all (\(artifact,body) -> Map.lookup (exactUnit artifact,exactModule artifact) retained == Just (artifact,body)
-      && exactSha256 artifact == artifactSha256 body) worldInterfaces
-      && not (or (Map.elems (Map.intersectionWith (/=) current previous))))
-    (fail "prior original interface captures conflict")
-  let readRetained artifact = case Map.lookup (exactUnit artifact,exactModule artifact) retained of
-        Just (selected,body) | selected == artifact -> pure body
+  unless (all (\(artifact,body) -> Map.lookup (exactUnit artifact,exactModule artifact) current == Just (artifact,body)) worldInterfaces)
+    (fail "current type interface captures conflict")
+  retained <- either fail pure (retainTypeInterfaceCaptures previous current)
+  let readRetained artifact = case retainedTypeInterfaceBody retained artifact of
+        Just body -> pure body
         _ -> readOrdinary artifact
   newOriginalInterfaceArtifactsWithReader readRetained (prHscEnv result)
     (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared ++ map fst (Map.elems retained))
@@ -734,13 +767,12 @@ writeCertifiedSegmentProducts
   -> PreparedProductContext -> IO StagedOriginalProducts
 writeCertifiedSegmentProducts includes originals directory prepared context = do
   (certified,bytes,outputs) <- writeCertifiedProducts SegmentOriginalFacts True includes originals directory prepared (Just context) []
-  let previous = maybe Map.empty stagedOriginalInterfaces (preparedPriorOriginalProducts context)
+  let previous = maybe Map.empty stagedTypeInterfaces (preparedPriorOriginalProducts context)
       current = Map.fromList [(key,(artifact,localFinalizedInterfaceBody proof))
         | (key,proof) <- Map.toAscList (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified))
         , let (artifact,_,_) = localFinalizedInterface proof]
-  unless (not (or (Map.elems (Map.intersectionWith (/=) current previous))))
-    (fail "a prior original was replaced by another finalized capture")
-  pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs (Map.union current previous))
+  retained <- either fail pure (retainTypeInterfaceCaptures previous current)
+  pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs retained)
 
 writeCertifiedSegmentItemProducts
   :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO FilePath
@@ -799,6 +831,10 @@ stagedDeclarationInputReferences prepared (StagedOriginalProducts originals _ _ 
       -- Constructor applications have structural representation; constructor
       -- workers cannot capture values and have no recoverable interface body.
       | isJust (isDataConWorkId_maybe identifier) = pure (Right [])
+      -- GHC's newtype workers and wrappers are DataConWrapIds with compulsory
+      -- cast unfoldings and no top-level binding (Id.Make, Newtype workers).
+      | Just constructor <- isDataConWrapId_maybe identifier
+      , isNewTyCon (dataConTyCon constructor) = pure (Right [])
       | otherwise = pure (Right [identifier])
     runtimeIds thing@(ATyCon tycon) = do
       implicit <- mapM runtimeIds (implicitTyThings thing)

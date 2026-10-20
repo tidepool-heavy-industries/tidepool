@@ -882,7 +882,7 @@ pub fn prepare_world_cell_program(
         SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program);
+    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program)?;
     let mut stage_sources = Vec::new();
     let mut planned_declarations = BTreeMap::new();
     let mut outputs = BTreeMap::new();
@@ -897,43 +897,9 @@ pub fn prepare_world_cell_program(
         let original = stage.identity().original_owner().is_some();
         let stage_produced =
             produced_outputs.for_segment(first..if original { first } else { end })?;
-        let stage_root = root.join(
-            stage
-                .outputs()
-                .source_receipt()
-                .relative()
-                .parent()
-                .ok_or_else(|| {
-                    CompileError::ExtractFailed("World stage source output has no namespace".into())
-                })?,
-        );
         let decoded =
             crate::declaration_context::decode_world_source_receipt(&program, stage.index())?;
-        let (packages_path, packages) = decoded.package_imports();
-        validation
-            .record_captured_bytes(packages_path, packages)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let raw = certified_products::ParsedModuleProducts::decode_with_operation(
-            checked_cell::world_output_bytes(
-                &program,
-                stage.outputs().module_products().relative(),
-            )?,
-            packages,
-            validation.inventory.clone(),
-        )
-        .map_err(compiler_evidence_failure)?;
-        let receipt = certified_products::decode_segment_originals_with_operation(
-            checked_cell::world_output_bytes(
-                &program,
-                stage.outputs().certified_products().relative(),
-            )?,
-            &stage_root,
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
         let mut segment = decoded.issue_segment_originals(
-            receipt,
-            raw,
             None,
             &selected_values,
             Some(&stage_produced),
@@ -3490,7 +3456,63 @@ impl SealedOriginalEvidence {
     }
 }
 
+/// One requested group's membership in its actual physical output. This
+/// observes native bytes; only the runtime producer can pair its source issuer.
+pub struct PhysicalCurrentNativeGroup<'a> {
+    group: &'a certified_products::PendingCertifiedGroup,
+}
+
+impl PhysicalCurrentNativeGroup<'_> {
+    pub fn sites(&self) -> impl Iterator<Item = u64> + '_ {
+        self.group
+            .group()
+            .definitions()
+            .sites()
+            .iter()
+            .map(|site| site.site)
+    }
+}
+
 impl SealedTurnProducts {
+    /// Inspect only the actual group requested by a receiving native installer.
+    /// Historical payload custody and native reuse labels cannot qualify it.
+    pub fn physical_current_native_group(
+        &self,
+        group: &certified_products::PendingCertifiedGroup,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Result<Option<PhysicalCurrentNativeGroup<'_>>, CompileError> {
+        if !self
+            .target
+            .artifacts()
+            .contains_issued_native_group(binding)
+        {
+            return Err(CompileError::ExtractFailed(
+                "native source group is outside its target acquisition".into(),
+            ));
+        }
+        let actual = self
+            .certified_groups
+            .iter()
+            .find(|actual| actual.same_issuance(group))
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("native group belongs to another sealed output".into())
+            })?;
+        if binding.original_ordinal != actual.group().original_ordinal() {
+            return Err(CompileError::ExtractFailed(
+                "native source group ordinal differs from its target acquisition".into(),
+            ));
+        }
+        if self
+            .source_selection()
+            .physical_current_original(actual.owner())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+            != Some(binding.binding.artifact())
+        {
+            return Ok(None);
+        }
+        Ok(Some(PhysicalCurrentNativeGroup { group: actual }))
+    }
+
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
         match &self.original {
             SealedOriginalEvidence::Exact { output, .. } => output.artifacts(),

@@ -1067,6 +1067,48 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn('LD_LIBRARY_PATH', group['resource_env'])
         self.assertIn('//build/package:tidepool_extract_runtime_libraries', group['resources'])
         self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256', rooted['env'])
+        retirement = self.rule('exomonad/actor', 'actor_generation_retirement_owner_tests',
+                               'tidepool_rust_test_cases')
+        self.assertEqual(retirement['binary'], group['binary'])
+        self.assertEqual(retirement['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate',
+            'resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic',
+        ])
+        self.assertEqual(retirement['expected_count'], 2)
+        self.assertTrue(retirement['ignored'])
+        self.assertEqual(retirement['case_compiler_modes'], {
+            name: 'owned-resident' for name in retirement['exact_tests']
+        })
+        self.assertEqual(retirement['resource_env'], rooted['resource_env'])
+        self.assertEqual(retirement['resources'], rooted['resources'])
+        publication = self.rule('exomonad/actor', 'actor_world_declaration_publication_test',
+                                'tidepool_rust_test_cases')
+        self.assertEqual(publication['binary'], rooted['binary'])
+        self.assertEqual(publication['exact_tests'], [
+            'resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell',
+        ])
+        self.assertEqual(publication['expected_count'], 1)
+        self.assertTrue(publication['ignored'])
+        self.assertEqual(publication['case_compiler_modes'], {
+            publication['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(publication['resource_env'], rooted['resource_env'])
+        self.assertEqual(publication['resources'], rooted['resources'])
+        self.assertTrue(publication['haskell_worker'])
+        durable = self.rule('exomonad/actor', 'actor_world_durable_generation_history_test',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(durable['binary'], rooted['binary'])
+        self.assertEqual(durable['exact_tests'], [
+            'resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement',
+        ])
+        self.assertEqual(durable['expected_count'], 1)
+        self.assertTrue(durable['ignored'])
+        self.assertEqual(durable['case_compiler_modes'], {
+            durable['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(durable['resource_env'], rooted['resource_env'])
+        self.assertEqual(durable['resources'], rooted['resources'])
+        self.assertTrue(durable['haskell_worker'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [

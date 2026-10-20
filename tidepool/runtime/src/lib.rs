@@ -455,19 +455,21 @@ fn install_compiled_target(
     let resolved =
         state.resolve_certification_in(scope, target.prepared.prepared(), &certification)?;
     let registry = state.certified_image_registry();
-    let (target, demanded) = ScopedTargetImage::compile_scoped(
+    let target = ScopedTargetImage::compile_scoped(
         target.prepared.prepared().clone(),
         &resolved,
         &registry,
     )?;
-    let (program, _) = state.install_certified_turn_in(
-        scope,
-        &artifacts.table,
-        target,
-        &resolved.source_evidence,
-        demanded,
-        &resolved.inherited_needed,
-    )?;
+    let (program, _, _) = state
+        .install_certified_turn_in(
+            scope,
+            &artifacts.table,
+            target,
+            &resolved.source_evidence,
+            &resolved.inherited_needed,
+            &|_| None,
+        )?
+        .into_parts();
     Ok(program)
 }
 

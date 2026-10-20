@@ -2,6 +2,7 @@
 //! Decoding these values grants no source, compiler-world or runtime authority.
 
 use ciborium::value::Value as CborValue;
+use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 #[error("inspection receipt: {0}")]
@@ -9,6 +10,75 @@ pub struct InspectionDecodeError(String);
 
 fn invalid(detail: impl Into<String>) -> InspectionDecodeError {
     InspectionDecodeError(detail.into())
+}
+
+/// Whether a callable's required effects fit the inspecting actor's row.
+/// Runtime resource grants remain a separate authority check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionAvailability {
+    Available,
+    /// The row fits and every closed constraint solves; a constraint stays open
+    /// only because the call site decides it. Usable, not uncertain.
+    Polymorphic,
+    Unavailable,
+    Unknown,
+}
+
+impl InspectionAvailability {
+    pub fn decode(value: &CborValue, what: &str) -> Result<Self, InspectionDecodeError> {
+        match text(value, what)? {
+            "Available" => Ok(Self::Available),
+            "Polymorphic" => Ok(Self::Polymorphic),
+            "Unavailable" => Ok(Self::Unavailable),
+            "Unknown" => Ok(Self::Unknown),
+            other => Err(invalid(format!("unknown {what} {other:?}"))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeMatchQuality {
+    Exact,
+    Usable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeMatch {
+    pub name: String,
+    pub module: Option<String>,
+    pub signature: String,
+    pub quality: TypeMatchQuality,
+    pub availability: InspectionAvailability,
+    pub references: Vec<IdentifierRef>,
+    /// The matched value's canonical resolved identity. `references` are
+    /// dependencies, not the matched declaration itself.
+    pub identity: IdentifierRef,
+}
+
+pub fn decode_type_match(value: &CborValue) -> Result<TypeMatch, InspectionDecodeError> {
+    let fields = array_len(value, 7, "TypeMatch")?;
+    let module = match &fields[1] {
+        CborValue::Null => None,
+        value => Some(text(value, "TypeMatch module")?.into()),
+    };
+    let quality = match text(&fields[3], "TypeMatch quality")? {
+        "Exact" => TypeMatchQuality::Exact,
+        "Usable" => TypeMatchQuality::Usable,
+        other => return Err(invalid(format!("unknown TypeMatch quality {other:?}"))),
+    };
+    Ok(TypeMatch {
+        name: text(&fields[0], "TypeMatch name")?.into(),
+        module,
+        signature: text(&fields[2], "TypeMatch signature")?.into(),
+        quality,
+        availability: InspectionAvailability::decode(&fields[4], "TypeMatch availability")?,
+        references: array(&fields[5], "TypeMatch references")?
+            .iter()
+            .map(decode_identifier_ref)
+            .collect::<Result<_, _>>()?,
+        identity: decode_identifier_ref(&fields[6])?,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,13 +260,22 @@ pub fn decode_structured_result(
 
 /// Decode the one complete structured answer carried by a world response.
 pub fn decode_structured_output(bytes: &[u8]) -> Result<StructuredReply, InspectionDecodeError> {
+    let value = parse_output(bytes)?;
+    decode_structured_result(single_result(&value)?)
+}
+
+fn parse_output(bytes: &[u8]) -> Result<CborValue, InspectionDecodeError> {
     let mut reader = std::io::Cursor::new(bytes);
     let value: CborValue = ciborium::de::from_reader(&mut reader)
         .map_err(|error| invalid(format!("malformed CBOR: {error}")))?;
     if reader.position() != bytes.len() as u64 {
         return Err(invalid("trailing CBOR data"));
     }
-    let top = array_len(&value, 2, "inspection receipt")?;
+    Ok(value)
+}
+
+fn single_result(value: &CborValue) -> Result<&CborValue, InspectionDecodeError> {
+    let top = array_len(value, 2, "inspection receipt")?;
     if text(&top[0], "inspection version")? != "TPINSP008" {
         return Err(invalid("unsupported inspection version"));
     }
@@ -205,8 +284,76 @@ pub fn decode_structured_output(bytes: &[u8]) -> Result<StructuredReply, Inspect
         return Err(invalid("expected complete output"));
     }
     let results = array_len(&complete[1], 1, "world inspection results")?;
-    decode_structured_result(&results[0])
+    Ok(&results[0])
 }
+
+/// One scoped compiler answer. It remains untrusted data until the owning
+/// World and runtime transaction authenticate its envelope and settlement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopedReply {
+    Info(Box<IdentifierInfo>),
+    Type(TypeInfo),
+    RowFit {
+        identifier: IdentifierRef,
+        availability: InspectionAvailability,
+    },
+    Expression {
+        expression: String,
+        display: String,
+        availability: InspectionAvailability,
+    },
+    TypeSearch {
+        pattern: String,
+        matches: Vec<TypeMatch>,
+    },
+    Error(QueryError),
+}
+
+pub fn decode_scoped_output(bytes: &[u8]) -> Result<ScopedReply, InspectionDecodeError> {
+    let value = parse_output(bytes)?;
+    let result = single_result(&value)?;
+    let body = array(result, "scoped result")?;
+    let tag = body.first().ok_or_else(|| invalid("empty scoped result"))?;
+    match text(tag, "scoped result tag")? {
+        "StructuredInfoOk" | "StructuredTypeOk" | "StructuredError" => {
+            Ok(match decode_structured_result(result)? {
+                StructuredReply::Info(info) => ScopedReply::Info(info),
+                StructuredReply::Type(info) => ScopedReply::Type(info),
+                StructuredReply::Error(error) => ScopedReply::Error(error),
+            })
+        }
+        "RowFit" => {
+            let fields = array_len(result, 3, "row fit")?;
+            Ok(ScopedReply::RowFit {
+                identifier: decode_identifier_ref(&fields[1])?,
+                availability: InspectionAvailability::decode(&fields[2], "row availability")?,
+            })
+        }
+        "Type" => {
+            let fields = array_len(result, 4, "expression type")?;
+            Ok(ScopedReply::Expression {
+                expression: text(&fields[1], "expression")?.into(),
+                display: text(&fields[2], "expression type")?.into(),
+                availability: InspectionAvailability::decode(
+                    &fields[3],
+                    "expression availability",
+                )?,
+            })
+        }
+        "TypeMatches" => {
+            let fields = array_len(result, 3, "type search")?;
+            Ok(ScopedReply::TypeSearch {
+                pattern: text(&fields[1], "type pattern")?.into(),
+                matches: array(&fields[2], "type matches")?
+                    .iter()
+                    .map(decode_type_match)
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+        other => Err(invalid(format!("unexpected scoped result {other:?}"))),
+    }
+}
+
 fn decode_identifier_info(value: &CborValue) -> Result<IdentifierInfo, InspectionDecodeError> {
     let fields = array_len(value, 4, "IdentifierInfo")?;
     Ok(IdentifierInfo {

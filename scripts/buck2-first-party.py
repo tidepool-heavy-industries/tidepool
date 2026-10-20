@@ -1798,9 +1798,22 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                         "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                     ]),
+                    ("actor_world_status_test", [
+                        "resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication",
+                    ]),
                     ("actor_world_cell_input_test", [
                         "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",
                         "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners",
+                    ]),
+                    ("actor_generation_retirement_owner_tests", [
+                        "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
+                        "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
+                    ]),
+                    ("actor_world_declaration_publication_test", [
+                        "resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell",
+                    ]),
+                    ("actor_world_durable_generation_history_test", [
+                        "resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement",
                     ]),
                     ("actor_world_lifetime_test", [
                         "resident_workbench::request_tests::abandoned_private_world_birth_reaps_scope_after_lost_delivery",
@@ -1825,6 +1838,7 @@ tidepool_buildscript_run(
                 renderer_env, renderer_resources, renderer_worker = compiler_service_test_inputs(
                     package_name, "activation_renderer_terminal_tests"
                 )
+
                 renderer_controls = ["resident_workbench::request_tests::" + name for name in (
                     "renderer_producer_loss_preserves_shared_terminal_cause_for_current_and_later_observers",
                     "renderer_producer_and_waiter_release_machine_checkout",

@@ -147,7 +147,47 @@ demandScopeChecks = do
           case stale of
             Left _ -> pure ()
             Right _ -> fail (name ++ ": source drift was accepted")
+      observationContributionChecks directory initial
       liftIO (putStrLn ("demand scope: " ++ show (length controls) ++ " controls passed"))
+
+-- Actual rendered operands must remain inside their single compiler-owned
+-- declaration slot. LINE pragmas cannot move a physical suffix into custody.
+observationContributionChecks :: FilePath -> DynFlags -> Ghc ()
+observationContributionChecks directory flags = liftIO $ do
+  let prefix = "module ObservationContribution where\n-- \955 \26085\nprotected = ()\n"
+      inert = "(let observation = observation in observation)"
+      typeHeader = "\n__tidepool_type_search_query :: " :: String
+      valueHeader = "__tidepool_type_search_query = "
+      expressionHeader = "\n__tidepool_inspect_0 = (\n"
+      typeCase operand accepted =
+        (ObservationTypeOperand (length prefix + length typeHeader + length operand + 1),
+          typeHeader ++ operand ++ "\n" ++ valueHeader ++ inert ++ "\n",accepted)
+      expressionCase operand accepted =
+        (ObservationExpressionOperand,expressionHeader ++ unlines (map ("  " ++) (lines operand)) ++ "  )\n",accepted)
+      cases =
+        [ typeCase "Int" True
+        , typeCase "Int\ninjected = True" False
+        , typeCase "Int\n{-# LINE 1 \"trusted\" #-}\ninjected = True" False
+        , typeCase "Int\ninstance Show Int where" False
+        , typeCase "Int\n__tidepool_type_search_query = 1" False
+        , expressionCase "let local = (1 :: Int) in local" True
+        , expressionCase "() ); injected = True; closer = (" False
+        , expressionCase "() ); {-# LINE 1 \"trusted\" #-} injected = True; closer = (" False
+        ]
+  forM_ (zip [0 :: Int ..] cases) $ \(ordinal,(mode,suffix,accepted)) -> do
+    let source = prefix ++ suffix
+        name = "ObservationContribution"
+        path = directory </> name ++ ".hs"
+    writeFile path source
+    recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
+      prefix source path name >>= either fail pure
+    captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+    parsed <- either (fail . (("operand control " ++ show ordinal ++ " must parse before its contribution check: ") ++) . show) pure
+      (prepareModuleDemand flags captured)
+    let actual = validateObservationContribution (length prefix) mode [] parsed
+    unless (case actual of Right () -> accepted; Left _ -> not accepted)
+      (fail ("wrong observation contribution result " ++ show ordinal ++ ": " ++ show actual))
+  putStrLn ("observation contribution: " ++ show (length cases) ++ " physical-boundary controls passed")
 
 data ExpectedDemand = Bindings [String] | ParseRefusal | RenameRefusal
   deriving (Eq, Show)

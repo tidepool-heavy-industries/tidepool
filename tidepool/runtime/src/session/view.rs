@@ -269,7 +269,7 @@ impl SessionCompileView {
     pub(super) fn admission_commitment(&self) -> ([u8; 32], usize) {
         let items = |items: &[super::ExportItem]| {
             items.iter().map(|item| {
-            serde_json::json!({"kind": match item { super::ExportItem::Value { .. } => "value", super::ExportItem::Type { .. } => "type", super::ExportItem::Class { .. } => "class" },
+            serde_json::json!({"kind": match item { super::ExportItem::Value { .. } => "value", super::ExportItem::Pattern { .. } => "pattern", super::ExportItem::Type { .. } => "type", super::ExportItem::Class { .. } => "class" },
                 "head": item.head_name(), "names": item.all_names().collect::<Vec<_>>()})
         }).collect::<Vec<_>>()
         };

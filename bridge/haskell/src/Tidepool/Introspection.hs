@@ -17,7 +17,7 @@ module Tidepool.Introspection
     StructuredQueryError (..),
     normalizeInspectionWildcards,
     searchTypeMatches,
-    InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc,
+    InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc, runWorldInspectionGhc,
     encodeInspectionResults,
     inspectPublicModuleExports,
     boundedDistinctNames,
@@ -111,6 +111,7 @@ instance Show InfoEntry where
 
 data InspectionResult
   = InspectionType String String Availability
+  | InspectionRowFit IdentifierRef Availability
   | InspectionInfo String [InfoEntry]
   | InspectionAmbiguous String [InfoEntry]
   | InspectionNotFound String
@@ -308,16 +309,15 @@ inspectionExecutionRow rdrEnv = do
 inspectionRow :: (GhcMonad m) => Id -> m Type
 inspectionRow identifier = do
   proxy <- lookupProxyTyCon
+  eff <- lookupEffTyCon
   let (_, _, body) = tcSplitSigmaTy (idType identifier)
-  case proxy of
-    Just proxyConstructor -> case splitTyConApp_maybe body of
-      Just (constructor, arguments)
-        | constructor == proxyConstructor,
-          Just row <- listToMaybe (reverse arguments) -> pure row
-      _ -> malformed
-    Nothing -> malformed
+  case splitTyConApp_maybe body of
+    Just (constructor,[row,_]) | Just constructor == eff -> pure row
+    Just (constructor,arguments) | Just constructor == proxy
+        , Just row <- listToMaybe (reverse arguments) -> pure row
+    _ -> malformed
   where
-    malformed = liftIO (ioError (userError "inspection row sentinel has no typed Proxy row"))
+    malformed = liftIO (ioError (userError "inspection row sentinel lacks an exact Proxy or Eff row signature"))
 
 lookupProxyTyCon :: (GhcMonad m) => m (Maybe TyCon)
 lookupProxyTyCon = do
@@ -459,10 +459,16 @@ searchTypeMatches hscEnv tcGblEnv rdrEnv queryBinder query = do
     _ -> pure ()
   searchTypeMatchesWithContext (AvailabilityContext hscEnv tcGblEnv effTyCon row Nothing) rdrEnv queryBinder query
 
+inspectionLookupName :: GhcMonad m => AvailabilityContext -> Name -> m (Maybe TyThing)
+inspectionLookupName context name = case lookupTypeEnv (tcg_type_env checked) name of
+  Just thing | nameIsLocalOrFrom (tcg_mod checked) name -> pure (Just thing)
+  _ -> lookupName name
+  where checked = availabilityTcGblEnv context
+
 searchTypeMatchesWithContext :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
 searchTypeMatchesWithContext context rdrEnv queryBinder query = do
   let entries =
-        filter ((/= queryBinder) . greName) (globalRdrEnvElts rdrEnv)
+        filter (\entry -> greName entry /= queryBinder && visibleInspectionName (greName entry)) (globalRdrEnvElts rdrEnv)
       spellingOwners =
         Map.fromListWith Set.union
           [ (spelling, Set.singleton (greName entry))
@@ -477,7 +483,7 @@ searchTypeMatchesWithContext context rdrEnv queryBinder query = do
             ]
   things <- fmap catMaybes $ forM namedEntries $ \(entry, spelling) -> do
     let name = greName entry
-    found <- lookupName name
+    found <- inspectionLookupName context name
     pure $ case found of
       Just (AnId identifier) -> Just (name, spelling, identifier)
       _ -> Nothing
@@ -570,7 +576,14 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = withInspectionW
 
 runInspectionGhc :: InspectionWork -> HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
   -> [InspectionRequest] -> Ghc [InspectionResult]
-runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
+runInspectionGhc work hscEnv tcGblEnv rdrEnv inspectionProbes =
+  runWorldInspectionGhc work hscEnv tcGblEnv rdrEnv inspectionProbes Map.empty
+
+-- Exact aliases come from the held World's admitted value-interface owner.
+-- They describe original compiler Names; they confer no runtime value access.
+runWorldInspectionGhc :: InspectionWork -> HscEnv -> TcGblEnv -> GlobalRdrEnv -> Map.Map String Id
+  -> Map.Map String Id -> [InspectionRequest] -> Ghc [InspectionResult]
+runWorldInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes aliases requests = do
   borrowed <- liftIO (forkExactContext hscEnv)
   setSession borrowed
   effTyCon <- lookupEffTyCon
@@ -581,7 +594,8 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
     (Just _,Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
     _ -> pure ()
   let context = AvailabilityContext borrowed tcGblEnv effTyCon row work
-  reverse . snd <$> foldM (inspect context) (0 :: Int,[]) requests
+  results <- reverse . snd <$> foldM (inspect context) (0 :: Int,[]) requests
+  pure (zipWith finalize requests results)
   where
     inspect context (typeIndex, results) request = case request of
       InspectTypeOf expression ->
@@ -610,15 +624,88 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
       InspectTypeSearch query -> do
         result <- inspectTypeSearch context rdrEnv inspectionProbes Nothing query
         pure (typeIndex, result : results)
-      InspectTypeSearchBounded query budget -> do
-        result <- inspectTypeSearch context rdrEnv inspectionProbes (Just budget) query
+      InspectTypeSearchBounded query _ -> do
+        result <- inspectTypeSearch context rdrEnv inspectionProbes Nothing query
         pure (typeIndex, result : results)
       InspectStructuredInfoOf query -> do
-        result <- inspectStructured rdrEnv StructuredInfo query
+        result <- structured context StructuredInfo query
         pure (typeIndex, result : results)
       InspectStructuredTypeOf query -> do
-        result <- inspectStructured rdrEnv StructuredType query
+        result <- structured context StructuredType query
         pure (typeIndex, result : results)
+      InspectKeyedAvailability query _ | structuredScope query /= StructuredCurrentScope
+          || structuredNamespace query == StructuredAnyName ->
+        pure (typeIndex,InspectionStructuredError (StructuredUnsupported "keyed row fit requires the current scope and a concrete namespace"):results)
+      InspectKeyedAvailability query owner -> do
+        NameSelection _ selection <- namesInScope rdrEnv
+          (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
+        let aliasCandidates = [idName identifier | identifier <- Map.elems aliases
+              , let ref = identifierRef (idName identifier) (AnId identifier)
+              , identifierModule ref == owner && identifierName ref == structuredName query]
+            scoped = case selection of Right (names,_) -> names; Left _ -> []
+            candidates = nub (aliasCandidates ++ scoped)
+        things <- fmap catMaybes $ forM candidates $ \name -> do
+          found <- inspectionLookupName context name
+          pure $ do
+            thing <- found
+            let ref = canonicalRef (identifierRef name thing)
+            if identifierModule ref == owner && identifierName ref == structuredName query
+                && exactThingMatches (structuredNamespace query) thing then Just (ref,thing) else Nothing
+        let requested = IdentifierRef owner (structuredName query) (case structuredNamespace query of
+              StructuredTypeName -> TypeIdentifier
+              StructuredConstructorName -> ConstructorIdentifier
+              StructuredFieldName -> FieldIdentifier
+              _ -> ValueIdentifier)
+        result <- case nubBy (\(a,_) (b,_) -> a == b) things of
+          [] -> pure (InspectionRowFit requested Unknown)
+          [(ref,thing)] -> InspectionRowFit ref <$> thingAvailability context thing
+          _ | structuredNamespace query == StructuredFieldName ->
+            pure (InspectionStructuredError (StructuredUnsupported "canonical field reference is ambiguous"))
+          many -> pure (InspectionStructuredError (StructuredAmbiguous query (map fst many)))
+        pure (typeIndex,result:results)
+    structured context mode query = case Map.lookup (structuredName query) aliases of
+      Just identifier | structuredScope query == StructuredCurrentScope
+          && exactThingMatches (structuredNamespace query) (AnId identifier) ->
+        pure (inspectResolved mode query [idName identifier] (idName identifier,AnId identifier))
+      _ -> do
+        NameSelection _ selection <- namesInScope rdrEnv
+          (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
+        case selection of
+          Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
+          Right (names,visible) -> do
+            things <- fmap catMaybes $ forM names $ \name -> do
+              found <- inspectionLookupName context name
+              pure ((name,) <$> (found >>= \thing -> if exactThingMatches (structuredNamespace query) thing then Just thing else Nothing))
+            pure $ case things of
+              [] -> InspectionStructuredError (StructuredUnknown query)
+              [thing] -> inspectResolved mode query visible thing
+              many -> InspectionStructuredError (StructuredAmbiguous query (map (uncurry identifierRef) many))
+    finalize request result = case canonicalize result of
+      InspectionTypeMatches query matches ->
+        let distinct = distinctOn typeMatchNominalName matches
+        in InspectionTypeMatches query (case request of
+          InspectTypeSearchBounded _ limit -> boundedNames (Just limit) distinct
+          _ -> distinct)
+      answer -> answer
+    canonicalRef ref
+      | identifierModule ref == moduleNameString (moduleName (tcg_mod tcGblEnv))
+      , Just identifier <- Map.lookup (identifierName ref) aliases =
+          identifierRef (idName identifier) (AnId identifier)
+      | otherwise = ref
+    canonicalize result = case result of
+      InspectionStructuredInfo info -> InspectionStructuredInfo info
+        { inspectedIdentifier = canonicalRef (inspectedIdentifier info) }
+      InspectionStructuredType info -> InspectionStructuredType info
+        { typeIdentifier = canonicalRef (typeIdentifier info) }
+      InspectionTypeMatches query matches -> InspectionTypeMatches query (map canonicalMatch matches)
+      InspectionStructuredError (StructuredAmbiguous query refs) ->
+        InspectionStructuredError (StructuredAmbiguous query (nub (map canonicalRef refs)))
+      _ -> result
+    canonicalMatch match = case Map.lookup (typeMatchName match) aliases of
+      Just identifier | nameModule_maybe (typeMatchNominalName match) == Just (tcg_mod tcGblEnv) ->
+        match { typeMatchNominalName = idName identifier
+              , typeMatchModule = moduleNameString . moduleName <$> nameModule_maybe (idName identifier) }
+      _ -> match
     missing binder = liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
 
 -- The budget bounds the encoded match list, not the search itself. Matching
@@ -636,12 +723,6 @@ inspectTypeSearch context rdrEnv inspectionProbes budget query =
 
 data StructuredMode = StructuredInfo | StructuredType
 
-inspectStructured :: GhcMonad m => GlobalRdrEnv -> StructuredMode -> StructuredInspection -> m InspectionResult
-inspectStructured rdrEnv mode query = do
-  NameSelection _ candidates <- namesInScope rdrEnv (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
-  case candidates of
-    Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
-    Right (names, visibleNames) -> fst <$> inspectStructuredCandidates mode query visibleNames names
 
 -- The service has already resolved the queried module in its held world.
 -- Selection uses that module's public exports; provenance follows the actual
@@ -913,13 +994,15 @@ boundedNames (Just budget) = take budget
 -- twice; taking the budget first would retain fewer than `budget` distinct
 -- entries and make a truncated answer look shorter than it is.
 boundedDistinctNames :: (Ord a) => Maybe Int -> [a] -> [a]
-boundedDistinctNames budget = boundedNames budget . distinctInOrder
+boundedDistinctNames budget = boundedNames budget . distinctOn id
+
+distinctOn :: Ord key => (value -> key) -> [value] -> [value]
+distinctOn key = go Set.empty
   where
-    distinctInOrder = go Set.empty
     go _ [] = []
-    go seen (x : rest)
-      | x `Set.member` seen = go seen rest
-      | otherwise = x : go (Set.insert x seen) rest
+    go seen (value:rest)
+      | key value `Set.member` seen = go seen rest
+      | otherwise = value : go (Set.insert (key value) seen) rest
 
 inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> Maybe Int -> m InspectionResult
 inspectModule context requested expanded budget
@@ -1110,6 +1193,8 @@ inspectionOutput body = toStrictByteString (encodeListLen 2 <> encodeString "TPI
 
 encodeResult :: InspectionResult -> Encoding
 encodeResult inspection = case inspection of
+  InspectionRowFit ref availability ->
+    encodeListLen 3 <> encodeString "RowFit" <> encodeIdentifierRef ref <> encodeAvailability availability
   InspectionType expression display availability ->
     encodeListLen 4 <> encodeString "Type" <> encodeText expression <> encodeText display
       <> encodeAvailability availability

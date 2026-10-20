@@ -12,6 +12,7 @@ module Tidepool.CheckedCell
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes
   , NativeParsedModule(..), unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule
   , typecheckNativeModuleWithDiagnostics
+  , ResolvedNativeSlots, resolveNativeAnnotations, applyNativeAnnotations, annotateNativeModule
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   ) where
 
@@ -373,10 +374,15 @@ slotOccurrence ActivationInputSlot = "TidepoolActivationInput"
 slotOccurrence RequestReplySlot = "TidepoolRequestReply"
 slotOccurrence RequestProgressSlot = "TidepoolRequestProgress"
 
-rewriteNativeSlots
+-- Resolved only against the admitted dependency environment. This immutable
+-- product is shared by demand renaming and final checking of the same source.
+newtype ResolvedNativeSlots = ResolvedNativeSlots
+  [(String, (Int, Maybe (Type, NameSet)))]
+
+resolveNativeSlots
   :: HscEnv -> [(NativeTypeSlot, Int, Maybe CheckedSignature)]
-  -> ParsedModule -> IO NativeParsedModule
-rewriteNativeSlots env slots parsed = do
+  -> IO ResolvedNativeSlots
+resolveNativeSlots env slots = do
   unless (Map.size (Map.fromList [(slot, ()) | (slot, _, _) <- slots]) == length slots)
     (fail "generated recipe repeats a native type slot")
   resolved <- forM slots $ \(slot, expected, signature) -> do
@@ -384,15 +390,40 @@ rewriteNativeSlots env slots parsed = do
       (fail "generated recipe has invalid native type slot evidence")
     native <- traverse (resolveCheckedSignature env) signature
     pure (slotOccurrence slot, (expected, native))
+  pure (ResolvedNativeSlots resolved)
+
+requestNativeSlots :: RequestHelperRecipe -> RequestTypeSignatures
+  -> [(NativeTypeSlot, Int, Maybe CheckedSignature)]
+requestNativeSlots recipe signatures = case recipe of
+  NoRequestHelpers ->
+    [ (RequestReplySlot, 0, Nothing)
+    , (RequestProgressSlot, 0, Nothing)
+    ]
+  ActorReplyHelpers ->
+    [ (RequestReplySlot, 2, Just (requestReplySignature signatures))
+    , (RequestProgressSlot, maybe 0 (const 1) (requestProgressSignature signatures),
+        requestProgressSignature signatures)
+    ]
+
+-- Counts are selected by the actual closed generated recipe: observation input
+-- has one type slot, while a mounted cell input normally infers its carrier type.
+resolveNativeAnnotations :: HscEnv
+  -> Maybe (RequestHelperRecipe, RequestTypeSignatures)
+  -> Maybe (Int, CheckedSignature) -> IO ResolvedNativeSlots
+resolveNativeAnnotations env request input = resolveNativeSlots env
+  (maybe [] (uncurry requestNativeSlots) request
+    ++ maybe [] (\(count, signature) -> [(ActivationInputSlot, count, Just signature)]) input)
+
+applyNativeAnnotations :: ResolvedNativeSlots -> ParsedSource -> IO (ParsedSource, NameSet)
+applyNativeAnnotations (ResolvedNativeSlots resolved) source = do
   counts <- newIORef Map.empty
   let inventory = Map.fromList resolved
-  rewritten <- rewriteSyntax (mkM (replaceSlot counts inventory)) (pm_parsed_source parsed)
+  rewritten <- rewriteSyntax (mkM (replaceSlot counts inventory)) source
   actual <- readIORef counts
   forM_ resolved $ \(slot, (expected, _)) ->
     unless (Map.findWithDefault 0 slot actual == expected)
       (fail ("generated recipe has missing or duplicated native type slot: " ++ slot))
-  pure (NativeParsedModule (parsed { pm_parsed_source = rewritten })
-    (unionNameSets [names | (_, (_, Just (_, names))) <- resolved]))
+  pure (rewritten, unionNameSets [names | (_, (_, Just (_, names))) <- resolved])
   where
     replaceSlot :: IORef (Map.Map String Int) -> Map.Map String (Int, Maybe (Type, NameSet))
       -> HsType GhcPs -> IO (HsType GhcPs)
@@ -408,24 +439,23 @@ rewriteNativeSlots env slots parsed = do
           _ -> fail ("generated native type slot is qualified or promoted: " ++ spelling)
     replaceSlot _ _ node = pure node
 
+annotateNativeModule :: ResolvedNativeSlots -> ParsedModule -> IO NativeParsedModule
+annotateNativeModule resolved parsed = do
+  (source, names) <- applyNativeAnnotations resolved (pm_parsed_source parsed)
+  pure (NativeParsedModule (parsed { pm_parsed_source = source }) names)
+
 rewriteHostInputType :: HscEnv -> Int -> CheckedSignature -> ParsedModule -> IO NativeParsedModule
-rewriteHostInputType env expected signature =
-  rewriteNativeSlots env [(ActivationInputSlot, expected, Just signature)]
+rewriteHostInputType env expected signature parsed = do
+  resolved <- resolveNativeSlots env [(ActivationInputSlot, expected, Just signature)]
+  annotateNativeModule resolved parsed
 
 -- Reply occurs in both sessionReply and respond; progress occurs only in
 -- reportProgress. No presentation string participates in these annotations.
 rewriteRequestTypes
   :: HscEnv -> RequestHelperRecipe -> RequestTypeSignatures -> ParsedModule -> IO NativeParsedModule
-rewriteRequestTypes env recipe signatures = rewriteNativeSlots env $ case recipe of
-  NoRequestHelpers ->
-    [ (RequestReplySlot, 0, Nothing)
-    , (RequestProgressSlot, 0, Nothing)
-    ]
-  ActorReplyHelpers ->
-    [ (RequestReplySlot, 2, Just (requestReplySignature signatures))
-    , (RequestProgressSlot, maybe 0 (const 1) (requestProgressSignature signatures),
-        requestProgressSignature signatures)
-    ]
+rewriteRequestTypes env recipe signatures parsed = do
+  resolved <- resolveNativeSlots env (requestNativeSlots recipe signatures)
+  annotateNativeModule resolved parsed
 
 -- Only compiler-generated signature binders acquire exact Types. Authored
 -- source continues through ordinary GHC renaming and lexical lookup.

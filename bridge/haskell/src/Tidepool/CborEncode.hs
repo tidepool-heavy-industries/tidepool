@@ -245,6 +245,7 @@ encodeExportItems items = encodeListLen (fromIntegral (length items)) <> foldMap
 encodeExportItem :: ExportItem -> Encoding
 encodeExportItem item = case item of
   EValue n     -> encodeListLen 2 <> encodeString "EValue" <> encodeString (T.pack n)
+  EPattern n   -> encodeListLen 2 <> encodeString "EPattern" <> encodeString (T.pack n)
   EType n cons -> encodeListLen 3 <> encodeString "EType" <> encodeString (T.pack n) <> encodeStringList cons
   EClass n ms  -> encodeListLen 3 <> encodeString "EClass" <> encodeString (T.pack n) <> encodeStringList ms
 

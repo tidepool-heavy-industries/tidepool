@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v26";
-const MAGIC: &[u8; 8] = b"TPREQ026";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v27";
+const MAGIC: &[u8; 8] = b"TPREQ027";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -121,28 +121,65 @@ fn valid_reference(value: &str) -> bool {
     !value.is_empty() && !value.contains('\0')
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorldQueryMode {
-    Info,
-    Type,
+/// Operand data only; source, imports and native types stay with the held World.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorldQueryQuestion {
+    PublicInfo(StructuredInspection),
+    PublicType(StructuredInspection),
+    ScopeInfo(StructuredInspection),
+    ScopeType(StructuredInspection),
+    RowFit {
+        query: StructuredInspection,
+        defining_module: String,
+    },
+    Expression {
+        generation: u64,
+        fingerprint: String,
+        expression: String,
+    },
+    TypeSearch {
+        generation: u64,
+        fingerprint: String,
+        pattern: String,
+        limit: u32,
+    },
 }
 
 /// Transport question only; an actual held compiler world authorizes execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorldPublicModuleRequest {
+pub struct WorldQueryRequest {
     pub world: String,
     pub realization: String,
-    pub mode: WorldQueryMode,
-    pub query: StructuredInspection,
+    pub question: WorldQueryQuestion,
     pub output: PathBuf,
 }
 
-impl WorldPublicModuleRequest {
+impl WorldQueryRequest {
     fn valid(&self) -> bool {
         valid_world_identity(&self.world)
             && valid_reference(&self.realization)
             && self.output.to_str().is_some_and(valid_reference)
-            && matches!(&self.query.scope, InspectionScope::PublicModule(module) if valid_reference(module))
+            && match &self.question {
+                WorldQueryQuestion::PublicInfo(query) | WorldQueryQuestion::PublicType(query) => {
+                    matches!(&query.scope, InspectionScope::PublicModule(module) if valid_reference(module))
+                }
+                WorldQueryQuestion::ScopeInfo(query) | WorldQueryQuestion::ScopeType(query) => {
+                    query.scope == InspectionScope::Current && valid_reference(&query.name)
+                }
+                WorldQueryQuestion::RowFit {
+                    query,
+                    defining_module,
+                } => {
+                    query.scope == InspectionScope::Current
+                        && query.namespace != InspectionNamespace::Any
+                        && valid_reference(&query.name)
+                        && valid_reference(defining_module)
+                }
+                WorldQueryQuestion::Expression { expression, .. } => valid_reference(expression),
+                WorldQueryQuestion::TypeSearch { pattern, limit, .. } => {
+                    valid_reference(pattern) && *limit > 0
+                }
+            }
     }
 }
 
@@ -561,7 +598,7 @@ enum Field {
     InspectionStrict,
     PortableOutput,
     EnsureExactInputs(ExactInputsRequest),
-    WorldPublicModule(WorldPublicModuleRequest),
+    WorldQuery(WorldQueryRequest),
     WorldCellPlan(WorldCellPlanRequest),
     WorldCellPrepare(WorldCellPrepareRequest),
 }
@@ -582,7 +619,7 @@ pub struct ExtractRequest {
 pub(crate) enum RequestMode {
     Invalid,
     EnsureExactInputs,
-    WorldPublicModule,
+    WorldQuery,
     WorldCellPlan,
     WorldCellPrepare,
     ActivationPreview,
@@ -601,7 +638,7 @@ impl std::fmt::Display for RequestMode {
         formatter.write_str(match self {
             Self::Invalid => "invalid",
             Self::EnsureExactInputs => "ensure_exact_inputs",
-            Self::WorldPublicModule => "world_public_module",
+            Self::WorldQuery => "world_query",
             Self::WorldCellPlan => "world_cell_plan",
             Self::WorldCellPrepare => "world_cell_prepare",
             Self::ActivationPreview => "activation_preview",
@@ -684,12 +721,10 @@ impl ExtractRequest {
         if self
             .fields
             .iter()
-            .any(|field| matches!(field, Field::WorldPublicModule(_)))
+            .any(|field| matches!(field, Field::WorldQuery(_)))
         {
             return match self.fields.as_slice() {
-                [Field::WorldPublicModule(request)] if request.valid() => {
-                    Ok(RequestMode::WorldPublicModule)
-                }
+                [Field::WorldQuery(request)] if request.valid() => Ok(RequestMode::WorldQuery),
                 _ => Err(CliError::new(
                     "world public module query must be source-free, public and exclusive",
                 )),
@@ -832,7 +867,7 @@ impl ExtractRequest {
                         _ => {
                             return Err(CliError::new(
                                 "--workload requires foreground or preparation",
-                            ))
+                            ));
                         }
                     });
                 }
@@ -1063,18 +1098,33 @@ impl ExtractRequest {
                 58 => {
                     let world = decoder.string()?;
                     let realization = decoder.string()?;
-                    let mode = match decoder.byte()? {
-                        0 => WorldQueryMode::Info,
-                        1 => WorldQueryMode::Type,
-                        _ => return Err(ProtocolError::InvalidWorldPublicModule),
+                    let question = match decoder.byte()? {
+                        0 => WorldQueryQuestion::PublicInfo(decoder.structured_inspection()?),
+                        1 => WorldQueryQuestion::PublicType(decoder.structured_inspection()?),
+                        2 => WorldQueryQuestion::ScopeInfo(decoder.structured_inspection()?),
+                        3 => WorldQueryQuestion::ScopeType(decoder.structured_inspection()?),
+                        4 => WorldQueryQuestion::RowFit {
+                            query: decoder.structured_inspection()?,
+                            defining_module: decoder.string()?,
+                        },
+                        5 => WorldQueryQuestion::Expression {
+                            generation: decoder.u64()?,
+                            fingerprint: decoder.string()?,
+                            expression: decoder.string()?,
+                        },
+                        6 => WorldQueryQuestion::TypeSearch {
+                            generation: decoder.u64()?,
+                            fingerprint: decoder.string()?,
+                            pattern: decoder.string()?,
+                            limit: decoder.u32()?,
+                        },
+                        _ => return Err(ProtocolError::InvalidWorldQuery),
                     };
-                    let query = decoder.structured_inspection()?;
                     let output = PathBuf::from(decoder.os_string()?);
-                    Field::WorldPublicModule(WorldPublicModuleRequest {
+                    Field::WorldQuery(WorldQueryRequest {
                         world,
                         realization,
-                        mode,
-                        query,
+                        question,
                         output,
                     })
                 }
@@ -1175,11 +1225,11 @@ impl ExtractRequest {
         if request
             .fields
             .iter()
-            .any(|field| matches!(field, Field::WorldPublicModule(_)))
+            .any(|field| matches!(field, Field::WorldQuery(_)))
         {
             request
                 .admitted_mode()
-                .map_err(|_| ProtocolError::InvalidWorldPublicModule)?;
+                .map_err(|_| ProtocolError::InvalidWorldQuery)?;
         }
         if request
             .fields
@@ -1521,8 +1571,8 @@ impl ExtractRequest {
         Ok(self)
     }
 
-    pub fn world_public_module(&mut self, request: WorldPublicModuleRequest) -> &mut Self {
-        self.fields.push(Field::WorldPublicModule(request));
+    pub fn world_query(&mut self, request: WorldQueryRequest) -> &mut Self {
+        self.fields.push(Field::WorldQuery(request));
         self
     }
 
@@ -1663,7 +1713,7 @@ impl ExtractRequest {
                     "<world-cell-prepare>",
                     OsStr::new(&request.world),
                 ),
-                Field::WorldPublicModule(request) => flag(
+                Field::WorldQuery(request) => flag(
                     &mut flags,
                     "<world-public-module>",
                     OsStr::new(&format!("{request:?}")),
@@ -1878,7 +1928,7 @@ pub enum ProtocolError {
     UnknownFieldTag(u8),
     UnknownInspectionScope(u8),
     InvalidExactInputs,
-    InvalidWorldPublicModule,
+    InvalidWorldQuery,
     InvalidWorldCell,
     RequestBudgetExceeded { declared: u64, limit: u32 },
     UnknownInspectionNamespace(u8),
@@ -1901,11 +1951,12 @@ impl std::fmt::Display for ProtocolError {
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidExactInputs => f.write_str("invalid source-free exact input acquisition"),
-            Self::InvalidWorldPublicModule => {
-                f.write_str("invalid source-free world public module query")
-            }
+            Self::InvalidWorldQuery => f.write_str("invalid source-free world public module query"),
             Self::InvalidWorldCell => f.write_str("invalid held world cell request"),
-            Self::RequestBudgetExceeded { declared, limit } => write!(f, "compiler request needs {declared} known argv payload bytes; limit is {limit} before the actual cwd"),
+            Self::RequestBudgetExceeded { declared, limit } => write!(
+                f,
+                "compiler request needs {declared} known argv payload bytes; limit is {limit} before the actual cwd"
+            ),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
             Self::Truncated => f.write_str("truncated worker request"),
             Self::NonUtf8Text => f.write_str("worker request text is not UTF-8"),
@@ -1923,9 +1974,7 @@ impl std::fmt::Display for ProtocolError {
             Self::InvalidBrowseExpansion(tag) => {
                 write!(f, "invalid bounded-browse expansion flag {tag}")
             }
-            Self::InvalidInspectionBudget => {
-                f.write_str("inspection budget must be positive")
-            }
+            Self::InvalidInspectionBudget => f.write_str("inspection budget must be positive"),
             Self::UnknownOptionalTextTag(tag) => {
                 write!(f, "unknown optional-text tag {tag}")
             }
@@ -2107,22 +2156,45 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             push_frame(out, request.directory.as_os_str());
             push_frame(out, request.output.as_os_str());
         }
-        Field::WorldPublicModule(request) => {
+        Field::WorldQuery(request) => {
             out.push(58);
             push_frame(out, OsStr::new(&request.world));
             push_frame(out, OsStr::new(&request.realization));
-            out.push(match request.mode {
-                WorldQueryMode::Info => 0,
-                WorldQueryMode::Type => 1,
-            });
-            encode_name_selection(
-                out,
-                &request.query.scope,
-                request.query.namespace,
-                &request.query.name,
-            );
-            out.extend_from_slice(&request.query.generation.to_le_bytes());
-            push_frame(out, OsStr::new(&request.query.fingerprint));
+            match &request.question {
+                WorldQueryQuestion::PublicInfo(query) => encode_structured(out, 0, query),
+                WorldQueryQuestion::PublicType(query) => encode_structured(out, 1, query),
+                WorldQueryQuestion::ScopeInfo(query) => encode_structured(out, 2, query),
+                WorldQueryQuestion::ScopeType(query) => encode_structured(out, 3, query),
+                WorldQueryQuestion::RowFit {
+                    query,
+                    defining_module,
+                } => {
+                    encode_structured(out, 4, query);
+                    push_frame(out, OsStr::new(defining_module));
+                }
+                WorldQueryQuestion::Expression {
+                    generation,
+                    fingerprint,
+                    expression,
+                } => {
+                    out.push(5);
+                    out.extend_from_slice(&generation.to_le_bytes());
+                    push_frame(out, OsStr::new(fingerprint));
+                    push_frame(out, OsStr::new(expression));
+                }
+                WorldQueryQuestion::TypeSearch {
+                    generation,
+                    fingerprint,
+                    pattern,
+                    limit,
+                } => {
+                    out.push(6);
+                    out.extend_from_slice(&generation.to_le_bytes());
+                    push_frame(out, OsStr::new(fingerprint));
+                    push_frame(out, OsStr::new(pattern));
+                    out.extend_from_slice(&limit.to_le_bytes());
+                }
+            }
             push_frame(out, request.output.as_os_str());
         }
         Field::EnsureExactInputs(request) => {
@@ -2757,6 +2829,7 @@ mod tests {
             "--worker-request-v12",
             "--worker-request-v18",
             "--worker-request-v21",
+            "--worker-request-v26",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -2788,6 +2861,7 @@ mod tests {
             b"TPREQ018",
             b"TPREQ020",
             b"TPREQ021",
+            b"TPREQ026",
             b"TPREQ022",
             b"TPREQ023",
         ] {
@@ -3050,34 +3124,36 @@ mod tests {
     }
 
     #[test]
-    fn world_public_module_wire_is_exclusive_and_matches_haskell() {
-        let query = WorldPublicModuleRequest {
+    fn world_query_wire_is_exclusive_and_matches_haskell() {
+        let query = WorldQueryRequest {
             world: "a".repeat(64),
             realization: "realized".into(),
-            mode: WorldQueryMode::Info,
-            query: StructuredInspection {
+            question: WorldQueryQuestion::PublicInfo(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,
                 name: "map".into(),
                 generation: 1,
                 fingerprint: "display-only".into(),
-            },
+            }),
             output: "answer.bin".into(),
         };
         let mut request = ExtractRequest::default();
-        request.world_public_module(query.clone());
-        let bytes = unhex("5450524551303236000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
+        request.world_query(query.clone());
+        let bytes = unhex("5450524551303237000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
         assert_eq!(request.encode(), bytes);
-        for mode in [WorldQueryMode::Info, WorldQueryMode::Type] {
+        let WorldQueryQuestion::PublicInfo(public) = &query.question else {
+            panic!("public fixture")
+        };
+        for question in [
+            WorldQueryQuestion::PublicInfo(public.clone()),
+            WorldQueryQuestion::PublicType(public.clone()),
+        ] {
             let mut request = ExtractRequest::default();
-            request.world_public_module(WorldPublicModuleRequest {
-                mode,
+            request.world_query(WorldQueryRequest {
+                question,
                 ..query.clone()
             });
-            assert_eq!(
-                request.admitted_mode().unwrap(),
-                RequestMode::WorldPublicModule
-            );
+            assert_eq!(request.admitted_mode().unwrap(), RequestMode::WorldQuery);
             assert_eq!(
                 ExtractRequest::decode(&request.encode()).unwrap().encode(),
                 request.encode()
@@ -3089,7 +3165,7 @@ mod tests {
             Field::Include("ambient".into()),
             Field::SessionArtifacts("missing".into()),
             Field::InspectOut("other".into()),
-            Field::WorldPublicModule(query.clone()),
+            Field::WorldQuery(query.clone()),
             Field::EnsureExactInputs(ExactInputsRequest {
                 root: query.world.clone(),
                 acquisition: ExactInputsAcquisition::Resident("realized".into()),
@@ -3107,31 +3183,31 @@ mod tests {
             }
         }
         for invalid in [
-            WorldPublicModuleRequest {
+            WorldQueryRequest {
                 world: "caller-label".into(),
                 ..query.clone()
             },
-            WorldPublicModuleRequest {
+            WorldQueryRequest {
                 realization: String::new(),
                 ..query.clone()
             },
-            WorldPublicModuleRequest {
+            WorldQueryRequest {
                 output: PathBuf::new(),
                 ..query.clone()
             },
-            WorldPublicModuleRequest {
-                query: StructuredInspection {
+            WorldQueryRequest {
+                question: WorldQueryQuestion::PublicInfo(StructuredInspection {
                     scope: InspectionScope::Current,
-                    ..query.query.clone()
-                },
+                    ..public.clone()
+                }),
                 ..query.clone()
             },
         ] {
             let mut invalid_request = ExtractRequest::default();
-            invalid_request.world_public_module(invalid);
+            invalid_request.world_query(invalid);
             assert_eq!(
                 ExtractRequest::decode(&invalid_request.encode()).unwrap_err(),
-                ProtocolError::InvalidWorldPublicModule
+                ProtocolError::InvalidWorldQuery
             );
         }
         for end in 0..bytes.len() {
@@ -3141,7 +3217,7 @@ mod tests {
         bad_mode[102] = 2;
         assert_eq!(
             ExtractRequest::decode(&bad_mode).unwrap_err(),
-            ProtocolError::InvalidWorldPublicModule
+            ProtocolError::InvalidWorldQuery
         );
     }
 
@@ -3182,8 +3258,8 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
         assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
-        let plan_bytes = unhex("5450524551303236000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72").unwrap();
-        let prepare_bytes = unhex("5450524551303236000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626213000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
+        let plan_bytes = unhex("5450524551303237000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72").unwrap();
+        let prepare_bytes = unhex("5450524551303237000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626213000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
         let mut plan_request = ExtractRequest::default();
         plan_request.world_cell_plan(plan.clone()).unwrap();
         let mut prepare_request = ExtractRequest::default();
@@ -3457,7 +3533,7 @@ mod tests {
         };
         let request = make(resident.clone());
         // Independent fixed bytes also checked by the maintained Haskell codec case.
-        let bytes = unhex("54505245513032360001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
+        let bytes = unhex("54505245513032370001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
         assert_eq!(request.encode(), bytes);
         assert_eq!(
             ExtractRequest::decode(&bytes).unwrap().mode(),
@@ -3603,12 +3679,33 @@ mod tests {
     #[test]
     fn exact_inputs_outcomes_match_closed_wire_and_reject_uncertain_frames() {
         let cases = [
-            ("545045584f303032004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564", EnsureExactInputsOutcome::Ready { world: "a".repeat(64), realization: "realized".into() }),
-            ("545045584f303032014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161", EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64))),
-            ("545045584f3030320200", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation)),
-            ("545045584f3030320201", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization)),
-            ("545045584f3030320202", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot)),
-            ("545045584f3030320203", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected)),
+            (
+                "545045584f303032004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564",
+                EnsureExactInputsOutcome::Ready {
+                    world: "a".repeat(64),
+                    realization: "realized".into(),
+                },
+            ),
+            (
+                "545045584f303032014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+                EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64)),
+            ),
+            (
+                "545045584f3030320200",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation),
+            ),
+            (
+                "545045584f3030320201",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization),
+            ),
+            (
+                "545045584f3030320202",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot),
+            ),
+            (
+                "545045584f3030320203",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected),
+            ),
         ];
         for (hex, expected) in cases {
             let bytes = unhex(hex).unwrap();

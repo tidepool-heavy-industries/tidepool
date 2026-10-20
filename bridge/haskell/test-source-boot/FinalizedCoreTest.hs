@@ -62,21 +62,21 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, captureArtifactBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
 import System.Mem.StableName (makeStableName)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope, serializeOriginalInterface
-  , newOriginalInterfaceArtifacts, originalInterfaceBody )
+  , newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithReader, originalInterfaceBody )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
-import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, captureFinalizedInterface)
+import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, captureFinalizedInterface, homeInterfaceUsageOwners)
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
-import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts)
+import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts, retainTypeInterfaceCaptures, retainedTypeInterfaceBody)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
   , pprAcceptedCandidates, revalidatePreparedCandidateInputs, CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected, withSourceImportIntents )
@@ -173,6 +173,23 @@ deferredFinalizationChecks work env original = do
   assert (captureCount "finalized_interface_encoding_attempts" interfaceCounts == 1
       && captureCount "finalized_interface_encoding_completions" interfaceCounts == 1)
     "same-owner concurrent demands did not share one interface encoding"
+  let selectedOwner = mi_module (hm_iface home)
+      artifact = ExactIfaceArtifact (unitString (moduleUnit selectedOwner))
+        (moduleNameString (moduleName selectedOwner)) (work </> "absent-old-type.hi")
+        (artifactSha256 left) (homeInterfaceUsageOwners env (hm_iface home))
+      relocated = artifact {exactPath=work </> "absent-new-type.hi"}
+      key = (exactUnit artifact,exactModule artifact)
+  forM_ [exactPath artifact,exactPath relocated] $ \path -> do
+    exists <- doesFileExist path
+    assert (not exists) "type-custody relocation control accidentally has a readable alias"
+  retained <- either fail pure (retainTypeInterfaceCaptures Map.empty (Map.singleton key (artifact,left)))
+  let readRetained requested = maybe (fail "relocated type attempted an unowned path read") pure
+        (retainedTypeInterfaceBody retained requested)
+  relocatedView <- newOriginalInterfaceArtifactsWithReader readRetained env Map.empty
+    [relocated] [] [] work
+  borrowed <- originalInterfaceBody relocatedView selectedOwner
+    >>= maybe (fail "relocated type lost its actual captured interface") pure
+  sameBody "relocated type reader did not borrow its previously issued body" left borrowed
   distinct <- fresh
   (distinctBody, distinctCounts) <- withTiming $ captureDiagnostics $
     captureFinalizedCore distinct >>= requireRight
