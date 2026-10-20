@@ -542,6 +542,7 @@ mod context_constructor_tests {
             ("ReloadPhysicalSupervision", 0),
             ("ReloadActorCompilerResource", 2),
             ("ReloadPreparationCompilerResource", 2),
+            ("ReloadSourceBindingResource", 2),
         ];
         table
             .extend_checked(
@@ -584,6 +585,8 @@ mod context_constructor_tests {
             u64::MAX.to_string(),
             usize::MAX.to_string(),
         );
+        let source_binding =
+            RlResource::ReloadSourceBindingResource((42, 7), usize::MAX.to_string());
         let resources = vec![
             resource.clone(),
             RlResource::ReloadActorResource((42, 8)),
@@ -618,6 +621,7 @@ mod context_constructor_tests {
             )),
             actor_compiler.clone(),
             preparation_compiler.clone(),
+            source_binding.clone(),
         ];
         let encoded_resources: Vec<_> = resources
             .iter()
@@ -645,10 +649,12 @@ mod context_constructor_tests {
         assert_ne!(actor_compiler, preparation_compiler);
         assert_ne!(actor_compiler, resources[7]);
         assert_ne!(preparation_compiler, resources[7]);
-        for compiler in [actor_compiler, preparation_compiler] {
-            let mut malformed = compiler.to_value(&table).unwrap();
+        assert_ne!(source_binding, resources[10]);
+        assert_ne!(source_binding, actor_compiler);
+        for resource in [actor_compiler, preparation_compiler, source_binding] {
+            let mut malformed = resource.to_value(&table).unwrap();
             let HaskellValue::Con(_, fields) = &mut malformed else {
-                panic!("compiler resource must encode as a constructor")
+                panic!("resource observation must encode as a constructor")
             };
             fields.pop();
             assert!(RlResource::from_value(&malformed, &table).is_err());

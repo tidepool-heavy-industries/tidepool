@@ -366,6 +366,10 @@ fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
             vec![HsType::Text, HsType::Text],
         ),
         (
+            "ReloadSourceBindingResource",
+            vec![HsType::Tuple(vec![HsType::Int, HsType::Int]), HsType::Text],
+        ),
+        (
             "ReloadCompilerResource",
             vec![
                 HsType::Tuple(vec![HsType::Int, HsType::Int]),

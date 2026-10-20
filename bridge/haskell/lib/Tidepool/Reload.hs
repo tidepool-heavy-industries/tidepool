@@ -146,6 +146,7 @@ resourceSummary resource = case resource of
   ReloadActorCompilerResource address registration -> actor address <> " compiler registration=" <> registration
   ReloadPreparationCompilerResource preparation registration -> "preparation " <> preparation
     <> " compiler registration=" <> registration
+  ReloadSourceBindingResource address slot -> actor address <> " source binding slot=" <> slot
   where
     actor (identity, incarnation) = "actor " <> number identity <> "/" <> number incarnation
 

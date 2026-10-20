@@ -106,6 +106,7 @@ main = do
       preparationCompiler = ReloadPreparationCompilerResource maximumUnsigned maximumUnsigned
       invocationCompiler = ReloadCompilerResource (42, 7) (ReloadWorkbenchReservation "exec-issued" "attempt-a") 0
       compilerResources = [actorCompiler, preparationCompiler, invocationCompiler]
+      sourceBinding = ReloadSourceBindingResource (42, 7) maximumUnsigned
   mapM_ (\resource -> assert (fromJSON (toJSON resource) == Success resource)
     "compiler resource observation did not roundtrip") compilerResources
   assert (toJSON actorCompiler == object
@@ -118,13 +119,21 @@ main = do
     toJSON actorCompiler /= toJSON invocationCompiler &&
     toJSON preparationCompiler /= toJSON invocationCompiler)
     "compiler resource owners collapsed"
+  assert (fromJSON (toJSON sourceBinding) == Success sourceBinding)
+    "source binding observation did not roundtrip"
+  assert (toJSON sourceBinding == object
+    ["tag" .= ("ReloadSourceBindingResource" :: String), "contents" .= ((42, 7) :: (Int, Int), maximumUnsigned :: T.Text)])
+    "source binding lost its actual actor or unsigned stable slot"
+  assert (toJSON sourceBinding /= toJSON (ReloadWatchResource (42, 7) 0))
+    "source binding was replaced by a watch coordinate"
   let compilerReceipt = render ReloadAReopened
-        [ReloadResourceOutcome resource ReloadStopPending ReloadCleanupPending | resource <- compilerResources]
+        [ReloadResourceOutcome resource ReloadStopPending ReloadCleanupPending | resource <- sourceBinding : compilerResources]
   mapM_ (\fragment -> assert (fragment `T.isInfixOf` compilerReceipt)
     "compiler resource presenter lost exact owner or coordinate")
     [ "actor 42/7 compiler registration=18446744073709551615"
     , "preparation 18446744073709551615 compiler registration=18446744073709551615"
     , "actor 42/7 compiler exec-issued/attempt=attempt-a/registration=0"
+    , "actor 42/7 source binding slot=18446744073709551615"
     ]
   assert (jsonSchema (Proxy :: Proxy ReloadRetirementReceipt) /= Null) "retirement receipt lacks generated schema"
 
