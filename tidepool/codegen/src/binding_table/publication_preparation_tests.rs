@@ -125,6 +125,58 @@ fn promotion_shadowing_keeps_hidden_dependency_custody_without_install_allocatio
 }
 
 #[test]
+fn exact_visibility_query_tracks_frozen_and_promoted_identities() {
+    let mut tree = ScopeTree::new();
+    let owner = tree.mint_isolated();
+    let frozen = tree.mint_isolated();
+    let public = tree.mint_isolated();
+    let sibling = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let original = table.bind_in(owner, entry("x", 701)).unwrap();
+    table.seed_scope(&tree, owner, frozen);
+    table
+        .promote_exact_bindings_in(owner, public, &[original])
+        .unwrap();
+    let other = table.bind_in(sibling, entry("x", 702)).unwrap();
+    assert_eq!(
+        table.is_binding_visible_in(&tree, frozen, original),
+        Ok(true)
+    );
+    assert_eq!(
+        table.is_binding_visible_in(&tree, public, original),
+        Ok(true)
+    );
+    assert_eq!(
+        table.is_binding_visible_in(&tree, sibling, original),
+        Ok(false)
+    );
+    assert_eq!(table.is_binding_visible_in(&tree, sibling, other), Ok(true));
+    let alias_entry = entry("alias", 703);
+    let alias = alias_entry.id;
+    table.bind_alias_in(owner, alias_entry, original).unwrap();
+    table.remove_current_in(owner, "x");
+    assert_eq!(
+        table.is_binding_visible_in(&tree, owner, original),
+        Ok(false)
+    );
+    assert_eq!(table.is_binding_visible_in(&tree, owner, alias), Ok(true));
+    assert_eq!(
+        table.is_binding_visible_in(&tree, frozen, original),
+        Ok(true)
+    );
+    assert_eq!(
+        table.is_binding_visible_in(&tree, public, original),
+        Ok(true)
+    );
+    let changed_name = entry("forged_alias", 701);
+    assert!(table.bind_in(owner, changed_name).is_err());
+    assert_eq!(
+        table.is_binding_visible_in(&tree, sibling, original),
+        Ok(false)
+    );
+}
+
+#[test]
 fn prepared_projection_preserves_ancestor_after_local_removal() {
     let mut tree = ScopeTree::new();
     let target = tree.mint_child(ScopeId::ROOT).unwrap();
