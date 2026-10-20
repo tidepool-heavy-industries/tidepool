@@ -15,8 +15,8 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
-    PreparedOuter, PreparedResult, ProgramId, SourceBinder,
+    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle, PreparedOuter,
+    PreparedResult, ProgramId, SourceBinder,
 };
 use tidepool_repr::execution_schema::{
     CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity,
@@ -182,7 +182,10 @@ impl CapturedSourceOrigin {
     // Only the closed source-entry installer calls this for definitions that
     // its fresh native batch is about to instantiate. Existing physical imports
     // retain their own ProgramFacts in the batch installer.
-    pub(super) fn for_closed_entry_sites(&self, sites: &[YieldSite]) -> NativeSourceCustody {
+    pub(super) fn for_closed_entry_sites(
+        &self,
+        sites: &[tidepool_repr::execution_schema::SiteRow],
+    ) -> NativeSourceCustody {
         NativeSourceCustody {
             sites: Arc::new(
                 sites
@@ -2347,6 +2350,17 @@ impl PreparedStartupEntry {
 }
 
 /// A closed source entry installed in a runtime-minted fresh domain.
+enum StartupInput<'a> {
+    Ordinary {
+        code: TurnCode<'a>,
+        identity: StartupCompileIdentity,
+    },
+    Closed {
+        entry: &'a super::PreparedSourceEntry,
+        origin: &'a CapturedSourceOrigin,
+    },
+}
+
 /// Neither a scope description nor a raw TurnCode can construct this capsule.
 #[must_use]
 pub struct PreparedSourceStartupEntry {
@@ -8163,7 +8177,13 @@ where
         code: TurnCode<'_>,
         compile_identity: StartupCompileIdentity,
     ) -> Result<PreparedStartupEntry, ResidentError> {
-        self.prepare_startup_entry_in(code, compile_identity, self.run_context.lexical_scope, None)
+        self.prepare_startup_entry_in(
+            StartupInput::Ordinary {
+                code,
+                identity: compile_identity,
+            },
+            self.run_context.lexical_scope,
+        )
     }
 
     /// Install closed compiler-owned code into a fresh runtime domain. The
@@ -8174,26 +8194,22 @@ where
         source_entry: &super::PreparedSourceEntry,
     ) -> Result<PreparedSourceStartupEntry, ResidentError> {
         self.settle_dropped_custody();
-        let transaction = self
-            .state
-            .source_transaction
-            .as_ref()
-            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        let origin = CapturedSourceOrigin::capture(transaction)?;
-        let code = source_entry.compiled().code();
-        let proof = code
-            .certification
-            .as_ref()
-            .as_ref()
-            .and_then(|certification| certification.ordinary_original())
-            .ok_or(ResidentError::UnsealedStartupEntry)?;
-        let identity = StartupCompileIdentity::Issued(proof.clone());
+        let transaction =
+            self.state
+                .source_transaction
+                .as_ref()
+                .ok_or(SessionError::SourceAdmission(
+                    super::SourceAdmissionError::MissingTransaction,
+                ))?;
+        let origin =
+            CapturedSourceOrigin::capture(transaction).map_err(SessionError::SourceAdmission)?;
         let installation_scope = self.state.mint_isolated_scope_with_lease()?;
         let entry = self.prepare_startup_entry_in(
-            code,
-            identity,
+            StartupInput::Closed {
+                entry: source_entry,
+                origin: &origin,
+            },
             installation_scope.scope(),
-            Some((source_entry, &origin)),
         )?;
         Ok(PreparedSourceStartupEntry {
             entry,
@@ -8204,28 +8220,39 @@ where
 
     fn prepare_startup_entry_in(
         &mut self,
-        code: TurnCode<'_>,
-        compile_identity: StartupCompileIdentity,
+        input: StartupInput<'_>,
         scope: ScopeId,
-        closed_origin: Option<(&super::PreparedSourceEntry, &CapturedSourceOrigin)>,
     ) -> Result<PreparedStartupEntry, ResidentError> {
         self.settle_dropped_custody();
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let admission = if let Some((entry, origin)) = closed_origin {
-            // Only the actual closed owner can select new physical definitions'
-            // execution source. Resolve once against this fresh domain.
-            let resolved = self
-                .state
-                .resolve_closed_source_entry_in(scope, entry, origin)?;
-            AdmittedTurnCode {
-                code,
-                scope,
-                resolved: Some(resolved),
+        let (admission, compile_identity) = match input {
+            StartupInput::Closed { entry, origin } => {
+                let code = entry.compiled().code();
+                let proof = code
+                    .certification
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|certification| certification.ordinary_original())
+                    .ok_or(ResidentError::UnsealedStartupEntry)?;
+                let identity = StartupCompileIdentity::Issued(proof.clone());
+                let resolved = self
+                    .state
+                    .resolve_closed_source_entry_in(scope, entry, origin)?;
+                (
+                    AdmittedTurnCode {
+                        code,
+                        scope,
+                        resolved: Some(resolved),
+                    },
+                    identity,
+                )
             }
-        } else {
-            self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?
+            StartupInput::Ordinary { code, identity } => (
+                self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?,
+                identity,
+            ),
         };
         let provenance = self.provenance_for(&admission)?;
         let InstalledAdmittedTurn {
@@ -8259,17 +8286,26 @@ where
         if self.run_context.lexical_scope != entry.installation_scope.scope() {
             return Err(ResidentError::StaleStartupEntry);
         }
-        let transaction = self
-            .state
-            .source_transaction
-            .as_ref()
-            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        let source = transaction.admitted_original_source()?;
+        let transaction =
+            self.state
+                .source_transaction
+                .as_ref()
+                .ok_or(SessionError::SourceAdmission(
+                    super::SourceAdmissionError::MissingTransaction,
+                ))?;
+        let source = transaction
+            .admitted_original_source()
+            .map_err(SessionError::SourceAdmission)?;
+        // Canonical live issuer identity, independent of compiler bytes or cache keys.
         if !Arc::ptr_eq(&source, &entry.original_source) {
-            return Err(super::SourceAdmissionError::DifferentOriginalSource.into());
+            return Err(SessionError::SourceAdmission(
+                super::SourceAdmissionError::DifferentOriginalSource,
+            )
+            .into());
         }
         self.state
-            .admit_source_work_in(entry.installation_scope.scope())?;
+            .admit_source_work_in(entry.installation_scope.scope())
+            .map_err(SessionError::SourceAdmission)?;
         self.state.validate_lexical_scope_lease(
             entry.installation_scope.scope(),
             &entry.installation_scope,
