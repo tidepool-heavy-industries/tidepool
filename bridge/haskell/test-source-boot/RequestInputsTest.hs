@@ -1837,9 +1837,9 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readMixedStage :: MixedStage -> Int"
                           ,"readMixedStage (MixedStage value) = value + baseStage"
                           ,"let answerStage = MixedStage baseStage"
-                          ,"readMixedStage answerStage"]
+                          ,"let resultStage = readMixedStage answerStage"]
                         ,[(0,PlannedBind 31),(1,PlannedDeclaration 32),(2,PlannedBind 33)
-                          ,(3,PlannedExpression 34 "ownedStageObservation")]
+                          ,(3,PlannedBind 34)]
                         ,["exec","declaration","exec"])
                       ,("publication",unlines ["let publishedBaseStage = (7 :: Int)"
                           ,"readPublishedStage :: Int -> Int"
