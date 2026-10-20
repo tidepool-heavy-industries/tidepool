@@ -22,7 +22,8 @@ use tidepool_toolchain::CompileError;
 
 #[test]
 #[serial_test::serial]
-fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() {
+fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
+) -> Result<(), tidepool_runtime::session::SessionError> {
     tidepool_testing::eval_harness::require_extract();
     let cache = tempfile::tempdir().unwrap();
     let _cache = OwnedEnvironment::set("TIDEPOOL_COMPILE_CACHE_DIR", Some(cache.path()));
@@ -44,8 +45,8 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
     let public = session.mint_scope(ScopeId::ROOT).unwrap();
     let source = include_str!("fixtures/checked-quoter-program.hs");
     for phase in ["first request", "repeated request"] {
-        let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let execution = Arc::new(session.begin_private_execution(public)?);
+        let view = execution.view()?;
         let imports = view.turn_imports(&SourceImports::from_specs([
             "qualified CheckedQuoterFacade as Q",
         ]));
@@ -281,6 +282,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         // or executing the quoted command's contents.
         assert_eq!(session.scope_binding_count(public), 0);
     }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
