@@ -616,6 +616,14 @@ impl Rows {
                 .filter_map(|(id, row)| supplied_roots.contains(id).then_some(*row)),
         );
         for raw in &planned_groups {
+            // A closed selected descendant is physical evidence, not another
+            // explicit root. New root intent comes from this request or the
+            // prior exact root frontier, independently of the returned census.
+            let is_root = demanded.contains(raw)
+                || parent
+                    .root_bindings
+                    .iter()
+                    .any(|row| row.fact == Fact::Group(*raw));
             let carrier = namespace[&catalog.originals[raw.0].descriptor.id];
             let fresh = issued_groups
                 .iter()
@@ -633,7 +641,9 @@ impl Rows {
                     "newly planned group uses chosen carrier"
                 );
                 selected.insert(*chosen);
-                root_bindings.insert(*chosen);
+                if is_root {
+                    root_bindings.insert(*chosen);
+                }
             } else {
                 // An issuer can return an already-held exact row when two
                 // branches issued equal group rows under the same carrier.
@@ -657,7 +667,9 @@ impl Rows {
                     matching.is_subset(&parent.physical),
                     "unobserved fresh issuing identity"
                 );
-                root_bindings.extend(&matching);
+                if is_root {
+                    root_bindings.extend(&matching);
+                }
                 selected.extend(matching);
             }
         }
