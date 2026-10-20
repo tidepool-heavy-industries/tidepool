@@ -20949,6 +20949,100 @@ pub(crate) mod request_tests {
         }
     }
 
+    #[test]
+    fn observe_actor_generation_future_layout_without_construction() {
+        fn output_size<A, F: std::future::Future>(_: impl FnOnce(A) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        type Workbench = ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>;
+        type Publisher = ActorGenerationPublisher<frunk::HNil, tidepool_mcp::CapturedOutput>;
+        type Prompts = tidepool_runtime::session::ComposedPromptSnapshot;
+        let mut observed = std::collections::BTreeMap::new();
+        observed.insert("quoted_fixture", output_size(|(client, persistence, control): (
+            crate::CompilerPreparationClient, Option<crate::ActorPersistencePolicy>,
+            Option<PublicationFailureControl>,
+        )| quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(client, persistence, control)));
+        observed.insert(
+            "prepare_initial_generation",
+            output_size(
+                |(workbench, state, context, descriptor, installation, prompts): (
+                    &'static Workbench,
+                    Arc<InstalledToolsState>,
+                    crate::ActorSessionContext,
+                    crate::ActorDescriptor,
+                    InstalledToolLease,
+                    Prompts,
+                )| {
+                    workbench.prepare_initial_generation(
+                        state,
+                        context,
+                        descriptor,
+                        installation,
+                        prompts,
+                    )
+                },
+            ),
+        );
+        observed.insert(
+            "prepare_actor_generation",
+            output_size(
+                |(workbench, context, descriptor, expected, installation, prompts): (
+                    &'static Workbench,
+                    crate::ActorSessionContext,
+                    crate::ActorDescriptor,
+                    ActorRequestSnapshot,
+                    InstalledToolLease,
+                    Prompts,
+                )| {
+                    workbench.prepare_actor_generation(
+                        context,
+                        descriptor,
+                        expected,
+                        installation,
+                        prompts,
+                    )
+                },
+            ),
+        );
+        observed.insert(
+            "complete_actor_generation_world",
+            output_size(
+                |(workbench, preparing): (&'static Workbench, PreparingActorGeneration)| {
+                    workbench.complete_actor_generation_world(preparing)
+                },
+            ),
+        );
+        observed.insert(
+            "publisher_failure_control",
+            output_size(
+                |(workbench, state, prepared, control): (
+                    &'static Workbench,
+                    Arc<InstalledToolsState>,
+                    PreparedActorGeneration,
+                    PublicationFailureControl,
+                )| {
+                    assert_real_publisher_failure(workbench, state, prepared, control)
+                },
+            ),
+        );
+        observed.insert(
+            "publish_reserved",
+            output_size(
+                |(publisher, reserved): (&'static Publisher, ReservedActorGeneration)| {
+                    publisher.publish_reserved(reserved)
+                },
+            ),
+        );
+        observed.insert(
+            "owned_publication",
+            output_size(|operation: ActorGenerationPublicationOperation| operation.run()),
+        );
+        eprintln!(
+            "ACTOR_GENERATION_FUTURE_LAYOUT {}",
+            serde_json::to_string(&observed).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn actual_publisher_checkout_loss_reaches_reload_as_unconfirmed() {
         for control in [
