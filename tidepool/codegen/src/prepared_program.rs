@@ -110,11 +110,11 @@ mod bytes_tests;
 mod data_tag;
 mod demand;
 pub use demand::{
-    DemandError, DemandedImage, GroupInventory, InheritedSourceDemand, PendingGroupInventory,
-    PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup, ScopedDemandedImage,
-    ScopedInheritedSourceDemand, ScopedSourceBinder, ScopedSourceGroupDemand, SealedDemand,
-    SourceBinder, SourceDomainSelection, SourceGroupOutline, SourceInstanceAttachment,
-    SourceInstanceDomain, SourceInstanceLease,
+    DemandError, DemandedImage, DemandedPackageImage, GroupInventory, InheritedSourceDemand,
+    PendingGroupInventory, PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup,
+    ScopedDemandedImage, ScopedInheritedSourceDemand, ScopedSourceBinder, ScopedSourceGroupDemand,
+    SealedDemand, SourceBinder, SourceDomainSelection, SourceGroupOutline,
+    SourceInstanceAttachment, SourceInstanceDomain, SourceInstanceLease,
 };
 #[cfg(test)]
 mod double_to_int_tests;

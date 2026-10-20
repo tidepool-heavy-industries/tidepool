@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tidepool_repr::execution_schema::{
     CachedHomeOwner, CertifiedGroup, DefinitionsView, Group, ImportOwner, ModuleVersion,
-    ProjectedGroup, Signature, SymbolIdentity, ValueId,
+    PackageGroupCode, ProjectedGroup, Signature, SymbolIdentity, ValueId,
 };
 
 use super::{CompileError, CompiledProgram, GroupInstanceId, ImageRegistry, PreparedHandle};
@@ -737,6 +737,36 @@ impl ScopedDemandedImage {
     }
     pub fn demand(&self) -> &ScopedSourceGroupDemand {
         &self.demand
+    }
+}
+
+/// Package code paired with the exact immutable image prepared from it. This
+/// carries no installed instance, HOME evidence, or runtime source authority.
+pub struct DemandedPackageImage {
+    group: PackageGroupCode,
+    image: Arc<CompiledProgram>,
+}
+
+impl DemandedPackageImage {
+    pub fn prepare(
+        group: PackageGroupCode,
+        owners: &[Option<super::LiteralOwner>],
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Self, CompileError> {
+        let image = CompiledProgram::prepare_package_group_code(
+            &group, owners, packages, sources, registry,
+        )?;
+        Ok(Self { group, image })
+    }
+
+    pub fn group(&self) -> &PackageGroupCode {
+        &self.group
+    }
+
+    pub fn image(&self) -> &Arc<CompiledProgram> {
+        &self.image
     }
 }
 
