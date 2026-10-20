@@ -2357,12 +2357,14 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| Ok(|| {}))
+        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| {
+            Ok(|_: &mut super::SessionLib| {})
+        })
     }
 
     /// Prepare an exact checked-prefix successor before durable adoption. The
     /// returned activation owns its snapshot and only installs it after COMMIT.
-    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce()>(
+    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
         prepare: impl FnOnce(
@@ -2394,7 +2396,77 @@ impl PersistentSession {
         committed
     }
 
-    fn adopt_staged_declaration_prepared<A: FnOnce()>(
+    /// Prepare the immutable World and runtime witness from the same binding
+    /// delta that the declaration commit consumes. No compiler view is rebuilt.
+    pub(super) fn adopt_staged_declaration_with_world_activation<
+        A: FnOnce(&mut super::SessionLib),
+    >(
+        &mut self,
+        staged: super::StagedDeclaration,
+        prior: &super::PublicVisibilitySnapshot,
+        prepare: impl FnOnce(
+            CompileViewKey,
+            super::PublicVisibilitySnapshot,
+            Vec<(String, Option<(SessionVarId, u64)>)>,
+        ) -> Result<A, SessionError>,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.adopt_staged_declaration_prepared(
+            staged,
+            |session, staged, origin, changes, next_epoch| {
+                let scope = staged.scope();
+                if prior.scope != scope
+                    || session.public_visibility_snapshot_in(scope).as_ref() != Some(prior)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let projected = session
+                    .bindings
+                    .prepared_declaration_projection(&session.scopes, origin, changes)
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?;
+                let mut key = session
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::DeadScope(scope))?;
+                key.tip = staged.generation;
+                key.bindings = projected.scope_witness().clone();
+                key.public_epoch = next_epoch;
+                let delta: Vec<_> = projected
+                    .visible_changes()
+                    .map(|(name, entry)| {
+                        (name.0.clone(), entry.map(|entry| (entry.id, entry.scope.0)))
+                    })
+                    .collect();
+                let mut visibility = prior.clone();
+                visibility.epoch = next_epoch;
+                visibility.declaration_tip = staged.generation;
+                for (name, entry) in &delta {
+                    match (
+                        visibility
+                            .bindings
+                            .binary_search_by(|(existing, _)| existing.cmp(name)),
+                        entry,
+                    ) {
+                        (Ok(index), Some((id, _))) => visibility.bindings[index].1 = *id,
+                        (Err(index), Some((id, _))) => {
+                            visibility.bindings.insert(index, (name.clone(), *id))
+                        }
+                        (Ok(index), None) => {
+                            visibility.bindings.remove(index);
+                        }
+                        (Err(_), None) => {}
+                    }
+                }
+                // This existing owner validates the prospective source selection
+                // and removed observation edges at the actual join boundary.
+                visibility.source_selection = session
+                    .bindings
+                    .prepared_scope_snapshot_in(&session.scopes, scope, origin, Some(changes))
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?;
+                prepare(key, visibility, delta)
+            },
+        )
+    }
+
+    fn adopt_staged_declaration_prepared<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
         prepare: impl FnOnce(
@@ -2465,13 +2537,13 @@ impl PersistentSession {
         self.lib
             .as_mut()
             .ok_or(SessionError::StaleStagedDeclaration)?
-            .admit_staged_declaration_in(staged, &visible_values, |generation| {
+            .admit_staged_declaration_in(staged, &visible_values, |lib, generation| {
                 if let Some(source_origin) = source_origin {
                     bindings.commit_source_owner_origin(source_origin);
                 }
                 bindings.commit_declaration_binding_changes(binding_changes);
                 epochs.insert(scope, next_epoch);
-                activate();
+                activate(lib);
                 DeclarationPlaneCommit {
                     generation,
                     module: SessionModule::lib(generation),

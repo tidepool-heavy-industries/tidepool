@@ -2611,14 +2611,14 @@ impl SessionLib {
         staged: StagedDeclaration,
         visible_values: &[(SessionVarId, String)],
     ) -> Result<Generation, SessionError> {
-        self.admit_staged_declaration_in(staged, visible_values, |generation| generation)
+        self.admit_staged_declaration_in(staged, visible_values, |_, generation| generation)
     }
 
     fn admit_staged_declaration_in<T>(
         &mut self,
         staged: StagedDeclaration,
         visible_values: &[(SessionVarId, String)],
-        activate: impl FnOnce(Generation) -> T,
+        activate: impl FnOnce(&mut Self, Generation) -> T,
     ) -> Result<T, SessionError> {
         let slot_matches = if staged.reserved {
             staged.certified_authored.is_some()
@@ -2700,7 +2700,7 @@ impl SessionLib {
                     self.install_committed_recovery_graph(graph, receipt.state().clone());
                     self.log.activate_prepared_commit(prepared);
                     *self.tips.get_mut(&scope).expect("prepared authored tip") = tip;
-                    let value = activate(generation);
+                    let value = activate(self, generation);
                     let context = receipt
                         .installed_blocking()
                         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
@@ -2748,12 +2748,12 @@ impl SessionLib {
                 .tips
                 .get_mut(&staged.scope)
                 .expect("prepared authored tip") = tip;
-            let activated = activate(staged.generation);
+            let activated = activate(self, staged.generation);
             complete_native_transition(admission)?;
             return Ok(activated);
         }
         let generation = self.push_turn_in(staged.scope, staged.turn)?;
-        Ok(activate(generation))
+        Ok(activate(self, generation))
     }
 
     fn stage_private_authored_graph(

@@ -1426,6 +1426,113 @@ impl CompilerWorld {
 }
 
 impl crate::checked_cell::CellProgram {
+    /// Advance a declaration only from its actual checked item and the
+    /// authenticated cumulative facade prepared for that item.
+    pub fn declaration_item_successor<'a>(
+        self: &Arc<Self>,
+        predecessor: &Arc<CompilerWorld>,
+        item: &crate::checked_cell::ExactCheckedItem,
+        joined: &Arc<crate::declaration_join::AcceptedJoin>,
+        projection_context: &Arc<ExactDeclarationContext>,
+        import_specs: Vec<String>,
+        visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+    ) -> Result<Arc<CompilerWorld>, CompileError> {
+        let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
+            return Err(source_failure("finite declaration has no World successor"));
+        };
+        let ordinal = item.index();
+        self.items()
+            .get(ordinal)
+            .filter(|issued| issued.checked_item() == item)
+            .ok_or_else(|| source_failure("declaration belongs to another checked output"))?;
+        let observed = program
+            .item(ordinal)
+            .ok_or_else(|| source_failure("declaration lacks its captured World proof"))?;
+        let ordered = if ordinal == 0 {
+            predecessor.logical_id() == program.logical().logical_id()
+        } else {
+            predecessor.position.as_ref().is_some_and(|position| {
+                position.original_base == *program.logical().logical_id()
+                    && position.certificate == *program.certificate_sha256()
+                    && position.next_item == ordinal
+                    && position.total_items == program.items().len()
+            })
+        };
+        let authored = item
+            .planned_declaration()
+            .ok_or_else(|| source_failure("World successor is not a declaration item"))?;
+        if !ordered
+            || predecessor.restoration.producer != *program.producer_sha256()
+            || predecessor.restoration.profile != program.logical.profile_sha256
+            || authored.product().owner().unit != "main"
+            || authored.product().owner().module
+                != tidepool_repr::SessionModule::lib(tidepool_repr::Generation(
+                    observed.generation(),
+                ))
+                .module_name()
+        {
+            return Err(source_failure(
+                "declaration successor has a foreign checked prefix",
+            ));
+        }
+        let owner = authored.product().owner();
+        let expected = authored.compiler_source_support().world_primary_type_row(owner)
+            .ok_or_else(|| source_failure("authored item lacks its issued primary binding"))?;
+        let actual = projection_context.compiler_source_support().world_primary_type_row(owner)
+            .ok_or_else(|| source_failure("declaration projection omits the actual authored owner"))?;
+        if actual.interface_binding != expected.interface_binding
+            || actual.original_binding != expected.original_binding
+        {
+            return Err(source_failure("declaration projection substitutes its authored binding"));
+        }
+        let advance = predecessor
+            .restoration
+            .primary_compiler_inputs
+            .with_declaration_projection(joined, projection_context)?;
+        tracing::debug!(target: "exomonad_harness::timing",
+            promotion_qualifier_invocations = advance.promotion_qualifier_invocations,
+            changed_primary_owners = advance.changed_owners.len(),
+            "World declaration support admitted");
+        let lexical = CompilerWorldLexicalSurface::from_publication(
+            import_specs,
+            Some(WorldDeclarationSelection::Joined(joined.clone())),
+        )?
+        .with_observation(predecessor.restoration.inputs.lexical.observation.clone())?;
+        let mut changes = BTreeMap::new();
+        for (name, binding) in visible_changes {
+            if name.is_empty() || name.contains('\0') || changes.contains_key(name) {
+                return Err(source_failure("invalid declaration binding delta"));
+            }
+            let fact = match binding {
+                None => None,
+                Some((id, scope)) => Some(
+                    predecessor
+                        .restoration
+                        .inputs
+                        .bindings
+                        .entries
+                        .get(name)
+                        .filter(|fact| fact.session_var == id && fact.defining_scope == scope)
+                        .ok_or_else(|| {
+                            source_failure("declaration delta has another issued binding")
+                        })?
+                        .clone(),
+                ),
+            };
+            changes.insert(name.to_owned(), fact);
+        }
+        predecessor.project_bindings_with_declaration(
+            predecessor.restoration.inputs.bindings.query_scope,
+            changes,
+            Some(WorldCellPosition {
+                original_base: *program.logical().logical_id(),
+                certificate: *program.certificate_sha256(),
+                next_item: ordinal + 1,
+                total_items: program.items().len(),
+            }),
+            Some((advance, lexical)),
+        )
+    }
     /// Issue the compiler facts of one successful runtime prefix. The caller
     /// supplies descriptions of the actual installed delta; this owner checks
     /// them against the same captured item and retains its type/native custody.
@@ -1761,8 +1868,25 @@ impl CompilerWorld {
         changes: impl IntoIterator<Item = (String, Option<WorldBindingFact>)>,
         position: Option<WorldCellPosition>,
     ) -> Result<Arc<Self>, CompileError> {
+        self.project_bindings_with_declaration(query_scope, changes, position, None)
+    }
+
+    fn project_bindings_with_declaration(
+        self: &Arc<Self>,
+        query_scope: u64,
+        changes: impl IntoIterator<Item = (String, Option<WorldBindingFact>)>,
+        position: Option<WorldCellPosition>,
+        declaration: Option<(
+            crate::declaration_context::WorldPrimaryProgramSupport,
+            CompilerWorldLexicalSurface,
+        )>,
+    ) -> Result<Arc<Self>, CompileError> {
         let prior = &self.restoration;
         let mut inputs = prior.inputs.clone();
+        if let Some((advance, lexical)) = &declaration {
+            inputs.primary_context = advance.context.clone();
+            inputs.lexical = lexical.clone();
+        }
         inputs.bindings.query_scope = query_scope;
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         inputs.directory = directory.clone();
@@ -1778,6 +1902,50 @@ impl CompilerWorld {
             diagnostics: None,
         };
         let mut materializer = Materializer::new(&prior.primary_blocks);
+        let mut primary_root = prior.primary_root.clone();
+        let mut primary_associations = prior.primary_associations.clone();
+        let mut primary_changes = Vec::new();
+        let mut lexical_root = prior.lexical_root;
+        if let Some((advance, _)) = &declaration {
+            primary_root = materializer
+                .materialize_context(
+                    Some(&prior.primary_root),
+                    &inputs.primary_context.snapshot(),
+                )
+                .map_err(|error| source_failure(error.to_string()))?;
+            let mut associations = prior.primary_associations.facts().clone();
+            let mut remaining = capture_allowance()?;
+            let support = advance.inputs.compiler_source_support();
+            for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
+                let selected = support.world_primary_type_row(owner).ok_or_else(|| {
+                    source_failure("declaration delta omits its issued primary row")
+                })?;
+                let (row, fact) = materialize_primary_type_row(
+                    selected.owner,
+                    selected.interface_binding,
+                    selected.original_binding,
+                    selected.entry,
+                    &prior.producer,
+                    directory.path(),
+                    ordinal,
+                    &mut rows,
+                    &mut materializer,
+                    &mut remaining,
+                )?;
+                associations.insert(*selected.transport_binding, fact);
+                primary_changes.push(world_array(vec![
+                    world_text(&owner.unit),
+                    world_text(&owner.module),
+                    row,
+                ]));
+            }
+            primary_associations = materializer
+                .materialize_map(Some(&prior.primary_associations), &associations)
+                .map_err(|error| source_failure(error.to_string()))?;
+            lexical_root = inputs
+                .lexical
+                .materialize(&inputs.primary_context, &mut materializer)?;
+        }
         // Remove all touched heads first, then add their resulting actual
         // selections. A row shared by several changed names is issued once.
         let changes: Vec<_> = changes.into_iter().collect();
@@ -1933,10 +2101,10 @@ impl CompilerWorld {
             .replace_semantic_roots(
                 &staged,
                 SemanticRoots {
-                    primary: *prior.primary_root.root().cid(),
-                    associations: *prior.primary_associations.root().cid(),
+                    primary: *primary_root.root().cid(),
+                    associations: *primary_associations.root().cid(),
                     bindings: *bindings.root().cid(),
-                    lexical: prior.lexical_root,
+                    lexical: lexical_root,
                 },
             )
             .map_err(|error| source_failure(error.to_string()))?;
@@ -1959,7 +2127,7 @@ impl CompilerWorld {
                 world_text("TPCWSUCC4"),
                 world_blob(&product),
                 world_array(changed_blocks),
-                world_array(Vec::new()),
+                world_array(primary_changes),
                 world_array(
                     visible_changes
                         .into_iter()
@@ -1978,13 +2146,16 @@ impl CompilerWorld {
             logical_id,
             inputs,
             product: product.into(),
-            primary_root: prior.primary_root.clone(),
+            primary_root,
             primary_blocks,
-            primary_associations: prior.primary_associations.clone(),
-            primary_compiler_inputs: prior.primary_compiler_inputs.clone(),
+            primary_associations,
+            primary_compiler_inputs: declaration.map_or_else(
+                || prior.primary_compiler_inputs.clone(),
+                |(advance, _)| advance.inputs,
+            ),
             bindings,
             binding_rows: row_roots,
-            lexical_root: prior.lexical_root,
+            lexical_root,
             producer: prior.producer,
             profile: prior.profile,
             descriptor,
@@ -4194,9 +4365,11 @@ fn prepare_world_cell_outputs(
             .map_err(|error| source_failure(error.to_string()))?;
         let diagnostics =
             crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
-        let files = plan.operand()
+        let files = plan
+            .operand()
             .map(|operand| operand.retain_for_request())
-            .transpose()?.unwrap_or_default();
+            .transpose()?
+            .unwrap_or_default();
         let run = world_execute(&command, bound, files)?;
         diagnostics.completed(
             directory.path(),
