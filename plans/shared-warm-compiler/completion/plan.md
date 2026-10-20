@@ -33,24 +33,27 @@ a reason to preserve the finite engine while building another abstraction layer.
 
 ## Current implementation and evidence
 
-The root source checkpoint `3f8b3bb54d` on
-`integration/compiler-query-warm-final` compiles runtime, actor and host
-production/test consumers. Eight source-admission controls and ten actor
-generation controls executed and passed. Runner evidence repairs are integrated
-at `7bcfb4d00f`; all 186 joined Python controls executed and passed.
-These are intermediate integrations, not release candidates. Compiler service,
-native source, lifecycle and query owners are receiving reviewed changes on their
-area branches; the table distinguishes their evidence from the root checkpoint.
+The root source checkpoint `8ad438c5bf` on
+`integration/compiler-query-warm-final` folds the reviewed engine, query,
+notebook, current-native-source and lifecycle work. It includes root repair
+`9b0d4e6d48`: World certificate selection comes from the same checked import
+authority, while runtime demand remains stage-local. Joined compilation and
+the actual input replay are pending at this checkpoint.
+Earlier `3f8b3bb54d` compiled runtime, actor and host consumers and passed eight
+source-admission plus ten actor generation controls. Runner repairs at
+`7bcfb4d00f` passed all 186 joined Python controls.
+These are intermediate integrations, not release candidates; leaf evidence
+below does not qualify the joined checkpoint.
 The baseline already has persistent GHC infrastructure; this campaign replaces
 repeated reconstruction and competing cell paths, not a process-per-cell design.
 
 | Evidence | Exact boundary | Remaining gate |
 | --- | --- | --- |
 | Root `3f8b3bb54d`: affected consumers compile; 18 focused controls pass | The publication owner retains the actual prerequisite claim through ordered source/world/installed-state settlement. Observation cannot extend authority, and missing confirmation cannot establish release | Actual hosted query regression, public reload, durable recovery and joined area folds |
-| Engine `3cef3698f1`: affected consumers compile; four metadata controls pass; actual private-input cohort executes 2 with 1 pass and 1 failure | Request-owned metadata replaces accidental dependence on a populated `ArtifactView` metadata cache. Crossed/retired input owner refuses correctly | Positive execution now reaches native demand: current Scientific output is incorrectly treated as requiring a prior body choice. The current-output/external-input repair must pass the actual producer/consumer history |
-| Native source `5bc75aece0`: affected consumers compile; 3 focused and 18 bundled controls pass | Actual prepared targets issue Current source support; raw/compiler-only inputs do not. Selected missing historical support remains a refusal | Carry the actual solver's source receipt through complete native offers, retaining exact selected historical anchors without unrelated sibling ownership |
-| Native fixture/model checkpoint `c021f5e4a1`: test targets compile; 12 execute with 3 passes and 9 failures | Failed oracles conflated a native offer's private proof with the receiving artifact view, and continuation with NewProduct issuance | Source-reviewed corrections must compile and rerun all 12. Preserve exact binding/edge and genuine ambiguity checks; do not amend already issued offers |
-| Lifecycle `a8bc364ebf`: affected consumers compile; 2 real worker controls pass; compact-cause `be11436023` has 5 focused passes | Real callbacks, candidate source ownership, refusal restoration and retained uncertainty are exercised through their owners | Operation diagnostic handoff, post-death terminal observation, compiler-owner DTOs, durable B import and full default/force/recovery path |
+| Engine `0477b3481b`: affected consumers compile; current-output demand controls pass 4/4; actual input cohort executes 2 with 1 pass and 1 failure | Physical current output and external historical inputs are distinguished using the same decoded products and receipt. The positive test passes the former Scientific boundary and fails because an unused actual input's interface was compared with runtime demand | `9b0d4e6d48` removes the independently supplied certificate-owner list. Replay must establish unused/used input behavior, wrong-payload failure, and crossed/retired refusal through actual execution |
+| Native source `5bc75aece0`: 3 focused and 18 bundled passes; receipt `b11b2f6194`: 1 pass; anchor `fe97b03e60`: 3 passes | Actual prepared targets issue Current support. Complete offers retain bounded solver receipts; historical traversal preserves the selected full binding. Graph-only/recovered inputs stay Unwitnessed | Fold compiler receipt/anchor changes. Mint runtime source companions only from the actual prepared-target/settled-cell pair; differing historical A/B acquisition and both receiving orders remain required before HistoricalKnown |
+| Native fixture/model checkpoint `68afeddf08`: test targets compile; 12 execute with 6 passes and 6 failures | Remaining fixtures paired choices with the wrong physical issuer or assumed a child-own proof. The independent model promoted closure descendants to roots | Receive `cdf15a4688`'s real finished-producer chain and explicit child proof; finish independent exact/allowed root expectations and rerun all 12. Preserve Full-but-explicit-empty refusal and exact binding/edge controls |
+| Lifecycle `a8bc364ebf`: 2 real worker passes; compact-cause `be11436023`: 5 passes; compiler-resource DTO chain: 3 actual codec/presenter passes | Real callbacks, candidate source ownership, refusal restoration and retained uncertainty are exercised through their owners. Actor and preparation resources have distinct protocol variants | Finish operation diagnostic acknowledgement, owner-loss terminal observation, producer-issued cleanup obligations and typed durable failures. Qualify actual editable-host default/force/recovery; quoted-source worker tests cannot substitute |
 | Query namespace `1dd53569cf`: one real GHC selector passes; query fixture `18b38632fc` compiles | Exact names, aliases and operator namespaces use the owning compiler; the hosted test contains all five semantic operations and explicit absence/malformed controls | Execute the hosted program on the join; precise diagnostics `82133b99cd` and status error propagation `6c29b1c6f4` must join first |
 | Notebook source fixture `30787690fa`: independent source review and 2 generator controls pass | Compilation and runtime source admission use the same captured files and actual source owner | Compile and execute the four native notebook cases; generator passes are not notebook execution |
 | Runner `7bcfb4d00f`: independently reviewed; leaf and joined Python controls pass 186/186 | Fresh output ownership prevents a retry or competing runner from overwriting retained evidence; wrapper reads the actual receipt's stream paths and hashes | No native property or compiler claim follows; later native cases use new output roots |
@@ -59,11 +62,11 @@ Exact commands, artifact hashes, selected/executed counts and logs are retained
 under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`, especially
 `completion/publication-claims-joined-verification.json`,
 `completion/native-runtime-source/`,
-`completion/tc-triage/c021-failed-execution-manifest.json`,
+`completion/tc-triage/68af-repaired-execution-manifest.json`,
 `completion/runner-evidence-root/` and the lifecycle area's
 `retirement-implementation/area-worker-joined-checkpoint.json`.
 The actual private-input result is
-`/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/main-3cef3698f1/summary.json`.
+`/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/main-0477b3481b/summary.json`.
 Leaf passes qualify their exact revisions and boundaries only. Frozen-bundle
 qualification and a new Persona launch have not passed.
 
@@ -121,7 +124,9 @@ remaining transition.
 
 Compiler input availability and executable demand are separate facts. A protected
 helper RHS may require an input's type even when the selected runtime root does
-not reach it. Retain the compiler's actual reference inventory and derive runtime
+not reach it. World certificate selection is derived from the exact checked
+import authority; callers cannot supply a separate runtime-demand list there.
+Retain the compiler's actual reference inventory and derive runtime
 requirements from actual emitted root/dependency evidence. Across stages, preserve
 the original producing/consuming witness; do not reconstruct it from names or
 stamp an earlier capture as a later one.

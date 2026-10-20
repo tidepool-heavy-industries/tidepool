@@ -401,7 +401,8 @@ pub(crate) struct CertifiedProducts {
 }
 
 /// Exact original facts admitted once by the physical segment owner. Captured
-/// value interfaces stay private until that owner's checked item selects them.
+/// input interfaces remain compiler-available; produced interfaces become
+/// available only through their checked item prefix. Neither grants live values.
 pub(crate) struct CertifiedSegmentOriginals {
     raw: ParsedModuleProducts,
     receipt: CertifiedReceipt,
@@ -463,6 +464,7 @@ impl CertifiedSegmentOriginals {
             produced,
             validation,
         )?;
+        products.source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
         let mut package_availability =
             inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
@@ -638,7 +640,6 @@ impl CertifiedSegmentOriginals {
         &self,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
-        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
@@ -650,6 +651,15 @@ impl CertifiedSegmentOriginals {
             return Err(CertificationError::Mismatch(
                 "segment inventory accounting owner",
             ));
+        }
+        match (&self.products.source_selection.produced_types, produced) {
+            (None, None) => {}
+            (Some(segment), Some(item)) if item.is_item_of(segment) => {}
+            _ => {
+                return Err(CertificationError::Mismatch(
+                    "item produced type selection differs from its physical segment",
+                ));
+            }
         }
         for (owner, witness) in &item.packages {
             check_segment_package_addition(
@@ -695,15 +705,15 @@ impl CertifiedSegmentOriginals {
             }
             verify_package_interface(validation, witness)?;
         }
+        // This segment already authenticated every captured input interface.
+        // An item can need an input's type without retaining its runtime value.
+        // Only this request's produced interfaces need ordinal narrowing here;
+        // executable demand is issued separately from the actual target imports.
         let selected_value = |value: &&crate::recovery_artifacts::CertifiedValueInterface| {
-            if let Some(outputs) =
-                produced.filter(|outputs| outputs.owns_artifact(value.artifact_id()))
-            {
-                outputs.selects_artifact(value.artifact_id())
-            } else {
-                tidepool_repr::SessionModule::from_module_name(value.interface().module())
-                    .is_some_and(|owner| selected_values.contains(&owner))
-            }
+            produced.is_none_or(|outputs| {
+                !outputs.owns_artifact(value.artifact_id())
+                    || outputs.selects_artifact(value.artifact_id())
+            })
         };
         let selected_count = self
             .products
