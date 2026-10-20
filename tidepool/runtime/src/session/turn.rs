@@ -3412,6 +3412,8 @@ fn prepare_cell_program_admitted_inner(
             ))
         })?;
         let program = tidepool_toolchain::artifacts::prepare_world_cell_program(output.clone())?;
+        admission.prepare_declaration_projections(program.checked_cell(), settlement)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let mut checked = decode_cell_out(
             program.checked_cell().observations(),
             &reservation.plan().recipe().source,
