@@ -440,13 +440,11 @@ pub(super) fn compiler_query_answer(
     }
 }
 
-pub(super) fn is_expression_rejection(error: &ResidentActorWorkbenchError) -> bool {
-    compiler_query_compile_error(error)
-        .is_some_and(|error| classify_compile(error).class == FailureClass::UserHaskell)
-}
-
-fn compiler_query_compile_error(error: &ResidentActorWorkbenchError) -> Option<&CompileError> {
-    match error {
+fn compiler_query_failure(
+    query: &CompilerQuery,
+    error: ResidentActorWorkbenchError,
+) -> CompilerQueryAnswer {
+    let compile = match &error {
         ResidentActorWorkbenchError::Compile(error)
         | ResidentActorWorkbenchError::Resident(ResidentError::Run(
             tidepool_runtime::RuntimeError::Compile(error),
@@ -457,14 +455,7 @@ fn compiler_query_compile_error(error: &ResidentActorWorkbenchError) -> Option<&
             ),
         ) => Some(error),
         _ => None,
-    }
-}
-
-fn compiler_query_failure(
-    query: &CompilerQuery,
-    error: ResidentActorWorkbenchError,
-) -> CompilerQueryAnswer {
-    let compile = compiler_query_compile_error(&error);
+    };
     if matches!(
         query,
         CompilerQuery::TypeOfExpression { .. } | CompilerQuery::TypeSearch { .. }

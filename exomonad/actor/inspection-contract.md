@@ -69,7 +69,9 @@ stays `<type unavailable>`. Only declaration types missing from their defining
 generation require enrichment, through the same held-World query owner as
 scoped effects. All requested declaration results share an entry view and pass
 its final source/view check before any type metadata is retained. A changed
-view refuses without retry; compiler infrastructure failure remains a failure.
+view refuses without retry. Structured unknown or unsupported answers leave a
+missing type unavailable; operational failures, including compiler diagnostics
+for these compiler-issued expressions, remain failures.
 Recovery status uses only the resident machine and never starts compiler work.
 This bindings view currently has no pagination; it enriches only that visible
 listing, never a recovery or changed-status history.

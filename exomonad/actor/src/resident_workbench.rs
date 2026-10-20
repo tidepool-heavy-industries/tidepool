@@ -10589,18 +10589,15 @@ where
                 continue;
             };
             let expression = expression.to_owned();
-            let inspected = match self
+            // This expression comes from the retained compiler export. A
+            // compiler diagnostic is a failed observation, not a missing type.
+            let inspected = self
                 .query_scoped_world(
                     context.clone(),
                     Q::Expression(expression.clone()),
                     Some(expected.clone()),
                 )
-                .await
-            {
-                Ok(inspected) => Some(inspected),
-                Err(error) if compiler_query::is_expression_rejection(&error) => None,
-                Err(error) => return Err(error),
-            };
+                .await?;
             observations.push((index, expression, inspected));
         }
         self.access
@@ -10619,9 +10616,6 @@ where
                 }
                 let mut retained = Vec::new();
                 for (index, expression, inspected) in observations {
-                    let Some(inspected) = inspected else {
-                        continue;
-                    };
                     let display = match compiler_query::finish_scoped_world_inspection(
                         session,
                         context,
