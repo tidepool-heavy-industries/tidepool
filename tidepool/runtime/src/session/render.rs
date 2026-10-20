@@ -85,7 +85,7 @@ impl TryFrom<&tidepool_toolchain::declaration_join::DeclarationExport> for Expor
         use tidepool_toolchain::declaration_join::{DeclarationKind, ExportNamespace};
         if export.head.record_parent.is_some() {
             return Err(crate::CompileError::ExtractFailed(
-                "certified declaration head has a field parent outside the field namespace".into(),
+                "certified field-parent declaration head is unsupported by the runtime export projection".into(),
             ));
         }
         let name = export.head.occurrence.clone();
