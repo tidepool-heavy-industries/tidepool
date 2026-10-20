@@ -9484,16 +9484,38 @@ mod custody_release_tests {
         }
     }
 
-    fn bind_fixture(session: &mut TestSession, scope: ScopeId, generation: u64) -> SessionVarId {
-        let mut binding = crate::session::prepared::tests::evaluated_publication_fixture(
-            &mut session.state,
-            "x",
-            generation,
+    fn bind_fixture(
+        session: &mut TestSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        scope: ScopeId,
+        generation: u64,
+    ) -> SessionVarId {
+        let settled = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let mut binding =
+                        crate::session::prepared::tests::evaluated_publication_fixture(
+                            &mut session.state,
+                            "x",
+                            generation,
+                        );
+                    binding.scope = scope;
+                    let id = binding.id;
+                    session.state.bind_in(scope, binding).unwrap();
+                    id
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
         );
-        binding.scope = scope;
-        let id = binding.id;
-        session.state.bind_in(scope, binding).unwrap();
-        id
+        settled.into_outcome().action
     }
 
     fn major_collect(session: &mut TestSession) {
@@ -9520,8 +9542,10 @@ mod custody_release_tests {
     fn foreign_custody_never_enters_destination() {
         let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        bind_fixture(&mut source, ScopeId::ROOT, 47);
-        let destination_id = bind_fixture(&mut destination, ScopeId::ROOT, 47);
+        let source_lease = source.mint_isolated_scope_with_lease().unwrap();
+        let destination_lease = destination.mint_isolated_scope_with_lease().unwrap();
+        bind_fixture(&mut source, &source_lease, ScopeId::ROOT, 47);
+        let destination_id = bind_fixture(&mut destination, &destination_lease, ScopeId::ROOT, 47);
         let local = destination.retain_binding_custody("x").unwrap().unwrap();
         let foreign = source.retain_binding_custody("x").unwrap().unwrap();
         assert_ne!(
@@ -9594,7 +9618,8 @@ mod custody_release_tests {
     #[test]
     fn exclusive_binding_custody_consumption_preserves_source_after_major_gc() {
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let id = bind_fixture(&mut session, ScopeId::ROOT, 41);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let id = bind_fixture(&mut session, &source, ScopeId::ROOT, 41);
         let provenance = Arc::new(ProgramProvenance::default());
         session
             .binding_provenance
@@ -9633,13 +9658,15 @@ mod custody_release_tests {
         for (retain_binding, retain_lexical) in [(false, false), (true, false), (false, true)] {
             let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
             let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
-            let other_id = bind_fixture(&mut session, other_scope, 43);
+            let other_source = session.adopt_initial_notebook_scope(other_scope).unwrap();
+            let other_id = bind_fixture(&mut session, &other_source, other_scope, 43);
             let other_provenance = Arc::new(ProgramProvenance::default());
             session
                 .binding_provenance
                 .insert(other_id.raw(), Arc::clone(&other_provenance));
             let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-            let id = bind_fixture(&mut session, scope, 42);
+            let source = session.adopt_initial_notebook_scope(scope).unwrap();
+            let id = bind_fixture(&mut session, &source, scope, 42);
             let provenance = Arc::new(ProgramProvenance::default());
             let weak = Arc::downgrade(&provenance);
             session
@@ -9665,6 +9692,8 @@ mod custody_release_tests {
             let retained = custody.handle.unwrap();
             session.set_run_context(SessionRunContext::ROOT).unwrap();
             session.retire_scope(scope);
+            drop(source);
+            session.settle_dropped_custody();
             assert_eq!(session.state.bindings().get(id).is_some(), leased);
             assert_eq!(session.binding_provenance.contains_key(&id.raw()), leased);
             assert!(Arc::ptr_eq(
@@ -9708,6 +9737,8 @@ mod custody_release_tests {
             major_collect(&mut session);
             assert_live_binding(&mut session, other_scope, other_id);
             session.retire_scope(other_scope);
+            drop(other_source);
+            session.settle_dropped_custody();
             assert!(!session.binding_provenance.contains_key(&other_id.raw()));
             major_collect(&mut session);
             assert_eq!(session.value_handle_count(), 0);
@@ -9717,7 +9748,8 @@ mod custody_release_tests {
     #[test]
     fn exact_borrowed_binding_refusals_precede_hole_access_and_root_allocation() {
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let id = bind_fixture(&mut session, ScopeId::ROOT, 43);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let id = bind_fixture(&mut session, &source, ScopeId::ROOT, 43);
         let capture = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         session
             .set_run_context(SessionRunContext {
@@ -9753,7 +9785,7 @@ mod custody_release_tests {
         // The detached capture retains the old root but original-name lookup
         // still refuses a later replacement of that exact request input.
         session.set_run_context(SessionRunContext::ROOT).unwrap();
-        bind_fixture(&mut session, ScopeId::ROOT, 44);
+        bind_fixture(&mut session, &source, ScopeId::ROOT, 44);
         session
             .set_run_context(SessionRunContext {
                 lexical_scope: capture,
@@ -9772,8 +9804,9 @@ mod custody_release_tests {
             ))
         .unwrap()
         .is_none());
-        let foreign_scope = session.mint_isolated_scope();
-        let foreign_id = bind_fixture(&mut session, foreign_scope, 45);
+        let foreign_source = session.mint_isolated_scope_with_lease().unwrap();
+        let foreign_scope = foreign_source.scope();
+        let foreign_id = bind_fixture(&mut session, &foreign_source, foreign_scope, 45);
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| session
                 .resume_framed_binding_sources_classified(
