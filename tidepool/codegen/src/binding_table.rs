@@ -158,6 +158,20 @@ impl<'a> PreparedPromotionProjection<'a> {
     ) -> impl Iterator<Item = (&'a BindingName, Option<&'a BindingEntry>)> + '_ {
         self.prepared.names.visible_changes(self.table, self.tree)
     }
+
+    /// Exact custody selected by this prepared promotion, including hidden
+    /// authored dependencies and separately admitted value writes. The runtime
+    /// checks these entries' current native handles before its commit claim.
+    pub fn retained_bindings(
+        &self,
+    ) -> impl Iterator<Item = Result<&'a BindingEntry, BindingPromotionError>> + '_ {
+        self.prepared.plan.retained.iter().map(|id| {
+            self.table
+                .live
+                .get(id)
+                .ok_or(BindingPromotionError::MissingOrForeignBinding)
+        })
+    }
 }
 
 pub struct PreparedSourceOwnerOrigin {
@@ -3013,16 +3027,9 @@ impl BindingTable {
         ids: &[SessionVarId],
         instances: &[SourceLeaseKey],
         accepted_owners: &[tidepool_repr::execution_schema::CachedHomeOwner],
-        binding_dependencies: &[SessionVarId],
     ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
         let mut prepared = self.exact_publication_plan(tree, source, target, ids, instances)?;
         let reachable = self.scope_dependency_ids(tree, source);
-        if binding_dependencies
-            .iter()
-            .any(|id| !reachable.contains(id) || !self.live.contains_key(id))
-        {
-            return Err(BindingPromotionError::MissingOrForeignBinding);
-        }
         let source_view = self
             .source_selection
             .get(&source)
@@ -3049,12 +3056,9 @@ impl BindingTable {
                 .ok_or(BindingPromotionError::MissingAuthoredBindingSupport)?;
             frozen_bindings.extend(support.retained.iter().copied());
         }
-        if binding_dependencies
+        if frozen_bindings
             .iter()
-            .any(|id| !frozen_bindings.contains(id))
-            || frozen_bindings
-                .iter()
-                .any(|id| !reachable.contains(id) || !self.live.contains_key(id))
+            .any(|id| !reachable.contains(id) || !self.live.contains_key(id))
         {
             return Err(BindingPromotionError::MissingOrForeignBinding);
         }

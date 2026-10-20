@@ -109,15 +109,7 @@ fn declaration_hidden_custody_survives_guard_retirement_and_publication_without_
     assert_eq!(table.scope_witness(&tree, private), Some(projected));
     assert_eq!(table.lease_count(input), 1);
     let publication = table
-        .prepare_authored_source_publication_in(
-            &tree,
-            private,
-            public,
-            &[],
-            &[],
-            &[owner],
-            &[input],
-        )
+        .prepare_authored_source_publication_in(&tree, private, public, &[], &[], &[owner])
         .unwrap();
     without_allocations(|| table.commit_exact_binding_promotion(publication));
     assert!(table.iter_current_in(&tree, public).is_empty());
@@ -296,15 +288,7 @@ fn declaration_custody_transfer_keeps_captured_edges_after_observation_update() 
     // captured declaration's immutable native dependency meaning.
     table.save_observation(input, &[later.var()], 10);
     let publication = table
-        .prepare_authored_source_publication_in(
-            &tree,
-            private,
-            public,
-            &[],
-            &[],
-            &[owner],
-            &[input],
-        )
+        .prepare_authored_source_publication_in(&tree, private, public, &[], &[], &[owner])
         .unwrap();
     table.commit_exact_binding_promotion(publication);
     table.retire_owner(input);
@@ -395,10 +379,9 @@ fn declaration_frozen_support_pairs_and_cannot_be_overwritten() {
             target,
             &[],
             &[],
-            &[owner.clone()],
-            &[second]
+            &[declaration_owner(255)]
         ),
-        Err(BindingPromotionError::MissingOrForeignBinding)
+        Err(BindingPromotionError::MissingSourceDomain)
     ));
     let mut same = table
         .prepare_source_owner_origin_in(&tree, scope, owner)
@@ -418,6 +401,67 @@ fn declaration_frozen_support_pairs_and_cannot_be_overwritten() {
     drop((same, delta, repeated, y, dy));
     assert_eq!(table.lease_count(first), 1);
     assert_eq!(table.lease_count(second), 0);
+}
+
+#[test]
+fn authored_promotion_exposes_only_issued_support_and_separate_writes_for_native_preflight() {
+    let mut tree = ScopeTree::new();
+    let source = tree.mint_isolated();
+    let target = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let selected = table
+        .bind_in(source, entry("hidden_selected", 270))
+        .unwrap();
+    let compiler_only = table.bind_in(source, entry("compiler_only", 271)).unwrap();
+    let ordinary = table.bind_in(source, entry("ordinary", 272)).unwrap();
+    let owner = declaration_owner(17);
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, source, owner.clone())
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            source,
+            &mut origin,
+            &[],
+            &["hidden_selected".into()],
+            &[selected],
+        )
+        .unwrap();
+    table.commit_source_owner_origin(origin);
+    table.commit_declaration_binding_changes(changes);
+    let prepared = table
+        .prepare_authored_source_publication_in(&tree, source, target, &[ordinary], &[], &[owner])
+        .unwrap();
+    let projection = table
+        .prepared_promotion_projection(&tree, &prepared)
+        .unwrap();
+    let retained = projection
+        .retained_bindings()
+        .map(|entry| entry.map(|entry| entry.id))
+        .collect::<Result<HashSet<_>, _>>()
+        .unwrap();
+    assert_eq!(retained, HashSet::from([selected, ordinary]));
+    assert!(!retained.contains(&compiler_only));
+    assert_eq!(
+        projection
+            .visible_changes()
+            .map(|(name, _)| name.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ordinary"]
+    );
+    // The native preflight must observe a missing selected entry explicitly;
+    // it cannot turn an unavailable root into an empty successful inventory.
+    table.drain_scope(source);
+    let projection = table
+        .prepared_promotion_projection(&tree, &prepared)
+        .unwrap();
+    let unavailable = projection.retained_bindings().collect::<Vec<_>>();
+    assert_eq!(unavailable.len(), 2);
+    assert!(unavailable
+        .into_iter()
+        .all(|entry| matches!(entry, Err(BindingPromotionError::MissingOrForeignBinding))));
+    assert!(table.iter_current_in(&tree, target).is_empty());
 }
 
 #[test]
@@ -630,15 +674,7 @@ fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
         table.commit_declaration_binding_changes(changes);
     }
     let publication = table
-        .prepare_authored_source_publication_in(
-            &tree,
-            source,
-            public,
-            &[],
-            &[],
-            &[owner.clone()],
-            &[selected],
-        )
+        .prepare_authored_source_publication_in(&tree, source, public, &[], &[], &[owner.clone()])
         .unwrap();
     table.commit_exact_binding_promotion(publication);
     assert_eq!(table.lease_count(unrelated), 1);
@@ -660,15 +696,7 @@ fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
     );
     table.drain_scope(public);
     let publication = table
-        .prepare_authored_source_publication_in(
-            &tree,
-            child,
-            later_public,
-            &[],
-            &[],
-            &[owner],
-            &[selected],
-        )
+        .prepare_authored_source_publication_in(&tree, child, later_public, &[], &[], &[owner])
         .unwrap();
     table.commit_exact_binding_promotion(publication);
     table.drain_scope(child);
@@ -689,15 +717,7 @@ fn declaration_missing_support_is_distinct_from_issued_empty_support() {
         .unwrap();
     table.commit_source_owner_origin(origin);
     assert!(matches!(
-        table.prepare_authored_source_publication_in(
-            &tree,
-            source,
-            target,
-            &[],
-            &[],
-            &[missing],
-            &[]
-        ),
+        table.prepare_authored_source_publication_in(&tree, source, target, &[], &[], &[missing]),
         Err(BindingPromotionError::MissingAuthoredBindingSupport)
     ));
     let empty = declaration_owner(14);
@@ -721,7 +741,7 @@ fn declaration_missing_support_is_distinct_from_issued_empty_support() {
     table.commit_source_owner_origin(origin);
     table.commit_declaration_binding_changes(changes);
     let prepared = table
-        .prepare_authored_source_publication_in(&tree, source, target, &[], &[], &[empty], &[])
+        .prepare_authored_source_publication_in(&tree, source, target, &[], &[], &[empty])
         .unwrap();
     without_allocations(|| table.commit_exact_binding_promotion(prepared));
     assert!(table.iter_current_in(&tree, target).is_empty());
