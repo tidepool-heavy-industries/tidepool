@@ -23,11 +23,12 @@
 //! `None` on Core, so there is nothing to assert there.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_repr::Generation;
 use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, BoundBinder, CompiledTurn, ModuleEnv, ResidentOutcome,
-    ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
+    ResidentSession, RuntimeLexicalScopeLease, SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_testing::eval_harness;
@@ -36,6 +37,7 @@ use tidepool_testing::eval_harness;
 /// one resident session, its compile plumbing, and expression/bind turns.
 struct Notebook {
     session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    source: Arc<RuntimeLexicalScopeLease>,
     preamble: String,
     effect_stack: String,
     include: Vec<PathBuf>,
@@ -70,14 +72,18 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped(
+        let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
+        let source = session
+            .mint_isolated_scope_with_lease()
+            .expect("issue the notebook's source owner");
         Self {
             session,
+            source,
             preamble,
             effect_stack,
             include,
@@ -102,14 +108,18 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped(
+        let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
+        let source = session
+            .mint_isolated_scope_with_lease()
+            .expect("issue the notebook's source owner");
         Self {
             session,
+            source,
             preamble,
             effect_stack,
             include,
@@ -218,15 +228,45 @@ impl Notebook {
     /// Install the immutable artifact afresh on every turn. Compilation is
     /// shared; mutable heap state and program retirement are still exercised.
     fn expression(&mut self, compiled: &CompiledTurn) {
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            self.session
-                .run_with_sites("residency_expression", compiled.code(), settlement)
-        })
-        .expect("prepared expression runs");
+        let outcome = self
+            .source_action(|session, settlement| {
+                session.run_with_sites("residency_expression", compiled.code(), settlement)
+            })
+            .expect("prepared expression runs");
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{outcome:?}"
         );
+    }
+
+    fn source_action<T>(
+        &mut self,
+        action: impl FnOnce(
+            &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> T {
+        let settled = self
+            .session
+            .with_source_compiler_transaction(
+                self.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                action,
+            )
+            .expect("admit the notebook's live source owner");
+        assert!(
+            matches!(
+                settled.close(),
+                tidepool_runtime::CompilerTransactionClose::Clean
+                    | tidepool_runtime::CompilerTransactionClose::NotStarted
+            ),
+            "source transaction did not retire cleanly: {:?}",
+            settled.close()
+        );
+        settled.into_outcome().action
     }
 
     fn bind(&mut self, text: &str) -> BoundBinder {
@@ -239,16 +279,18 @@ impl Notebook {
         let [binder] = bound.as_slice() else {
             panic!("{text:?} bound {} names", bound.len());
         };
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            self.session.run_bind_with_sites(
-                "residency_bind",
-                compiled.code(),
-                binder,
-                Generation(self.generation),
-                settlement,
-            )
-        })
-        .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        let generation = Generation(self.generation);
+        let outcome = self
+            .source_action(|session, settlement| {
+                session.run_bind_with_sites(
+                    "residency_bind",
+                    compiled.code(),
+                    binder,
+                    generation,
+                    settlement,
+                )
+            })
+            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{text:?} did not complete: {outcome:?}"
@@ -582,6 +624,41 @@ fn assert_counts_flat(
         old_bytes, previous_old_bytes,
         "{label}: old_bytes moved across collections"
     );
+}
+
+#[test]
+fn root_installation_checks_the_original_source_gate_before_mutation() {
+    use tidepool_runtime::session::{
+        ResidentError, SessionError, SourceAdmissionError, SourceAdmissionPhase,
+    };
+
+    let mut notebook = Notebook::new();
+    let expression = notebook.prepare_expression("1 + (2 :: Int)");
+    notebook.expression(&expression);
+    let before = notebook.session.residency();
+    let original_scope = notebook.source.scope();
+    let _fence = notebook
+        .source
+        .source_admission()
+        .fence()
+        .expect("close only the original source gate");
+
+    let error = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("closed_original_source", expression.code(), settlement)
+        })
+        .expect_err("an open ROOT receiver cannot replace the original source authority");
+    assert!(
+        matches!(
+            error,
+            ResidentError::Session(SessionError::SourceAdmission(SourceAdmissionError::Closed {
+                scope,
+                phase: SourceAdmissionPhase::Fenced { .. },
+            })) if scope == original_scope
+        ),
+        "{error:?}"
+    );
+    assert_eq!(notebook.session.residency(), before);
 }
 
 /// Twenty installations of one prepared constant expression on the prepared route, each installing
