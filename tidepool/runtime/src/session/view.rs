@@ -149,6 +149,10 @@ impl SourceImports {
         &self.specs
     }
 
+    pub(super) fn into_specs(self) -> Vec<String> {
+        self.specs
+    }
+
     /// Render the persistent workbench view in familiar Haskell syntax.
     #[must_use]
     pub fn source_lines(&self) -> Vec<String> {

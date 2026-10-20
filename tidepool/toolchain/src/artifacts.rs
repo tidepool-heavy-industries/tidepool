@@ -1311,6 +1311,7 @@ impl ModuleCandidateOffer {
         primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         bindings: crate::compiler_world::CompilerWorldBindings,
         sources: Arc<crate::compiler_world::CapturedCompilerSources>,
+        lexical: crate::compiler_world::CompilerWorldLexicalSurface,
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
         let visible_rows = bindings.cold_rows()?;
         let primary = checked_offer_context(primary)?;
@@ -1320,6 +1321,7 @@ impl ModuleCandidateOffer {
             visible_rows,
             bindings,
             sources,
+            lexical,
             directory,
         )
     }

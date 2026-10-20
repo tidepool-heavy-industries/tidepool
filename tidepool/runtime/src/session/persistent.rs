@@ -1746,6 +1746,26 @@ impl PersistentSession {
             tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
                 scope.0, bindings,
             )?;
+        use tidepool_toolchain::compiler_world::{
+            CompilerWorldLexicalSurface, WorldDeclarationSelection,
+        };
+        let declaration =
+            if let Some(projection) = self.lib().current_declaration_projection_in(scope) {
+                Some(WorldDeclarationSelection::Joined(
+                    projection.receipt().clone(),
+                ))
+            } else if let Some(recovered) = self.lib().current_recovered_declaration_in(scope) {
+                Some(WorldDeclarationSelection::Recovered(recovered))
+            } else {
+                if self.lib().current_module_in(scope).is_some() {
+                    return Err(SessionError::UncertifiedCompilerWorldDeclaration(scope));
+                }
+                None
+            };
+        let lexical = CompilerWorldLexicalSurface::from_publication(
+            self.lib().workbench_imports_in(scope).into_specs(),
+            declaration,
+        )?;
         Ok(AdmittedInspectionWorld {
             base: InspectionWorldBase {
                 scope,
@@ -1759,6 +1779,7 @@ impl PersistentSession {
             inputs: InspectionWorldInputs::Cold {
                 primary: self.lib().current_exact_context_in(scope),
                 bindings,
+                lexical,
             },
         })
     }
@@ -1800,26 +1821,40 @@ impl PersistentSession {
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> bool {
-        if cancellation.checkpoint().is_err() {
-            return false;
-        }
-        if !self.inspection_world_base_is_current(&association.base, source, original_source) {
-            return false;
-        }
-        tracing::debug!(
-            target: "exomonad_harness::timing",
-            logical_world = ?association.world.logical_id(),
-            source_sha256 = ?source.sha256(),
-            scope = ?association.base.scope,
-            "compiler world association installed"
-        );
-        let state = self
-            .lib_mut()
-            .tips
-            .entry(association.base.scope)
-            .or_default();
-        state.inspection_world = Some(association.clone());
-        true
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [original_source.clone(), association.base.target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        if cancellation.checkpoint().is_err()
+                            || !self.inspection_world_base_is_current(
+                                &association.base,
+                                source,
+                                original_source,
+                            )
+                        {
+                            return false;
+                        }
+                        tracing::debug!(
+                            target: "exomonad_harness::timing",
+                            logical_world = ?association.world.logical_id(),
+                            source_sha256 = ?source.sha256(),
+                            scope = ?association.base.scope,
+                            "compiler world association installed"
+                        );
+                        let state = self
+                            .lib_mut()
+                            .tips
+                            .entry(association.base.scope)
+                            .or_default();
+                        state.inspection_world = Some(association.clone());
+                        true
+                    },
+                )
+            },
+        )
+        .unwrap_or(false)
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
@@ -4806,35 +4841,68 @@ mod checkpoint_scope_tests {
         let original = session.adopt_initial_notebook_scope(scope).unwrap();
         let other_scope = session.mint_isolated_scope();
         let foreign = session.adopt_initial_notebook_scope(other_scope).unwrap();
-        let source = super::super::GenerationArtifactReference::capture(b"captured source".to_vec());
-        let admitted = session.capture_inspection_world_in(scope, &source, &original, |_| false).unwrap();
+        let source =
+            super::super::GenerationArtifactReference::capture(b"captured source".to_vec());
+        let admitted = session
+            .capture_inspection_world_in(scope, &source, &original, |_| false)
+            .unwrap();
         let captured = std::cell::Cell::new(false);
-        let settled = foreign.with_source_compiler_transaction(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(), None, |_| {},
-            |owner, _| run_admitted_compiler_world(owner, admitted, || {
-                captured.set(true);
-                Ok(None)
-            }),
-        ).unwrap();
-        assert!(!captured.get(), "foreign source must refuse before source capture");
-        assert!(matches!(finish_admitted_compiler_world(settled),
-            Err(WorldInspectionError::Runtime(crate::RuntimeError::SourceAdmission(
-                super::super::SourceAdmissionError::ForeignTransaction
-            )))
+        let settled = foreign
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| {
+                    run_admitted_compiler_world(owner, admitted, || {
+                        captured.set(true);
+                        Ok(None)
+                    })
+                },
+            )
+            .unwrap();
+        assert!(
+            !captured.get(),
+            "foreign source must refuse before source capture"
+        );
+        assert!(matches!(
+            finish_admitted_compiler_world(settled),
+            Err(WorldInspectionError::Runtime(
+                crate::RuntimeError::SourceAdmission(
+                    super::super::SourceAdmissionError::ForeignTransaction
+                )
+            ))
         ));
-        let admitted = session.capture_inspection_world_in(scope, &source, &original, |_| false).unwrap();
-        let settled = original.with_source_compiler_transaction(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(), None, |_| {},
-            |owner, _| run_admitted_compiler_world(owner, admitted, || {
-                captured.set(true);
-                Ok(None)
-            }),
-        ).unwrap();
-        assert!(captured.get(), "the rightful owner reaches its source capture");
-        assert!(matches!(finish_admitted_compiler_world(settled), Err(WorldInspectionError::UnsupportedSource)));
-        assert!(session.lib().tips.get(&scope).is_none_or(|tip| tip.inspection_world.is_none()));
+        let admitted = session
+            .capture_inspection_world_in(scope, &source, &original, |_| false)
+            .unwrap();
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| {
+                    run_admitted_compiler_world(owner, admitted, || {
+                        captured.set(true);
+                        Ok(None)
+                    })
+                },
+            )
+            .unwrap();
+        assert!(
+            captured.get(),
+            "the rightful owner reaches its source capture"
+        );
+        assert!(matches!(
+            finish_admitted_compiler_world(settled),
+            Err(WorldInspectionError::UnsupportedSource)
+        ));
+        assert!(session
+            .lib()
+            .tips
+            .get(&scope)
+            .is_none_or(|tip| tip.inspection_world.is_none()));
     }
 
     #[test]
