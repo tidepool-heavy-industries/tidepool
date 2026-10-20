@@ -127,40 +127,77 @@ impl RuntimeSourceOrigin {
     }
 }
 
-/// Project one exact installation import into this invocation's local builder.
-/// Native physical/semantic ownership does not itself supply runtime source custody.
-fn contribute_import_source<'a>(
+enum RuntimeSourceContribution<'a> {
+    Retained {
+        id: u64,
+        provenance: &'a Arc<ProgramProvenance>,
+    },
+    MissingNative,
+    SourceNeutral,
+}
+
+fn classify_import_source<'a>(
     owner: &ImportOwner,
+    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
+) -> RuntimeSourceContribution<'a> {
+    match owner {
+        ImportOwner::Retained { id, .. } => match bindings.get(&id.raw()) {
+            Some(provenance) => RuntimeSourceContribution::Retained {
+                id: id.raw(),
+                provenance,
+            },
+            None => RuntimeSourceContribution::MissingNative,
+        },
+        ImportOwner::Source { .. } | ImportOwner::CodeExport { .. } => {
+            RuntimeSourceContribution::MissingNative
+        }
+        ImportOwner::Package { .. } => RuntimeSourceContribution::SourceNeutral,
+    }
+}
+
+/// Gather exact imports once per binding identity. Unresolved native custody
+/// contributes uncertainty once over the selected target's possible sites.
+fn contribute_import_sources<'a>(
+    imports: impl IntoIterator<Item = &'a ImportOwner>,
     bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
     possible_sites: impl Iterator<Item = u64>,
     sources: &mut BTreeMap<u64, RuntimeSourceOrigin>,
-) -> Option<&'a Arc<ProgramProvenance>> {
-    match owner {
-        ImportOwner::Retained { id, .. } => {
-            if let Some(original) = bindings.get(&id.raw()) {
-                for (site, source) in &original.original_sources {
-                    sources
-                        .entry(*site)
-                        .and_modify(|held| held.merge(source))
-                        .or_insert_with(|| source.clone());
-                }
-                return Some(original);
+) -> Vec<&'a Arc<ProgramProvenance>> {
+    let mut retained = BTreeMap::new();
+    let mut unresolved_native = false;
+    for owner in imports {
+        match classify_import_source(owner, bindings) {
+            RuntimeSourceContribution::Retained { id, provenance } => {
+                retained.entry(id).or_insert(provenance);
             }
+            RuntimeSourceContribution::MissingNative => unresolved_native = true,
+            RuntimeSourceContribution::SourceNeutral => {}
         }
-        ImportOwner::Source { .. } | ImportOwner::CodeExport { .. } => {}
-        ImportOwner::Package { .. } => return None,
     }
-    // Missing binding/native provenance has no trustworthy site projection.
-    // The exact selected target closure bounds its possible contribution.
-    for site in possible_sites {
-        sources
-            .entry(site)
-            .and_modify(|held| {
-                held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
-            })
-            .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+    for original in retained.values() {
+        for site in original.sites.keys() {
+            let source = original
+                .original_sources
+                .get(site)
+                .cloned()
+                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            sources
+                .entry(*site)
+                .and_modify(|held| held.merge(&source))
+                .or_insert(source);
+        }
     }
-    None
+    if unresolved_native {
+        for site in possible_sites {
+            sources
+                .entry(site)
+                .and_modify(|held| {
+                    held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
+                })
+                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+        }
+    }
+    retained.into_values().collect()
 }
 
 impl PartialEq for RuntimeSourceOrigin {
@@ -587,9 +624,10 @@ impl ProgramProvenance {
                 }
             } else {
                 self.sites.insert(site.site, site.clone());
-                self.original_sources
-                    .insert(site.site, RuntimeSourceOrigin::Unknown(Vec::new()));
             }
+            self.original_sources
+                .entry(site.site)
+                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
         }
         Ok(())
     }
@@ -635,14 +673,18 @@ impl ProgramProvenance {
         for site in other.sites.values() {
             let existing = self.sites.contains_key(&site.site);
             self.extend(std::slice::from_ref(site))?;
-            let incoming = &other.original_sources[&site.site];
+            let incoming = other
+                .original_sources
+                .get(&site.site)
+                .cloned()
+                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
             if existing {
                 self.original_sources
-                    .get_mut(&site.site)
-                    .expect("site source")
-                    .merge(incoming);
+                    .entry(site.site)
+                    .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()))
+                    .merge(&incoming);
             } else {
-                self.original_sources.insert(site.site, incoming.clone());
+                self.original_sources.insert(site.site, incoming);
             }
         }
         for (site, interfaces) in &other.authenticated_inputs {
@@ -7065,16 +7107,12 @@ where
                     .iter()
                     .flat_map(|group| group.original().imports()),
             );
-            for owner in imports {
-                if let Some(original) = contribute_import_source(
-                    owner,
-                    &self.binding_provenance,
-                    provenance.native_sites.ids(),
-                    &mut sources,
-                ) {
-                    retained.push(original);
-                }
-            }
+            retained = contribute_import_sources(
+                imports,
+                &self.binding_provenance,
+                provenance.native_sites.ids(),
+                &mut sources,
+            );
         }
         {
             let provenance = Arc::make_mut(&mut provenance);
@@ -12421,8 +12459,13 @@ mod source_origin_tests {
     fn independent_source_owners_survive_identical_compiler_evidence() {
         let mut a = PersistentSession::new(None, 1024);
         let mut b = PersistentSession::new(None, 1024);
-        let source_a = a.retain_lexical_scope(ScopeId::ROOT).unwrap();
-        let source_b = b.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let source_a = a.mint_notebook_scope_with_lease(None).unwrap();
+        let source_b = b.mint_notebook_scope_with_lease(None).unwrap();
+        source_a.validate_source_issuer().unwrap();
+        source_b.validate_source_issuer().unwrap();
+        assert_ne!(source_a.scope(), ScopeId::ROOT);
+        assert_ne!(source_b.scope(), ScopeId::ROOT);
+        assert!(!Arc::ptr_eq(&source_a, &source_b));
         let mut provenance = issued(17, &source_a);
         provenance.merge(&issued(17, &source_a)).unwrap();
         assert!(Arc::ptr_eq(
@@ -12442,7 +12485,9 @@ mod source_origin_tests {
     #[test]
     fn unknown_same_site_stays_missing_in_both_merge_orders() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source.validate_source_issuer().unwrap();
+        assert_ne!(source.scope(), ScopeId::ROOT);
         let known = issued(17, &source);
         let unknown = ProgramProvenance::from_sites(&[site(17)]).unwrap();
         for (mut left, right) in [(known.clone(), unknown.clone()), (unknown, known)] {
@@ -12461,8 +12506,13 @@ mod source_origin_tests {
     #[test]
     fn fresh_target_and_retained_dependency_keep_distinct_site_owners() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source_a = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
-        let source_b = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let source_a = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source_b = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source_a.validate_source_issuer().unwrap();
+        source_b.validate_source_issuer().unwrap();
+        assert_ne!(source_a.scope(), ScopeId::ROOT);
+        assert_ne!(source_b.scope(), ScopeId::ROOT);
+        assert!(!Arc::ptr_eq(&source_a, &source_b));
         let mut provenance = issued(23, &source_b);
         provenance.merge(&issued(17, &source_a)).unwrap();
         assert!(Arc::ptr_eq(
@@ -12478,7 +12528,9 @@ mod source_origin_tests {
     #[test]
     fn unresolved_import_owners_poison_only_selected_native_sites() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source.validate_source_issuer().unwrap();
+        assert_ne!(source.scope(), ScopeId::ROOT);
         let binder = SymbolIdentity {
             unit: "Source".into(),
             module: "Source".into(),
@@ -12518,9 +12570,19 @@ mod source_origin_tests {
                 } else {
                     [&retained, missing]
                 };
-                for import in imports {
-                    contribute_import_source(import, &bindings, [17, 19].into_iter(), &mut sources);
-                }
+                let traversed = std::cell::Cell::new(0);
+                let retained_refs = contribute_import_sources(
+                    imports
+                        .into_iter()
+                        .chain([&retained, missing, &retained, missing]),
+                    &bindings,
+                    [17, 19]
+                        .into_iter()
+                        .inspect(|_| traversed.set(traversed.get() + 1)),
+                    &mut sources,
+                );
+                assert_eq!(retained_refs.len(), 1, "one unique retained binding");
+                assert_eq!(traversed.get(), 2, "one traversal of two selected sites");
                 assert!(matches!(
                     sources[&17].require_unique(17),
                     Err(ResidentError::MissingOriginalSource {
@@ -12544,6 +12606,48 @@ mod source_origin_tests {
         }
     }
 
+    #[test]
+    fn missing_per_site_runtime_evidence_is_unknown_at_owner_boundaries() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source.validate_source_issuer().unwrap();
+        let known = issued(17, &source);
+        let mut missing = known.clone();
+        missing.original_sources.clear();
+        for (mut left, right) in [(missing.clone(), known.clone()), (known, missing.clone())] {
+            left.merge(&right).unwrap();
+            assert!(matches!(
+                left.original_sources[&17].require_unique(17),
+                Err(ResidentError::MissingOriginalSource {
+                    site: 17,
+                    known_origins: 1
+                })
+            ));
+        }
+        let mut metadata_only = ProgramProvenance::default();
+        metadata_only.sites.insert(17, site(17));
+        metadata_only.extend(&[site(17)]).unwrap();
+        assert!(matches!(
+            metadata_only.original_sources[&17].require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        let id = SessionVarId::from_extract(7);
+        let imports = [ImportOwner::Retained { id, generation: 1 }];
+        let bindings = HashMap::from([(id.raw(), Arc::new(missing))]);
+        let mut sources = BTreeMap::from([(17, RuntimeSourceOrigin::Known(source.clone()))]);
+        contribute_import_sources(&imports, &bindings, [].into_iter(), &mut sources);
+        assert!(matches!(
+            sources[&17].require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 1,
+                ..
+            })
+        ));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
         #[test]
@@ -12551,7 +12655,14 @@ mod source_origin_tests {
             history in prop::collection::vec((0u64..5, 0usize..3, any::<bool>()), 1..80),
         ) {
             let mut owner = PersistentSession::new(None, 1024);
-            let leases = (0..3).map(|_| owner.retain_lexical_scope(ScopeId::ROOT).unwrap()).collect::<Vec<_>>();
+            let leases = (0..3).map(|_| owner.mint_notebook_scope_with_lease(None).unwrap()).collect::<Vec<_>>();
+            for (index, lease) in leases.iter().enumerate() {
+                lease.validate_source_issuer().unwrap();
+                prop_assert_ne!(lease.scope(), ScopeId::ROOT);
+                for previous in &leases[..index] {
+                    prop_assert!(!Arc::ptr_eq(lease, previous));
+                }
+            }
             let mut actual = ProgramProvenance::default();
             let mut model = BTreeMap::<u64, (BTreeSet<usize>, bool)>::new();
             for (site_id, source, missing) in history {
