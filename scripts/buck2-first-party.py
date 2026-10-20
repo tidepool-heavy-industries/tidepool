@@ -2026,6 +2026,8 @@ tidepool_buildscript_run(
                 world_env, world_resources, world_worker = compiler_service_test_inputs(
                     package_name, world_target
                 )
+                if world_target == "toolchain_world_value_selection_test":
+                    world_env["TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES"] = "0"
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
                     f'    name = {json.dumps(world_target)},',

@@ -130,7 +130,7 @@ qualification.
 
 ## Exact-scope transport
 
-Worker requests use `TPREQ024`. Field 57 acquires one world without source
+Worker requests use `TPREQ028`. Field 57 acquires one world without source
 request fields; field 58 queries public module metadata through the same
 `CompilerRequest` executor admission. Fields 59 and 60 carry the held-world
 cell plan and preparation recipes. Runtime owns reservation/adoption authority;
