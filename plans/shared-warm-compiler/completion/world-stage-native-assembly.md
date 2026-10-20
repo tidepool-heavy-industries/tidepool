@@ -1,0 +1,119 @@
+# World stage native assembly
+
+The receiving contract is recorded in
+`/srv/swarm/evidence/inanna/world-full-language-rust-receiver-contract-20261020.md`.
+The receiver owns checked stage identities, ordinal coverage, captured FileRefs
+and the closed executable/original item sum. Assembly consumes these owners; it
+does not decode a second proof tree or recapture output files.
+
+## Owner transitions
+
+`prepare_world_cell_program` folds `CheckedWorldCellProgram::stages()` in source
+order. Each stage supplies its own source receipt, module products and certified
+products references. Decode those outputs once using the existing accounting
+operation and actual captured bytes. Capture produced value interfaces once,
+then select only each stage's own ordinal range.
+
+Executable stages retain the existing transition:
+
+1. `DecodedWorldSourceReceipt::issue_segment_originals` admits source facts and
+   authenticates the stage's original native products.
+2. `CertifiedSegmentOriginals::select_item` authenticates each actual prepared
+   target and item certificate against the same original issuer.
+3. The existing native target issuer and `IssuedOriginalOutput` retain exact
+   dependency choices and private immutable custody.
+4. Store each item's own prefix context and source lexical facts beside its
+   output. Capture `PreparedCheckedItemOutput` against the common checked-cell
+   owner after declaration certificates are available.
+
+Declaration/prologue stages have no executable target or native entry. They
+reuse the existing authored declaration mechanism:
+
+1. Extend the existing private `NativeAuthoredDeclarationAdmission` owner with
+   `from_world_stage(program, stage, source)`. It verifies the exact checked
+   stage Arc, reserved Lib generation/actual owner and same generated source.
+2. Forward that admission through `CertifiedSegmentOriginals::issue` to the
+   existing `certify_products_with_validation` call. This issues the actual
+   authored canonical origin through the existing certifier.
+3. Select the actual authored original closure, retaining its exact native
+   dependency graph, then issue `IssuedOriginalOutput` from that selection.
+4. Factor the common post-source-authentication portion of
+   `certify_same_offer_planned_declaration`. Validate the actual interface SHA,
+   source digest, producer, planned inventory, exports, instances and family
+   closure. World borrows captured source facts and actual aliases; finite
+   admission retains its existing physical source checks.
+5. Retain `PlannedCheckedDeclaration` with its actual certificate, source,
+   receipt digest and complete `OriginalCompilerInputs`. The common checked-cell
+   seal already handles declaration items without native executable outputs.
+
+Proposed narrow helper:
+`WorldProgramSegment::product_admission(&self) -> ExactProductAdmission<'_>`.
+This borrows the existing source/binding/input facts; it grants no new authority.
+No public trusted constructor, finite physical request, fake prepared program
+or separate declaration evaluator is introduced.
+
+## Prefix input decision
+
+One `ProgramSourceSupportState` must move across the ordered stages. It cannot
+restart at each stage or be replaced by the final context. Exact item snapshots
+retain only their own prefix visibility, while native products retain the full
+issued dependency closure, including mutual declaration support.
+
+The current World input path always projects `program.primary_compiler_inputs`
+and `ProductInputFacts::from_demand` supplies empty program source/lexical facts.
+That must change before mixed stages can honestly work. Later stages need the
+previous stage's actual selected canonical roles, issued private native offers,
+produced value interfaces and inherited source/instance facts.
+
+The existing `ExactRequestInputs` owner is semantic and separate from the
+physical `ExactCompilationRequest`; its private context advance already carries
+`OriginalCompilerInputs`. Its current advance also scans baseline metadata and
+groups. The receiving engine and assembly owner must choose a shared semantic
+continuation that consumes keyed issued support deltas, rather than import that
+broad finite work or build a second compiler-input registry. The demanded stage
+owner should own its context Arc so a moved continuation does not borrow itself.
+
+## Ownership and acceptance
+
+The receiver owns compiler_world proof/admission types, World source binding and
+identity, receipt decoder, and checked_cell closed-variant consumers. Assembly
+owns artifacts plus the coordinated declaration issuer/helper slices. Engine
+owns runtime declaration projection, actual settlement and logical successor
+updates. Haskell owns the actual ordered producer and retained compiler prefix.
+
+First acceptance is compilation of affected production and cfg(test) consumers,
+then actual emitted declaration/prologue/executable stage controls with useful
+crossed-owner/interface/source/ordinal refusals. The joined mixed-language actor
+history and subsequent value use remain the receiving engine's gate. Linking,
+receiver DATA controls and compiler native evidence do not establish runtime
+execution authority.
+
+## Common declaration certifier checkpoint
+
+The first source tranche extracts shared validation from the existing finite
+declaration certifier. Its finite wrapper preserves the same source preconditions
+and physical source reread. The shared private helper performs the existing
+producer, selected original, canonical declaration origin, inventory, lexical,
+instance and family closure validation. It is not yet a World stage consumer.
+
+Build `dfa9b53f-9c0f-41f8-bd1b-6d5679ea564c` compiled production and cfg(test)
+consumers and executed three existing controls: two passed, one failed, exit 1.
+The generated issue/retention history and inventory refusal passed. The
+multiversion-custody consumer failed at its pre-certifier native-selection
+refusal assertion at `planned_original_history_tests.rs:590`.
+
+An exact inverse of this extraction against `0e3fde7cd2` reproduces the same
+failure: build `9b2b22fb-01a1-405f-8e30-1cf1138b82d0`, executed 1, failed 1,
+exit 1. The extraction was reapplied afterward and `git diff --check` passes.
+No assertion or native qualification rule was changed. The exact returned
+native result and cause still need classification; the failed expected variant
+alone does not establish a permission regression.
+
+Evidence roots are
+`/srv/swarm/evidence/inanna/world-stage-declaration-factor-20261020` and
+`/srv/swarm/evidence/inanna/world-stage-before-declaration-factor-20261020`.
+The inverse patch is retained at the first path plus `.patch`. The extracted
+Rust executable SHA-256 is
+`3fa7ddd5b304479c18867c593f5fb3265edab0f08370ea1acf46aa290d653650`;
+the pre-extraction executable is
+`743c75bb11772e70b3698dd073225c8c3ebdffc33f5ff440a704415d451ac21a`.
