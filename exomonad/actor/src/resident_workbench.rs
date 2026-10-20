@@ -21383,6 +21383,7 @@ pub(crate) mod request_tests {
         prepared: PreparedActorGeneration,
     ) {
         let target = prepared
+            .candidate
             .installation
             .source_dependency()
             .generation()
@@ -21477,6 +21478,7 @@ pub(crate) mod request_tests {
         prepared: PreparedActorGeneration,
     ) {
         let parent = prepared
+            .candidate
             .installation
             .source_dependency()
             .generation()
@@ -21486,6 +21488,7 @@ pub(crate) mod request_tests {
             .unwrap()
             .clone();
         let target = prepared
+            .candidate
             .installation
             .source_dependency()
             .generation()
@@ -22139,7 +22142,7 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap();
                 assert_eq!(rejected.installation_work, expected_work);
-                let rejected_scope = rejected.scope.clone();
+                let rejected_scope = rejected.candidate.scope.clone();
                 let decision = tidepool_runtime::session::PublicationDecision::new();
                 if cancelled {
                     decision.request_cancellation();
