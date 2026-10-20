@@ -200,34 +200,11 @@ impl GenerationRetirementDiagnostic {
         }
     }
 
-    fn record_refusal(
-        &mut self,
-        refusal: &ActorGenerationPublicationRefusal,
-    ) -> Option<(
-        crate::resident_actor::RecordedRetirementDiagnosticObservation,
-        Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
-    )> {
-        let (owner, handoff) = match self {
-            Self::Operation { owner, handoff } => (owner, handoff),
+    fn project_settlement(&mut self, settlement: &ActorGenerationPublicationSettlement) {
+        let handoff = match self {
+            Self::Operation { handoff, .. } => handoff,
             #[cfg(test)]
-            Self::CancelledComponent => return None,
-        };
-        if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
-            // Retain the SAME immutable projection before the first write: a
-            // lost receipt must never force reconstruction or text matching.
-            *handoff = RetirementDiagnosticHandoff::Projected {
-                evidence: Arc::new(
-                    crate::resident_actor::RetirementDiagnosticEvidence::from_refusal(refusal),
-                ),
-                refusals: Vec::new(),
-            };
-        }
-        Self::write_projected(owner, handoff)
-    }
-
-    fn record_settlement(&mut self, settlement: &ActorGenerationPublicationSettlement) {
-        let Self::Operation { owner, handoff } = self else {
-            return;
+            Self::CancelledComponent => return,
         };
         if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
             let Some(evidence) =
@@ -235,17 +212,41 @@ impl GenerationRetirementDiagnostic {
             else {
                 return;
             };
+            // Retain the SAME projection before any write. A lost receipt never
+            // requires rebuilding evidence or comparing rendered diagnostics.
             *handoff = RetirementDiagnosticHandoff::Projected {
                 evidence: Arc::new(evidence),
                 refusals: Vec::new(),
             };
         }
-        Self::write_projected(owner, handoff);
     }
 
     fn retry_projected(&mut self) {
-        if let Self::Operation { owner, handoff } = self {
-            Self::write_projected(owner, handoff);
+        match self {
+            Self::Operation { owner, handoff } => {
+                Self::write_projected(owner, handoff);
+            }
+            #[cfg(test)]
+            Self::CancelledComponent => {}
+        }
+    }
+
+    fn recorded(
+        &self,
+    ) -> Option<(
+        crate::resident_actor::RecordedRetirementDiagnosticObservation,
+        Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
+    )> {
+        match self {
+            Self::Operation {
+                handoff:
+                    RetirementDiagnosticHandoff::Recorded {
+                        observation,
+                        refusals,
+                    },
+                ..
+            } => Some((observation.clone(), refusals.clone())),
+            _ => None,
         }
     }
 
@@ -1254,7 +1255,7 @@ impl GenerationPublicationCustody {
         if let Self::Received(settlement) = self {
             // The same actual settlement remains in the core across projection
             // and journal writes, including panic or loss of the live owner.
-            diagnostic.record_settlement(settlement);
+            diagnostic.project_settlement(settlement);
             let Self::Received(settlement) =
                 std::mem::replace(self, Self::ProducerLostAfterExecute)
             else {
@@ -1379,10 +1380,8 @@ impl GenerationPublicationCustody {
                 }
             };
         }
-        let Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
-            refusal,
-            ..
-        }) = self
+        let Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished { .. }) =
+            self
         else {
             return None;
         };
@@ -1391,7 +1390,7 @@ impl GenerationPublicationCustody {
             // still requires the actual body's settled-obligation assessment.
             (None, Vec::new())
         } else {
-            let (recorded, refusals) = diagnostic.record_refusal(refusal)?;
+            let (recorded, refusals) = diagnostic.recorded()?;
             (Some(recorded), refusals)
         };
         // The producer's consuming check has no await or source transition. It
