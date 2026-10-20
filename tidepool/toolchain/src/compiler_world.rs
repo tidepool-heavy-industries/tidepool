@@ -2226,7 +2226,7 @@ impl CheckedWorldCellItem {
 
 /// The SAME-certified checked World CellProgram. It can only be issued from
 /// one physical `WorldCellOutputAdmission`; a raw completion or a decoded
-/// receipt is not authority. It binds the reservation, logical world, distinct
+/// receipt is not authority. It binds the reservation, logical world, labeled
 /// original/target selections, producer and issuing transaction origin,
 /// per-item generations and the exact output certificate.
 // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -2353,11 +2353,8 @@ impl CheckedWorldCellProgram {
         origin: &tidepool_extract_cmd::CompilerTransactionOrigin,
         producer_identity: [u8; 32],
     ) -> Result<Self, CompileError> {
-        if original == target {
-            return Err(source_failure(
-                "world cell original and target selections are not distinct",
-            ));
-        }
+        // These labeled descriptions may agree. Runtime admission retains and
+        // checks the actual original transaction and receiving placement.
         if output.origin != *origin {
             return Err(source_failure(
                 "world cell preparation belongs to another compiler transaction",
