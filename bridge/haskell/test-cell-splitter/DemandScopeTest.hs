@@ -3,6 +3,7 @@ module DemandScopeTest (demandScopeChecks) where
 import Control.Exception (bracket)
 import Control.Monad (forM_, unless, foldM)
 import Control.Monad.IO.Class (liftIO)
+import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
 import GHC
@@ -41,6 +42,12 @@ demandScopeChecks = do
             ["module DeclarationModule where", "data Box = Box Int", "refer = old"])
           "QualifiedOperand" -> pure (unlines
             ["module QualifiedOperand where", "import qualified Data.Version as Operand", "root = Operand.makeVersion"])
+          "SameLabelOperand" -> pure (unlines
+            ["module SameLabelOperand where", "import qualified Data.Version as Operand"
+            ,"root = (input, input, Operand.makeVersion, Operand.makeVersion)"])
+          "UnusedHelperOperand" -> pure (unlines
+            ["module UnusedHelperOperand where", "import qualified Data.Version as Operand"
+            ,"helper = Operand.makeVersion", "root = ()"])
           "UnusedOperand" -> pure (unlines
             ["module UnusedOperand where", "import qualified Data.Version as Operand", "root = ()"])
           "ShadowOperand" -> pure (unlines
@@ -53,7 +60,7 @@ demandScopeChecks = do
         actual <- liftIO (sourceModuleFlags initial source)
           >>= either (liftIO . fail . show) pure
         _ <- setSessionDynFlags actual {backend=noBackend,ghcLink=NoLink}
-        actualOperand <- if name `elem` ["QualifiedOperand","UnusedOperand","ShadowOperand"] then do
+        actualOperand <- if name `elem` ["QualifiedOperand","SameLabelOperand","UnusedHelperOperand","UnusedOperand","ShadowOperand"] then do
           owner <- findModule (mkModuleName "Data.Version") Nothing
           information <- getModuleInfo owner >>= maybe (liftIO (fail "missing actual Data.Version interface")) pure
           case [exported | exported <- modInfoExports information,occNameString (nameOccName exported) == "makeVersion"] of
@@ -113,6 +120,11 @@ demandScopeChecks = do
                 (RenameRefusal,Left (InputDemandRenameRejected diagnostic))
                   | not (null diagnostic) -> putStrLn (name ++ ": " ++ diagnostic)
                 _ -> fail (name ++ ": wrong demand or refusal phase: " ++ show demanded)
+              case demanded of
+                Right selected | name == "SameLabelOperand" ->
+                  unless (sort selected == [("input",0),("input",999)])
+                    (fail "distinct resolved Names sharing a label lost their original binding payloads")
+                _ -> pure ()
               _ <- foldM (\(previous,previousBindings) changes -> do
                 updated <- updateSegmentDemandScope environment changes previous
                 let nextBindings = Map.mapMaybe id (Map.union (Map.fromList changes)
@@ -158,6 +170,8 @@ controls =
   , ("MissingImport","root",["old"],RenameRefusal)
   , ("ActualQuote","root",[],ParseRefusal)
   , ("QualifiedOperand","root",[],Bindings ["input"])
+  , ("SameLabelOperand","root",["input"],Bindings ["input","input"])
+  , ("UnusedHelperOperand","root",[],Bindings ["input"])
   , ("UnusedOperand","root",[],Bindings [])
   , ("ShadowOperand","root",[],Bindings [])
   , ("DeclarationModule","",["old"],Bindings ["old"])
