@@ -1935,6 +1935,17 @@ pub enum CompilerResponseRejection {
     ProvenanceMismatch,
 }
 
+impl std::fmt::Display for CompilerResponseRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "malformed accepted compiler response",
+            Self::ProvenanceMismatch => "accepted compiler response provenance differs",
+        })
+    }
+}
+
+impl std::error::Error for CompilerResponseRejection {}
+
 /// Keep refusal and cleanup on the transaction that actually produced the
 /// rejected bytes. Its next request is poisoned; END retains all input custody.
 pub fn reject_compiler_response(reason: CompilerResponseRejection) -> SpawnError {
@@ -1949,15 +1960,7 @@ pub fn reject_compiler_response(reason: CompilerResponseRejection) -> SpawnError
     });
     SpawnError::indeterminate(
         "compiler response",
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            match reason {
-                CompilerResponseRejection::Malformed => "malformed accepted compiler response",
-                CompilerResponseRejection::ProvenanceMismatch => {
-                    "accepted compiler response provenance differs"
-                }
-            },
-        ),
+        io::Error::new(io::ErrorKind::InvalidData, reason),
     )
 }
 

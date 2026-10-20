@@ -4109,6 +4109,13 @@ impl CheckedWorldCellProgram {
         &self.output.observations
     }
 
+    /// Replay data-only refusal controls after the actual compiler transaction
+    /// has closed; this never returns an admitted owner to its caller.
+    #[cfg(test)]
+    pub(crate) fn assert_captured_stage_output_refusals(&self) {
+        answer_tests::assert_captured_stage_output_refusals(self);
+    }
+
     pub fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
         &self.output.reservation
     }
@@ -5732,6 +5739,117 @@ pub fn restore_world(
 #[cfg(test)]
 mod answer_tests {
     use super::*;
+    #[test]
+    fn response_rejections_preserve_typed_cause_and_uncertain_settlement() {
+        use tidepool_extract_cmd::CompilerResponseRejection as R;
+        for (provenance, expected) in [(false, R::Malformed), (true, R::ProvenanceMismatch)] {
+            let CompileError::CompilerEndpoint(error) = world_response_error(provenance) else {
+                panic!("response refusal must retain endpoint cause");
+            };
+            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(
+                error
+                    .source
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<R>()),
+                Some(&expected),
+            );
+            assert!(!error.definitely_unsubmitted());
+            assert!(!error.permits_rebind());
+        }
+    }
+
+    pub(super) fn assert_captured_stage_output_refusals(program: &CheckedWorldCellProgram) {
+        use ciborium::value::Value;
+        use tidepool_extract_cmd::CompilerResponseRejection as Rejection;
+
+        // A malformed accepted response poisons an active transaction. These
+        // controls inspect a completed producer's bytes, outside that scope.
+        assert!(tidepool_extract_cmd::CompilerTransactionOrigin::current().is_none());
+        let bytes = std::fs::read(program.directory().path().join("cell-prepared.cbor"))
+            .expect("actual retained preparation output");
+        let replay = |bytes: &[u8]| {
+            admit_world_preparation_response(
+                program.output.origin.clone(),
+                program.output.request_correlation.clone(),
+                Arc::clone(program.reservation()),
+                Arc::clone(program.directory()),
+                bytes,
+                crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+        };
+        match replay(&bytes) {
+            Ok(Ok(_)) => {}
+            Ok(Err(refusal)) => panic!("actual preparation replay refused: {refusal:?}"),
+            Err(error) => panic!("actual preparation replay failed: {error:?}"),
+        }
+        let packet = answer_cbor(&bytes).expect("actual preparation packet");
+        let fields = answer_array(&packet, 9).expect("actual PREP5 fields");
+        let Value::Array(stages) = &fields[8] else {
+            panic!("actual preparation stage table");
+        };
+        assert!(stages.len() >= 2, "requires a genuine multi-stage producer");
+        let last = stages.len() - 1;
+        let bundle_ref = |stage: usize, role: usize| {
+            answer_array(&answer_array(&stages[stage], 4).unwrap()[2], 3).unwrap()[role].clone()
+        };
+        let assert_refused = |mutated: Value, expected: Rejection| {
+            // All correlation, reservation, manifest and item fields are the
+            // unchanged actual output. Only the named stage bundle is altered.
+            assert_eq!(&answer_array(&mutated, 9).unwrap()[..8], &fields[..8]);
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&mutated, &mut encoded).unwrap();
+            let Err(CompileError::CompilerEndpoint(error)) = replay(&encoded) else {
+                panic!("mutated actual stage output did not reach endpoint refusal");
+            };
+            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(
+                error
+                    .source
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<Rejection>()),
+                Some(&expected),
+            );
+            assert!(!error.definitely_unsubmitted());
+            assert!(!error.permits_rebind());
+        };
+        for stage in [0, last] {
+            for role in 0..3 {
+                let mut missing = packet.clone();
+                let Value::Array(fields) = &mut missing else {
+                    unreachable!()
+                };
+                let Value::Array(stages) = &mut fields[8] else {
+                    unreachable!()
+                };
+                let Value::Array(row) = &mut stages[stage] else {
+                    unreachable!()
+                };
+                let Value::Array(bundle) = &mut row[2] else {
+                    unreachable!()
+                };
+                bundle.remove(role);
+                assert_refused(missing, Rejection::Malformed);
+
+                let mut crossed = packet.clone();
+                let Value::Array(fields) = &mut crossed else {
+                    unreachable!()
+                };
+                let Value::Array(stages) = &mut fields[8] else {
+                    unreachable!()
+                };
+                let Value::Array(row) = &mut stages[stage] else {
+                    unreachable!()
+                };
+                let Value::Array(bundle) = &mut row[2] else {
+                    unreachable!()
+                };
+                bundle[role] = bundle_ref(if stage == 0 { last } else { 0 }, role);
+                assert_refused(crossed, Rejection::ProvenanceMismatch);
+            }
+        }
+        eprintln!("actual stage-output decoder controls: 1 baseline, 12 typed refusals");
+    }
     fn sources(first: &[u8], second: &[u8]) -> CapturedCompilerSources {
         let root = |body: &[u8]| CapturedCompilerSourceRoot {
             manifest: SourceRootManifest::from_file_digests([(
