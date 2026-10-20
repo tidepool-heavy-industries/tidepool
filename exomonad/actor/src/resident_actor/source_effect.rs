@@ -159,10 +159,17 @@ pub(super) fn reload_disposition(
             WorkbenchOperationDisposition::Unknown
         }
         Ok(SrReloadOutcome::ReloadRetirement(receipt)) => {
-            use tidepool_bridge_effects::{RlCleanupOutcome, RlRetirementState, RlStopOutcome};
+            use tidepool_bridge_effects::{
+                RlCleanupOutcome, RlOperationalSettlement, RlRetirementState, RlStopOutcome,
+            };
+            if matches!(
+                receipt.settlement,
+                RlOperationalSettlement::ReloadOperationalUnsettled(..)
+            ) {
+                return WorkbenchOperationDisposition::Unknown;
+            }
             match &receipt.state {
-                RlRetirementState::ReloadRetirementFenced(_)
-                | RlRetirementState::ReloadBPublishedAUnsettled(..) => {
+                RlRetirementState::ReloadRetirementFenced(_) => {
                     WorkbenchOperationDisposition::Unknown
                 }
                 RlRetirementState::ReloadBPublished(..) => WorkbenchOperationDisposition::Committed,
@@ -422,7 +429,71 @@ mod tests {
                 WorkbenchOperationDisposition::Rejected,
             ),
         ];
-        for (answer, expected) in cases {
+        let retirement = |state, settlement| {
+            Ok(SrReloadOutcome::ReloadRetirement(
+                tidepool_bridge_effects::RlRetirementReceipt {
+                    previous: revision("A"),
+                    candidate: revision("B"),
+                    operation: None,
+                    state,
+                    blockers: vec![],
+                    outcomes: vec![],
+                    surface: tidepool_bridge_effects::RlSurfaceDiff {
+                        added: vec![],
+                        removed: vec![],
+                        changed: vec![],
+                    },
+                    primary: Some(tidepool_bridge_effects::RlCause {
+                        kind: tidepool_bridge_effects::RlCauseKind::ReloadPublicationFailed,
+                        detail: "a completed failure can have all obligations settled".into(),
+                    }),
+                    secondary: vec![],
+                    settlement,
+                },
+            ))
+        };
+        use tidepool_bridge_effects::{
+            RlObligationObservation as Observation, RlOperationalSettlement as Settlement,
+            RlRetirementObligation as Obligation, RlRetirementState as State,
+        };
+        let explicit_settlement = [
+            (
+                retirement(State::ReloadAReopened, Settlement::ReloadOperationalSettled),
+                WorkbenchOperationDisposition::Rejected,
+            ),
+            (
+                retirement(
+                    State::ReloadBPublished(vec![], vec![]),
+                    Settlement::ReloadOperationalSettled,
+                ),
+                WorkbenchOperationDisposition::Committed,
+            ),
+            (
+                retirement(
+                    State::ReloadAReopened,
+                    Settlement::ReloadOperationalUnsettled(
+                        Obligation::ReloadPhysicalCleanupObligation(
+                            Observation::ReloadObligationUnconfirmed,
+                        ),
+                        vec![],
+                    ),
+                ),
+                WorkbenchOperationDisposition::Unknown,
+            ),
+            (
+                retirement(
+                    State::ReloadBPublished(vec![], vec![]),
+                    Settlement::ReloadOperationalUnsettled(
+                        Obligation::ReloadOriginalRetirementObligation(
+                            Observation::ReloadObligationRefused,
+                        ),
+                        vec![],
+                    ),
+                ),
+                WorkbenchOperationDisposition::Unknown,
+            ),
+        ];
+        for (answer, expected) in cases.into_iter().chain(explicit_settlement) {
             let disposition = reload_disposition(&answer);
             assert_eq!(disposition, expected);
             let delivered = format!("{answer:?}");
