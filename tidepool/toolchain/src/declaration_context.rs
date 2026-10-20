@@ -20749,6 +20749,7 @@ mod tests {
             // This is untrusted group-demand DATA, not a source/product receipt
             // admission. The actual existing group issuer supplies the proof.
             let mut receipt = CertifiedReceipt {
+                package_products: Vec::new(),
                 modules: Vec::new(),
                 targets: BTreeMap::from([(
                     "target".into(),
@@ -20890,6 +20891,7 @@ mod tests {
             .unwrap();
         let binder = group.binders().iter().next().unwrap().clone();
         CertifiedReceipt {
+            package_products: Vec::new(),
             modules: Vec::new(),
             targets: BTreeMap::from([(
                 "target".into(),
@@ -20980,6 +20982,7 @@ mod tests {
             ProductOrigin::Cached,
         ] {
             let mut receipt = CertifiedReceipt {
+                package_products: Vec::new(),
                 modules: vec![CertifiedModuleReceipt {
                     origin,
                     unit: owner.unit.clone(),
