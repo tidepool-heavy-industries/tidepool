@@ -63,6 +63,95 @@ fn return_through_stopped_endpoint(
 }
 
 impl RunControlClient {
+    pub(crate) fn assert_cancelled_initial_publication(
+        &self,
+        preparation: ActorGenerationRetirementPreparation,
+        state: Arc<InstalledToolsState>,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        retained: bool,
+    ) -> futures_util::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            assert!(preparation.expected_generation().is_none());
+            assert!(preparation.reload_report().is_none());
+            let actor = preparation.actor();
+            let bootstrap = state.current().unwrap();
+            let (prepared, driver) = preparation.into_parts();
+            let ActorGenerationRetirementPreparationOutcome::Reserved {
+                reserved,
+                publisher,
+            } = driver
+                .reserve(prepared)
+                .unwrap_or_else(|_| panic!("actual initial preparation matches its driver"))
+            else {
+                panic!("the actual bootstrap must reserve its prepared initial generation")
+            };
+            let observer = reserved.attempt_observer();
+            let mut owner = reserved.into_publication_owner();
+            let body = owner
+                .take_body()
+                .unwrap_or_else(|_| panic!("actual initial owner issues its own body"));
+            assert_eq!(
+                decision.request_cancellation(),
+                tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
+            );
+            let (endpoint, task) = Actor::spawn(None, PreparationSupervisor, self.owner.clone())
+                .await
+                .unwrap();
+            let (writer, receiver, terminal) =
+                preparation::PublicationTransfer::channel(actor, observer, self.owner.clone());
+            let transfer = preparation::PublicationTransfer::new(body, publisher, writer);
+            assert!(endpoint
+                .send_message(PreparationMessage::PublishGeneration(transfer))
+                .is_ok());
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while terminal.get().is_none() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let mut custody = GenerationPublicationCustody::Waiting { receiver, terminal };
+            custody.observe(&mut owner);
+            assert!(matches!(custody, GenerationPublicationCustody::Received));
+            assert!(matches!(
+                owner.failure_outcome().unwrap().as_ref(),
+                Ok(ActorGenerationCommit::Refused(_))
+            ));
+            assert!(matches!(
+                owner.refuse_initial(),
+                PublicationOwnerSettlement::Restored
+            ));
+            let (discharge, error) = initial_publication_failure(&owner, &custody);
+            assert_eq!(discharge, !retained);
+            match (&error, retained) {
+                (InitialGenerationPublicationError::Body(actual), false)
+                | (InitialGenerationPublicationError::UnconfirmedBody(actual), true) => {
+                    assert!(Arc::ptr_eq(actual, owner.failure_outcome().unwrap()));
+                }
+                _ => panic!("actual body obligations must control the shared Initial classifier"),
+            }
+            let error = ResidentActorWorkbenchError::InitialPublication {
+                source: Box::new(error),
+            };
+            assert_eq!(error.requires_recovery(), retained);
+            assert_eq!(owner.settled_obligations(), !retained);
+            assert!(owner.confirmed_generation().is_none());
+            assert!(state.current_generation().is_none());
+            let restored = state.current().unwrap();
+            assert_eq!(restored.actor(), bootstrap.actor());
+            assert!(restored.source().same_revision(bootstrap.source()));
+            assert!(Arc::ptr_eq(
+                &restored.tools_arc().unwrap(),
+                &bootstrap.tools_arc().unwrap()
+            ));
+            endpoint.stop(None);
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap();
+        })
+    }
+
     pub(crate) fn assert_publication_transport_protocol(
         &self,
         preparations: Vec<ActorGenerationRetirementPreparation>,

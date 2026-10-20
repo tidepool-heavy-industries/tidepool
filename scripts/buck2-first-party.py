@@ -1968,6 +1968,18 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                initial_publication_control = "resident_workbench::request_tests::actual_initial_cancelled_body_preserves_its_owned_obligations"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_initial_publication_protocol_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([initial_publication_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(initial_publication_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 source_registration_control = "resident_actor::replacement::tests::source_registration_slots_preserve_independent_callbacks_and_deferred_input"
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",

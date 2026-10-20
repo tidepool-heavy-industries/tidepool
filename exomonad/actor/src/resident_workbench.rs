@@ -23898,6 +23898,7 @@ pub(crate) mod request_tests {
         BootstrapOwnerLoss,
         ReplacementOwnerLoss,
         BootstrapCheckoutRetired,
+        BootstrapCancelledBody,
         ReplacementCheckoutRetired,
         ReplacementFrozenSource,
         UnstartedSourceSettlements,
@@ -23929,11 +23930,26 @@ pub(crate) mod request_tests {
         }).await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted initial publication execution group"]
+    async fn actual_initial_cancelled_body_preserves_its_owned_obligations() {
+        with_test_compiler_owner(|client| async move {
+            for persistence in [crate::ActorPersistencePolicy::Ephemeral, crate::ActorPersistencePolicy::Durable] {
+                quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                    client.clone(), Some(persistence),
+                    Some(PublicationFailureControl::BootstrapCancelledBody),
+                ).await;
+            }
+        }).await;
+    }
+
     impl PublicationFailureControl {
         fn bootstrap(self) -> bool {
             matches!(
                 self,
-                Self::BootstrapOwnerLoss | Self::BootstrapCheckoutRetired
+                Self::BootstrapOwnerLoss
+                    | Self::BootstrapCheckoutRetired
+                    | Self::BootstrapCancelledBody
             )
         }
     }
@@ -24450,8 +24466,9 @@ pub(crate) mod request_tests {
     ) {
         match control {
             PublicationFailureControl::UnstartedSourceSettlements
-            | PublicationFailureControl::PublicationTransportProtocol => {
-                unreachable!("source settlement controls retain their three actual preparations")
+            | PublicationFailureControl::PublicationTransportProtocol
+            | PublicationFailureControl::BootstrapCancelledBody => {
+                unreachable!("the control enters at its actual preparation boundary")
             }
             PublicationFailureControl::RetirementNativeOwnerLoss(_) => {
                 unreachable!("native controls use their actual directory owner")
@@ -25408,7 +25425,35 @@ pub(crate) mod request_tests {
                 };
                 assert_eq!(prepared.installation_work, expected_work);
                 if let Some(control) = publication_failure.filter(|control| control.bootstrap()) {
-                    assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                    if matches!(control, PublicationFailureControl::BootstrapCancelledBody) {
+                        let publisher = workbench.generation_publisher(
+                            state.clone(),
+                            ActorPublicationOwner::Preparation(preparation_client.clone()),
+                        );
+                        let decision = tidepool_runtime::session::PublicationDecision::new();
+                        let preparation = publisher.into_publication_preparation(
+                            prepared,
+                            decision.clone(),
+                            ActorGenerationPublication::Terminal,
+                        );
+                        let (directory, task) = crate::LocalActorDirectory::start().await.unwrap();
+                        directory
+                            .assert_cancelled_initial_publication(
+                                preparation,
+                                state,
+                                decision,
+                                descriptor.persistence_policy()
+                                    == crate::ActorPersistencePolicy::Durable,
+                            )
+                            .await;
+                        directory.stop_owner_for_test().await;
+                        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    } else {
+                        assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                    }
                     return;
                 }
                 let initial = match workbench
