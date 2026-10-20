@@ -57,7 +57,7 @@ pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
     PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity, WorldCellPlanRequest,
-    WorldCellPrepareRequest, WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
+    WorldCellOperandRequest, WorldCellPrepareRequest, WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -972,6 +972,7 @@ mod tests {
                 template: "template".into(),
                 turn_templates: vec![],
             }),
+            operand: None,
             output: "plan.cbor".into(),
         });
         assert!(matches!(refused, Err(ProtocolError::InvalidWorldCell)));

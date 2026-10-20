@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v25";
-const MAGIC: &[u8; 8] = b"TPREQ025";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v26";
+const MAGIC: &[u8; 8] = b"TPREQ026";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -166,11 +166,24 @@ impl WorldCellRecipe {
     }
 }
 
+/// Descriptor transport coordinates; the toolchain owns its checked operand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldCellOperandRequest {
+    pub descriptor: PathBuf,
+    pub sha256: [u8; 32],
+}
+
+impl WorldCellOperandRequest {
+    fn valid(&self) -> bool { valid_cell_path(&self.descriptor) }
+    fn encoded_len(&self) -> usize { 4 + self.descriptor.as_os_str().len() + 32 }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldCellPlanRequest {
     pub world: String,
     pub realization: String,
     pub recipe: Arc<WorldCellRecipe>,
+    pub operand: Option<WorldCellOperandRequest>,
     pub output: PathBuf,
 }
 
@@ -189,6 +202,7 @@ impl WorldCellPlanRequest {
         if !valid_world_identity(&self.world)
             || !valid_reference(&self.realization)
             || !self.recipe.valid()
+            || self.operand.as_ref().is_some_and(|operand| !operand.valid())
             || !valid_cell_path(&self.output)
         {
             return Err(ProtocolError::InvalidWorldCell);
@@ -200,6 +214,7 @@ impl WorldCellPlanRequest {
                 + 4
                 + self.realization.len()
                 + self.recipe.encoded_len()
+                + 1 + self.operand.as_ref().map_or(0, WorldCellOperandRequest::encoded_len)
                 + 4
                 + self.output.as_os_str().len(),
         )
@@ -233,8 +248,10 @@ pub struct WorldCellPrepareRequest {
     pub world: String,
     pub realization: String,
     pub recipe: Arc<WorldCellRecipe>,
+    pub operand: Option<WorldCellOperandRequest>,
     pub plan: Arc<[u8]>,
     pub admission: [u8; 32],
+    pub defining_scope: u64,
     pub slots: Vec<(u64, PlannedCellSlot)>,
     pub directory: PathBuf,
     pub output: PathBuf,
@@ -279,6 +296,7 @@ impl WorldCellPrepareRequest {
             &self.world,
             &self.realization,
             &self.recipe,
+            self.operand.as_ref(),
             &self.plan,
             self.slots
                 .iter()
@@ -294,6 +312,7 @@ impl WorldCellPrepareRequest {
         world: &str,
         realization: &str,
         recipe: &WorldCellRecipe,
+        operand: Option<&WorldCellOperandRequest>,
         plan: &[u8],
         slots: impl IntoIterator<Item = (u64, PlannedCellSlotRef<'a>)>,
         directory: &Path,
@@ -302,6 +321,7 @@ impl WorldCellPrepareRequest {
         if !valid_world_identity(world)
             || !valid_reference(realization)
             || !recipe.valid()
+            || operand.is_some_and(|operand| !operand.valid())
             || plan.is_empty()
             || plan.len() > 8 << 20
             || !valid_cell_path(directory)
@@ -344,6 +364,8 @@ impl WorldCellPrepareRequest {
                 + 4
                 + realization.len()
                 + recipe.encoded_len()
+                + 1 + operand.map_or(0, WorldCellOperandRequest::encoded_len)
+                + 8
                 + 4
                 + plan.len()
                 + 32
@@ -1033,11 +1055,17 @@ impl ExtractRequest {
                     let world = decoder.cell_string(64)?;
                     let realization = decoder.string()?;
                     let recipe = Arc::new(decoder.world_cell_recipe()?);
+                    let operand = match decoder.byte()? {
+                        0 => None,
+                        1 => Some(WorldCellOperandRequest { descriptor: PathBuf::from(decoder.cell_string(65536)?), sha256: decoder.fixed()? }),
+                        _ => return Err(ProtocolError::InvalidWorldCell),
+                    };
                     let output = PathBuf::from(decoder.cell_string(65536)?);
                     Field::WorldCellPlan(WorldCellPlanRequest {
                         world,
                         realization,
                         recipe,
+                        operand,
                         output,
                     })
                 }
@@ -1046,8 +1074,14 @@ impl ExtractRequest {
                     let world = decoder.cell_string(64)?;
                     let realization = decoder.string()?;
                     let recipe = Arc::new(decoder.world_cell_recipe()?);
+                    let operand = match decoder.byte()? {
+                        0 => None,
+                        1 => Some(WorldCellOperandRequest { descriptor: PathBuf::from(decoder.cell_string(65536)?), sha256: decoder.fixed()? }),
+                        _ => return Err(ProtocolError::InvalidWorldCell),
+                    };
                     let plan = decoder.cell_frame(8 << 20)?.to_vec();
                     let admission = decoder.fixed()?;
+                    let defining_scope = decoder.u64()?;
                     let count = decoder.count(17)?;
                     if count > 10000 {
                         return Err(ProtocolError::InvalidWorldCell);
@@ -1075,8 +1109,10 @@ impl ExtractRequest {
                         world,
                         realization,
                         recipe,
+                        operand,
                         plan: plan.into(),
                         admission,
+                        defining_scope,
                         slots,
                         directory,
                         output,
@@ -1993,6 +2029,10 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             push_frame(out, OsStr::new(&request.world));
             push_frame(out, OsStr::new(&request.realization));
             encode_world_cell_recipe(out, &request.recipe);
+            match &request.operand {
+                None => out.push(0),
+                Some(operand) => { out.push(1); push_frame(out, operand.descriptor.as_os_str()); out.extend_from_slice(&operand.sha256); }
+            }
             push_frame(out, request.output.as_os_str());
         }
         Field::WorldCellPrepare(request) => {
@@ -2000,9 +2040,14 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             push_frame(out, OsStr::new(&request.world));
             push_frame(out, OsStr::new(&request.realization));
             encode_world_cell_recipe(out, &request.recipe);
+            match &request.operand {
+                None => out.push(0),
+                Some(operand) => { out.push(1); push_frame(out, operand.descriptor.as_os_str()); out.extend_from_slice(&operand.sha256); }
+            }
             push_u32(out, request.plan.len());
             out.extend_from_slice(&request.plan);
             out.extend_from_slice(&request.admission);
+            out.extend_from_slice(&request.defining_scope.to_le_bytes());
             push_u32(out, request.slots.len());
             for (ordinal, slot) in &request.slots {
                 out.extend_from_slice(&ordinal.to_le_bytes());
@@ -2975,7 +3020,7 @@ mod tests {
         };
         let mut request = ExtractRequest::default();
         request.world_public_module(query.clone());
-        let bytes = unhex("5450524551303235000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
+        let bytes = unhex("5450524551303236000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
         assert_eq!(request.encode(), bytes);
         for mode in [WorldQueryMode::Info, WorldQueryMode::Type] {
             let mut request = ExtractRequest::default();
@@ -3065,14 +3110,17 @@ mod tests {
             world: "a".repeat(64),
             realization: "held".into(),
             recipe: recipe.clone(),
+            operand: None,
             output: "plan.cbor".into(),
         };
         let prepare = WorldCellPrepareRequest {
             world: plan.world.clone(),
             realization: plan.realization.clone(),
             recipe,
+            operand: None,
             plan: Arc::from(&b"plan-receipt"[..]),
             admission: [b'b'; 32],
+            defining_scope: 19,
             slots: vec![
                 (0, PlannedCellSlot::Bind(7)),
                 (
@@ -3088,8 +3136,8 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
         assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
-        let plan_bytes = unhex("5450524551303235000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72").unwrap();
-        let prepare_bytes = unhex("5450524551303235000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
+        let plan_bytes = unhex("5450524551303236000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72").unwrap();
+        let prepare_bytes = unhex("5450524551303236000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626213000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
         let mut plan_request = ExtractRequest::default();
         plan_request.world_cell_plan(plan.clone()).unwrap();
         let mut prepare_request = ExtractRequest::default();
@@ -3128,6 +3176,28 @@ mod tests {
                 }
             }
         }
+        // The optional descriptor and target scope survive both independent operations.
+        let operand = WorldCellOperandRequest {
+            descriptor: "operand.cbor".into(), sha256: [37; 32],
+        };
+        let mut with_operand = plan.clone();
+        with_operand.operand = Some(operand.clone());
+        let mut request = ExtractRequest::default();
+        request.world_cell_plan(with_operand.clone()).unwrap();
+        let bytes = request.encode();
+        let decoded = ExtractRequest::decode(&bytes).unwrap();
+        let [Field::WorldCellPlan(actual)] = decoded.fields.as_slice() else { panic!("plan"); };
+        assert_eq!(actual, &with_operand);
+        let mut with_operand = prepare.clone();
+        with_operand.operand = Some(operand);
+        let mut request = ExtractRequest::default();
+        request.world_cell_prepare(with_operand.clone()).unwrap();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        let [Field::WorldCellPrepare(actual)] = decoded.fields.as_slice() else { panic!("prepare"); };
+        assert_eq!(actual, &with_operand);
+        let mut invalid = plan.clone();
+        invalid.operand = Some(WorldCellOperandRequest { descriptor: "".into(), sha256: [0;32] });
+        assert_eq!(invalid.validate_transport(), Err(ProtocolError::InvalidWorldCell));
         let mut bad_recipes = Vec::new();
         let mut value = plan.clone();
         Arc::make_mut(&mut value.recipe).source = "λ".repeat((1 << 20) + 1);
@@ -3225,6 +3295,7 @@ mod tests {
                 &world,
                 "held",
                 &recipe,
+                None,
                 b"plan",
                 [(
                     0,
@@ -3253,6 +3324,7 @@ mod tests {
                 &world,
                 "held",
                 &recipe,
+                None,
                 b"plan",
                 aggregate,
                 Path::new("operation"),
@@ -3297,8 +3369,10 @@ mod tests {
                 template: String::new(),
                 turn_templates: vec![],
             }),
+            operand: None,
             plan: vec![0; 8 << 20].into(),
             admission: [1; 32],
+            defining_scope: 19,
             slots: vec![],
             directory: "operation".into(),
             output: "prepared.cbor".into(),
@@ -3325,7 +3399,7 @@ mod tests {
         };
         let request = make(resident.clone());
         // Independent fixed bytes also checked by the maintained Haskell codec case.
-        let bytes = unhex("54505245513032350001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
+        let bytes = unhex("54505245513032360001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
         assert_eq!(request.encode(), bytes);
         assert_eq!(
             ExtractRequest::decode(&bytes).unwrap().mode(),
