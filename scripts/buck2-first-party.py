@@ -1871,7 +1871,7 @@ tidepool_buildscript_run(
                 )
                 retirement_tests = [
                     "resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff",
-                    "resident_workbench::request_tests::actual_retirement_lost_delivery_preserves_published_notification",
+                    "resident_workbench::request_tests::actual_retirement_lost_body_delivery_retains_unconfirmed_publication",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
@@ -1947,7 +1947,7 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
-                delivery_loss_control = "resident_workbench::request_tests::actual_retirement_lost_delivery_preserves_published_notification"
+                delivery_loss_control = "resident_workbench::request_tests::actual_retirement_lost_body_delivery_retains_unconfirmed_publication"
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
                     '    name = "actor_generation_retirement_delivery_loss_tests",',
@@ -1956,6 +1956,30 @@ tidepool_buildscript_run(
                     "    expected_count = 1,", "    ignored = True,",
                     "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                     '    case_compiler_modes = {' + json.dumps(delivery_loss_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                publication_protocol_control = "resident_workbench::request_tests::actual_publication_transport_return_controls_source_restoration"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_publication_protocol_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([publication_protocol_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(publication_protocol_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                initial_publication_control = "resident_workbench::request_tests::actual_initial_cancelled_body_preserves_its_owned_obligations"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_initial_publication_protocol_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([initial_publication_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(initial_publication_control) + ': "owned-resident"},',
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))

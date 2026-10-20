@@ -1388,6 +1388,99 @@ impl std::fmt::Debug for RuntimeLexicalScopeLease {
             .finish_non_exhaustive()
     }
 }
+/// Sole pre-reservation disposal right for a freshly issued notebook source.
+/// Observing or cloning its lease does not grant this right.
+#[must_use]
+pub struct UnpublishedNotebookScope {
+    lease: Option<Arc<RuntimeLexicalScopeLease>>,
+}
+
+/// Neutral custody after the actual publication owner has fenced this source.
+/// Dropping this value cannot retire a possibly visible generation.
+#[must_use]
+pub struct ReservedNotebookScope {
+    lease: Option<Arc<RuntimeLexicalScopeLease>>,
+    attempt: u64,
+}
+
+impl UnpublishedNotebookScope {
+    pub fn lease(&self) -> &Arc<RuntimeLexicalScopeLease> {
+        self.lease
+            .as_ref()
+            .expect("unpublished notebook owns its lease")
+    }
+
+    pub fn into_reserved(
+        mut self,
+        fence: &super::RuntimeSourceFence,
+    ) -> Result<ReservedNotebookScope, (Self, super::SourceAdmissionError)> {
+        let attempt = match fence.reservation_for(self.lease()) {
+            Ok(attempt) => attempt,
+            Err(error) => return Err((self, error)),
+        };
+        Ok(ReservedNotebookScope {
+            lease: self.lease.take(),
+            attempt,
+        })
+    }
+}
+
+impl Drop for UnpublishedNotebookScope {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            // Cut off only the new unpublished source. Physical resources stay
+            // behind actual compiler/continuation holds and the existing reaper.
+            lease.source_admission.retire_scope(lease.scope);
+            drop(lease);
+        }
+    }
+}
+
+impl ReservedNotebookScope {
+    fn validate(
+        &self,
+        witness: &super::OwnSourceFenceReopened,
+    ) -> Result<(), super::SourceAdmissionError> {
+        let Some(lease) = &self.lease else {
+            return Err(super::SourceAdmissionError::StaleFence);
+        };
+        if !witness.matches(lease.source_admission(), self.attempt) {
+            return Err(super::SourceAdmissionError::StaleFence);
+        }
+        Ok(())
+    }
+
+    pub fn settle_published(
+        &mut self,
+        witness: &super::ConfirmedSourcePublication,
+    ) -> Result<(), super::SourceAdmissionError> {
+        let Some(lease) = &self.lease else {
+            return Err(super::SourceAdmissionError::StaleFence);
+        };
+        if !witness.matches(lease.source_admission(), self.attempt) {
+            return Err(super::SourceAdmissionError::StaleFence);
+        }
+        drop(self.lease.take());
+        Ok(())
+    }
+
+    /// Cut off this own reopened source. Only the publication guard's known
+    /// nonpublication branch may invoke this; the witness proves exact reopen,
+    /// not the absence of publication or physical cleanup.
+    pub fn close_reopened_source(
+        &mut self,
+        witness: &super::OwnSourceFenceReopened,
+    ) -> Result<(), super::SourceAdmissionError> {
+        self.validate(witness)?;
+        witness.discard_unpublished()?;
+        drop(self.lease.take());
+        Ok(())
+    }
+}
+
+static_assertions::assert_not_impl_any!(UnpublishedNotebookScope: Clone, Copy);
+static_assertions::assert_not_impl_any!(ReservedNotebookScope: Clone, Copy);
+
 impl Drop for RuntimeLexicalScopeLease {
     fn drop(&mut self) {
         self.owner
@@ -2015,7 +2108,9 @@ impl CheckedTurnCompletion {
             (tidepool_repr::execution_schema::CachedHomeOwner, u32),
         >,
         inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
-        retained_sources: &dyn Fn(super::persistent::ValidatedRetainedSourceRef<'_>) -> Option<super::resident::NativeSourceCustody>,
+        retained_sources: &dyn Fn(
+            super::persistent::ValidatedRetainedSourceRef<'_>,
+        ) -> Option<super::resident::NativeSourceCustody>,
     ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
         let association = {
             let state = self.prefix.state.lock();
@@ -2663,7 +2758,12 @@ impl RuntimeCellAdmission {
     /// Issue cumulative lexical projections while the machine and prefix
     /// mutex are stowed. Only this admission's immutable checked items enter
     /// the prepared sequence consumed by declaration adoption.
-    #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.declaration_projections", skip_all, fields(inclusive = true))]
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "cell_program.declaration_projections",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(super) fn prepare_declaration_projections(
         &self,
         cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
@@ -2681,24 +2781,31 @@ impl RuntimeCellAdmission {
             };
             let generation = match &self.compiler_basis {
                 RuntimeCellCompilerBasis::Finite(finite) => match &finite.planned {
-                    Some(plan) => plan.items().get(index).and_then(|row| row.declaration_generation()),
+                    Some(plan) => plan
+                        .items()
+                        .get(index)
+                        .and_then(|row| row.declaration_generation()),
                     None if index == 0 => self.reserved_generations.first().copied(),
                     None => None,
                 },
                 RuntimeCellCompilerBasis::World { reservation, .. } => {
                     use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
                     match reservation.slots().get(index) {
-                        Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => Some(Generation(*declaration)),
+                        Some(
+                            Slot::Prologue { declaration } | Slot::Declaration { declaration },
+                        ) => Some(Generation(*declaration)),
                         _ => None,
                     }
                 }
-            }.ok_or(SessionError::StaleStagedDeclaration)?;
+            }
+            .ok_or(SessionError::StaleStagedDeclaration)?;
             let _join = tracing::debug_span!(target: "exomonad_harness::timing",
                 "cell_program.authenticated_declaration_join", inclusive = true,
                 item_ordinal = index, generation = generation.0,
                 baseline_export_count = baseline.as_ref().map_or(0, |prior| prior.exports.len()),
                 introduced_export_count = evidence.introduced_exports().len(),
-            ).entered();
+            )
+            .entered();
             let includes = match &self.compiler_basis {
                 RuntimeCellCompilerBasis::Finite(finite) => finite.include_paths.as_slice(),
                 RuntimeCellCompilerBasis::World { .. } => item.include_paths(),
@@ -3372,6 +3479,17 @@ impl PersistentSession {
             .mint_detached_scope(source)
             .ok_or(SessionError::DeadScope(source))?;
         self.prepared_lexical_scope_lease(scope)
+    }
+
+    pub(super) fn mint_unpublished_notebook_scope(
+        &mut self,
+        prerequisite: Option<Arc<RuntimeLexicalScopeLease>>,
+    ) -> Result<UnpublishedNotebookScope, SessionError> {
+        if self.source_transaction.is_some() {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
+        let lease = self.mint_notebook_scope_with_lease(prerequisite)?;
+        Ok(UnpublishedNotebookScope { lease: Some(lease) })
     }
 
     pub(super) fn prepared_lexical_scope_lease(
@@ -5477,11 +5595,16 @@ impl PersistentSession {
             initial_value_generation,
             declarations: RuntimeCellDeclarations {
                 root: self.lib().root.clone(),
-                declaration_baseline: if !reservation.slots().iter().any(|slot| matches!(slot,
+                declaration_baseline: if !reservation.slots().iter().any(|slot| {
+                    matches!(slot,
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
-                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })) { None } else {
+                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })
+                }) {
+                    None
+                } else {
                     super::lexical_projection::DeclarationProjectionBaseline::capture(
-                        self.lib(), self.lib().scope_tip(scope),
+                        self.lib(),
+                        self.lib().scope_tip(scope),
                     )?
                 },
                 prepared_declarations: std::sync::OnceLock::new(),

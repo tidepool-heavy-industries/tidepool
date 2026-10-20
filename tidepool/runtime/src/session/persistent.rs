@@ -519,6 +519,15 @@ impl Drop for PersistentSession {
     }
 }
 
+enum NativeInstallationSource<'a> {
+    Unwitnessed,
+    Checked(super::turn::CurrentNativeSources<'a>),
+    ClosedEntry {
+        entry: &'a super::PreparedSourceEntry,
+        source: &'a super::resident::CapturedSourceOrigin,
+    },
+}
+
 impl PersistentSession {
     /// Own source preparation for callers that hold the session substrate.
     pub fn with_source_compiler_transaction<T>(
@@ -864,7 +873,33 @@ impl PersistentSession {
         let current = certification
             .current_native_sources(prepared)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        self.resolve_certification_with_sources(scope, prepared, certification, current.as_ref())
+        self.resolve_certification_with_sources(
+            scope,
+            prepared,
+            certification,
+            current.map_or(
+                NativeInstallationSource::Unwitnessed,
+                NativeInstallationSource::Checked,
+            ),
+        )
+    }
+
+    pub(super) fn resolve_closed_source_entry_in(
+        &self,
+        scope: ScopeId,
+        entry: &super::PreparedSourceEntry,
+        source: &super::resident::CapturedSourceOrigin,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        let code = entry.compiled().code();
+        let certification = code
+            .certification()
+            .expect("PreparedSourceEntry retains sealed original certification");
+        self.resolve_certification_with_sources(
+            scope,
+            code.prepared(),
+            certification,
+            NativeInstallationSource::ClosedEntry { entry, source },
+        )
     }
 
     pub(crate) fn resolve_runtime_target_in(
@@ -885,7 +920,10 @@ impl PersistentSession {
             scope,
             target.prepared.prepared(),
             &certification,
-            current.as_ref(),
+            current.map_or(
+                NativeInstallationSource::Unwitnessed,
+                NativeInstallationSource::Checked,
+            ),
         )
     }
 
@@ -894,7 +932,7 @@ impl PersistentSession {
         scope: ScopeId,
         prepared: &PreparedProgram,
         certification: &TurnCertification,
-        current: Option<&super::turn::CurrentNativeSources<'_>>,
+        origin: NativeInstallationSource<'_>,
     ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
@@ -1077,18 +1115,21 @@ impl PersistentSession {
             let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
             groups.push(ResolvedSourceGroup {
-                sources: current
-                    .map(|current| current.group(pending))
-                    .unwrap_or_else(|| {
-                        NativeSourceCustody::unknown(
-                            pending
-                                .group()
-                                .definitions()
-                                .sites()
-                                .iter()
-                                .map(|site| site.site),
-                        )
-                    }),
+                sources: match &origin {
+                    NativeInstallationSource::Checked(current) => current.group(pending),
+                    NativeInstallationSource::ClosedEntry { entry, source } => {
+                        debug_assert!(std::ptr::eq(prepared, entry.compiled().prepared().as_ref()));
+                        source.for_closed_entry_sites(pending.group().definitions().sites())
+                    }
+                    NativeInstallationSource::Unwitnessed => NativeSourceCustody::unknown(
+                        pending
+                            .group()
+                            .definitions()
+                            .sites()
+                            .iter()
+                            .map(|site| site.site),
+                    ),
+                },
                 group: tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
                     CertifiedGroup::admit(
                         pending.owner().clone(),
@@ -1101,11 +1142,15 @@ impl PersistentSession {
         }
         Ok(ResolvedCertifiedTurn {
             groups,
-            target_sources: current
-                .map(super::turn::CurrentNativeSources::target)
-                .unwrap_or_else(|| {
+            target_sources: match &origin {
+                NativeInstallationSource::Checked(current) => current.target(),
+                NativeInstallationSource::ClosedEntry { source, .. } => {
+                    source.for_closed_entry_sites(prepared.sites())
+                }
+                NativeInstallationSource::Unwitnessed => {
                     NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
-                }),
+                }
+            },
             target_owners,
             package_interfaces: certification.package_interfaces.clone(),
             source_evidence,
@@ -2549,19 +2594,21 @@ impl PersistentSession {
                     .visible_changes()
                     .map(|(name, entry)| {
                         let binding = entry
-                            .map(|entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
-                                let row = session
-                                    .retained_checked_value_artifact(entry.module)
-                                    .ok_or(SessionError::MissingRetainedValueInterface(
-                                        entry.module,
-                                    ))?;
-                                Ok(WorldDeclarationVisibleBinding {
-                                    identity: entry.value.identity.clone(),
-                                    id: entry.id,
-                                    defining_scope: entry.scope.0,
-                                    row: row.clone(),
-                                })
-                            })
+                            .map(
+                                |entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
+                                    let row = session
+                                        .retained_checked_value_artifact(entry.module)
+                                        .ok_or(SessionError::MissingRetainedValueInterface(
+                                            entry.module,
+                                        ))?;
+                                    Ok(WorldDeclarationVisibleBinding {
+                                        identity: entry.value.identity.clone(),
+                                        id: entry.id,
+                                        defining_scope: entry.scope.0,
+                                        row: row.clone(),
+                                    })
+                                },
+                            )
                             .transpose()?;
                         Ok((name.0.clone(), binding))
                     })
@@ -6785,7 +6832,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &authored_custody,
-                &[owner])
+                &[owner],
+            )
             .unwrap();
         session
             .bindings
@@ -6850,7 +6898,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_a,
-                &[owner.clone()])
+                &[owner.clone()],
+            )
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
         let before = session.residency().unwrap();
@@ -6862,7 +6911,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_b,
-                &[owner]),
+                &[owner]
+            ),
             Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(session.residency().unwrap(), before);
@@ -7068,7 +7118,8 @@ mod checkpoint_scope_tests {
                     public,
                     &[],
                     keys,
-                    &[owner])
+                    &[owner],
+                )
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
@@ -7148,7 +7199,8 @@ mod checkpoint_scope_tests {
                         public,
                         &[],
                         keys,
-                        &[owner.clone()])
+                        &[owner.clone()],
+                    )
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);
             }
@@ -7167,7 +7219,8 @@ mod checkpoint_scope_tests {
             let root_domain = target.source_plan().target[&source("D", "d2")].domain;
             let e_domain = target.source_plan().target[&source("E", "e2")].domain;
             assert_ne!(root_domain, e_domain);
-            let d2: Vec<_> = target.demanded()
+            let d2: Vec<_> = target
+                .demanded()
                 .iter()
                 .filter(|image| image.group().owner().module == "D")
                 .collect();

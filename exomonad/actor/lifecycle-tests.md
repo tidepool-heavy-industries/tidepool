@@ -13,7 +13,7 @@ decision. They do not issue a staged Reload report or qualify automatic Reload.
 | Body refusal and linked cancelled body | An executed body returns its own refusal and obligations; this is not command nonstart. |
 | Native recovery of linked result | Native cleanup consumes the same actual body result, preserving physical obligations. |
 | Crossed source receipts and partial reopening | Only the same reservation's source receipt can discharge it; partial A restoration remains refused. |
-| Lost publication delivery | Known publication and notification must survive lost result delivery. The oracle is reached only after actual publication. |
+| Lost body delivery after visibility | A compact visibility observation does not confirm publication or notify the lifecycle. The core retains the guard, both source gates stay closed, and notification remains unconfirmed. |
 
 Retain these component controls when changing the publication protocol. A
 component pass does not establish successful hosted Reload, force, complete
@@ -25,6 +25,21 @@ an actual reservation/fence, a real refused transport returning the same unrun
 body, the owner-held guard, and an ordinary acknowledged operation diagnostic.
 Do not attach a fabricated Reload report, create a capture, or bypass automatic
 policy to make a component fixture resemble the hosted path.
+
+The named `actor_generation_publication_protocol_tests` target exercises that
+lower production reconciliation boundary with three actual prepared replacements.
+It returns a body through a stopped supervisor, loses an actual diagnostic journal,
+and loses the real result after the driver accepts and completes its body. That
+third history does not require or establish visibility or independent B source.
+It creates no Reload report, capture, or STOP command. Its source restoration and
+evidence assertions do not establish physical cleanup or successful hosted Reload.
+
+The separate `actor_initial_publication_protocol_tests` target uses actual
+Ephemeral and Durable initial preparations. Each is cancelled before committing
+and executed through a live publication supervisor. The real returned refusal and
+borrowed initial settlement feed the production failure classifier. The Durable
+body's retained obligations must remain recovery-required; the settled Ephemeral
+body can discharge. The test creates neither a predecessor nor a cutoff.
 
 The host's coherent reload histories use the real source staging owner and the
 authored tool. The frozen-source history must execute a new B cell after A's

@@ -42,7 +42,7 @@ where
             tidepool_runtime::session::PublicationDecision::new,
             |control| control.publication_decision(),
         );
-        let preparation = self.publisher.into_retirement_preparation(
+        let preparation = self.publisher.into_publication_preparation(
             prepared,
             publication,
             if self.control.is_some() {

@@ -15,8 +15,8 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle,
-    PreparedOuter, PreparedResult, ProgramId, SourceBinder,
+    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle, PreparedOuter,
+    PreparedResult, ProgramId, SourceBinder,
 };
 use tidepool_repr::execution_schema::{
     CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity,
@@ -177,6 +177,23 @@ impl CapturedSourceOrigin {
         source: &super::RuntimeSourceCompilerTransaction,
     ) -> Result<Self, super::SourceAdmissionError> {
         source.admitted_original_source().map(Self)
+    }
+
+    // Only the closed source-entry installer calls this for definitions that
+    // its fresh native batch is about to instantiate. Existing physical imports
+    // retain their own ProgramFacts in the batch installer.
+    pub(super) fn for_closed_entry_sites(
+        &self,
+        sites: &[tidepool_repr::execution_schema::SiteRow],
+    ) -> NativeSourceCustody {
+        NativeSourceCustody {
+            sites: Arc::new(
+                sites
+                    .iter()
+                    .map(|site| (site.site, RuntimeSourceOrigin::Known(self.0.clone())))
+                    .collect(),
+            ),
+        }
     }
 
     pub(super) fn for_current_target(
@@ -2331,6 +2348,34 @@ impl PreparedStartupEntry {
         }
     }
 }
+
+/// A closed source entry installed in a runtime-minted fresh domain.
+enum StartupInput<'a> {
+    Ordinary {
+        code: TurnCode<'a>,
+        identity: StartupCompileIdentity,
+    },
+    Closed {
+        entry: &'a super::PreparedSourceEntry,
+        origin: &'a CapturedSourceOrigin,
+    },
+}
+
+/// Neither a scope description nor a raw TurnCode can construct this capsule.
+#[must_use]
+pub struct PreparedSourceStartupEntry {
+    entry: PreparedStartupEntry,
+    installation_scope: Arc<super::RuntimeLexicalScopeLease>,
+    original_source: Arc<super::RuntimeOriginalSource>,
+}
+
+impl PreparedSourceStartupEntry {
+    pub fn installation_scope(&self) -> &Arc<super::RuntimeLexicalScopeLease> {
+        &self.installation_scope
+    }
+}
+
+static_assertions::assert_not_impl_any!(PreparedSourceStartupEntry: Clone, Copy);
 
 static_assertions::assert_not_impl_any!(PreparedStartupEntry: Clone, Copy);
 
@@ -7359,6 +7404,16 @@ where
         self.settle_dropped_custody();
         self.state.mint_notebook_scope_with_lease(prerequisite)
     }
+    /// Mint the provisional notebook only outside compiler-source sequencing.
+    /// Permission to initiate replacement is held by the actor owner separately.
+    pub fn mint_unpublished_notebook_scope(
+        &mut self,
+        prerequisite: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<super::UnpublishedNotebookScope, SessionError> {
+        self.settle_dropped_custody();
+        self.state.mint_unpublished_notebook_scope(prerequisite)
+    }
+
     pub fn adopt_initial_notebook_scope(
         &mut self,
         scope: ScopeId,
@@ -8038,7 +8093,9 @@ where
                 }
             };
             let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                self.binding_provenance.get(&input.id().raw()).map(|p| p.source_custody())
+                self.binding_provenance
+                    .get(&input.id().raw())
+                    .map(|p| p.source_custody())
             };
             match checked {
                 Some(checked) => checked.install_certified_turn_in(
@@ -8057,7 +8114,8 @@ where
                     &resolved.source_evidence,
                     &resolved.inherited_needed,
                 )?,
-            }.into_parts()
+            }
+            .into_parts()
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
@@ -8119,20 +8177,92 @@ where
         code: TurnCode<'_>,
         compile_identity: StartupCompileIdentity,
     ) -> Result<PreparedStartupEntry, ResidentError> {
+        self.prepare_startup_entry_in(
+            StartupInput::Ordinary {
+                code,
+                identity: compile_identity,
+            },
+            self.run_context.lexical_scope,
+        )
+    }
+
+    /// Install closed compiler-owned code into a fresh runtime domain. The
+    /// current transaction supplies the actual source authority; immutable code
+    /// reuse never substitutes for that admission or reuses a live dispatcher.
+    pub fn prepare_source_startup_entry(
+        &mut self,
+        source_entry: &super::PreparedSourceEntry,
+    ) -> Result<PreparedSourceStartupEntry, ResidentError> {
         self.settle_dropped_custody();
-        let scope = self.run_context.lexical_scope;
+        let transaction =
+            self.state
+                .source_transaction
+                .as_ref()
+                .ok_or(SessionError::SourceAdmission(
+                    super::SourceAdmissionError::MissingTransaction,
+                ))?;
+        let origin =
+            CapturedSourceOrigin::capture(transaction).map_err(SessionError::SourceAdmission)?;
+        self.set_image_registry(Arc::clone(source_entry.image_registry()));
+        let installation_scope = self.state.mint_isolated_scope_with_lease()?;
+        let entry = self.prepare_startup_entry_in(
+            StartupInput::Closed {
+                entry: source_entry,
+                origin: &origin,
+            },
+            installation_scope.scope(),
+        )?;
+        Ok(PreparedSourceStartupEntry {
+            entry,
+            installation_scope,
+            original_source: origin.0,
+        })
+    }
+
+    fn prepare_startup_entry_in(
+        &mut self,
+        input: StartupInput<'_>,
+        scope: ScopeId,
+    ) -> Result<PreparedStartupEntry, ResidentError> {
+        self.settle_dropped_custody();
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let admission =
-            self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?;
+        let (admission, compile_identity) = match input {
+            StartupInput::Closed { entry, origin } => {
+                let code = entry.compiled().code();
+                let proof = code
+                    .certification
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|certification| certification.ordinary_original())
+                    .ok_or(ResidentError::UnsealedStartupEntry)?;
+                let identity = StartupCompileIdentity::Issued(proof.clone());
+                let resolved = self
+                    .state
+                    .resolve_closed_source_entry_in(scope, entry, origin)?;
+                (
+                    AdmittedTurnCode {
+                        code,
+                        scope,
+                        resolved: Some(resolved),
+                    },
+                    identity,
+                )
+            }
+            StartupInput::Ordinary { code, identity } => (
+                self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?,
+                identity,
+            ),
+        };
         let provenance = self.provenance_for(&admission)?;
         let InstalledAdmittedTurn {
             program,
             source_keys,
             provenance,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
+        } =
+            self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -8147,6 +8277,41 @@ where
             _lease: self.lease_bindings(&[]),
             compile_identity,
         })
+    }
+
+    pub fn run_source_startup_entry(
+        &mut self,
+        entry: PreparedSourceStartupEntry,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentError> {
+        if self.run_context.lexical_scope != entry.installation_scope.scope() {
+            return Err(ResidentError::StaleStartupEntry);
+        }
+        let transaction =
+            self.state
+                .source_transaction
+                .as_ref()
+                .ok_or(SessionError::SourceAdmission(
+                    super::SourceAdmissionError::MissingTransaction,
+                ))?;
+        let source = transaction
+            .admitted_original_source()
+            .map_err(SessionError::SourceAdmission)?;
+        // Canonical live issuer identity, independent of compiler bytes or cache keys.
+        if !Arc::ptr_eq(&source, &entry.original_source) {
+            return Err(SessionError::SourceAdmission(
+                super::SourceAdmissionError::DifferentOriginalSource,
+            )
+            .into());
+        }
+        self.state
+            .admit_source_work_in(entry.installation_scope.scope())
+            .map_err(SessionError::SourceAdmission)?;
+        self.state.validate_lexical_scope_lease(
+            entry.installation_scope.scope(),
+            &entry.installation_scope,
+        )?;
+        self.run_startup_entry(entry.entry, settlement)
     }
 
     /// Consume the original startup capsule under the admitted actor's current
@@ -12739,6 +12904,290 @@ mod authored_publication_tests {
             eprintln!("ordinary admission work startup={startup} groups={group_count} resolver_calls={} outline_visits={} resolved_groups=unmeasured",
                 after.0 - before.0, after.1 - before.1);
         }
+    }
+
+    #[test]
+    fn closed_source_startup_owns_fresh_domain_and_survives_prior_source_cutoff() {
+        use crate::session::{
+            assemble_expression_module, run_turn, ExpressionLift, TemplateSelector, TurnRequest,
+            TurnResult, TurnTemplate,
+        };
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
+        let preamble = crate::session::insert_preamble_imports(
+            effects.preamble(),
+            "Tidepool.Actors.Internal.Agent (installRequestReceiver)",
+        );
+        let templates = vec![TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_expression_module(
+                &preamble,
+                "__result",
+                effects.row(),
+                "{{TURN}}",
+                ExpressionLift::Effectful,
+            ),
+        }];
+        let root = tempfile::tempdir().unwrap();
+        let mut includes = effects.include_paths().to_vec();
+        includes.push(tidepool_testing::eval_harness::actor_sources_path());
+        includes.push(root.path().to_path_buf());
+        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "installRequestReceiver >> pure (42 :: Int)",
+                    templates: &templates,
+                    include: &includes,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap() else {
+            panic!("actual source expression target");
+        };
+        let prepared = crate::session::PreparedSourceEntry::prepare(
+            Arc::new(compiled),
+            Arc::new(ImageRegistry::new()),
+        )
+        .unwrap();
+        let lib =
+            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session =
+            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
+        let prior = session.mint_unpublished_notebook_scope(None).unwrap();
+        // Keep A's actual physical installation alive while the same immutable
+        // compiled entry is freshly instantiated for B in this machine.
+        let prior_entry = session
+            .with_source_compiler_transaction(
+                prior.lease().original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.prepare_source_startup_entry(&prepared),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        assert!(!prior_entry
+            .entry
+            .provenance
+            .original_sources
+            .sites
+            .is_empty());
+        for site in prior_entry.entry.provenance.original_sources.sites.keys() {
+            assert!(Arc::ptr_eq(
+                &prior_entry
+                    .entry
+                    .provenance
+                    .original_sources
+                    .require_unique(*site)
+                    .unwrap(),
+                prior.lease().original_source()
+            ));
+        }
+        let candidate = session.mint_unpublished_notebook_scope(None).unwrap();
+        let source = candidate.lease().original_source().clone();
+        session
+            .set_actor_execution(
+                SessionRunContext {
+                    lexical_scope: candidate.lease().scope(),
+                    ..SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        let prepare = |session: &mut TestSession| {
+            session
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.prepare_source_startup_entry(&prepared),
+                )
+                .unwrap()
+                .into_outcome()
+                .action
+                .unwrap()
+        };
+        let before = session.run_context;
+        let abandoned = prepare(&mut session);
+        assert_eq!(
+            session.run_context, before,
+            "runtime preparation never changes ambient placement"
+        );
+        assert_ne!(
+            abandoned.installation_scope.scope(),
+            candidate.lease().scope()
+        );
+        let program = abandoned.entry.program.unwrap();
+        let cancelled = session.mint_unpublished_notebook_scope(None).unwrap();
+        let cancelled_source = cancelled.lease().original_source().clone();
+        let cancelled_entry = session
+            .with_source_compiler_transaction(
+                cancelled_source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.prepare_source_startup_entry(&prepared),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        let cancelled_program = cancelled_entry.entry.program.unwrap();
+        drop(cancelled);
+        assert!(matches!(
+            cancelled_source.source_admission().admit(),
+            Err(super::super::SourceAdmissionError::Closed {
+                phase: super::super::SourceAdmissionPhase::ScopeRetired,
+                ..
+            })
+        ));
+        drop(cancelled_entry);
+        drop(abandoned);
+        assert!(session.settle_dropped_custody() >= 2);
+        assert!(
+            !session.state.require_prepared().unwrap().unpin(program),
+            "pre-hole cancellation released actual install pin"
+        );
+        assert!(
+            !session
+                .state
+                .require_prepared()
+                .unwrap()
+                .unpin(cancelled_program),
+            "provisional cancellation released its exact private install pin"
+        );
+        let entry = prepare(&mut session);
+        let wrong_scope = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        assert!(matches!(wrong_scope, Err(ResidentError::StaleStartupEntry)));
+        session.settle_dropped_custody();
+        let entry = prepare(&mut session);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: entry.installation_scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let wrong_source = session
+            .with_source_compiler_transaction(
+                prior.lease().original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        assert!(matches!(
+            wrong_source,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::DifferentOriginalSource
+            )))
+        ));
+        session.settle_dropped_custody();
+        let entry = prepare(&mut session);
+        let sites = entry.entry.provenance.original_sources.sites.len();
+        assert!(
+            sites > 0,
+            "actual effect site must exercise closed-source origin issuance"
+        );
+        for site in entry.entry.provenance.original_sources.sites.keys() {
+            assert!(Arc::ptr_eq(
+                &entry
+                    .entry
+                    .provenance
+                    .original_sources
+                    .require_unique(*site)
+                    .unwrap(),
+                &source
+            ));
+        }
+        let cutoff = prior.lease().source_admission().fence_if_idle().unwrap();
+        assert!(prior.lease().admit_source().is_err());
+        assert!(
+            candidate.lease().admit_source().is_ok(),
+            "B has no prior-A source edge"
+        );
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: entry.installation_scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let completed = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        let ResidentOutcome::Suspended { hole, .. } = completed else {
+            panic!("closed B reaches its actual effect site after A cutoff");
+        };
+        let completed = session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.resume_classified(hole, (), settlement).unwrap(),
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        let ResidentOutcome::Completed { result, .. } = completed else {
+            panic!("the actual accepted effect continuation completes once");
+        };
+        assert_eq!(result.to_json(), serde_json::json!(42));
+        eprintln!(
+            "actual closed source executed after prior cutoff; witnessed native sites={sites}"
+        );
+        cutoff.reopen(prior.lease().original_source()).unwrap();
+        let prior_program = prior_entry.entry.program.unwrap();
+        drop(prior_entry);
+        session.settle_dropped_custody();
+        assert!(!session
+            .state
+            .require_prepared()
+            .unwrap()
+            .unpin(prior_program));
     }
 
     #[test]

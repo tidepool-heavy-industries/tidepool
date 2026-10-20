@@ -36,12 +36,38 @@ impl RetirementDiagnosticEvidence {
         }
     }
 
+    pub(crate) fn unobserved_publication(error: &ResidentActorWorkbenchError) -> Self {
+        Self {
+            detail: error.to_string(),
+            diagnostic: error.failure_diagnostic(),
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Failed {
+                    cause: error.publication_failure_cause(),
+                    execution: error.execution_failure_kind(),
+                    requires_recovery: true,
+                },
+            retirement: None,
+        }
+    }
+
+    pub(crate) fn nonstart(detail: String) -> Self {
+        Self {
+            detail,
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_refusal(
         refusal: &crate::resident_workbench::ActorGenerationPublicationRefusal,
     ) -> Self {
         Self::from_outcome(refusal.outcome().as_ref(), refusal.observation())
     }
 
+    #[cfg(test)]
     pub(crate) fn from_settlement(
         settlement: &crate::resident_workbench::ActorGenerationPublicationSettlement,
     ) -> Option<Self> {
@@ -49,7 +75,7 @@ impl RetirementDiagnosticEvidence {
         Some(Self::from_outcome(outcome, observation))
     }
 
-    fn from_outcome(
+    pub(crate) fn from_outcome(
         outcome: &Result<
             crate::resident_workbench::ActorGenerationCommit,
             ResidentActorWorkbenchError,
@@ -1096,6 +1122,103 @@ impl WorkbenchExecutions {
             })
             .collect()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_publication_transport_protocol(
+    workbench: &crate::resident_workbench::ResidentActorWorkbench<
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput,
+    >,
+    state: Arc<crate::resident_workbench::InstalledToolsState>,
+    preparations: Vec<crate::resident_workbench::PreparedActorGeneration>,
+) -> futures_util::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        let preparation_owner = crate::CompilerPreparationOwner::new();
+        let preparations = preparations
+            .into_iter()
+            .map(|prepared| {
+                workbench
+                    .generation_publisher(
+                        state.clone(),
+                        crate::resident_workbench::ActorPublicationOwner::Preparation(
+                            preparation_owner.client(),
+                        ),
+                    )
+                    .into_publication_preparation(
+                        prepared,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        crate::resident_workbench::ActorGenerationPublication::Terminal,
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(preparations.len(), 3);
+        let actor = preparations[0].actor();
+        let mut journals = Vec::new();
+        let mut works = Vec::new();
+        let mut diagnostics = Vec::new();
+        for _ in 0..3 {
+            let control = crate::WorkbenchExecutionControl::untracked();
+            let execution = control.execution_id(actor);
+            let request = WorkbenchRequest::from_cell_input("publication protocol observation")
+                .with_execution_id(execution.clone());
+            let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+            let work = journal
+                .lock()
+                .begin_selecting_invocation(actor, &execution, &request, None, &control);
+            let operation = WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            };
+            diagnostics.push(
+                WorkbenchExecutions::admit_operation_diagnostic(&journal, operation, None, &work)
+                    .unwrap(),
+            );
+            journals.push(Some(journal));
+            works.push(work);
+        }
+        // This is actual journal loss, not a substituted acknowledgement or a
+        // policy flag in the publication attempt. Its owner keeps only Weak.
+        drop(journals[1].take());
+        let (directory, task) = crate::LocalActorDirectory::start().await.unwrap();
+        directory
+            .assert_publication_transport_protocol(preparations, state, diagnostics)
+            .await;
+        {
+            let journal = journals[0].as_ref().unwrap().lock();
+            let written = journal
+                .0
+                .values()
+                .flat_map(|record| record.operation_diagnostics.iter())
+                .filter_map(|operation| operation.evidence.as_ref())
+                .collect::<Vec<_>>();
+            assert_eq!(written.len(), 1);
+            assert!(matches!(
+                &written[0].observation,
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused
+            ));
+        }
+        assert!(journals[2]
+            .as_ref()
+            .unwrap()
+            .lock()
+            .0
+            .values()
+            .all(|record| {
+                record
+                    .operation_diagnostics
+                    .iter()
+                    .all(|operation| operation.evidence.is_none())
+            }));
+        directory.stop_owner_for_test().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(works);
+        drop(preparation_owner);
+    })
 }
 
 #[cfg(test)]

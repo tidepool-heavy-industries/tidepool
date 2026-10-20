@@ -80,6 +80,8 @@ mod terminal_wait;
 mod tool_support;
 pub use tool_support::installed_intrinsic_effect_support;
 mod workbench_ledger;
+#[cfg(test)]
+pub(crate) use workbench_ledger::assert_publication_transport_protocol;
 
 #[cfg(test)]
 pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
@@ -8632,7 +8634,8 @@ where
                 }
             };
             if let Some(installation) = &mut installation {
-                self.bind_initial_generation(context, installation).await?;
+                self.bind_initial_generation(kernel, context, installation)
+                    .await?;
             }
             self.check_application_readiness(kernel, context).await?;
             let mut installation_error = None;
@@ -8876,6 +8879,7 @@ where
 
     async fn bind_initial_generation(
         &self,
+        kernel: &KernelContext,
         context: &ActorSessionContext,
         installation: &mut LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
@@ -8914,14 +8918,17 @@ where
                 prompts.clone(),
             )
             .await?;
-        publisher
-            .publish(
-                prepared,
-                tidepool_runtime::session::PublicationDecision::new(),
-                crate::resident_workbench::ActorGenerationPublication::Terminal,
-            )
-            .await?
-            .notify_initial_generation(&lifecycle)?;
+        let preparation = publisher.into_publication_preparation(
+            prepared,
+            tidepool_runtime::session::PublicationDecision::new(),
+            crate::resident_workbench::ActorGenerationPublication::Terminal,
+        );
+        kernel
+            .publish_initial_actor_generation(preparation)
+            .await
+            .map_err(|source| ResidentActorWorkbenchError::InitialPublication {
+                source: Box::new(source),
+            })?;
         installation.prepared_tools.take();
         Ok(())
     }
@@ -8932,7 +8939,7 @@ where
         context: &ActorSessionContext,
         mut installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        self.bind_initial_generation(context, &mut installation)
+        self.bind_initial_generation(kernel, context, &mut installation)
             .await?;
         self.check_application_readiness(kernel, context).await?;
         let mut installation_error = None;
@@ -16275,11 +16282,10 @@ mod tests {
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, ResidentError,
-        TurnClassification, TurnKind, WorkbenchCellItemKind,
-        WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt,
-        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-        WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,
-        WorkbenchTerminalTransfer,
+        TurnClassification, TurnKind, WorkbenchCellItemKind, WorkbenchExecutionId,
+        WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+        WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
     };
 
     #[test]
