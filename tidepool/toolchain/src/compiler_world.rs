@@ -2757,7 +2757,7 @@ impl WorldColdRows {
         let canonical = match &entry.payload {
             ArtifactPayload::Original(product) => product.module_interface(),
             ArtifactPayload::Canonical(interface) => Some(interface),
-            ArtifactPayload::Interface(..) => None,
+            ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
         };
         let evidence = if let Some(interface) = canonical {
             let certificate = find(K::Certificate)?;

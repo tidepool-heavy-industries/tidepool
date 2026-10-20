@@ -2845,6 +2845,7 @@ impl InventoryState {
         }
         self.canonical_comparisons.fetch_add(1, Ordering::Relaxed);
         let offered = match &entry.payload {
+            ArtifactPayload::PackageCode(product) => product.bytes().len(),
             ArtifactPayload::Original(product) => product
                 .original_byte_anchors()
                 .iter()
@@ -3355,7 +3356,7 @@ impl SelectedOwners {
                     .module_interface()
                     .ok_or_else(|| failure("native canonical carrier missing"))?,
             ),
-            ArtifactPayload::Interface(_, _) => None,
+            ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         };
         if let Some(canonical) = canonical {
             let sealed = canonical
@@ -4894,7 +4895,7 @@ impl ArtifactInventory {
         }
         let materialization_parents = Vec::new();
         let retained_roots: Option<Vec<InventoryNodeKey>> = None;
-        let custody_roots = Vec::<ArtifactBindingNode>::new();
+        let mut custody_roots = Vec::<ArtifactBindingNode>::new();
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -5184,6 +5185,9 @@ impl ArtifactInventory {
         let planning_entries = selected
             .iter()
             .filter(|(id, entry)| {
+                if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                    return supplied.contains_key(id) && !parent_ids.contains(id);
+                }
                 namespace_ids.as_ref().is_none_or(|ids| {
                     ids.contains(id)
                         || current_artifacts.contains(id)
@@ -5430,6 +5434,7 @@ impl ArtifactInventory {
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let namespace = selected
             .keys()
+            .filter(|id| !matches!(selected[*id].payload, ArtifactPayload::PackageCode(_)))
             .filter(|id| namespace_ids.as_ref().is_none_or(|ids| ids.contains(id)))
             .map(|id| {
                 let InventoryNodeKey::Artifact(binding) =
@@ -5440,6 +5445,11 @@ impl ArtifactInventory {
                 Ok((*id, binding))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        for (id, entry) in &planning_entries {
+            if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                custody_roots.push(resolve_row(LogicalNodeKey::Artifact(*id))?);
+            }
+        }
         for (key, (binding, cause)) in issued_causes {
             if resolve_target(requested_target(key)?, selection)?
                 == InventoryNodeKey::Group(binding)
@@ -5497,6 +5507,7 @@ impl ArtifactInventory {
             None => {
                 let mut roots = supplied
                     .keys()
+                    .filter(|id| !matches!(selected[*id].payload, ArtifactPayload::PackageCode(_)))
                     .filter(|id| planning_entries.contains_key(id))
                     .map(|id| resolve_row(LogicalNodeKey::Artifact(*id)))
                     .collect::<Result<BTreeSet<_>, _>>()?;
@@ -5667,6 +5678,7 @@ impl ArtifactInventory {
             || namespace
                 .values()
                 .any(|binding| !bindings.contains(binding))
+            || namespace.keys().any(|id| matches!(entries[id].payload, ArtifactPayload::PackageCode(_)))
         {
             return Err(failure("invalid bound recovery namespace"));
         }
@@ -7020,7 +7032,7 @@ impl ArtifactView {
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => product.module_interface(),
                 ArtifactPayload::Canonical(interface) => Some(interface),
-                ArtifactPayload::Interface(_, _) => None,
+                ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
             })
             .filter_map(|interface| interface.original_input_origins().cloned())
             .collect()
