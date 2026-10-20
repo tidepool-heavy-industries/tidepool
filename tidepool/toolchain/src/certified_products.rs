@@ -12867,6 +12867,21 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert!(Arc::ptr_eq(current.entry(), &entry));
+        assert!(current
+            .dependency_product(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: other.descriptor.id,
+                    original_ordinal: 7,
+                },
+                &other,
+            )
+            .unwrap()
+            .is_none());
+        let actual_dependency = current
+            .dependency_product(current.key(), &entry)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(actual_dependency.entry(), &entry));
         let groups = current.own_group_candidates().unwrap();
         assert_eq!(groups.bindings().len(), 1);
         let CertifiedNativeGroupSupport::Issued(own) = current
