@@ -12,27 +12,14 @@ pub(crate) struct InvocationWork {
     cleanup_owner: ResourceCleanupOwner,
     scope_id: Option<i64>,
     parent: Weak<InvocationWork>,
-    source:
-        Arc<OnceLock<Option<crate::resident_workbench::generation_admission::SourceDependency>>>,
+    source: Arc<OnceLock<crate::termination::ExecutionSourceOrigin>>,
     state: Mutex<InvocationWorkState>,
     cleanup_lock: tokio::sync::Mutex<()>,
 }
 
-pub(crate) enum InvocationSourceObservation<'a> {
-    Neutral,
-    Unclassified,
-    Source(&'a crate::resident_workbench::generation_admission::SourceDependency),
-}
+pub(crate) use crate::termination::ExecutionSourceBindingError as InvocationSourceBindingError;
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum InvocationSourceBindingError {
-    #[error(transparent)]
-    Admission(#[from] crate::resident_workbench::generation_admission::GenerationAdmissionError),
-    #[error("a neutral resource owner cannot become a source execution")]
-    NeutralOwner,
-    #[error("the invocation already selected a different source owner")]
-    DifferentSource,
-}
+pub(crate) use crate::termination::GenerationCompilerSource;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationInvocationState {
@@ -43,6 +30,7 @@ pub(crate) enum GenerationInvocationState {
     Compiler {
         registration: usize,
         close: crate::CompilerWorkClose,
+        source: GenerationCompilerSource,
     },
     Form(String),
     DisplayPendingProducer(WorkbenchOperationId),
@@ -265,7 +253,9 @@ impl InvocationWork {
     /// Mixed resource-lifetime custody has no implicit execution source.
     pub(super) fn new_neutral(owner: ActorRef, reservation: RequestReservationOwner) -> Arc<Self> {
         let work = Self::new_selecting(owner, reservation);
-        work.source.set(None).expect("new source slot is empty");
+        work.source
+            .set(crate::termination::ExecutionSourceOrigin::Neutral)
+            .expect("new source slot is empty");
         work
     }
 
@@ -276,7 +266,7 @@ impl InvocationWork {
     ) -> Arc<Self> {
         let work = Self::new_selecting(owner, reservation);
         work.source
-            .set(Some(source))
+            .set(crate::termination::ExecutionSourceOrigin::Actor(source))
             .expect("new source slot is empty");
         work
     }
@@ -303,25 +293,18 @@ impl InvocationWork {
         &self,
         source: crate::resident_workbench::generation_admission::SourceDependency,
     ) -> Result<(), InvocationSourceBindingError> {
-        source
-            .clone()
-            .with_open_admission(|| match self.source.set(Some(source)) {
-                Ok(()) => Ok(()),
-                Err(Some(source)) => match self.source.get() {
-                    Some(Some(selected)) if selected == &source => Ok(()),
-                    Some(None) => Err(InvocationSourceBindingError::NeutralOwner),
-                    _ => Err(InvocationSourceBindingError::DifferentSource),
-                },
-                Err(None) => unreachable!("binding always supplies a selected source"),
-            })?
+        crate::termination::ExecutionSourceOrigin::bind_actor(&self.source, source)
     }
 
-    pub(crate) fn source_observation(&self) -> InvocationSourceObservation<'_> {
-        match self.source.get() {
-            Some(Some(source)) => InvocationSourceObservation::Source(source),
-            Some(None) => InvocationSourceObservation::Neutral,
-            None => InvocationSourceObservation::Unclassified,
-        }
+    pub(super) fn bind_original_source(
+        &self,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
+    ) -> Result<(), InvocationSourceBindingError> {
+        crate::termination::ExecutionSourceOrigin::bind_original(&self.source, source)
+    }
+
+    pub(crate) fn source_observation(&self) -> Option<&crate::termination::ExecutionSourceOrigin> {
+        self.source.get()
     }
 
     pub(super) fn generation_observations(
@@ -329,7 +312,6 @@ impl InvocationWork {
         dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
         active_execution: bool,
     ) -> Vec<GenerationInvocationObservation> {
-        use crate::resident_workbench::generation_admission::SourceDependency;
         let mut observed = Vec::new();
         let (scopes, forms, compilers, phase, cleanup) = {
             let state = self.state.lock();
@@ -342,10 +324,8 @@ impl InvocationWork {
             )
         };
         let (dependent, unclassified) = match self.source_observation() {
-            InvocationSourceObservation::Neutral => (false, false),
-            InvocationSourceObservation::Unclassified
-            | InvocationSourceObservation::Source(SourceDependency::Unqualified) => (false, true),
-            InvocationSourceObservation::Source(source) => (source.depends_on(dependency), false),
+            None => (false, true),
+            Some(origin) => (origin.depends_on(dependency), origin.is_unclassified()),
         };
         let mut record = |state| {
             observed.push(GenerationInvocationObservation {
@@ -372,14 +352,14 @@ impl InvocationWork {
                     }
                 }
             }
-            for (registration, compiler) in compilers.into_iter().enumerate() {
-                let close = compiler.observation();
-                if !close.is_confirmed() {
-                    record(GenerationInvocationState::Compiler {
-                        registration,
-                        close,
-                    });
-                }
+        }
+        for (registration, compiler) in compilers.into_iter().enumerate() {
+            if let Some(observation) = compiler.generation_observation(dependency, registration) {
+                record(GenerationInvocationState::Compiler {
+                    registration: observation.registration,
+                    close: observation.close,
+                    source: observation.source,
+                });
             }
         }
         for form in forms {

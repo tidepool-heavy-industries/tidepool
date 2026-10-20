@@ -200,11 +200,16 @@ shipped editable specs). It publishes source, tools and workspace prompts togeth
 Synchronous notebook cells can use `reloadSource []` for the same operation;
 asynchronous cells and programmatic calls cannot activate drafts. A changed selection starts a fresh
 notebook; an unchanged selection preserves its bindings. Keep durable definitions
-in `.hs` files. Conversation, resources and published memory context persist;
+in `.hs` files. Conversation and published memory context persist;
 reload does not run startup or refresh memory.
 
-Failed preparation or cancellation before commit preserves the active selection.
-Tool surface changes refuse with a diff by default. Set
+Failed preparation and preflight refusal stop nobody. Active dependent work and
+registrations refuse reload by default. Set `force` to true to authorize retirement
+of the captured dependent set; it needs no earlier preview and does not authorize
+stopping independent resources. Read the receipt for exact blockers, actual stops
+and cleanup settlement. A reopened generation may include settled partial stops;
+those resources remain stopped. Pending or uncertain cleanup keeps admission
+fenced until reconciliation. Tool surface changes refuse with a diff by default. Set
 `accept_cache_invalidation` to true to approve supported changes after provider
 validation. Runtime grants and typed actor protocols remain enforced.
 Already-issued work and existing children retain their captured generation;

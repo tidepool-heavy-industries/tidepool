@@ -165,6 +165,31 @@ instance {-# OVERLAPPING #-} JsonSchema [Char] where
 -- | 'Nothing' encodes as @null@, including inside arrays and nested values.
 -- In field position absence is also accepted by 'GSchemaRecord'.
 -- | Matches the explicit Left/Right object encoding in Tidepool.Aeson.Value.
+-- Tuple encoders and decoders use fixed-length arrays, including nested fields.
+-- Keep their schema shape shared with generic positional constructor payloads.
+instance (JsonSchema a, JsonSchema b) => JsonSchema (a, b) where
+  jsonSchema _ = fixedArraySchema [jsonSchema (Proxy :: Proxy a), jsonSchema (Proxy :: Proxy b)]
+
+instance (JsonSchema a, JsonSchema b, JsonSchema c) => JsonSchema (a, b, c) where
+  jsonSchema _ = fixedArraySchema
+    [jsonSchema (Proxy :: Proxy a), jsonSchema (Proxy :: Proxy b), jsonSchema (Proxy :: Proxy c)]
+
+instance (JsonSchema a, JsonSchema b, JsonSchema c, JsonSchema d) => JsonSchema (a, b, c, d) where
+  jsonSchema _ = fixedArraySchema
+    [jsonSchema (Proxy :: Proxy a), jsonSchema (Proxy :: Proxy b), jsonSchema (Proxy :: Proxy c), jsonSchema (Proxy :: Proxy d)]
+
+instance (JsonSchema a, JsonSchema b, JsonSchema c, JsonSchema d, JsonSchema e) => JsonSchema (a, b, c, d, e) where
+  jsonSchema _ = fixedArraySchema
+    [jsonSchema (Proxy :: Proxy a), jsonSchema (Proxy :: Proxy b), jsonSchema (Proxy :: Proxy c), jsonSchema (Proxy :: Proxy d), jsonSchema (Proxy :: Proxy e)]
+
+fixedArraySchema :: [Value] -> Value
+fixedArraySchema schemas = object
+  [ ("type", String "array")
+  , ("prefixItems", Array schemas)
+  , ("minItems", Number (scientific (fromIntegral (length schemas)) 0))
+  , ("maxItems", Number (scientific (fromIntegral (length schemas)) 0))
+  ]
+
 instance (JsonSchema a, JsonSchema b) => JsonSchema (Either a b) where
   jsonSchema _ = object [("oneOf", Array
     [ objectSchema Nothing [("Left", jsonSchema (Proxy :: Proxy a), True)]
@@ -276,13 +301,7 @@ instance (GPositionalSchemas f) => GTaggedConSchema 'False f where
     where
       contentsSchema = case gPositionalSchemas p of
         [s] -> s
-        ss ->
-          object
-            [ ("type", String "array"),
-              ("prefixItems", Array ss),
-              ("minItems", Number (scientific (fromIntegral (length ss)) 0)),
-              ("maxItems", Number (scientific (fromIntegral (length ss)) 0))
-            ]
+        ss -> fixedArraySchema ss
 
 -- | A positional payload's per-field schemas, in declaration order.
 class GPositionalSchemas (f :: Type -> Type) where

@@ -58,7 +58,7 @@ async fn fenced_source_preserves_admitted_callback_cleanup_and_refuses_new_activ
     assert!(work.cleanup_observation().unwrap().uncertainty().is_none());
     assert!(fixture.actor.terminal().get().is_none());
     fence
-        .reopen_with(&scope, |reopen| {
+        .reopen_with(scope.original_source(), |reopen| {
             reopen.commit();
             Ok::<_, ()>(())
         })
@@ -101,7 +101,7 @@ fn callback_registration_racing_source_fence_is_captured_or_refused() {
             Err(_) => assert!(captured.is_empty()),
         }
         fence
-            .reopen_with(&scope, |reopen| {
+            .reopen_with(scope.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -1080,6 +1080,30 @@ pub(in crate::resident_actor) struct Fixture {
 }
 
 impl Fixture {
+    pub(in crate::resident_actor) async fn assert_generation_compilers(
+        &self,
+        fence: &crate::resident_workbench::generation_admission::GenerationFence,
+        expected: &[(usize, crate::termination::GenerationCompilerSource)],
+    ) {
+        let observed = self.directory.generation_population(fence).await.unwrap();
+        assert_eq!(observed.compilers.len(), expected.len());
+        for (registration, source) in expected {
+            let compiler = observed
+                .compilers
+                .iter()
+                .find(|observation| observation.compiler.registration == *registration)
+                .unwrap();
+            assert_eq!(
+                compiler.owner,
+                crate::local_actor::run_control::GenerationCompilerOwner::Actor(
+                    self.actor.identity()
+                )
+            );
+            assert_eq!(compiler.compiler.close, crate::CompilerWorkClose::Pending);
+            assert_eq!(&compiler.compiler.source, source);
+        }
+    }
+
     pub(in crate::resident_actor) async fn seal_membership(&self) {
         self.directory.seal().await.unwrap();
     }
@@ -3803,7 +3827,7 @@ mod form_source_admission {
         assert_eq!(host.opens.load(Ordering::SeqCst), 2);
         second.close().unwrap();
         fence
-            .reopen_with(&scope, |reopen| {
+            .reopen_with(scope.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -3870,19 +3894,15 @@ mod form_source_admission {
 }
 #[test]
 fn selecting_source_is_shared_with_scopes_and_cannot_change_issuer() {
-    use super::InvocationSourceObservation;
     use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
     let actor = ActorRef::first(crate::ActorId(1));
     let work = InvocationWork::new_selecting(actor, reservation());
     let scope = work.new_scope().unwrap();
-    assert!(matches!(
-        scope.source_observation(),
-        InvocationSourceObservation::Unclassified
-    ));
+    assert!(matches!(scope.source_observation(), None));
     let issued = SourceDependency::World(BootstrapWorld::new(None));
     work.bind_source(issued.clone()).unwrap();
     assert!(
-        matches!(scope.source_observation(), InvocationSourceObservation::Source(source) if source == &issued)
+        matches!(scope.source_observation(), Some(crate::termination::ExecutionSourceOrigin::Actor(source)) if source == &issued)
     );
     scope.bind_source(issued.clone()).unwrap();
     assert!(matches!(
@@ -3890,7 +3910,7 @@ fn selecting_source_is_shared_with_scopes_and_cannot_change_issuer() {
         Err(super::InvocationSourceBindingError::DifferentSource)
     ));
     assert!(
-        matches!(work.source_observation(), InvocationSourceObservation::Source(source) if source == &issued)
+        matches!(work.source_observation(), Some(crate::termination::ExecutionSourceOrigin::Actor(source)) if source == &issued)
     );
 }
 
@@ -3906,6 +3926,48 @@ fn neutral_resource_custody_cannot_be_relabelled_as_source_execution() {
     ));
     assert!(matches!(
         work.source_observation(),
-        super::InvocationSourceObservation::Neutral
+        Some(crate::termination::ExecutionSourceOrigin::Neutral)
     ));
+}
+
+#[test]
+fn original_execution_origin_binds_exact_issuer_and_keeps_cleanup_observable_after_fence() {
+    use crate::termination::{ExecutionSourceBindingError, ExecutionSourceOrigin};
+    let actor = ActorRef::first(crate::ActorId(1));
+    let mut session = tidepool_runtime::session::PersistentSession::new(None, 1024);
+    let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+    let original = original_scope.original_source().clone();
+    let foreign_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+    let foreign = foreign_scope.original_source().clone();
+    let work = InvocationWork::new_selecting(actor, reservation());
+    let scope = work.new_scope().unwrap();
+    work.bind_original_source(original.clone()).unwrap();
+    scope.bind_original_source(original.clone()).unwrap();
+    assert!(
+        matches!(scope.source_observation(), Some(ExecutionSourceOrigin::Original(source)) if Arc::ptr_eq(source, &original))
+    );
+    assert!(matches!(
+        work.bind_original_source(foreign),
+        Err(ExecutionSourceBindingError::DifferentSource)
+    ));
+    let neutral = InvocationWork::new_neutral(actor, reservation());
+    assert!(matches!(
+        neutral.bind_original_source(original.clone()),
+        Err(ExecutionSourceBindingError::NeutralOwner)
+    ));
+    let fence = original.source_admission().fence().unwrap();
+    assert!(
+        scope.source_observation().is_some(),
+        "retained cleanup observation does not require fresh admission"
+    );
+    let late = InvocationWork::new_selecting(actor, reservation());
+    assert!(matches!(
+        late.bind_original_source(original),
+        Err(ExecutionSourceBindingError::Admission(_))
+    ));
+    assert!(
+        late.source_observation().is_none(),
+        "refusal cannot publish guessed provenance"
+    );
+    drop(fence);
 }

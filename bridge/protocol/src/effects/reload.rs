@@ -1,4 +1,4 @@
-//! Inspect the executing request's immutable source generation.
+//! Synchronous source publication and observed retirement settlement.
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -22,14 +22,15 @@ const WIRE: WireDerives = WireDerives(&[
 pub fn reload() -> Effect {
     Effect { name: "Reload", authored_surface: crate::schema::AuthoredSurface::All,
  handler: "ReloadHandler", handler_module: "reload", req_enum: "ReloadReq", decl_fn: "reload_decl",
- description: &["Publish edited source through an admitted synchronous endpoint. CompatibleOnly preserves the declared tool surface; AcceptCacheInvalidation permits supported surface changes and invalidates the provider tool cache."],
+ description: &["Publish edited source through an admitted synchronous endpoint. CompatibleOnly preserves the declared tool surface; AcceptCacheInvalidation permits supported surface changes and invalidates the provider tool cache. Force independently authorizes retirement of the captured dependent resources; by default blockers refuse without stops."],
  prompt_card: None, type_params: &[], default_row_args: &[], extra_imports: &[],
- type_defs: vec![TypeDef { name: "ReloadPolicy", wire_rust: Some("RlPolicy"), haskell_module: None, shape: TypeShape::Sum { variants: vec![SumVariant { ctor: "CompatibleOnly", fields: positional_fields![], doc: &[] },SumVariant { ctor: "AcceptCacheInvalidation", fields: positional_fields![], doc: &[] }] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadOptions", wire_rust: Some("RlOptions"), haskell_module: None, shape: TypeShape::Record { fields: vec![field("reloadAlsoCheck", "also_check", HsType::list(HsType::Text)),field("reloadPolicy", "policy", HsType::Named("ReloadPolicy")),field("reloadForce", "force", HsType::Bool)] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadSurfaceDiff", wire_rust: Some("RlSurfaceDiff"), haskell_module: None, shape: TypeShape::Record { fields: vec![field("surfaceAdded", "added", HsType::list(HsType::Text)),field("surfaceRemoved", "removed", HsType::list(HsType::Text)),field("surfaceChanged", "changed", HsType::list(HsType::Text))] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadRefusalCategory", wire_rust: Some("RlRefusalCategory"), haskell_module: None, shape: TypeShape::Sum { variants: vec![SumVariant { ctor: "PreparationFailed", fields: positional_fields![], doc: &[] },SumVariant { ctor: "SurfaceIncompatible", fields: positional_fields![], doc: &[] },SumVariant { ctor: "UnsupportedSurface", fields: positional_fields![], doc: &[] },SumVariant { ctor: "AuthorityDenied", fields: positional_fields![], doc: &[] }] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadRefusal", wire_rust: Some("RlRefusal"), haskell_module: None, shape: TypeShape::Record { fields: vec![field("refusalCategory", "category", HsType::Named("ReloadRefusalCategory")),field("refusalDetail", "detail", HsType::Text),field("refusalSurface", "surface", HsType::Named("ReloadSurfaceDiff"))] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },            TypeDef {
+ type_defs: { let mut definitions = vec![TypeDef { name: "ReloadPolicy", wire_rust: Some("RlPolicy"), haskell_module: None, shape: TypeShape::Sum { variants: vec![SumVariant { ctor: "CompatibleOnly", fields: positional_fields![], doc: &[] },SumVariant { ctor: "AcceptCacheInvalidation", fields: positional_fields![], doc: &[] }] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadOptions", wire_rust: Some("RlOptions"), haskell_module: None, shape: TypeShape::Record { fields: vec![field("reloadAlsoCheck", "also_check", HsType::list(HsType::Text)),field("reloadPolicy", "policy", HsType::Named("ReloadPolicy")),field("reloadForce", "force", HsType::Bool)] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadSurfaceDiff", wire_rust: Some("RlSurfaceDiff"), haskell_module: None, shape: TypeShape::Record { fields: vec![field("surfaceAdded", "added", HsType::list(HsType::Text)),field("surfaceRemoved", "removed", HsType::list(HsType::Text)),field("surfaceChanged", "changed", HsType::list(HsType::Text))] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadRefusalCategory", wire_rust: Some("RlRefusalCategory"), haskell_module: None, shape: TypeShape::Sum { variants: vec![SumVariant { ctor: "PreparationFailed", fields: positional_fields![], doc: &[] },SumVariant { ctor: "SurfaceIncompatible", fields: positional_fields![], doc: &[] },SumVariant { ctor: "UnsupportedSurface", fields: positional_fields![], doc: &[] },SumVariant { ctor: "AuthorityDenied", fields: positional_fields![], doc: &[] }] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },TypeDef { name: "ReloadRefusal", wire_rust: Some("RlRefusal"), haskell_module: None, shape: TypeShape::Record { fields: vec![field("refusalCategory", "category", HsType::Named("ReloadRefusalCategory")),field("refusalDetail", "detail", HsType::Text),field("refusalSurface", "surface", HsType::Named("ReloadSurfaceDiff"))] }, json: JsonInstance::Generic, derives: WIRE, domain: None, doc: &[] },            TypeDef {
                 name: "ReloadOutcome",
                 wire_rust: Some("SrReloadOutcome"),
                 haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
+                        SumVariant { ctor: "ReloadRetirement", fields: positional_fields![HsType::Named("ReloadRetirementReceipt")], doc: &["Observed retirement effects and publication settlement. A reopened generation may have confirmed partial stops; stopped resources are not restarted."] },
                         SumVariant { ctor: "ReloadRefused", fields: positional_fields![HsType::Named("SourceRevision"), HsType::Named("SourceRevision"), HsType::Named("ReloadRefusal")], doc: &["The candidate was refused without publication; the receipt gives the typed category and surface difference."] },
                         SumVariant {
                             ctor: "ReloadUnchanged",
@@ -93,7 +94,7 @@ pub fn reload() -> Effect {
                 derives: WIRE,
                 domain: None,
                 doc: &["What one reload did. Every case is an ordinary value to match on."],
-            },],
+            },]; definitions.extend(retirement_types()); definitions },
  external_types: &[crate::schema::ExternalType { haskell_name: "SourceRevision", rust_wire: "SrRevision", core_module: None }],
  errors: Some(ErrorAdt { name: "ReloadError", variants: vec![
  ErrorVariant { ctor: "ReloadUnavailable", fields: vec![ErrorField { name: "detail", ty: HsType::Text, rust: RustBinding::Derived }], doc: "this actor does not own editable source publication" },
@@ -109,6 +110,173 @@ fn field(hs_name: &'static str, rust_name: &'static str, ty: HsType) -> RecordFi
         hs_name,
         rust_name,
         ty,
+        doc: &[],
+    }
+}
+
+// These receipts are observations issued by lifecycle owners, never stop authority.
+// The additive ReloadRetirement constructor is the wire migration: old consumers
+// refuse that unknown constructor rather than misclassifying partial effects.
+// Every result after retirement capture must use ReloadRetirement, carrying the
+// actual owner-issued outcomes. ReloadPublished, ReloadCancelled,
+// ReloadPublishedWithWarnings and ReloadPublicationUnconfirmed remain temporarily
+// for the host endpoint and its existing test callers. Delete those constructors
+// when that endpoint/caller migration lands; DTO generation alone does not issue
+// lifecycle evidence or qualify the endpoint's execution and recovery behavior.
+fn retirement_types() -> Vec<TypeDef> {
+    use HsType::{Int, Named, Text};
+    let address = || HsType::Tuple(vec![Int, Int]);
+    vec![
+        record("ReloadOperation", "RlOperation", vec![
+            field("reloadExecution", "execution", Text),
+            field("reloadInputUnitIndex", "input_unit_index", Int),
+            field("reloadEffectOrdinal", "effect_ordinal", Int),
+        ], &["The existing hosted operation coordinate; absence means this caller has no issued coordinate."]),
+        sum("ReloadReservation", "RlReservation", vec![
+            variant("ReloadWorkbenchReservation", vec![Text, Text]),
+            variant("ReloadRouteReservation", vec![Int]),
+            variant("ReloadScopeReservation", vec![Int]),
+        ], &["Existing request owner coordinates. Workbench execution and exact reservation attempt remain separate."]),
+        sum("ReloadNativeIdentity", "RlNativeIdentity", vec![
+            variant("ReloadNativeLocal", vec![Text]),
+            variant("ReloadNativeRemote", vec![Text, Text]),
+        ], &["Native actor identity preserves Local versus Remote and exact unsigned decimal node/pid coordinates without signed narrowing. These are observations, not authority."]),
+        sum("ReloadResource", "RlResource", vec![
+            variant("ReloadActorResource", vec![address()]),
+            variant("ReloadNativeResource", vec![address(), Named("ReloadNativeIdentity")]),
+            variant("ReloadPreparationResource", vec![Int]),
+            variant("ReloadInvocationResource", vec![address(), Named("ReloadReservation")]),
+            variant("ReloadCompilerResource", vec![address(), Named("ReloadReservation"), Int]),
+            variant("ReloadFormResource", vec![address(), Named("ReloadReservation"), Text]),
+            variant("ReloadDisplayResource", vec![Named("ReloadOperation")]),
+            variant("ReloadWatchResource", vec![address(), Int]),
+            variant("ReloadUnclassifiedPhysicalResource", vec![Named("ReloadNativeIdentity")]),
+        ], &["Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs."]),
+        sum("ReloadBlockerReason", "RlBlockerReason", vec![
+            variant("ReloadActiveDependentWork", vec![]),
+            variant("ReloadUnclassifiedWork", vec![]),
+            variant("ReloadStartingResource", vec![]),
+            variant("ReloadRunningResource", vec![]),
+            variant("ReloadTransferringResource", vec![]),
+            variant("ReloadCleanupUnsupported", vec![]),
+            variant("ReloadCleanupUnconfirmed", vec![Text]),
+            variant("ReloadCompilerPending", vec![]),
+            variant("ReloadCompilerUnconfirmed", vec![Text]),
+            variant("ReloadPendingProducer", vec![]),
+            variant("ReloadDisplayAcknowledgementPending", vec![]),
+            variant("ReloadDisplayAcknowledgementUnconfirmed", vec![Text]),
+        ], &[]),
+        sum("ReloadLifetimeEdge", "RlLifetimeEdge", vec![
+            variant("ReloadPhysicalSupervision", vec![]),
+            variant("ReloadPendingSupervision", vec![]),
+            variant("ReloadPendingResourcePreparation", vec![]),
+            variant("ReloadResourceOwnership", vec![]),
+            variant("ReloadOwnershipTransfer", vec![]),
+            variant("ReloadOwnershipTransferUnconfirmed", vec![]),
+        ], &[]),
+        sum("ReloadBlocker", "RlBlocker", vec![
+            variant("ReloadResourceBlocker", vec![Named("ReloadResource"), Named("ReloadBlockerReason")]),
+            variant("ReloadCollateralBlocker", vec![Named("ReloadResource"), Named("ReloadResource"), Named("ReloadLifetimeEdge")]),
+            variant("ReloadUnclassifiedSourceWork", vec![Int]),
+        ], &["Observed work that prevents retirement. A collateral blocker names the proposed stop and the independently affected resource."]),
+        sum("ReloadCauseKind", "RlCauseKind", vec![
+            variant("ReloadRetirementBlocked", vec![]),
+            variant("ReloadRetirementCancelled", vec![]),
+            variant("ReloadCandidateSettlementFailed", vec![]),
+            variant("ReloadOriginalReopenFailed", vec![]),
+            variant("ReloadStopFailed", vec![]),
+            variant("ReloadCleanupFailed", vec![]),
+            variant("ReloadPublicationFailed", vec![]),
+            variant("ReloadContinuationFailed", vec![]),
+            variant("ReloadAcknowledgementUnconfirmed", vec![]),
+        ], &[]),
+        record("ReloadCause", "RlCause", vec![
+            field("reloadCauseKind", "kind", Named("ReloadCauseKind")),
+            field("reloadCauseDetail", "detail", Text),
+        ], &["Typed cause with explanatory detail. Detail text never selects control flow."]),
+        sum("ReloadStopOutcome", "RlStopOutcome", vec![
+            variant("ReloadStopNotRequested", vec![]),
+            variant("ReloadStopPending", vec![]),
+            variant("ReloadStopConfirmed", vec![]),
+            variant("ReloadStopRefused", vec![Named("ReloadCause")]),
+            variant("ReloadStopUnconfirmed", vec![Named("ReloadCause")]),
+        ], &[]),
+        sum("ReloadCleanupOutcome", "RlCleanupOutcome", vec![
+            variant("ReloadCleanupNotRequired", vec![]),
+            variant("ReloadCleanupPending", vec![]),
+            variant("ReloadCleanupConfirmed", vec![]),
+            variant("ReloadCleanupRefused", vec![Named("ReloadCause")]),
+            variant("ReloadCleanupUnknown", vec![Named("ReloadCause")]),
+        ], &["Physical cleanup settlement is independent of terminal stop acknowledgement."]),
+        record("ReloadResourceOutcome", "RlResourceOutcome", vec![
+            field("reloadOutcomeResource", "resource", Named("ReloadResource")),
+            field("reloadStopOutcome", "stop", Named("ReloadStopOutcome")),
+            field("reloadCleanupOutcome", "cleanup", Named("ReloadCleanupOutcome")),
+        ], &["Actual observed effects, never the planned population re-labelled as stopped."]),
+        sum("ReloadRetirementStage", "RlRetirementStage", vec![
+            variant("ReloadCandidateSettlement", vec![]),
+            variant("ReloadOriginalReopen", vec![]),
+            variant("ReloadResourceStop", vec![]),
+            variant("ReloadResourceCleanup", vec![]),
+            variant("ReloadSourcePublication", vec![]),
+        ], &[]),
+        sum("ReloadRetirementState", "RlRetirementState", vec![
+            variant("ReloadAReopened", vec![]),
+            variant("ReloadRetirementFenced", vec![Named("ReloadRetirementStage")]),
+            variant("ReloadBPublished", vec![HsType::list(Text), HsType::list(Text)]),
+        ], &["AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings."]),
+        record("ReloadRetirementReceipt", "RlRetirementReceipt", vec![
+            field("reloadPrevious", "previous", Named("SourceRevision")),
+            field("reloadCandidate", "candidate", Named("SourceRevision")),
+            field("reloadOperation", "operation", HsType::maybe(Named("ReloadOperation"))),
+            field("reloadRetirementState", "state", Named("ReloadRetirementState")),
+            field("reloadBlockers", "blockers", HsType::list(Named("ReloadBlocker"))),
+            field("reloadResourceOutcomes", "outcomes", HsType::list(Named("ReloadResourceOutcome"))),
+            field("reloadRetirementSurface", "surface", Named("ReloadSurfaceDiff")),
+            field("reloadPrimaryCause", "primary", HsType::maybe(Named("ReloadCause"))),
+            field("reloadSecondaryCauses", "secondary", HsType::list(Named("ReloadCause"))),
+        ], &["Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Primary and secondary causes survive independently of selection/fence state. Inspect the owning operation and resource records for detailed retained obligations."]),
+    ]
+}
+
+fn record(
+    name: &'static str,
+    wire: &'static str,
+    fields: Vec<RecordField>,
+    doc: &'static [&'static str],
+) -> TypeDef {
+    TypeDef {
+        name,
+        wire_rust: Some(wire),
+        haskell_module: None,
+        shape: TypeShape::Record { fields },
+        json: JsonInstance::Generic,
+        derives: WIRE,
+        domain: None,
+        doc,
+    }
+}
+fn sum(
+    name: &'static str,
+    wire: &'static str,
+    variants: Vec<SumVariant>,
+    doc: &'static [&'static str],
+) -> TypeDef {
+    TypeDef {
+        name,
+        wire_rust: Some(wire),
+        haskell_module: None,
+        shape: TypeShape::Sum { variants },
+        json: JsonInstance::Generic,
+        derives: WIRE,
+        domain: None,
+        doc,
+    }
+}
+fn variant(ctor: &'static str, fields: Vec<HsType>) -> SumVariant {
+    SumVariant {
+        ctor,
+        fields: crate::schema::VariantFields::Positional(fields),
         doc: &[],
     }
 }
