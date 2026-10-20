@@ -129,7 +129,10 @@ pub(super) fn inspection_provenance(
     frame(&serde_json::to_vec(selected_imports.specs()).expect("source imports serialize"));
     inputs.frame_authorization(&mut frame);
     match actor {
-        Some(actor) => { frame(b"actor"); actor.frame(&mut frame); }
+        Some(actor) => {
+            frame(b"actor");
+            actor.frame(&mut frame);
+        }
         None => frame(b"runtime-only"),
     }
     ScopeProvenance {

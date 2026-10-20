@@ -5530,7 +5530,7 @@ mod checkpoint_scope_tests {
                     b"observation-only-source",
                     &imports,
                     &inputs,
-                None,
+                    None,
                     super::super::NameScope::Current,
                 )
             })
@@ -5564,7 +5564,7 @@ mod checkpoint_scope_tests {
                     b"observation-only-source",
                     &imports,
                     &inputs,
-                None,
+                    None,
                     super::super::NameScope::Current,
                 )
             })
