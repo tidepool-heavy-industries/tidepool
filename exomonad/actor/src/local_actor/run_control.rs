@@ -158,7 +158,7 @@ pub(super) struct RunState {
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
     lost_retirements: Vec<generation::RetainedGenerationRetirement>,
-    retirement_discards: Vec<crate::resident_workbench::ActorGenerationPublicationDiscard>,
+    retirement_discards: Vec<generation::GenerationRetirementDiscard>,
     recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
     resource_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
@@ -644,6 +644,20 @@ pub(super) enum RunControlMessage {
         actor: ActorRef,
         reply: oneshot::Sender<Vec<(u64, bool)>>,
     },
+    BeginGenerationRetirement {
+        preparation: crate::resident_workbench::ActorGenerationRetirementPreparation,
+        inventory: generation::GenerationRetirementInventory,
+        reply: oneshot::Sender<
+            Result<
+                crate::resident_workbench::ActorPublicationAttemptObserver,
+                generation::GenerationRetirementBeginFailure,
+            >,
+        >,
+    },
+    CaptureGenerationRetirement {
+        actor: ActorRef,
+        observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+    },
     GenerationPopulation {
         dependency: GenerationDependency,
         reply: oneshot::Sender<GenerationPopulation>,
@@ -1092,6 +1106,17 @@ impl Actor for RunControl {
                         })
                         .collect(),
                 );
+            }
+            RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory,
+                reply,
+            } => {
+                let outcome = state.begin_generation_retirement(&myself, preparation, inventory);
+                let _ = reply.send(outcome);
+            }
+            RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
+                state.capture_generation_retirement(actor, observer);
             }
             RunControlMessage::GenerationPopulation { dependency, reply } => {
                 let _ = reply.send(state.generation_population(dependency));
