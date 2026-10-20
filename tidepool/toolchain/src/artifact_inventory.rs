@@ -14716,23 +14716,17 @@ mod tests {
                         fact.issued_groups(broader).unwrap(),
                     );
                 }
-                let mut unproved = inventory
+                let missing_private = inventory
                     .bind_segment(&interfaces, vec![Arc::new(root.clone())], &receipt)
-                    .unwrap();
-                let imports = [issued_source(&root, 12)];
-                let missing_private = inventory.admit_bound_target(
-                    &mut unproved,
-                    &inventory.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &receipt,
-                );
+                    .err()
+                    .expect("product completion requires the private child proof");
                 assert!(
-                    matches!(&missing_private, Err(CompileError::ArtifactInventory(error))
+                    matches!(&missing_private, CompileError::ArtifactInventory(error)
                     if matches!(&error.failure,
                         ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 }
-                        if *artifact == child.descriptor.id)),
-                    "missing private proof at executable demand returned {missing_private:?}"
+                        if *artifact == child.descriptor.id)
+                    && error.native_refusal.is_none()),
+                    "missing private proof at product completion returned {missing_private:?}"
                 );
             }
             receipt
