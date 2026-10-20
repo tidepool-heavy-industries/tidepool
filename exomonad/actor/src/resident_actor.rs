@@ -29,6 +29,8 @@ mod drain_wait;
 #[cfg(test)]
 mod forest_shutdown_tests;
 pub(crate) mod forms;
+mod generation_inventory;
+pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
 pub(crate) mod green;
 mod green_notebook;
 #[cfg(test)]
