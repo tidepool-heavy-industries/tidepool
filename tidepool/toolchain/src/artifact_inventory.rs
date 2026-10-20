@@ -14652,11 +14652,13 @@ mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                     &receipt,
                 );
-                assert!(matches!(&missing_private, Err(CompileError::ArtifactInventory(error))
+                assert!(
+                    matches!(&missing_private, Err(CompileError::ArtifactInventory(error))
                     if matches!(&error.failure,
                         ArtifactInventoryFailure::MissingDependency { required, dependency: ArtifactDependency::NativeGroup { dependent_ordinal: 12, required_ordinal: 7 }, .. }
                         if required == &child.descriptor.owner)),
-                    "missing private proof returned {missing_private:?}");
+                    "missing private proof returned {missing_private:?}"
+                );
             }
             receipt
                 .with_new_product_dependencies(&retained.artifacts().metadata_snapshot(), &facts)
