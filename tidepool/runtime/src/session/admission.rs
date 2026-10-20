@@ -1837,16 +1837,51 @@ fn checked_snapshot(
     retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_imports: CheckedNativeImports,
 ) -> RuntimeCheckedPrefixSnapshot {
+    let session_root = view.session_root().to_path_buf();
+    checked_snapshot_with_basis(
+        RuntimeCheckedPrefixBasis::Finite {
+            view,
+            digest: view_digest,
+        },
+        session_root,
+        visibility,
+        interfaces,
+        compiler_prefix,
+        admission,
+        retained_scope,
+        native_imports,
+    )
+}
+
+fn checked_snapshot_with_basis(
+    basis: RuntimeCheckedPrefixBasis,
+    session_root: PathBuf,
+    visibility: PublicVisibilitySnapshot,
+    interfaces: CheckedInterfaces,
+    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
+    admission: [u8; 32],
+    retained_scope: Arc<RuntimeLexicalScopeLease>,
+    native_imports: CheckedNativeImports,
+) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
     let mut digest = blake3::Hasher::new();
     let mut frame = |bytes: &[u8]| {
         digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     };
-    frame(b"TidepoolRuntimeCheckedPrefix1");
+    frame(b"TidepoolRuntimeCheckedPrefix2");
     frame(&admission);
     frame(&(compiler_prefix.next_item() as u64).to_le_bytes());
-    frame(&view_digest);
+    match &basis {
+        RuntimeCheckedPrefixBasis::Finite { digest, .. } => {
+            frame(b"finite");
+            frame(digest);
+        }
+        RuntimeCheckedPrefixBasis::World { world, .. } => {
+            frame(b"world");
+            frame(world.logical_id());
+        }
+    }
     frame(&visibility.epoch.to_le_bytes());
     frame(&visibility.declaration_tip.0.to_le_bytes());
     match visibility.machine_incarnation {
@@ -1882,11 +1917,8 @@ fn checked_snapshot(
         }
     }
     RuntimeCheckedPrefixSnapshot {
-        session_root: view.session_root().to_path_buf(),
-        basis: RuntimeCheckedPrefixBasis::Finite {
-            view,
-            digest: view_digest,
-        },
+        session_root,
+        basis,
         visibility,
         interfaces,
         _retained_scope: retained_scope,
@@ -1908,25 +1940,16 @@ fn world_checked_snapshot(
     retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_imports: CheckedNativeImports,
 ) -> RuntimeCheckedPrefixSnapshot {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"TidepoolRuntimeWorldCheckedPrefix1");
-    hash.update(&admission);
-    hash.update(world.logical_id());
-    hash.update(&(compiler_prefix.next_item() as u64).to_le_bytes());
-    hash.update(&interfaces.commitment);
-    hash.update(&native_imports.commitment);
-    let native_shares = visibility.source_instances.clone();
-    RuntimeCheckedPrefixSnapshot {
-        basis: RuntimeCheckedPrefixBasis::World { world, key },
+    checked_snapshot_with_basis(
+        RuntimeCheckedPrefixBasis::World { world, key },
         session_root,
         visibility,
         interfaces,
-        _retained_scope: retained_scope,
-        native_shares,
-        native_imports,
         compiler_prefix,
-        digest: *hash.finalize().as_bytes(),
-    }
+        admission,
+        retained_scope,
+        native_imports,
+    )
 }
 
 impl AdmittedValueInterface {
