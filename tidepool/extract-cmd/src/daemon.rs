@@ -4653,6 +4653,55 @@ mod tests {
     }
 
     #[test]
+    fn affinity_prefers_only_matching_idle_eligible_instances() {
+        let resources = ResourceAdmission::with_limits(3, 10 * WARM_WORKER_MB, 2, 4);
+        let capacity = admission_capacity(16, 10 * WARM_WORKER_MB);
+        for (slot, instance) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
+            resources.observe_worker(slot, instance);
+        }
+        let hint = crate::CompilerWorkerLocation::started([7; 32], 1, [2; 32]);
+        let preferred = resources
+            .acquire_with_affinity(CompileWorkload::Foreground, capacity, Some(&hint))
+            .unwrap();
+        assert_eq!(
+            preferred.slot, 1,
+            "an eligible hint precedes the idle foreground default"
+        );
+        let fallback = resources
+            .acquire_with_affinity(CompileWorkload::Foreground, capacity, Some(&hint))
+            .unwrap();
+        assert_eq!(
+            fallback.slot, 0,
+            "busy affinity immediately uses ordinary admission"
+        );
+        assert_eq!(preferred.grant, fallback.grant);
+        drop((preferred, fallback));
+        for hint in [
+            crate::CompilerWorkerLocation::started([7; 32], 1, [99; 32]),
+            crate::CompilerWorkerLocation::started([7; 32], u32::MAX, [2; 32]),
+        ] {
+            let fallback = resources
+                .acquire_with_affinity(CompileWorkload::Foreground, capacity, Some(&hint))
+                .unwrap();
+            assert_eq!(fallback.slot, 0);
+        }
+        let reserved = crate::CompilerWorkerLocation::started([7; 32], 0, [1; 32]);
+        let preparation = resources
+            .acquire_with_affinity(CompileWorkload::Preparation, capacity, Some(&reserved))
+            .unwrap();
+        assert_eq!(
+            preparation.slot, 1,
+            "affinity cannot consume the foreground reserve"
+        );
+        assert_eq!(preparation.grant.jobs, 4);
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(foreground.slot, 0);
+        assert_eq!(foreground.grant.jobs, 2);
+    }
+
+    #[test]
     fn typed_resource_refusal_is_known_unsubmitted_without_retry_or_rebind() {
         let dir = tempfile::tempdir().unwrap();
         for transaction in [false, true] {
@@ -4669,6 +4718,7 @@ mod tests {
                 if transaction {
                     assert_eq!(&header[..8], TRANSACTION);
                     assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [1]);
+                    assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [0]);
                 } else {
                     assert_eq!(&header[..8], REQUEST);
                     read_request(&mut connection).unwrap();
@@ -6851,8 +6901,8 @@ tidepool-reuse-error: witness failed\n";
             let (mut connection, _) = listener.accept().unwrap();
             let magic = read_exact_or_crash(&mut connection, 8).unwrap();
             // The predecessor owns a different grammar and never accepts this
-            // connection. No response frame can be decoded as a v4 event.
-            assert_ne!(magic, b"TPDTR003");
+            // connection. No response frame can be decoded as a v5 event.
+            assert_ne!(magic, b"TPDTR004");
             drop(connection);
             listener.set_nonblocking(true).unwrap();
             assert_eq!(
@@ -6881,6 +6931,44 @@ tidepool-reuse-error: witness failed\n";
                 worker: crate::CompilerWorkerRetirement::Reaped(ExitStatus::from_raw(9)),
             },
             failure: crate::CompilerIoCause::from(&io::Error::from_raw_os_error(libc::ECANCELED)),
+        }
+    }
+
+    #[test]
+    fn worker_started_is_required_once_and_matches_the_accepted_epoch() {
+        for case in 0..5 {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let mut transaction = DaemonTransaction::for_test(client);
+            if case != 3 {
+                write_worker_started(&mut server, &[u8::from(case == 1); 32], 0, &[2; 32]).unwrap();
+            }
+            if case == 2 {
+                write_worker_started(&mut server, &[0; 32], 0, &[2; 32]).unwrap();
+            }
+            server.write_all(&[TRANSACTION_OUTPUT]).unwrap();
+            write_response(&mut server, 0, b"completed", b"").unwrap();
+            let result = transaction.read_event(Instant::now() + Duration::from_secs(1));
+            if case == 0 || case == 4 {
+                assert!(
+                    matches!(result, Ok(TransactionEvent::Output(output)) if output.stdout == b"completed")
+                );
+                let location = transaction.worker_location().unwrap();
+                assert_eq!(location.epoch(), &[0; 32]);
+                assert_eq!(location.instance(), &[2; 32]);
+                if case == 4 {
+                    write_worker_started(&mut server, &[0; 32], 0, &[3; 32]).unwrap();
+                    assert!(matches!(
+                        transaction.read_event(Instant::now() + Duration::from_secs(1)),
+                        Err(DaemonError::Protocol(_))
+                    ));
+                    assert!(!transaction.framing_known);
+                    assert!(end_transaction(&mut transaction).is_err());
+                }
+            } else {
+                assert!(matches!(result, Err(DaemonError::Protocol(_))));
+                assert!(!transaction.framing_known);
+                assert!(end_transaction(&mut transaction).is_err());
+            }
         }
     }
 
@@ -6928,6 +7016,7 @@ tidepool-reuse-error: witness failed\n";
             transaction.cancellation = Some(cancellation.clone());
             let server_cancel = cancellation.clone();
             let server_thread = std::thread::spawn(move || {
+                write_worker_started(&mut server, &[0; 32], 0, &[1; 32]).unwrap();
                 if phase != 0 {
                     assert_eq!(
                         read_exact_or_crash(&mut server, 1).unwrap(),
@@ -6988,6 +7077,7 @@ tidepool-reuse-error: witness failed\n";
         let mut transaction = DaemonTransaction::for_test(client);
         // A complete event tag and partial Output cannot be mistaken for a
         // later terminal boundary. Its owner refuses all further decoding.
+        write_worker_started(&mut server, &[0; 32], 0, &[1; 32]).unwrap();
         server.write_all(&[TRANSACTION_OUTPUT, 0]).unwrap();
         let started = Instant::now();
         assert!(transaction
@@ -7014,9 +7104,11 @@ tidepool-reuse-error: witness failed\n";
             let mut workload = [0];
             connection.read_exact(&mut workload).unwrap();
             assert_eq!(workload, [0]);
+            assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [0]);
             assert_eq!(&header[8..], &[3; 32]);
             connection.write_all(&[ACCEPTED]).unwrap();
             connection.write_all(&1u64.to_le_bytes()).unwrap();
+            write_worker_started(&mut connection, &[3; 32], 0, &[1; 32]).unwrap();
             for expected in ["one", "one"] {
                 let mut command = [0u8; 1];
                 connection.read_exact(&mut command).unwrap();
@@ -7160,6 +7252,10 @@ tidepool-reuse-error: witness failed\n";
                     },
                 )
                 .unwrap();
+                assert!(
+                    matches!(read_transaction_event(&mut client).unwrap(), TransactionEvent::Started(location)
+                    if location.epoch() == &[9; 32] && location.slot() == 0 && location.instance() == &worker.instance)
+                );
                 for _ in 0..request_count {
                     assert!(
                         matches!(read_transaction_event(&mut client).unwrap(), TransactionEvent::Output(output) if output.status.code() == Some(0))
@@ -7399,6 +7495,7 @@ tidepool-reuse-error: witness failed\n";
             let mut workload = [0];
             stream.read_exact(&mut workload).unwrap();
             assert_eq!(workload, [0]);
+            assert_eq!(read_exact_or_crash(&mut stream, 1).unwrap(), [0]);
             stream.write_all(&[ACCEPTED]).unwrap();
             stream.write_all(&81u64.to_le_bytes()).unwrap();
             let mut command = [0];
@@ -7478,6 +7575,7 @@ tidepool-reuse-error: witness failed\n";
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut worker = Worker {
+            instance: boot_epoch().unwrap(),
             child,
             stdin: Some(stdin),
             stdout,
@@ -7527,6 +7625,7 @@ tidepool-reuse-error: witness failed\n";
                 let mut other = children.pop().unwrap();
                 let mut child = children.pop().unwrap();
                 let mut worker = Worker {
+                    instance: boot_epoch().unwrap(),
                     stdin: child.stdin.take(),
                     stdout: child.stdout.take().unwrap(),
                     child,
@@ -7603,6 +7702,7 @@ tidepool-reuse-error: witness failed\n";
             .spawn()
             .unwrap();
         let mut worker = Worker {
+            instance: boot_epoch().unwrap(),
             stdin: child.stdin.take(),
             stdout: child.stdout.take().unwrap(),
             child,
@@ -8064,7 +8164,7 @@ tidepool-reuse-error: witness failed\n";
             legacy
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
-            legacy.write_all(b"TPDTR003").unwrap();
+            legacy.write_all(b"TPDTR004").unwrap();
             let mut refused = [0];
             assert_eq!(
                 legacy.read(&mut refused).unwrap(),
@@ -8946,6 +9046,188 @@ fn main() {{
         request_stop(&socket).unwrap();
         assert_eq!(server.join().unwrap().unwrap(), 0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn idle_affinity_falls_back_and_queued_rotation_reports_actual_instance() {
+        struct OwnedServer {
+            socket: PathBuf,
+            thread: Option<std::thread::JoinHandle<Result<u8, FrontendError>>>,
+        }
+        impl Drop for OwnedServer {
+            fn drop(&mut self) {
+                if let Some(thread) = self.thread.take() {
+                    request_stop(&self.socket).unwrap();
+                    assert_eq!(thread.join().unwrap().unwrap(), 0);
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_bin = compile_sleepy_fake_worker(dir.path(), &argv, 0);
+        for rotate in [false, true] {
+            let socket = dir.path().join(if rotate {
+                "rotation.sock"
+            } else {
+                "affinity.sock"
+            });
+            let prepared = PreparedWorker::for_test(worker_bin.clone()).unwrap();
+            let config = DaemonConfig {
+                socket: socket.clone(),
+                rotate_after: rotate.then_some(1),
+                rss_ceiling_mb: None,
+                request_deadline_secs: Some(10),
+                watch_stamp: None,
+                persistent: true,
+                run_id: Some("actual-worker-affinity".into()),
+                log_path: None,
+                workers: Some(2),
+                foreground_jobs: Some(1),
+                preparation_jobs: Some(1),
+            };
+            let server = std::thread::spawn(move || serve(&config, prepared));
+            let _server = OwnedServer {
+                socket: socket.clone(),
+                thread: Some(server),
+            };
+            let ready_deadline = Instant::now() + Duration::from_secs(10);
+            let binding = loop {
+                if let Ok(binding) = preflight(&socket) {
+                    break binding;
+                }
+                assert!(Instant::now() < ready_deadline, "daemon readiness deadline");
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "bounded test-owned daemon readiness polling"
+                )]
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let mut first = begin_transaction(&socket, &binding.epoch).unwrap();
+            assert!(
+                first.worker_location().is_none(),
+                "acceptance does not invent an executing instance"
+            );
+            assert!(
+                execute_test_transaction_request(&mut first, dir.path(), &argv)
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let first_location = first.worker_location().unwrap().clone();
+            let mut spill = begin_transaction(&socket, &binding.epoch).unwrap();
+            assert!(
+                execute_test_transaction_request(&mut spill, dir.path(), &argv)
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let spill_location = spill.worker_location().unwrap().clone();
+            assert_eq!((first_location.slot(), spill_location.slot()), (0, 1));
+            if rotate {
+                let mut queued = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                let accepted = queued.admission_id;
+                assert!(queued.worker_location().is_none());
+                end_transaction(&mut spill).unwrap();
+                // Slot 1 becomes idle while this already accepted transaction
+                // retains the original slot-0 queue and its fixed CPU grant.
+                queued.stream.set_nonblocking(true).unwrap();
+                assert_eq!(
+                    queued.stream.read(&mut [0]).unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock
+                );
+                queued.stream.set_nonblocking(false).unwrap();
+                end_transaction(&mut first).unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut queued, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(queued.admission_id, accepted);
+                let actual = queued.worker_location().unwrap();
+                assert_eq!(
+                    actual.slot(),
+                    0,
+                    "accepted work cannot reroute to the now idle hinted slot"
+                );
+                assert_ne!(
+                    actual.instance(),
+                    first_location.instance(),
+                    "queued execution observes the replacement instance after rotation"
+                );
+                end_transaction(&mut queued).unwrap();
+                let mut stale = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut stale, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    stale.worker_location().unwrap().slot(),
+                    0,
+                    "a rotated hint immediately falls back to ordinary admission"
+                );
+                end_transaction(&mut stale).unwrap();
+            } else {
+                end_transaction(&mut spill).unwrap();
+                end_transaction(&mut first).unwrap();
+                let mut preferred = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut preferred, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    preferred.worker_location(),
+                    Some(&spill_location),
+                    "the same eligible idle worker wins over the foreground default"
+                );
+                let mut fallback = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut fallback, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    fallback.worker_location(),
+                    Some(&first_location),
+                    "a busy hint does not wait for its preferred instance"
+                );
+                end_transaction(&mut fallback).unwrap();
+                end_transaction(&mut preferred).unwrap();
+            }
+        }
     }
 
     /// Characterize the accepted connection's lease independently of compiler

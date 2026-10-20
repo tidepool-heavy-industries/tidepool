@@ -2784,6 +2784,7 @@ mod tests {
             cancellation.arm_daemon(&stream).unwrap();
             let server_cancel = cancellation.clone();
             let server = std::thread::spawn(move || {
+                daemon::write_worker_started(&mut peer, &[0; 32], 0, &[1; 32]).unwrap();
                 let mut command = [0];
                 let count = peer.read(&mut command).unwrap();
                 if phase == 4 {
@@ -4518,6 +4519,7 @@ mod tests {
         requests: usize,
         ends: usize,
         active: usize,
+        hints: Vec<Option<CompilerWorkerLocation>>,
     }
 
     /// The peer speaks the actual preflight/transaction protocol. Its census is
@@ -4575,6 +4577,24 @@ mod tests {
                     let mut workload = [0];
                     connection.read_exact(&mut workload).unwrap();
                     assert_eq!(workload, [0]);
+                    let mut affinity = [0];
+                    connection.read_exact(&mut affinity).unwrap();
+                    let hint = match affinity[0] {
+                        0 => None,
+                        1 => {
+                            let mut slot = [0; 4];
+                            let mut instance = [0; 32];
+                            connection.read_exact(&mut slot).unwrap();
+                            connection.read_exact(&mut instance).unwrap();
+                            Some(CompilerWorkerLocation::started(
+                                requested_epoch,
+                                u32::from_le_bytes(slot),
+                                instance,
+                            ))
+                        }
+                        _ => panic!("invalid affinity frame"),
+                    };
+                    server_counts.lock().unwrap().hints.push(hint);
                     server_counts.lock().unwrap().begins += 1;
                     if requested_epoch != *server_epoch.lock().unwrap() {
                         let message = b"replaced daemon epoch";
@@ -4607,6 +4627,13 @@ mod tests {
                         }
                         connection.write_all(&[1]).unwrap();
                         connection.write_all(&admission.to_le_bytes()).unwrap();
+                        daemon::write_worker_started(
+                            &mut connection,
+                            &requested_epoch,
+                            0,
+                            &[1; 32],
+                        )
+                        .unwrap();
                         loop {
                             let mut command = [0];
                             if connection.read_exact(&mut command).is_err() {
@@ -4757,6 +4784,66 @@ mod tests {
             ),
             (1, 1, 1, 1, 0)
         );
+    }
+
+    #[test]
+    fn scoped_worker_hint_is_placement_only_and_active_transactions_stay_pinned() {
+        let mut fixture = DeferredDaemonFixture::new(
+            DaemonFixtureBehavior::Normal,
+            CompilerTransactionCancellation::new(),
+        );
+        let mut command = fixture.command();
+        let first = with_compiler_transaction(
+            |_| {},
+            || {
+                fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap()
+                    .worker_location
+                    .unwrap()
+            },
+        );
+        assert_eq!(first.close, CompilerTransactionClose::Clean);
+        let actual = first.action;
+        command.set_worker_affinity_hint(Some(actual.clone()));
+        let before = daemon::compile_request_correlation(Path::new("/tmp"), &command.request);
+        let second = with_compiler_transaction(
+            |_| {},
+            || {
+                let endpoint = fixture.bind(&command).unwrap();
+                assert_eq!(
+                    fixture.counts.lock().unwrap().begins,
+                    1,
+                    "hint selection precedes lazy BEGIN"
+                );
+                assert_eq!(
+                    endpoint.execute(&command).unwrap().worker_location.as_ref(),
+                    Some(&actual)
+                );
+                command.set_worker_affinity_hint(None);
+                assert_eq!(
+                    fixture
+                        .bind(&command)
+                        .unwrap()
+                        .execute(&command)
+                        .unwrap()
+                        .worker_location
+                        .as_ref(),
+                    Some(&actual)
+                );
+            },
+        );
+        assert_eq!(second.close, CompilerTransactionClose::Clean);
+        assert_eq!(
+            before,
+            daemon::compile_request_correlation(Path::new("/tmp"), &command.request)
+        );
+        fixture.settle();
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!(counts.hints, [None, Some(actual)]);
+        assert_eq!((counts.begins, counts.requests, counts.ends), (2, 3, 2));
     }
 
     #[test]
