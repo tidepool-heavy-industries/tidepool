@@ -243,6 +243,20 @@ pub(crate) enum ExecutionSourceBindingError {
     DifferentSource,
 }
 
+impl ExecutionSourceBindingError {
+    pub(crate) fn into_source_error(self) -> tidepool_runtime::session::SourceAdmissionError {
+        match self {
+            Self::Admission(error) => error,
+            Self::NeutralOwner => {
+                tidepool_runtime::session::SourceAdmissionError::NeutralSourceOwner
+            }
+            Self::DifferentSource => {
+                tidepool_runtime::session::SourceAdmissionError::DifferentOriginalSource
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationCompilerSource {
     Dependent,
@@ -526,6 +540,62 @@ impl CompilerWorkTicket {
                 action,
             )
             .map(|settled| settled.into_outcome().action)
+    }
+
+    pub(crate) fn run_original_source_transaction<H, O, T>(
+        session: &mut tidepool_runtime::session::ResidentSession<H, O>,
+        ticket: Self,
+        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(
+            &mut tidepool_runtime::session::ResidentSession<H, O>,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<T, crate::resident_workbench::generation_admission::GenerationAdmissionError>
+    where
+        H: tidepool_effect::dispatch::DispatchEffect<O> + Send,
+        O: tidepool_runtime::session::OutputSink + Sync,
+    {
+        if let Err(error) = ticket.bind_original_source(source.clone()) {
+            ticket.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+            return Err(error.into_source_error());
+        }
+        let cancellation = ticket.control.cancellation.clone();
+        session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation,
+                None,
+                move |close| ticket.consume_close(close),
+                action,
+            )
+            .map(|settled| settled.into_outcome().action)
+    }
+
+    pub(crate) fn run_original_source_compiler_phase<T>(
+        self,
+        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        action: impl FnOnce(
+            &tidepool_runtime::session::RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<
+        tidepool_runtime::CompilerTransactionSettled<T>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
+        if let Err(error) = self.bind_original_source(source.clone()) {
+            self.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+            return Err(error.into_source_error());
+        }
+        let cancellation = self.control.cancellation.clone();
+        source.with_source_compiler_transaction(
+            workload,
+            cancellation,
+            None,
+            move |close| self.consume_close(close),
+            action,
+        )
     }
 
     pub(crate) fn run_source_compiler_phase<T>(

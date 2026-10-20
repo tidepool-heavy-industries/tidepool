@@ -72,7 +72,145 @@ pub struct ProgramProvenance {
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
     authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
+    original_sources: BTreeMap<u64, RuntimeSourceOrigin>,
 }
+
+/// Actual runtime source custody is independent of semantic compiler equality.
+/// Unknown retains every known contributor and cannot be repaired by a later merge.
+#[derive(Clone, Debug)]
+enum RuntimeSourceOrigin {
+    Known(Arc<super::RuntimeLexicalScopeLease>),
+    Ambiguous(Vec<Arc<super::RuntimeLexicalScopeLease>>),
+    Unknown(Vec<Arc<super::RuntimeLexicalScopeLease>>),
+}
+
+impl RuntimeSourceOrigin {
+    fn known(&self) -> &[Arc<super::RuntimeLexicalScopeLease>] {
+        match self {
+            Self::Known(source) => std::slice::from_ref(source),
+            Self::Ambiguous(sources) | Self::Unknown(sources) => sources,
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        let unknown = matches!(self, Self::Unknown(_)) || matches!(other, Self::Unknown(_));
+        let mut sources = self.known().to_vec();
+        for source in other.known() {
+            if !sources.iter().any(|held| Arc::ptr_eq(held, source)) {
+                sources.push(source.clone());
+            }
+        }
+        *self = if unknown {
+            Self::Unknown(sources)
+        } else if sources.len() == 1 {
+            Self::Known(sources.pop().expect("one source"))
+        } else {
+            Self::Ambiguous(sources)
+        };
+    }
+
+    fn require_unique(
+        &self,
+        site: u64,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+        match self {
+            Self::Known(source) => Ok(source.clone()),
+            Self::Ambiguous(sources) => Err(ResidentError::AmbiguousOriginalSource {
+                site,
+                origins: sources.len(),
+            }),
+            Self::Unknown(sources) => Err(ResidentError::MissingOriginalSource {
+                site,
+                known_origins: sources.len(),
+            }),
+        }
+    }
+}
+
+enum RuntimeSourceContribution<'a> {
+    Retained {
+        id: u64,
+        provenance: &'a Arc<ProgramProvenance>,
+    },
+    MissingNative,
+    SourceNeutral,
+}
+
+fn classify_import_source<'a>(
+    owner: &ImportOwner,
+    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
+) -> RuntimeSourceContribution<'a> {
+    match owner {
+        ImportOwner::Retained { id, .. } => match bindings.get(&id.raw()) {
+            Some(provenance) => RuntimeSourceContribution::Retained {
+                id: id.raw(),
+                provenance,
+            },
+            None => RuntimeSourceContribution::MissingNative,
+        },
+        ImportOwner::Source { .. } | ImportOwner::CodeExport { .. } => {
+            RuntimeSourceContribution::MissingNative
+        }
+        ImportOwner::Package { .. } => RuntimeSourceContribution::SourceNeutral,
+    }
+}
+
+/// Gather exact imports once per binding identity. Unresolved native custody
+/// contributes uncertainty once over the selected target's possible sites.
+fn contribute_import_sources<'a>(
+    imports: impl IntoIterator<Item = &'a ImportOwner>,
+    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
+    possible_sites: impl Iterator<Item = u64>,
+    sources: &mut BTreeMap<u64, RuntimeSourceOrigin>,
+) -> Vec<&'a Arc<ProgramProvenance>> {
+    let mut retained = BTreeMap::new();
+    let mut unresolved_native = false;
+    for owner in imports {
+        match classify_import_source(owner, bindings) {
+            RuntimeSourceContribution::Retained { id, provenance } => {
+                retained.entry(id).or_insert(provenance);
+            }
+            RuntimeSourceContribution::MissingNative => unresolved_native = true,
+            RuntimeSourceContribution::SourceNeutral => {}
+        }
+    }
+    for original in retained.values() {
+        for site in original.sites.keys() {
+            let source = original
+                .original_sources
+                .get(site)
+                .cloned()
+                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            sources
+                .entry(*site)
+                .and_modify(|held| held.merge(&source))
+                .or_insert(source);
+        }
+    }
+    if unresolved_native {
+        for site in possible_sites {
+            sources
+                .entry(site)
+                .and_modify(|held| {
+                    held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
+                })
+                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+        }
+    }
+    retained.into_values().collect()
+}
+
+impl PartialEq for RuntimeSourceOrigin {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+            && self.known().len() == other.known().len()
+            && self
+                .known()
+                .iter()
+                .all(|source| other.known().iter().any(|held| Arc::ptr_eq(source, held)))
+    }
+}
+impl Eq for RuntimeSourceOrigin {}
 
 /// Compiler-selected immutable facts. No runtime execution owner or renderer
 /// is retained here; each installation creates its own execution observation.
@@ -193,6 +331,11 @@ impl CompiledProvenancePlan {
             fresh_completion_sites: self.fresh_completion_sites.clone(),
             source_originals: self.source_originals.clone(),
             native_sites: self.native_sites.clone(),
+            original_sources: self
+                .sites
+                .keys()
+                .map(|site| (*site, RuntimeSourceOrigin::Unknown(Vec::new())))
+                .collect(),
             authenticated_inputs: self
                 .authenticated_inputs
                 .iter()
@@ -319,7 +462,12 @@ impl ActivationDisplayOwners {
 struct OriginalDisplayOwner {
     identity: [u8; 32],
     display: Option<Arc<tidepool_toolchain::activation_preview::OriginalDisplayContext>>,
-    renderers: Mutex<BTreeMap<ActivationRendererKey, Arc<RendererSlot<SharedActivationRenderer>>>>,
+    renderers: Mutex<
+        BTreeMap<
+            ActivationRendererKey,
+            Arc<RendererSlot<SharedActivationRenderer, super::turn::ActivationRendererFailure>>,
+        >,
+    >,
 }
 
 impl OriginalExecutionContext {
@@ -482,6 +630,9 @@ impl ProgramProvenance {
             } else {
                 self.sites.insert(site.site, site.clone());
             }
+            self.original_sources
+                .entry(site.site)
+                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
         }
         Ok(())
     }
@@ -525,7 +676,21 @@ impl ProgramProvenance {
             }
         }
         for site in other.sites.values() {
+            let existing = self.sites.contains_key(&site.site);
             self.extend(std::slice::from_ref(site))?;
+            let incoming = other
+                .original_sources
+                .get(&site.site)
+                .cloned()
+                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            if existing {
+                self.original_sources
+                    .entry(site.site)
+                    .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()))
+                    .merge(&incoming);
+            } else {
+                self.original_sources.insert(site.site, incoming);
+            }
         }
         for (site, interfaces) in &other.authenticated_inputs {
             self.authenticated_inputs
@@ -1189,6 +1354,7 @@ static_assertions::assert_not_impl_any!(RequestReceiverEntry: Clone, Copy);
 #[derive(Debug)]
 pub struct RuntimeActivationInput {
     custody: RootCustody,
+    original_source: Arc<super::RuntimeLexicalScopeLease>,
     site: u64,
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
@@ -1203,6 +1369,10 @@ pub struct RuntimeActivationInput {
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 
 impl RuntimeActivationInput {
+    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+        self.original_source.clone()
+    }
+
     pub fn input_type(&self) -> &str {
         &self.input_type
     }
@@ -1291,6 +1461,7 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 /// A committed original live binding. Type authority does not authorize preview
 /// code; that executable is admitted separately after this mount.
 pub struct MountedActivationInput {
+    original_source: Arc<super::RuntimeLexicalScopeLease>,
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     original_execution_identity: [u8; 32],
@@ -1347,13 +1518,15 @@ impl BoundActivationPreview {
     /// Spend the bound admission exactly once.
     pub(super) fn try_consume(&self) -> Result<SpentActivationPreview, ResidentError> {
         self.admission
-            .phase
-            .compare_exchange(
-                PREVIEW_BOUND,
-                PREVIEW_CONSUMED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .with_open_sources(|| {
+                self.admission.phase.compare_exchange(
+                    PREVIEW_BOUND,
+                    PREVIEW_CONSUMED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+            })
+            .map_err(SessionError::SourceAdmission)?
             .map_err(|_| ResidentError::ActivationPreviewRefused {
                 binding: self.admission.mounted.binding,
             })?;
@@ -1377,6 +1550,28 @@ impl SpentActivationPreview {
 }
 
 impl RuntimeActivationPreviewAdmission {
+    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+        self.mounted.original_source.clone()
+    }
+
+    pub(super) fn with_open_sources<T>(
+        &self,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [
+                self.mounted.original_source.clone(),
+                self.scope_lease.clone(),
+            ],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    action,
+                )
+            },
+        )
+    }
+
     pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
         self.scope_lease.clone()
     }
@@ -1389,16 +1584,18 @@ impl RuntimeActivationPreviewAdmission {
     /// Claim the sole right to bind this admission. Concurrent binders race on
     /// this transition; exactly one observes the fresh phase.
     pub(super) fn try_bind(self: &Arc<Self>) -> Result<BoundActivationPreview, ResidentError> {
-        self.phase
-            .compare_exchange(
+        self.with_open_sources(|| {
+            self.phase.compare_exchange(
                 PREVIEW_FRESH,
                 PREVIEW_BOUND,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map_err(|_| ResidentError::ActivationPreviewRefused {
-                binding: self.mounted.binding,
-            })?;
+        })
+        .map_err(SessionError::SourceAdmission)?
+        .map_err(|_| ResidentError::ActivationPreviewRefused {
+            binding: self.mounted.binding,
+        })?;
         Ok(BoundActivationPreview {
             admission: Arc::clone(self),
         })
@@ -1488,20 +1685,20 @@ struct ActivationRendererKey {
 }
 
 #[derive(Debug)]
-struct RendererSlot<T> {
-    state: Mutex<RendererSlotState<T>>,
+struct RendererSlot<T, E> {
+    state: Mutex<RendererSlotState<T, E>>,
     changed: tokio::sync::watch::Sender<()>,
 }
 
 #[derive(Debug)]
-enum RendererSlotState<T> {
+enum RendererSlotState<T, E> {
     Empty,
     Compiling,
     Ready(Arc<T>),
-    CloseUnconfirmed,
+    Terminal(Arc<RendererProductionFailure<E>>),
 }
 
-impl<T> RendererSlot<T> {
+impl<T, E> RendererSlot<T, E> {
     fn new() -> Arc<Self> {
         let (changed, _) = tokio::sync::watch::channel(());
         Arc::new(Self {
@@ -1510,11 +1707,11 @@ impl<T> RendererSlot<T> {
         })
     }
 
-    fn acquire(self: &Arc<Self>) -> RendererAccess<T> {
+    fn acquire(self: &Arc<Self>) -> RendererAccess<T, E> {
         let mut state = self.state.lock();
         match &*state {
             RendererSlotState::Ready(value) => RendererAccess::Ready(value.clone()),
-            RendererSlotState::CloseUnconfirmed => RendererAccess::CloseUnconfirmed,
+            RendererSlotState::Terminal(failure) => RendererAccess::Terminal(failure.clone()),
             RendererSlotState::Compiling => RendererAccess::Wait(RendererWaiter {
                 slot: self.clone(),
                 changed: self.changed.subscribe(),
@@ -1530,11 +1727,11 @@ impl<T> RendererSlot<T> {
     }
 }
 
-pub enum RendererAccess<T> {
+pub enum RendererAccess<T, E> {
     Ready(Arc<T>),
-    Produce(RendererProduction<T>),
-    Wait(RendererWaiter<T>),
-    CloseUnconfirmed,
+    Produce(RendererProduction<T, E>),
+    Wait(RendererWaiter<T, E>),
+    Terminal(Arc<RendererProductionFailure<E>>),
 }
 
 /// Native renderer action, including a failed action, bound to its compiler owner.
@@ -1558,6 +1755,9 @@ impl<T> PreparedRenderer<T> {
 #[derive(Debug)]
 pub enum RendererProductionFailure<E> {
     Compile(E),
+    ProducerLost {
+        origin: crate::CompilerTransactionOrigin,
+    },
     CloseUnconfirmed {
         close: crate::CompilerTransactionClose,
         action_error: Option<E>,
@@ -1573,17 +1773,24 @@ impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Compile(error) => write!(formatter, "{error}"),
-            Self::CloseUnconfirmed { close, action_error } => {
-                write!(
-                    formatter,
-                    "compiler close is unconfirmed: {close:?}"
-                )?;
+            Self::ProducerLost { origin } => {
+                write!(formatter, "renderer producer disappeared after starting compiler scope {origin:?}; settlement was not observed")
+            }
+            Self::CloseUnconfirmed {
+                close,
+                action_error,
+            } => {
+                write!(formatter, "compiler close is unconfirmed: {close:?}")?;
                 if let Some(error) = action_error {
                     write!(formatter, "; primary action failed: {error}")?;
                 }
                 Ok(())
             }
-            Self::Publication { error, close, action_error } => {
+            Self::Publication {
+                error,
+                close,
+                action_error,
+            } => {
                 write!(
                     formatter,
                     "compiler publication failed: {error}; close: {close:?}"
@@ -1597,43 +1804,53 @@ impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
     }
 }
 
-/// Move this affine lease into the compiler's blocking owner. Publish or drop
-/// it only after that owner's native transaction has closed.
-pub struct RendererProduction<T> {
-    slot: Option<Arc<RendererSlot<T>>>,
+/// Move this affine lease into the compiler's blocking owner. Publication and
+/// retry require its settled transaction; a started producer lost before
+/// settlement retains terminal evidence for all observers.
+pub struct RendererProduction<T, E> {
+    slot: Option<Arc<RendererSlot<T, E>>>,
     native: RendererNativeState,
 }
 
 enum RendererNativeState {
     Idle,
     Started(crate::CompilerTransactionOrigin),
-    CloseUnconfirmed,
 }
 
-impl<T> RendererProduction<T> {
+impl<T, E> RendererProduction<T, E> {
+    /// Observe this production without acquiring another producer or its stop authority.
+    pub fn waiter(&self) -> RendererWaiter<T, E> {
+        let slot = self.slot.as_ref().expect("one renderer producer");
+        let _state = slot.state.lock();
+        RendererWaiter {
+            slot: slot.clone(),
+            changed: slot.changed.subscribe(),
+        }
+    }
+
     pub fn begin_native(&mut self) -> Result<(), crate::CompilerTransactionPublicationError> {
         let origin = crate::CompilerTransactionOrigin::current()
             .ok_or(crate::CompilerTransactionPublicationError::MissingOwner)?;
         match &self.native {
             RendererNativeState::Idle => self.native = RendererNativeState::Started(origin),
             RendererNativeState::Started(previous) if previous == &origin => {}
-            RendererNativeState::Started(_) | RendererNativeState::CloseUnconfirmed => {
+            RendererNativeState::Started(_) => {
                 return Err(crate::CompilerTransactionPublicationError::DifferentOwner);
             }
         }
         Ok(())
     }
 
-    pub fn settle_native<E>(
+    pub fn settle_native(
         mut self,
         outcome: crate::CompilerTransactionSettled<Result<PreparedRenderer<Result<T, E>>, E>>,
-    ) -> Result<Arc<T>, RendererProductionFailure<E>> {
+    ) -> Result<Arc<T>, Arc<RendererProductionFailure<E>>> {
         let owner_error = match &self.native {
             RendererNativeState::Started(origin) if outcome.belongs_to(origin) => None,
             RendererNativeState::Started(_) => {
                 Some(crate::CompilerTransactionPublicationError::DifferentOwner)
             }
-            RendererNativeState::Idle | RendererNativeState::CloseUnconfirmed => {
+            RendererNativeState::Idle => {
                 Some(crate::CompilerTransactionPublicationError::MissingOwner)
             }
         };
@@ -1654,12 +1871,13 @@ impl<T> RendererProduction<T> {
         let outcome = outcome.into_outcome();
         let action = outcome.action.and_then(|prepared| prepared.value);
         if let Some(error) = owner_error {
-            self.native = RendererNativeState::CloseUnconfirmed;
-            return Err(RendererProductionFailure::Publication {
-                error,
-                close: outcome.close,
-                action_error: action.err(),
-            });
+            return Err(
+                self.finish_terminal(RendererProductionFailure::Publication {
+                    error,
+                    close: outcome.close,
+                    action_error: action.err(),
+                }),
+            );
         }
         match outcome.close {
             crate::CompilerTransactionClose::Clean
@@ -1667,18 +1885,28 @@ impl<T> RendererProduction<T> {
                 self.native = RendererNativeState::Idle;
                 match action {
                     Ok(value) => Ok(self.publish(value)),
-                    Err(error) => Err(RendererProductionFailure::Compile(error)),
+                    Err(error) => Err(Arc::new(RendererProductionFailure::Compile(error))),
                 }
             }
             close @ (crate::CompilerTransactionClose::Unconfirmed(_)
-            | crate::CompilerTransactionClose::Retired(_)) => {
-                self.native = RendererNativeState::CloseUnconfirmed;
-                Err(RendererProductionFailure::CloseUnconfirmed {
+            | crate::CompilerTransactionClose::Retired(_)) => Err(self.finish_terminal(
+                RendererProductionFailure::CloseUnconfirmed {
                     close,
                     action_error: action.err(),
-                })
-            }
+                },
+            )),
         }
+    }
+
+    fn finish_terminal(
+        mut self,
+        failure: RendererProductionFailure<E>,
+    ) -> Arc<RendererProductionFailure<E>> {
+        let failure = Arc::new(failure);
+        let slot = self.slot.take().expect("one renderer producer");
+        *slot.state.lock() = RendererSlotState::Terminal(failure.clone());
+        slot.changed.send_replace(());
+        failure
     }
 
     fn publish(mut self, value: T) -> Arc<T> {
@@ -1690,13 +1918,15 @@ impl<T> RendererProduction<T> {
     }
 }
 
-impl<T> Drop for RendererProduction<T> {
+impl<T, E> Drop for RendererProduction<T, E> {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
             *slot.state.lock() = match self.native {
                 RendererNativeState::Idle => RendererSlotState::Empty,
-                RendererNativeState::Started(_) | RendererNativeState::CloseUnconfirmed => {
-                    RendererSlotState::CloseUnconfirmed
+                RendererNativeState::Started(ref origin) => {
+                    RendererSlotState::Terminal(Arc::new(RendererProductionFailure::ProducerLost {
+                        origin: origin.clone(),
+                    }))
                 }
             };
             slot.changed.send_replace(());
@@ -1704,13 +1934,21 @@ impl<T> Drop for RendererProduction<T> {
     }
 }
 
-pub struct RendererWaiter<T> {
-    slot: Arc<RendererSlot<T>>,
+pub struct RendererWaiter<T, E> {
+    slot: Arc<RendererSlot<T, E>>,
     changed: tokio::sync::watch::Receiver<()>,
 }
 
-impl<T> RendererWaiter<T> {
-    pub async fn wait(mut self) -> RendererAccess<T> {
+impl<T, E> RendererWaiter<T, E> {
+    /// Inspect retained terminal evidence after the producer's task has joined.
+    pub fn failure(&self) -> Option<Arc<RendererProductionFailure<E>>> {
+        match &*self.slot.state.lock() {
+            RendererSlotState::Terminal(failure) => Some(failure.clone()),
+            _ => None,
+        }
+    }
+
+    pub async fn wait(mut self) -> RendererAccess<T, E> {
         self.changed
             .changed()
             .await
@@ -1724,7 +1962,10 @@ impl RuntimeActivationPreviewAdmission {
         &self,
         template_source: &str,
         budget: u64,
-    ) -> Result<RendererAccess<SharedActivationRenderer>, ResidentError> {
+    ) -> Result<
+        RendererAccess<SharedActivationRenderer, super::turn::ActivationRendererFailure>,
+        ResidentError,
+    > {
         let witness = self
             .mounted
             .interface
@@ -2305,6 +2546,12 @@ pub enum ResidentError {
     },
     #[error("request receiver registration has no live entry: {hole}")]
     MissingRequestReceiverEntry { hole: String },
+    #[error("parked continuation has no original-source site: {hole}")]
+    MissingOriginalSourceContinuation { hole: String },
+    #[error("site {site} lacks an original runtime source contribution ({known_origins} known)")]
+    MissingOriginalSource { site: u64, known_origins: usize },
+    #[error("site {site} has {origins} distinct original runtime source owners")]
+    AmbiguousOriginalSource { site: u64, origins: usize },
     #[error("activation site {site} lacks its original live input/type evidence")]
     InvalidActivationInput { site: u64 },
     #[error("activation site {site} lacks its original canonical input type witness")]
@@ -3831,6 +4078,20 @@ where
         self.state.durable_public_readiness(owner, scope)
     }
 
+    fn admit_original_source_work_in(
+        &self,
+        original: &Arc<super::RuntimeLexicalScopeLease>,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        let target = self.state.source_lease_in(scope)?;
+        self.state
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .admit_original(original, Some(target))?;
+        Ok(())
+    }
+
     /// Reserve a fresh interface for one original input. No authored cell or
     /// prepared program is needed to bind the already rooted heap value.
     pub fn admit_activation_input_in(
@@ -3853,6 +4114,7 @@ where
         {
             return Err(invalid());
         }
+        self.admit_original_source_work_in(&input.original_source, scope)?;
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolOriginalLiveInput2");
         digest.update(&raw.0.to_le_bytes());
@@ -4765,6 +5027,36 @@ where
         Some(Arc::clone(&entry.provenance))
     }
 
+    /// Retain source custody for the actual suspended site, including raw tools
+    /// which have no activation input or compiler-authenticated input witness.
+    pub fn parked_original_source(
+        &mut self,
+        hole: &ResidentHole,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+        let invalid = || ResidentError::MissingOriginalSourceContinuation {
+            hole: hole.cont_id().to_owned(),
+        };
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(invalid)?;
+        let site = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked_site(entry.id))
+            .ok_or_else(invalid)?;
+        entry
+            .provenance
+            .original_sources
+            .get(&site)
+            .ok_or(ResidentError::MissingOriginalSource {
+                site,
+                known_origins: 0,
+            })?
+            .require_unique(site)
+    }
+
     /// Whether the session has no parked frames (ready and quiescent).
     pub fn is_idle(&self) -> bool {
         self.parked.is_empty()
@@ -5014,6 +5306,7 @@ where
         if parked_site != site {
             return Err(invalid());
         }
+        let original_source = self.parked_original_source(hole)?;
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
         if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
@@ -5057,6 +5350,7 @@ where
             .ok_or_else(invalid)?;
         Ok(RuntimeActivationInput {
             custody,
+            original_source,
             site,
             input_type,
             type_evidence: Arc::new(type_evidence),
@@ -5630,8 +5924,15 @@ where
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
         }
-        self.state
-            .consume_binding_interface(reservation, &interface)?;
+        self.admit_original_source_work_in(&owner.input.original_source, scope)?;
+        let target = self.state.source_lease_in(scope).map_err(SessionError::SourceAdmission)?;
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [owner.input.original_source.clone(), target],
+            |leases| super::RuntimeSourceAdmission::with_open_admissions(
+                leases.iter().map(|lease| lease.source_admission()),
+                || self.state.consume_binding_interface(reservation, &interface),
+            ),
+        ).map_err(SessionError::SourceAdmission)??;
         self.mount_compiled_binding_prepared(
             scope,
             &binder,
@@ -5652,6 +5953,7 @@ where
                 source: Box::new(SessionError::DeadScope(scope).into()),
             })?;
         Ok(MountedActivationInput {
+            original_source: owner.input.original_source,
             interface,
             original_execution: owner.input.original_execution,
             original_execution_identity: owner.input.original_execution_identity,
@@ -6890,25 +7192,52 @@ where
             .get()
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
+        // Pending origins live only in this local builder. Cached plans retain
+        // compiler facts alone; every site is finalized before provenance escapes.
+        let mut sources = BTreeMap::<u64, RuntimeSourceOrigin>::new();
+        let source = match code.certification().map(|proof| proof.purpose()) {
+            Some(TurnPurpose::Execution { prefix, .. }) => {
+                Some(prefix.admission().original_source_lease()?)
+            }
+            Some(TurnPurpose::Ordinary { original: Some(_) } | TurnPurpose::HostPrototype(_)) => {
+                self.state
+                    .source_transaction
+                    .as_ref()
+                    .map(|owner| owner.admitted_original_source())
+                    .transpose()
+                    .map_err(SessionError::from)?
+            }
+            _ => None,
+        };
+        if let Some(source) = source {
+            for site in code.prepared().sites() {
+                sources.insert(site.site, RuntimeSourceOrigin::Known(source.clone()));
+            }
+        }
+        let mut retained = Vec::new();
         if let Some(resolved) = &admission.resolved {
-            // Runtime binding lineage is projected from this admission's exact
-            // selected imports and never enters the immutable provenance plan.
             let imports = resolved.target_owners.iter().chain(
                 resolved
                     .groups
                     .iter()
                     .flat_map(|group| group.original().imports()),
             );
-            let retained = imports
-                .filter_map(|owner| match owner {
-                    ImportOwner::Retained { id, .. } => Some(id.raw()),
-                    _ => None,
-                })
-                .collect::<std::collections::BTreeSet<_>>();
-            for id in retained {
-                if let Some(original) = self.binding_provenance.get(&id) {
-                    Arc::make_mut(&mut provenance).merge(original)?;
-                }
+            retained = contribute_import_sources(
+                imports,
+                &self.binding_provenance,
+                provenance.native_sites.ids(),
+                &mut sources,
+            );
+        }
+        {
+            let provenance = Arc::make_mut(&mut provenance);
+            for original in retained {
+                provenance.merge(original)?;
+            }
+            for (site, source) in &mut provenance.original_sources {
+                *source = sources
+                    .remove(site)
+                    .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
             }
         }
         Ok(provenance)
@@ -7042,6 +7371,7 @@ where
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
         }
+        admission.with_open_sources(|| ()).map_err(SessionError::SourceAdmission)?;
         Ok(())
     }
 
@@ -7105,12 +7435,12 @@ where
         drop(provenance_admission);
         self.state
             .validate_lexical_scope_lease(admission.scope_lease.scope(), &admission.scope_lease)?;
-        // The mounted original A is the source this preview renders. Bind its
-        // live lease to the active compiler transaction before the affine
-        // admission is spent, so a revoked original refuses while the
-        // admission is still intact.
-        self.state
-            .admit_source_work_in(mounted.scope)
+        self.state.source_transaction.as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)
+            .and_then(|source| source.admit_original(
+                &mounted.original_source,
+                Some(admission.scope_lease.clone()),
+            ))
             .map_err(SessionError::SourceAdmission)?;
         // The authoritative spend follows every non-consuming admission and
         // lease check. A refusal after this point leaves the admission spent;
@@ -12210,6 +12540,285 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
 mod activation_input_tests;
 
 #[cfg(test)]
+mod source_origin_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn site(id: u64) -> YieldSite {
+        YieldSite {
+            site: id,
+            origin: "SameCompilerEvidence".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: vec![],
+            heads: vec![],
+            inputs: vec![],
+            input_type_witnesses: vec![],
+            reply_declaration: None,
+            request_type_signatures: None,
+        }
+    }
+
+    fn issued(
+        site_id: u64,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+    ) -> ProgramProvenance {
+        let mut provenance = ProgramProvenance::from_sites(&[site(site_id)]).unwrap();
+        provenance
+            .original_sources
+            .insert(site_id, RuntimeSourceOrigin::Known(source.clone()));
+        provenance
+    }
+
+    #[test]
+    fn independent_source_owners_survive_identical_compiler_evidence() {
+        let mut a = PersistentSession::new(None, 1024);
+        let mut b = PersistentSession::new(None, 1024);
+        let source_a = a.mint_notebook_scope_with_lease(None).unwrap();
+        let source_b = b.mint_notebook_scope_with_lease(None).unwrap();
+        source_a.validate_source_issuer().unwrap();
+        source_b.validate_source_issuer().unwrap();
+        assert_ne!(source_a.scope(), ScopeId::ROOT);
+        assert_ne!(source_b.scope(), ScopeId::ROOT);
+        assert!(!Arc::ptr_eq(&source_a, &source_b));
+        let mut provenance = issued(17, &source_a);
+        provenance.merge(&issued(17, &source_a)).unwrap();
+        assert!(Arc::ptr_eq(
+            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &source_a
+        ));
+        provenance.merge(&issued(17, &source_b)).unwrap();
+        assert!(matches!(
+            provenance.original_sources[&17].require_unique(17),
+            Err(ResidentError::AmbiguousOriginalSource {
+                site: 17,
+                origins: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn unknown_same_site_stays_missing_in_both_merge_orders() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source.validate_source_issuer().unwrap();
+        assert_ne!(source.scope(), ScopeId::ROOT);
+        let known = issued(17, &source);
+        let unknown = ProgramProvenance::from_sites(&[site(17)]).unwrap();
+        for (mut left, right) in [(known.clone(), unknown.clone()), (unknown, known)] {
+            left.merge(&right).unwrap();
+            assert!(matches!(
+                left.original_sources[&17].require_unique(17),
+                Err(ResidentError::MissingOriginalSource {
+                    site: 17,
+                    known_origins: 1
+                })
+            ));
+            assert!(Arc::ptr_eq(&left.original_sources[&17].known()[0], &source));
+        }
+    }
+
+    #[test]
+    fn fresh_target_and_retained_dependency_keep_distinct_site_owners() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source_a = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source_b = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source_a.validate_source_issuer().unwrap();
+        source_b.validate_source_issuer().unwrap();
+        assert_ne!(source_a.scope(), ScopeId::ROOT);
+        assert_ne!(source_b.scope(), ScopeId::ROOT);
+        assert!(!Arc::ptr_eq(&source_a, &source_b));
+        let mut provenance = issued(23, &source_b);
+        provenance.merge(&issued(17, &source_a)).unwrap();
+        assert!(Arc::ptr_eq(
+            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &source_a
+        ));
+        assert!(Arc::ptr_eq(
+            &provenance.original_sources[&23].require_unique(23).unwrap(),
+            &source_b
+        ));
+    }
+
+    #[test]
+    fn unresolved_import_owners_poison_only_selected_native_sites() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source.validate_source_issuer().unwrap();
+        assert_ne!(source.scope(), ScopeId::ROOT);
+        let binder = SymbolIdentity {
+            unit: "Source".into(),
+            module: "Source".into(),
+            namespace: "value".into(),
+            occurrence: "f".into(),
+            record_parent: None,
+        };
+        let selected_binding = SessionVarId::from_extract(7);
+        let known = Arc::new(issued(17, &source));
+        let bindings = HashMap::from([(selected_binding.raw(), known.clone())]);
+        let retained = ImportOwner::Retained {
+            id: selected_binding,
+            generation: 1,
+        };
+        let missing_owners = [
+            ImportOwner::Retained {
+                id: SessionVarId::from_extract(8),
+                generation: 1,
+            },
+            ImportOwner::Source {
+                version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+                binder: binder.clone(),
+            },
+            ImportOwner::CodeExport {
+                binder,
+                generation: 1,
+                root_id: 9,
+                interface_digest: None,
+            },
+        ];
+        for missing in &missing_owners {
+            for missing_first in [false, true] {
+                let mut sources =
+                    BTreeMap::from([(23, RuntimeSourceOrigin::Known(source.clone()))]);
+                let imports = if missing_first {
+                    [missing, &retained]
+                } else {
+                    [&retained, missing]
+                };
+                let traversed = std::cell::Cell::new(0);
+                let retained_refs = contribute_import_sources(
+                    imports
+                        .into_iter()
+                        .chain([&retained, missing, &retained, missing]),
+                    &bindings,
+                    [17, 19]
+                        .into_iter()
+                        .inspect(|_| traversed.set(traversed.get() + 1)),
+                    &mut sources,
+                );
+                assert_eq!(retained_refs.len(), 1, "one unique retained binding");
+                assert_eq!(traversed.get(), 2, "one traversal of two selected sites");
+                assert!(matches!(
+                    sources[&17].require_unique(17),
+                    Err(ResidentError::MissingOriginalSource {
+                        known_origins: 1,
+                        ..
+                    })
+                ));
+                assert!(Arc::ptr_eq(&sources[&17].known()[0], &source));
+                assert!(matches!(
+                    sources[&19].require_unique(19),
+                    Err(ResidentError::MissingOriginalSource {
+                        known_origins: 0,
+                        ..
+                    })
+                ));
+                assert!(Arc::ptr_eq(
+                    &sources[&23].require_unique(23).unwrap(),
+                    &source
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_per_site_runtime_evidence_is_unknown_at_owner_boundaries() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        source.validate_source_issuer().unwrap();
+        let known = issued(17, &source);
+        let mut missing = known.clone();
+        missing.original_sources.clear();
+        for (mut left, right) in [(missing.clone(), known.clone()), (known, missing.clone())] {
+            left.merge(&right).unwrap();
+            assert!(matches!(
+                left.original_sources[&17].require_unique(17),
+                Err(ResidentError::MissingOriginalSource {
+                    site: 17,
+                    known_origins: 1
+                })
+            ));
+        }
+        let mut metadata_only = ProgramProvenance::default();
+        metadata_only.sites.insert(17, site(17));
+        metadata_only.extend(&[site(17)]).unwrap();
+        assert!(matches!(
+            metadata_only.original_sources[&17].require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        let id = SessionVarId::from_extract(7);
+        let imports = [ImportOwner::Retained { id, generation: 1 }];
+        let bindings = HashMap::from([(id.raw(), Arc::new(missing))]);
+        let mut sources = BTreeMap::from([(17, RuntimeSourceOrigin::Known(source.clone()))]);
+        contribute_import_sources(&imports, &bindings, [].into_iter(), &mut sources);
+        assert!(matches!(
+            sources[&17].require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 1,
+                ..
+            })
+        ));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn accumulated_site_origins_match_independent_owner_set_model(
+            history in prop::collection::vec((0u64..5, 0usize..3, any::<bool>()), 1..80),
+        ) {
+            let mut owner = PersistentSession::new(None, 1024);
+            let leases = (0..3).map(|_| owner.mint_notebook_scope_with_lease(None).unwrap()).collect::<Vec<_>>();
+            for (index, lease) in leases.iter().enumerate() {
+                lease.validate_source_issuer().unwrap();
+                prop_assert_ne!(lease.scope(), ScopeId::ROOT);
+                for previous in &leases[..index] {
+                    prop_assert!(!Arc::ptr_eq(lease, previous));
+                }
+            }
+            let mut actual = ProgramProvenance::default();
+            let mut model = BTreeMap::<u64, (BTreeSet<usize>, bool)>::new();
+            for (site_id, source, missing) in history {
+                let mut contribution = issued(site_id, &leases[source]);
+                if missing {
+                    contribution.original_sources.insert(site_id, RuntimeSourceOrigin::Unknown(vec![leases[source].clone()]));
+                }
+                actual.merge(&contribution).unwrap();
+                let expected = model.entry(site_id).or_default();
+                expected.0.insert(source);
+                expected.1 |= missing;
+                for (site_id, (owners, unresolved)) in &model {
+                    let observed = &actual.original_sources[site_id];
+                    let actual_owners = observed.known().iter().map(|lease| {
+                        leases.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
+                    }).collect::<BTreeSet<_>>();
+                    prop_assert_eq!(&actual_owners, owners);
+                    prop_assert_eq!(observed.known().len(), owners.len());
+                    match observed.require_unique(*site_id) {
+                        Ok(lease) => {
+                            prop_assert!(!unresolved && owners.len() == 1);
+                            prop_assert!(Arc::ptr_eq(&lease, &leases[*owners.first().unwrap()]));
+                        }
+                        Err(ResidentError::MissingOriginalSource { known_origins, .. }) => {
+                            prop_assert!(*unresolved);
+                            prop_assert_eq!(known_origins, owners.len());
+                        }
+                        Err(ResidentError::AmbiguousOriginalSource { origins, .. }) => {
+                            prop_assert!(!unresolved && owners.len() > 1);
+                            prop_assert_eq!(origins, owners.len());
+                        }
+                        other => prop_assert!(false, "unexpected source observation: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod preview_budget_tests {
     use super::truncate_preview_at_line;
     use proptest::prelude::*;
@@ -12350,10 +12959,11 @@ mod renderer_slot_tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
         #[test]
-        fn renderer_slot_matches_single_producer_model(operations in prop::collection::vec(0u8..6, 1..100)) {
-            let slot = RendererSlot::<usize>::new();
+        fn renderer_slot_matches_single_producer_model(operations in prop::collection::vec(0u8..8, 1..100)) {
+            let slot = RendererSlot::<usize, &'static str>::new();
             let mut producer = None;
             let mut ready = None;
+            let mut terminal: Option<Arc<RendererProductionFailure<&'static str>>> = None;
             let mut waiters = Vec::new();
             for (step, operation) in operations.into_iter().enumerate() {
                 match operation {
@@ -12361,15 +12971,18 @@ mod renderer_slot_tests {
                         let borrowed = slot.clone();
                         match borrowed.acquire() {
                             RendererAccess::Produce(lease) => {
-                                prop_assert!(producer.is_none() && ready.is_none());
+                                prop_assert!(producer.is_none() && ready.is_none() && terminal.is_none());
                                 producer = Some(lease);
                             }
                             RendererAccess::Wait(waiter) => {
-                                prop_assert!(producer.is_some() && ready.is_none());
+                                prop_assert!(producer.is_some() && ready.is_none() && terminal.is_none());
                                 waiters.push(waiter);
                             }
                             RendererAccess::Ready(value) => prop_assert_eq!(Some(*value), ready),
-                            RendererAccess::CloseUnconfirmed => prop_assert!(false, "model never starts native work"),
+                            RendererAccess::Terminal(failure) => {
+                                let expected = terminal.as_ref().expect("model terminal state");
+                                prop_assert!(Arc::ptr_eq(&failure, expected));
+                            },
                         }
                     }
                     1 => { drop(producer.take()); }
@@ -12382,13 +12995,51 @@ mod renderer_slot_tests {
                     4 => {
                         let state = slot.state.lock();
                         match &*state {
-                            RendererSlotState::Empty => prop_assert!(producer.is_none() && ready.is_none()),
-                            RendererSlotState::Compiling => prop_assert!(producer.is_some() && ready.is_none()),
+                            RendererSlotState::Empty => prop_assert!(producer.is_none() && ready.is_none() && terminal.is_none()),
+                            RendererSlotState::Compiling => prop_assert!(producer.is_some() && ready.is_none() && terminal.is_none()),
                             RendererSlotState::Ready(value) => prop_assert_eq!(Some(**value), ready),
-                            RendererSlotState::CloseUnconfirmed => prop_assert!(false, "model never starts native work"),
+                            RendererSlotState::Terminal(failure) => {
+                                let expected = terminal.as_ref().expect("model terminal state");
+                                prop_assert!(Arc::ptr_eq(failure, expected));
+                            },
                         }
                     }
+                    6 | 7 => if let Some(mut lease) = producer.take() {
+                        let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
+                            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                            crate::CompilerTransactionCancellation::new(),
+                            |_| {},
+                            |report| {
+                                lease.begin_native().unwrap();
+                                PreparedRenderer::prepare(|| {
+                                    if operation == 7 {
+                                        report(crate::CompilerTransactionClose::Unconfirmed(
+                                            tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                                                tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                                                tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                                            ),
+                                        ));
+                                    }
+                                    Err::<usize, _>("generated compile failure")
+                                }).map_err(|_| "missing owner")
+                            },
+                        );
+                        let failure = lease.settle_native(outcome).unwrap_err();
+                        if operation == 6 {
+                            prop_assert!(matches!(failure.as_ref(), RendererProductionFailure::Compile("generated compile failure")));
+                        } else {
+                            prop_assert!(matches!(failure.as_ref(), RendererProductionFailure::CloseUnconfirmed {
+                                action_error: Some("generated compile failure"), ..
+                            }), "terminal failure retains the issued primary action");
+                            terminal = Some(failure);
+                        }
+                    },
                     _ => unreachable!(),
+                }
+                if let Some(expected) = &terminal {
+                    for waiter in &waiters {
+                        prop_assert!(Arc::ptr_eq(expected, &waiter.failure().expect("retained terminal observation")));
+                    }
                 }
             }
         }
@@ -12396,7 +13047,7 @@ mod renderer_slot_tests {
 
     #[tokio::test]
     async fn renderer_waiter_loss_retry_and_ready_release() {
-        let slot = RendererSlot::<usize>::new();
+        let slot = RendererSlot::<usize, &'static str>::new();
         let RendererAccess::Produce(mut first) = slot.acquire() else {
             panic!("first producer")
         };
@@ -12418,8 +13069,8 @@ mod renderer_slot_tests {
             },
         );
         assert!(matches!(
-            first.settle_native(first_outcome),
-            Err(RendererProductionFailure::Compile("failed specialization"))
+            first.settle_native(first_outcome).unwrap_err().as_ref(),
+            RendererProductionFailure::Compile("failed specialization")
         ));
         let RendererAccess::Produce(mut second) = waiter.wait().await else {
             panic!("retry producer")
@@ -12457,7 +13108,7 @@ mod renderer_slot_tests {
     #[tokio::test]
     async fn renderer_unconfirmed_native_settlement_never_retries() {
         for primary_failure in [false, true] {
-            let slot = RendererSlot::<usize>::new();
+            let slot = RendererSlot::<usize, &'static str>::new();
             let RendererAccess::Produce(mut producer) = slot.acquire() else {
                 panic!("first producer")
             };
@@ -12483,10 +13134,11 @@ mod renderer_slot_tests {
                     }).map_err(|_| "missing compiler owner")
                 },
             );
-            let Err(RendererProductionFailure::CloseUnconfirmed {
+            let failure = producer.settle_native(outcome).unwrap_err();
+            let RendererProductionFailure::CloseUnconfirmed {
                 close,
                 action_error,
-            }) = producer.settle_native(outcome)
+            } = failure.as_ref()
             else {
                 panic!("uncertain native close must refuse publication and retry");
             };
@@ -12495,20 +13147,23 @@ mod renderer_slot_tests {
                 crate::CompilerTransactionClose::Unconfirmed(_)
             ));
             assert_eq!(
-                action_error,
+                *action_error,
                 primary_failure.then_some("primary native failure")
             );
-            assert!(matches!(
-                waiter.wait().await,
-                RendererAccess::CloseUnconfirmed
-            ));
-            assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+            let RendererAccess::Terminal(waited) = waiter.wait().await else {
+                panic!("current observer must retain terminal failure");
+            };
+            let RendererAccess::Terminal(later) = slot.acquire() else {
+                panic!("later observer must not create a new producer");
+            };
+            assert!(Arc::ptr_eq(&failure, &waited));
+            assert!(Arc::ptr_eq(&failure, &later));
         }
     }
 
     #[tokio::test]
     async fn renderer_unissued_action_error_refuses_retry_and_wakes_waiters() {
-        let slot = RendererSlot::<usize>::new();
+        let slot = RendererSlot::<usize, &'static str>::new();
         let RendererAccess::Produce(mut producer) = slot.acquire() else {
             panic!("producer")
         };
@@ -12523,25 +13178,29 @@ mod renderer_slot_tests {
                 Err::<PreparedRenderer<Result<usize, &'static str>>, _>("unissued native error")
             },
         );
-        let Err(RendererProductionFailure::Publication {
+        let failure = producer.settle_native(outcome).unwrap_err();
+        let RendererProductionFailure::Publication {
             error,
             close,
             action_error,
-        }) = producer.settle_native(outcome)
+        } = failure.as_ref()
         else {
             panic!("an unissued error cannot authorize a renderer retry");
         };
         assert_eq!(
-            error,
+            *error,
             crate::CompilerTransactionPublicationError::MissingOwner
         );
-        assert_eq!(close, crate::CompilerTransactionClose::NotStarted);
-        assert_eq!(action_error, Some("unissued native error"));
-        assert!(matches!(
-            waiter.wait().await,
-            RendererAccess::CloseUnconfirmed
-        ));
-        assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+        assert_eq!(*close, crate::CompilerTransactionClose::NotStarted);
+        assert_eq!(*action_error, Some("unissued native error"));
+        let RendererAccess::Terminal(waited) = waiter.wait().await else {
+            panic!("current observer must retain terminal failure");
+        };
+        let RendererAccess::Terminal(later) = slot.acquire() else {
+            panic!("later observer must not create a new producer");
+        };
+        assert!(Arc::ptr_eq(&failure, &waited));
+        assert!(Arc::ptr_eq(&failure, &later));
     }
 
     #[tokio::test]
@@ -12549,7 +13208,7 @@ mod renderer_slot_tests {
         for (primary_failure, begin_fresh) in
             [(false, false), (true, false), (false, true), (true, true)]
         {
-            let slot = RendererSlot::<usize>::new();
+            let slot = RendererSlot::<usize, &'static str>::new();
             let RendererAccess::Produce(mut producer) = slot.acquire() else {
                 panic!("producer")
             };
@@ -12607,56 +13266,147 @@ mod renderer_slot_tests {
                 *reassociated.close(),
                 crate::CompilerTransactionClose::NotStarted
             );
-            let Err(RendererProductionFailure::Publication {
+            let failure = producer.settle_native(reassociated).unwrap_err();
+            let RendererProductionFailure::Publication {
                 error,
                 close,
                 action_error,
-            }) = producer.settle_native(reassociated)
+            } = failure.as_ref()
             else {
                 panic!("another owner must refuse publication");
             };
             assert_eq!(
-                error,
+                *error,
                 crate::CompilerTransactionPublicationError::DifferentOwner
             );
-            assert_eq!(close, crate::CompilerTransactionClose::NotStarted);
+            assert_eq!(*close, crate::CompilerTransactionClose::NotStarted);
             assert_eq!(
-                action_error,
+                *action_error,
                 primary_failure.then_some("original native failure")
             );
-            assert!(matches!(
-                waiter.wait().await,
-                RendererAccess::CloseUnconfirmed
-            ));
-            assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+            let RendererAccess::Terminal(waited) = waiter.wait().await else {
+                panic!("current observer must retain terminal failure");
+            };
+            let RendererAccess::Terminal(later) = slot.acquire() else {
+                panic!("later observer must not create a new producer");
+            };
+            assert!(Arc::ptr_eq(&failure, &waited));
+            assert!(Arc::ptr_eq(&failure, &later));
         }
     }
 
     #[tokio::test]
+    async fn renderer_actual_retirement_retains_terminal_cause_for_observers() {
+        tidepool_testing::eval_harness::require_extract();
+        let slot = RendererSlot::<usize, crate::CompileError>::new();
+        let RendererAccess::Produce(mut producer) = slot.acquire() else {
+            panic!("producer")
+        };
+        let RendererAccess::Wait(waiter) = slot.acquire() else {
+            panic!("current observer")
+        };
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            cancellation.clone(),
+            |_| {},
+            |report| {
+                producer.begin_native().unwrap();
+                let prepared = PreparedRenderer::prepare(|| {
+                    crate::compile_haskell(
+                        "module RendererEnd where\nrenderer = (42 :: Int)\n",
+                        "renderer",
+                        &[],
+                        report,
+                    )
+                    .map(|_| 42)
+                })
+                .unwrap();
+                assert!(
+                    prepared.value.is_ok(),
+                    "the actual compiler response must precede cancellation: {:?}",
+                    prepared.value
+                );
+                cancellation.cancel();
+                Ok::<_, crate::CompileError>(prepared)
+            },
+        );
+        let close = outcome.close().clone();
+        assert!(
+            matches!(close, crate::CompilerTransactionClose::Retired(_)),
+            "actual cancellation after compiler response must retain retirement: {close:?}"
+        );
+        assert!(close.resources_retired());
+        let failure = producer.settle_native(outcome).unwrap_err();
+        assert!(
+            matches!(failure.as_ref(), RendererProductionFailure::CloseUnconfirmed {
+                close: observed, action_error: None,
+            } if observed == &close)
+        );
+        let RendererAccess::Terminal(waited) = waiter.wait().await else {
+            panic!("retired producer observer")
+        };
+        let RendererAccess::Terminal(later) = slot.acquire() else {
+            panic!("retired production must never admit another producer");
+        };
+        assert!(Arc::ptr_eq(&failure, &waited));
+        assert!(Arc::ptr_eq(&failure, &later));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
+    }
+    #[test]
+    fn renderer_idle_producer_loss_allows_retry_without_terminal_evidence() {
+        let slot = RendererSlot::<usize, &'static str>::new();
+        let RendererAccess::Produce(producer) = slot.acquire() else {
+            panic!("producer")
+        };
+        let observer = producer.waiter();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _producer = producer;
+            panic!("producer disappeared before native work");
+        }));
+        assert!(unwind.is_err());
+        assert!(observer.failure().is_none());
+        assert!(matches!(slot.acquire(), RendererAccess::Produce(_)));
+    }
+
+    #[tokio::test]
     async fn renderer_native_panic_cannot_publish_retry() {
-        let slot = RendererSlot::<usize>::new();
+        let slot = RendererSlot::<usize, &'static str>::new();
         let RendererAccess::Produce(mut producer) = slot.acquire() else {
             panic!("first producer")
         };
         let RendererAccess::Wait(waiter) = slot.acquire() else {
             panic!("waiter")
         };
+        let producer_observer = producer.waiter();
+        assert!(producer_observer.failure().is_none());
+        let observed_origin = Arc::new(Mutex::new(None));
+        let started_origin = observed_origin.clone();
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::settle_compiler_transaction_cancellable(
                 crate::CompilerTransactionCancellation::new(),
                 |_| {},
                 move || {
                     producer.begin_native().unwrap();
+                    *started_origin.lock() = crate::CompilerTransactionOrigin::current();
                     panic!("native producer unwind");
                 },
             )
         }));
         assert!(unwind.is_err());
-        assert!(matches!(
-            waiter.wait().await,
-            RendererAccess::CloseUnconfirmed
-        ));
-        assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+        let RendererAccess::Terminal(waited) = waiter.wait().await else {
+            panic!("current observer must retain producer loss");
+        };
+        let RendererAccess::Terminal(later) = slot.acquire() else {
+            panic!("later observer must not create a new producer");
+        };
+        let RendererProductionFailure::ProducerLost { origin } = waited.as_ref() else {
+            panic!("producer loss must not invent compiler settlement");
+        };
+        assert_eq!(Some(origin), observed_origin.lock().as_ref());
+        assert!(Arc::ptr_eq(&waited, &later));
+        assert!(Arc::ptr_eq(&waited, &producer_observer.failure().unwrap()));
     }
 }
 

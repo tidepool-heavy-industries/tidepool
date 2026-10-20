@@ -2681,8 +2681,7 @@ pub fn bind_activation_renderer(
     // A revoked original lease can never execute this preview. Refuse before
     // claiming the affine admission so the refusal cannot strand it bound.
     admission
-        .source_lease()
-        .validate_source_issuer()
+        .with_open_sources(|| ())
         .map_err(|error| {
             super::ResidentError::Session(crate::session::SessionError::SourceAdmission(error))
         })?;
@@ -2753,7 +2752,7 @@ pub fn compile_activation_renderer(
     ActivationRendererFailure,
 > {
     source
-        .admit(Some(admission.source_lease()))
+        .admit_original(&admission.original_source_lease(), Some(admission.source_lease()))
         .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)

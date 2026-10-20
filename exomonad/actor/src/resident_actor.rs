@@ -12975,18 +12975,6 @@ where
                 exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
                 exomonad_tool::ToolArguments::Structured(value) => value,
             };
-            self.checkpoint_publication = CheckpointPublication::Workbench {
-                boundary: hosted_boundary.or_else(|| {
-                    crate::resident_workbench::execution_control().map(|control| {
-                        crate::ContextCheckpointBoundary::Execution {
-                            actor_id: context.actor.id.0,
-                            incarnation: context.actor.incarnation.0,
-                            execution_id: control.execution_id(context.actor),
-                        }
-                    })
-                }),
-                capture: hosted_checkpoint_capture,
-            };
             let control = crate::resident_workbench::execution_control().ok_or_else(|| {
                 Self::invocation_failure(
                     context.actor,
@@ -13006,6 +12994,25 @@ where
                         "tool execution lost its original resource owner",
                     )
                 })?;
+            if let Err(error) = work.bind_original_source(awaiting.original_source.clone()) {
+                self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
+                return Err(Self::tool_invocation_failure(
+                    context.actor,
+                    ResidentActorWorkbenchError::SourceAdmission(error.into_source_error()),
+                ));
+            }
+            self.checkpoint_publication = CheckpointPublication::Workbench {
+                boundary: hosted_boundary.or_else(|| {
+                    crate::resident_workbench::execution_control().map(|control| {
+                        crate::ContextCheckpointBoundary::Execution {
+                            actor_id: context.actor.id.0,
+                            incarnation: context.actor.incarnation.0,
+                            execution_id: control.execution_id(context.actor),
+                        }
+                    })
+                }),
+                capture: hosted_checkpoint_capture,
+            };
             let mut cursor = green_tool::ToolCursor::new(
                 work,
                 control,

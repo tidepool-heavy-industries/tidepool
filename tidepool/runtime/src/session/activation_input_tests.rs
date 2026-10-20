@@ -5918,30 +5918,21 @@ fn compile_activation_preview(
             let outcome = outcome.map_err(|error| {
                 turn::ActivationRendererFailure::from(super::PreparedRuntimeError::from(error))
             })?;
-            producer
-                .settle_native(outcome)
-                .map_err(|failure| match failure {
+            producer.settle_native(outcome).map_err(|failure| {
+                match Arc::try_unwrap(failure).unwrap_or_else(|failure| {
+                    panic!("semantic fixture cannot recover terminal renderer failure: {failure}")
+                }) {
                     RendererProductionFailure::Compile(error) => error,
-                    RendererProductionFailure::Publication {
-                        error,
-                        action_error,
-                        ..
-                    } => action_error.unwrap_or_else(|| CompileError::from(error).into()),
-                    RendererProductionFailure::CloseUnconfirmed {
-                        close,
-                        action_error,
-                    } => action_error.unwrap_or_else(|| {
-                        CompileError::ExtractFailed(format!(
-                            "renderer close is unconfirmed: {close:?}"
-                        ))
-                        .into()
-                    }),
-                })?
+                    failure => panic!(
+                        "semantic fixture cannot recover terminal renderer failure: {failure}"
+                    ),
+                }
+            })?
         }
         RendererAccess::Wait(_) => {
             panic!("synchronous semantic fixture has no concurrent producer")
         }
-        RendererAccess::CloseUnconfirmed => {
+        RendererAccess::Terminal(_) => {
             panic!("semantic fixture has no unconfirmed native close")
         }
     };
