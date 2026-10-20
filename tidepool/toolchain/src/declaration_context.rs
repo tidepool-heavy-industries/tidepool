@@ -9012,12 +9012,14 @@ impl WorldProgramSegment<'_> {
         &self,
         inputs: &OriginalCompilerInputs,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.product_admission().original_execution_context(inputs)
+    }
+    pub(crate) fn product_admission(&self) -> ExactProductAdmission<'_> {
         ExactProductAdmission {
             compilation_binding: ProductCompilationBinding::World(&self.binding),
             source: &self.source,
             facts: self.inputs.facts(),
         }
-        .original_execution_context(inputs)
     }
     pub(crate) fn admit_program_support(
         &mut self,
@@ -9175,6 +9177,18 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             Some(&source_domain),
             validation,
         )?;
+        let authored = match self.binding.stage.identity() {
+            crate::compiler_world::WorldCellStageIdentity::Executable { .. } => None,
+            crate::compiler_world::WorldCellStageIdentity::Declaration { .. }
+            | crate::compiler_world::WorldCellStageIdentity::Prologue { .. } => Some(
+                crate::declaration_join::NativeAuthoredDeclarationAdmission::from_world_stage(
+                    program,
+                    &self.binding.stage,
+                    &source,
+                    &target_source,
+                )?,
+            ),
+        };
         let admission = MatchedExactProductAdmission::world(
             &binding,
             &source,
@@ -9188,9 +9202,18 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             raw,
             receipt,
             admission,
-            program.directory().path(),
+            &program.directory().path().join(
+                self.binding
+                    .stage
+                    .outputs()
+                    .source_receipt()
+                    .relative()
+                    .parent()
+                    .ok_or_else(|| failure("World stage source output has no namespace"))?,
+            ),
             program.producer_identity_bytes(),
             &self.aliases,
+            authored.as_ref(),
             candidates,
             selected_values,
             produced,

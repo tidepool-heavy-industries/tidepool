@@ -146,3 +146,49 @@ Earlier compilation failures exposed raw-map assumptions in the completion
 handoff and test observation types; they are retained under the corresponding
 `world-stage-native-persistent-rows*` evidence roots. No broad map conversion was
 added to a production handoff to satisfy those errors.
+
+## Checked stage issuer checkpoint
+
+The accepted receiver chain through `3e91eec6ce` is received locally. The first
+assembly tranche derives `NativeAuthoredDeclarationAdmission` inside World
+source issuance from that source's exact checked declaration/prologue stage.
+It checks the same stage Arc, reservation kind/generation, actual Lib owner,
+admitted generated source and ready source evidence. The existing segment
+certifier consumes that admission; finite executable consumers still pass no
+authored admission. Native original entry evidence is never invented.
+
+Named module-product/certificate outputs and nested payload roots now use their
+actual stage namespace. H confirmed that nested receipt paths are relative to
+the stage directory, while executable item files remain under `item-N` at the
+preparation root. `WorldProgramSegment::product_admission` borrows the existing
+source/binding/input facts and is reused by its original-execution consumer.
+
+The first four receiver/source/declaration history controls passed, build
+`5baab79a-8f00-48be-a34c-610ed7b32a66`. After the final explicit generated-source
+owner check, production/cfg(test) consumers compiled and the stage-ownership and
+generated declaration issue/retention history controls passed again: build
+`a3288c65-403c-49a6-a3a3-2aaf63915dc5`, executed 2, passed 2, exit 0. Rust SHA-256
+`779809ac265d71287fd4fbe0a076ccb0ce7ba10cd4d06987e8f7d9d1313bc9e8`.
+Evidence:
+`/srv/swarm/evidence/inanna/world-stage-authored-issuer-final-20261020`.
+
+This is receiver/issuer compilation and existing component coverage. Ordered
+multi-stage assembly, the keyed source/native prefix continuation and actual
+mixed-language output remain unfinished. The earlier actual native and cold
+restore gates apply to `ad99ed7700`; they do not qualify the new PREP4 schema.
+
+## Captured file follow-up
+
+Confirmed source facts: `compiler_world.rs::capture_world_file` retains each
+named file as a `WorldOutputFile` and invokes
+`recovery_artifacts.rs::PackageInterfaceValidation::record_captured_bytes`.
+That method records digest/size observations only when its observation scope is
+enabled; it does not provide an immutable byte source for later loaders.
+`prepare_world_cell_program` creates a new validation owner with the same
+inventory accounting operation.
+
+Unconfirmed implication: native finalization/sidecar consumers may reread some
+already-captured paths. Trace those exact consumers before calling this redundant
+or deleting an intentional independent authentication observation. If they must
+consume the same captured output, lend the actual existing output owner through
+the product loader; do not add a second output cache or duplicate payload tree.
