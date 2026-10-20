@@ -21857,16 +21857,20 @@ pub(crate) mod request_tests {
                 public_selection.public_root()
             );
             assert_eq!(initial_originals[0].revision(), public_selection.revision());
-            if initial_originals[0].context().semantic_sha256() != public_selection.context().semantic_sha256() {
-                let source_identity = |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
-                    let roles = context.compiler_input_projection().snapshot_roles();
-                    let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
-                        interface, original, source_revision, original_input_identity, selection_sha256, ..
-                    } = roles.get(public_selection.public_root()).unwrap() else {
-                        panic!("actual selected source must retain its published original role");
+            if initial_originals[0].context().semantic_sha256()
+                != public_selection.context().semantic_sha256()
+            {
+                let source_identity =
+                    |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+                        let mut identities = context.compiler_input_roles().into_iter().filter_map(|role| {
+                        let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
+                            interface, original, source_revision, original_input_identity, selection_sha256, ..
+                        } = role else { return None; };
+                        Some((interface, original, source_revision, original_input_identity, selection_sha256))
+                    }).collect::<Vec<_>>();
+                        identities.sort();
+                        identities
                     };
-                    (*interface, *original, source_revision.clone(), original_input_identity.clone(), *selection_sha256)
-                };
                 let installed = initial_originals[0].context();
                 let issued = public_selection.context();
                 let installed_groups = installed.artifact_view().selected_native_groups();

@@ -3,7 +3,9 @@ use super::*;
 use crate::resident_workbench::generation_admission::{GenerationAdmissionError, GenerationFence};
 use crate::ResidentActorWorkbenchError;
 
-use crate::resident_workbench::generation_admission::{GenerationRetirementFence, GenerationRetirementFenceError};
+use crate::resident_workbench::generation_admission::{
+    GenerationRetirementFence, GenerationRetirementFenceError,
+};
 use crate::resident_workbench::{
     ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationPublicationDiscard,
     ActorGenerationPublicationOperation, ActorGenerationRetirementCutoff,
@@ -117,12 +119,7 @@ enum RetainedGenerationRetirementPhase {
 }
 
 impl GenerationRetirementAttempt {
-    fn into_retained(
-        self,
-    ) -> (
-        RetainedGenerationRetirement,
-        GenerationRetirementDiscard,
-    ) {
+    fn into_retained(self) -> (RetainedGenerationRetirement, GenerationRetirementDiscard) {
         let Self {
             actor,
             candidate,
@@ -319,7 +316,10 @@ impl RunState {
             return;
         }
         let pending_claims = match &attempt.phase {
-            GenerationRetirementPhase::Reserved { cutoff: GenerationRetirementCutoffPhase::AwaitCapture { fence, .. }, .. } => fence.pending_claims(),
+            GenerationRetirementPhase::Reserved {
+                cutoff: GenerationRetirementCutoffPhase::AwaitCapture { fence, .. },
+                ..
+            } => fence.pending_claims(),
             _ => return,
         };
         let population = self.generation_population(attempt.expected.dependency().clone());
