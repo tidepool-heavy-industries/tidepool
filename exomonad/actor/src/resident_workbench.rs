@@ -21624,13 +21624,29 @@ pub(crate) mod request_tests {
         generation_replacement: Option<crate::ActorPersistencePolicy>,
         publication_failure: Option<PublicationFailureControl>,
     ) {
+        let native_owner_control = matches!(
+            publication_failure,
+            Some(PublicationFailureControl::RetirementNativeOwnerLoss(_))
+        );
         let mut recovery = None;
-        let (mut session, mut context, source, session_root) = host_mount_fixture_with_lib(|lib| {
+        let configure = |lib: &mut tidepool_runtime::session::SessionLib| {
             let fixture =
                 crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
             tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
             recovery = Some(fixture);
-        });
+        };
+        let (mut session, mut context, source, session_root) = if native_owner_control {
+            host_mount_fixture_with_effects(
+                configure,
+                &[
+                    tidepool_mcp::notifications_decl(),
+                    tidepool_mcp::sleep_decl(),
+                ],
+                "'[Notifications, Sleep]",
+            )
+        } else {
+            host_mount_fixture_with_lib(configure)
+        };
         let recovery = recovery.unwrap();
         if publication_failure.is_some() {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
@@ -21644,6 +21660,24 @@ pub(crate) mod request_tests {
             context.source_dependency = generation_admission::SourceDependency::World(
                 generation_admission::BootstrapWorld::new(Some(parent)),
             );
+        }
+        let native_descriptor = native_owner_control.then(|| {
+            crate::ActorDescriptor::new("quoted replacement", context.placement)
+                .with_actor_path(tidepool_repr::ActorPath::parse("root/quoted-original").unwrap())
+                .with_persistence_policy(generation_replacement.unwrap())
+                .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(vec![
+                    crate::ActorEffectKey::Notifications,
+                    crate::ActorEffectKey::Sleep,
+                ]))
+                .with_source_dependency(context.source_dependency().clone())
+        });
+        if let Some(descriptor) = &native_descriptor {
+            let issued = descriptor.session_context(context.actor);
+            assert_eq!(
+                issued, context,
+                "the real host and descriptor agree before A preparation"
+            );
+            context = issued;
         }
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
@@ -22155,12 +22189,13 @@ pub(crate) mod request_tests {
         if generation_replacement.is_some() {
             let replacement_publication_history = async {
                 // Replacement publishes its own issued source base without inheriting the notebook.
-                let descriptor =
+                let descriptor = native_descriptor.clone().unwrap_or_else(|| {
                     crate::ActorDescriptor::new("quoted replacement", context.placement)
                         .with_actor_path(
                             tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
                         )
-                        .with_persistence_policy(generation_replacement.unwrap());
+                        .with_persistence_policy(generation_replacement.unwrap())
+                });
                 let state = Arc::new(InstalledToolsState::default());
                 let installation = InstalledToolLease::new(
                     context.actor,
