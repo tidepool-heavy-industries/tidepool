@@ -7965,7 +7965,13 @@ impl ArtifactView {
             materialization_parents: Vec::new(),
             materialization: Mutex::new(BTreeMap::new()),
         });
-        self.retain_projected_materializations(retained)
+        let mut retained = self.retain_projected_materializations(retained)?;
+        // Materialization projection can infer a namespace for an empty view.
+        // Reopening preserves the issuer's exact choice, including an empty one.
+        Arc::get_mut(&mut retained.lease)
+            .expect("new issued selection lease")
+            .selection = Arc::clone(selection.snapshot());
+        Ok(retained)
     }
 
     /// Transfer physical file owners only for this exact selected closure.

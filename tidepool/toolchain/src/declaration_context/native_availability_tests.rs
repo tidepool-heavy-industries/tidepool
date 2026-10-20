@@ -7468,6 +7468,46 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 reopened.capture_graph_selection(),
                 context.artifact_view().capture_graph_selection()
             );
+            let unrelated = Arc::new(ArtifactEntry::canonical(
+                product("UnrequestedOfferScope", 121)
+                    .module_interface()
+                    .unwrap()
+                    .clone(),
+            ));
+            let broader = inventory
+                .admit_shared_with_demand(
+                    context.artifact_view(),
+                    vec![unrelated.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            assert!(broader.selection_snapshot().scopes.len() > selection.snapshot().scopes.len());
+            let narrowed = broader.select_issued(vec![id], &selection).unwrap();
+            assert!(Arc::ptr_eq(
+                narrowed.selection_snapshot(),
+                selection.snapshot()
+            ));
+            assert!(!narrowed.artifact_ids().contains(&unrelated.descriptor.id));
+            let mut custody_only = selection.snapshot().as_ref().clone();
+            for root in custody_only.roots.keys() {
+                custody_only.custody_roots.insert(*root, ());
+            }
+            custody_only.roots.clear();
+            custody_only.namespace.clear();
+            let custody_only = crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                Arc::new(custody_only),
+            );
+            let reopened_custody = broader.select_issued(vec![], &custody_only).unwrap();
+            assert!(!reopened_custody
+                .selection_snapshot()
+                .custody_roots
+                .is_empty());
+            assert!(reopened_custody.selection_snapshot().namespace.is_empty());
+            assert!(reopened_custody.selection_snapshot().roots.is_empty());
+            assert!(Arc::ptr_eq(
+                reopened_custody.selection_snapshot(),
+                custody_only.snapshot()
+            ));
             assert!(
                 matches!(
                     baseline.artifacts().select_issued(vec![id], &selection),
@@ -7623,6 +7663,20 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .unwrap();
         assert_eq!(full.snapshot_facts(), recorded_full);
         assert_eq!(full.issued_group_carriers().unwrap(), carriers);
+        if published {
+            let roles = restored.compiler_input_roles();
+            let selection = roles
+                .iter()
+                .find_map(|role| match role {
+                    CompilerInputRole::PublishedSourceOriginal { selection, .. } => Some(selection),
+                    _ => None,
+                })
+                .unwrap();
+            for (scope, proof) in &selection.snapshot().scopes {
+                let acquired = &restored.artifact_view().selection_snapshot().scopes[scope];
+                assert!(Arc::ptr_eq(proof.proof(), acquired.proof()));
+            }
+        }
         let scratch = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(restored))
             .prepare_compilation(scratch.path(), PRODUCER)
