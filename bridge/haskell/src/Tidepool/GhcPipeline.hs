@@ -2579,7 +2579,12 @@ restoreWorldCellPrefixHomes environment (WorldCellPrefix _ homes graph _ _ _ _) 
         Nothing -> pure home
         Just existing -> do
           unless (sameWorldCellHome existing home) (throwIO WorldCellCorrupt)
-          pure existing
+          -- A reserved Original cannot be redefined within this request.
+          -- Make may have reconstructed equal interface bytes with another
+          -- lazy details knot; preserve the actual finalized owner instead.
+          pure $ case parseSessionModule (moduleNameString (moduleName owner)) of
+            Just selected | smKind selected == LibMod -> home
+            _ -> existing
       _ <- addHomeModuleToFinder (hsc_FC current) (hsc_home_unit current)
         (GWIB (moduleName owner) (if ms_hsc_src summary == HsBootFile then IsBoot else NotBoot)) (ms_location summary)
       pure (hscUpdateHPT (\table -> addToHpt table (moduleName owner) selected) current)
@@ -2617,9 +2622,17 @@ restoreWorldCellPrefixFor summary environment prefix@(WorldCellPrefix _ _ graph 
 -- Retain the successful graph projection, including SOURCE/boot identity.
 -- Virtual locations keep these completed nodes out of Make without retaining
 -- paths or buffers owned by an earlier stage's disposable source directory.
-retainWorldCellOriginal :: HscEnv -> HomePackageTable -> ModuleGraph -> HomeModInfo
+retainWorldCellOriginal :: PreparedPipelineResult -> HomePackageTable -> ModuleGraph -> PlannedDeclaration
   -> IO (HomePackageTable,ModuleGraph)
-retainWorldCellOriginal environment homes graph original = do
+retainWorldCellOriginal prepared homes graph planned = do
+  -- The finalization owner retains hscTidy's actual details. A post-Make HPT
+  -- lookup may instead return an interface-reloaded lazy knot without the
+  -- captured value environment; equal interface bytes cannot replace it.
+  original <- maybe (throwIO WorldCellCorrupt) (pure . finalizedHomeModInfo)
+    (Map.lookup (mkModuleName (plannedModule planned)) (pprFinalizedModules prepared))
+  unless (mi_module (hm_iface original) == mkModule
+      (homeUnitAsUnit (hsc_home_unit environment)) (mkModuleName (plannedModule planned)))
+    (throwIO WorldCellCorrupt)
   root <- case [node | node@(ModuleNode _ summary) <- completed
       , ms_mod summary == mi_module (hm_iface original), ms_hsc_src summary == HsSrcFile] of
     [node] -> pure (mkNodeKey node)
@@ -2631,6 +2644,7 @@ retainWorldCellOriginal environment homes graph original = do
   retained <- foldM retainHome homes (Set.toList modules)
   pure (retained,mkModuleGraph (mgModSummaries' graph ++ added))
   where
+    environment = prHscEnv (pprPipelineResult prepared)
     completed = mgModSummaries' (hsc_mod_graph environment)
     prior = mgModSummaries' graph
     nodes = Map.fromList [(mkNodeKey node,node) | node <- completed ++ prior]
@@ -2646,19 +2660,21 @@ retainWorldCellOriginal environment homes graph original = do
     visit seen [] = seen
     visit seen (key:rest)
       | key `Set.member` seen = visit seen rest
+      | key `Set.member` known = visit (Set.insert key seen) rest
       | otherwise = case Map.lookup key nodes of
           Just node | lexical node -> visit (Set.insert key seen)
             (Set.toList (Map.findWithDefault Set.empty key dependencies) ++ rest)
           _ -> visit seen rest
     retainHome table owner = do
-      home <- if owner == mi_module (hm_iface original) then pure original
-        else maybe (throwIO WorldCellCorrupt) pure
-          (lookupHpt (hsc_HPT environment) (moduleName owner))
+      home <- case Map.lookup (moduleName owner) (pprFinalizedModules prepared) of
+        Just finalized -> pure (finalizedHomeModInfo finalized)
+        Nothing -> maybe (throwIO WorldCellCorrupt) pure
+          (lookupHpt homes (moduleName owner) <|> lookupHpt (hsc_HPT environment) (moduleName owner))
       unless (mi_module (hm_iface home) == owner) (throwIO WorldCellCorrupt)
       forM_ (lookupHpt table (moduleName owner)) $ \previous ->
         unless (sameWorldCellHome previous home) (throwIO WorldCellCorrupt)
       pure (addToHpt table (moduleName owner) home)
-    virtualize selected node@(ModuleNode originalEdges summary) =
+    virtualize selected (ModuleNode originalEdges summary) =
       let owner = ms_mod summary
           artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
             (moduleNameString (moduleName owner))
@@ -2711,8 +2727,7 @@ advanceWorldCellPrefix _ question offset current _ selection completed environme
   (nextHomes,nextGraph,nextInventories) <- case completedCompilerWorldCompletion completed >>= worldCompilerCompletionPlannedDeclaration of
     Nothing -> pure (homesWithValues,graph,inventories)
     Just (planned,inventory) -> do
-      home <- evaluate (lookupHpt (hsc_HPT environment) (mkModuleName (plannedModule planned))) >>= maybe (throwIO WorldCellCorrupt) evaluate
-      (retained,extended) <- retainWorldCellOriginal (prHscEnv (pprPipelineResult result)) homesWithValues graph home
+      (retained,extended) <- retainWorldCellOriginal result homesWithValues graph planned
       pure (retained,extended,inventories ++ [inventory])
   nextScope <- updateSegmentDemandScope environment [(alias,Just (WorldPriorBinding value)) | (alias,value) <- additions] scope
   pure (WorldCellPrefix (cursor+1) nextHomes nextGraph nextInventories nextScope inherited WorldStagePending)
