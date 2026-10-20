@@ -2052,20 +2052,95 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
 
+type GenerationPublicationAction = Box<
+    dyn FnOnce(
+            ReservedActorGeneration,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+        > + Send,
+>;
+
+type GenerationReservationAction = Box<
+    dyn FnOnce(
+            PreparedActorGeneration,
+        )
+            -> Result<ActorGenerationRetirementPreparationOutcome, ResidentActorWorkbenchError>
+        + Send,
+>;
+
+/// The publisher is discarded only after its affine product is retained by the
+/// cleanup owner. This value exposes no publication or reservation operation.
+pub(crate) struct ActorGenerationPublicationDiscard {
+    _action: GenerationPublicationDiscardAction,
+}
+
+enum GenerationPublicationDiscardAction {
+    Reservation {
+        _reserve: GenerationReservationAction,
+    },
+    Publication {
+        _publish: GenerationPublicationAction,
+    },
+}
+
+/// The real publisher and its single frozen candidate cross into RunState
+/// before reservation changes either source admission or installed state.
+#[must_use]
+pub(crate) struct ActorGenerationRetirementPreparation {
+    prepared: PreparedActorGeneration,
+    reserve: GenerationReservationAction,
+}
+
+pub(crate) enum ActorGenerationRetirementPreparationOutcome {
+    Reserved(ActorGenerationPublicationOperation),
+    Refused(String),
+}
+
+impl ActorGenerationRetirementPreparation {
+    pub(crate) fn actor(&self) -> crate::ActorRef {
+        self.prepared.candidate.context.actor
+    }
+
+    pub(crate) fn candidate_custody(&self) -> ActorGenerationCandidateCustody {
+        ActorGenerationCandidateCustody(self.prepared.candidate.clone())
+    }
+
+    pub(crate) fn reload_report(&self) -> Option<&PreparedReloadReport> {
+        self.prepared.reload_report()
+    }
+
+    pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
+        self.prepared.expected.generation()
+    }
+
+    pub(crate) fn reserve(
+        self,
+    ) -> Result<ActorGenerationRetirementPreparationOutcome, ResidentActorWorkbenchError> {
+        let Self { prepared, reserve } = self;
+        reserve(prepared)
+    }
+
+    pub(crate) fn into_retained_parts(
+        self,
+    ) -> (PreparedActorGeneration, ActorGenerationPublicationDiscard) {
+        let Self { prepared, reserve } = self;
+        (
+            prepared,
+            ActorGenerationPublicationDiscard {
+                _action: GenerationPublicationDiscardAction::Reservation { _reserve: reserve },
+            },
+        )
+    }
+}
+
 /// Affine transfer payload for the linked publication worker. The concrete
 /// publisher supplies its consumer; callers cannot replace it with a closure
 /// that loses the reservation before recording whether publication started.
 #[must_use]
 pub(crate) struct ActorGenerationPublicationOperation {
     reserved: ReservedActorGeneration,
-    publish: Box<
-        dyn FnOnce(
-                ReservedActorGeneration,
-            ) -> futures_util::future::BoxFuture<
-                'static,
-                Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
-            > + Send,
-    >,
+    publish: GenerationPublicationAction,
 }
 
 impl ActorGenerationPublicationOperation {
@@ -2079,8 +2154,16 @@ impl ActorGenerationPublicationOperation {
 
     /// Possession of the unconsumed payload proves its publication body has not
     /// run. A failed worker transfer must return this whole payload first.
-    pub(crate) fn into_reserved(self) -> ReservedActorGeneration {
-        self.reserved
+    pub(crate) fn into_retained_parts(
+        self,
+    ) -> (ReservedActorGeneration, ActorGenerationPublicationDiscard) {
+        let Self { reserved, publish } = self;
+        (
+            reserved,
+            ActorGenerationPublicationDiscard {
+                _action: GenerationPublicationDiscardAction::Publication { _publish: publish },
+            },
+        )
     }
 
     pub(crate) async fn run(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
@@ -2091,6 +2174,8 @@ impl ActorGenerationPublicationOperation {
 
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(ActorGenerationPublicationOperation: Clone, Copy);
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(ActorGenerationRetirementPreparation: Clone, Copy);
 
 #[derive(Clone)]
 pub(crate) enum ActorPublicationOwner {
@@ -2707,6 +2792,30 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) fn into_retirement_preparation(
+        self,
+        prepared: PreparedActorGeneration,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        kind: ActorGenerationPublication,
+        compiler: crate::capabilities::CompilerOwnerScope,
+    ) -> ActorGenerationRetirementPreparation {
+        ActorGenerationRetirementPreparation {
+            prepared,
+            reserve: Box::new(move |prepared| {
+                Ok(match self.reserve(prepared, decision, kind)? {
+                    ActorGenerationReservation::Reserved(reserved) => {
+                        ActorGenerationRetirementPreparationOutcome::Reserved(
+                            self.into_publication_operation(reserved, compiler),
+                        )
+                    }
+                    ActorGenerationReservation::Refused(reason) => {
+                        ActorGenerationRetirementPreparationOutcome::Refused(reason)
+                    }
+                })
+            }),
+        }
+    }
+
     pub(crate) fn into_publication_operation(
         self,
         reserved: ReservedActorGeneration,
