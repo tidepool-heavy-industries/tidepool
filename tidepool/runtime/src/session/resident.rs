@@ -8525,7 +8525,7 @@ where
             ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
         ) {
             if let Some(checked) = checked {
-                checked.settle(&mut self.state, program)?;
+                checked.settle(&mut self.state)?;
             }
         }
         Ok(outcome)
