@@ -1256,6 +1256,10 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         dropped_capture[0].observation().state,
         SourceRegistrationState::Closed { rejected: 0 }
     ));
+    crate::local_actor::run_control::assert_source_registration_retirement_projection(
+        dropped_capture.clone(),
+        &[],
+    );
     // A driver observation may straddle an already-admitted native replacement.
     // It must not publish B's old fenced result into the independent A binding.
     let (race_send, mut race_events) = tokio::sync::mpsc::unbounded_channel();
@@ -1337,6 +1341,10 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         ),
         "the old B capture cannot close independent replacement A"
     );
+    crate::local_actor::run_control::assert_source_registration_retirement_projection(
+        race_capture.clone(),
+        &[],
+    );
     let raced = receive(&mut race_new_events).await;
     let admitted = match replacement_slots.admit_delivery(raced) {
         SourceDeliveryAdmission::Admitted(delivery) => delivery,
@@ -1380,6 +1388,10 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
     assert_eq!(captured_a.len(), 1);
     assert_eq!(captured_a[0].observation().identity.actor, actor);
     assert_eq!(captured_a[0].observation().identity.slot, 0);
+    crate::local_actor::run_control::assert_source_registration_retirement_projection(
+        captured_a.clone(),
+        &[(actor, 0)],
+    );
     drop(first);
     assert_eq!(fence.pending_claims(), 0);
     let independent = match slots.admit_delivery(initial_b) {

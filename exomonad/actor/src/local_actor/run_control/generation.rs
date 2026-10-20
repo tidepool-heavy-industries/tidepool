@@ -930,7 +930,6 @@ impl GenerationRetirementCapture {
         &self,
     ) -> Result<Vec<tidepool_bridge_effects::RlBlocker>, GenerationRetirementProjectionRefusal>
     {
-        use crate::resident_actor::invocation_work::GenerationInvocationState as Invocation;
         use tidepool_bridge_effects::{
             RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
         };
@@ -1001,11 +1000,31 @@ impl GenerationRetirementCapture {
                 retirement_compiler_reason(&observed.compiler.close, &observed.compiler.source),
             ));
         }
-        match &self.work {
-            GenerationRetirementWork::Unavailable => {
-                blockers.push(Blocker::ReloadUnclassifiedSourceWork(1))
-            }
-            GenerationRetirementWork::Observed(work) => {
+        self.work.append_blockers(&mut blockers)?;
+        match self.pending_claims {
+            Ok(0) => {}
+            Ok(count) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(
+                i64::try_from(count)
+                    .map_err(|_| GenerationRetirementProjectionRefusal::PendingClaims)?,
+            )),
+            Err(_) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+        }
+        Ok(blockers)
+    }
+}
+
+impl GenerationRetirementWork {
+    fn append_blockers(
+        &self,
+        blockers: &mut Vec<tidepool_bridge_effects::RlBlocker>,
+    ) -> Result<(), GenerationRetirementProjectionRefusal> {
+        use crate::resident_actor::invocation_work::GenerationInvocationState as Invocation;
+        use tidepool_bridge_effects::{
+            RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
+        };
+        match self {
+            Self::Unavailable => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+            Self::Observed(work) => {
                 for observed in &work.invocations {
                     let actor = retirement_actor_identity(observed.actor)?;
                     let reservation = retirement_reservation(&observed.reservation)?;
@@ -1075,16 +1094,44 @@ impl GenerationRetirementCapture {
                 }
             }
         }
-        match self.pending_claims {
-            Ok(0) => {}
-            Ok(count) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(
-                i64::try_from(count)
-                    .map_err(|_| GenerationRetirementProjectionRefusal::PendingClaims)?,
-            )),
-            Err(_) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
-        }
-        Ok(blockers)
+        Ok(())
     }
+}
+
+/// Assertion-only receiving control: all source registrations come from their
+/// actual issuing owners. It neither constructs a population nor grants access
+/// to any registration, source, or cleanup authority.
+#[cfg(test)]
+pub(crate) fn assert_source_registration_retirement_projection(
+    registrations: Vec<crate::resident_actor::source_slots::CapturedSourceRegistration>,
+    expected: &[(ActorRef, usize)],
+) {
+    use tidepool_bridge_effects::{RlBlocker, RlBlockerReason, RlResource};
+    let work =
+        GenerationRetirementWork::Observed(crate::resident_actor::GenerationWorkObservations {
+            actors: Vec::new(),
+            invocations: Vec::new(),
+            routes: Vec::new(),
+            source_registrations: registrations,
+        });
+    let mut actual = Vec::new();
+    work.append_blockers(&mut actual).unwrap();
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|(actor, slot)| {
+            RlBlocker::ReloadResourceBlocker(
+                RlResource::ReloadSourceBindingResource(
+                    (
+                        i64::try_from(actor.id.0).unwrap(),
+                        i64::try_from(actor.incarnation.0).unwrap(),
+                    ),
+                    slot.to_string(),
+                ),
+                RlBlockerReason::ReloadActiveDependentWork,
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 fn retirement_compiler_reason(
