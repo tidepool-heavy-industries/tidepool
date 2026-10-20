@@ -383,7 +383,7 @@ fn type_defs() -> Vec<TypeDef> {
                 field("namesLimit", HsType::Int),
                 field("nameListProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Name entries retained from one enumeration, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
+            &["Name entries retained from one enumeration, with the count observed at admission, the applied limit, and the compile view the answer describes. The worker stops at the limit, so `namesObserved == namesLimit` is a lower bound on the module's exports."],
         ),
         record(
             "NameRefList",
@@ -393,7 +393,7 @@ fn type_defs() -> Vec<TypeDef> {
                 field("refsLimit", HsType::Int),
                 field("refListProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Identifiers bound in one admitted scope, with the complete count observed before admission, the applied limit, and the compile view the answer describes. Presentation and row availability are deliberately absent: enumerating a held world does not compile anything, so `info` is the only source for them."],
+            &["Identifiers bound in one admitted scope, with the exact count of bindings in that scope, the applied limit, and the compile view the answer describes. `refs` is truncated at `refsLimit` when the exact count is larger, but `refsObserved` stays exact. Presentation and row availability are deliberately absent: enumerating a held world does not compile anything, so `info` is the only source for them."],
         ),
         closed_sum(
             "FitAvailability",
@@ -453,7 +453,7 @@ fn type_defs() -> Vec<TypeDef> {
                 field("typeMatchesLimit", HsType::Int),
                 field("typeMatchesProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Type matches retained from one probe, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
+            &["Type matches retained from one probe, with the count observed at admission, the applied limit, and the compile view the answer describes. The worker stops at the limit, so `typeMatchesObserved == typeMatchesLimit` is a lower bound on the matches."],
         ),
         record(
             "DiagnosticSpan",

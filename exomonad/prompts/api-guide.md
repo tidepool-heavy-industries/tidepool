@@ -283,9 +283,12 @@ name's structured declaration or canonical type. A `NameQuery` carries a scope
 `currentScopeView` and `scopeBindings` to enumerate the current view,
 `moduleExports` to enumerate a public module's exports, `rowFit` to observe an
 identifier's fit against the executing actor's row, and `typeOfExpression` or
-`typeSearch` for compiled probes. A no-match result covers the attempted query;
-it does not establish that the capability is absent. Inspect close candidates,
-qualify the name, or browse its owning module.
+`typeSearch` for compiled probes. `scopeBindings` reports the exact binding
+count in `refsObserved` and may truncate `refs` at `refsLimit`;
+`moduleExports` and `typeSearch` stop at their limit, so a count equal to the
+limit is a lower bound. A no-match result covers the attempted query; it does
+not establish that the capability is absent. Inspect close candidates, qualify
+the name, or browse its owning module.
 
 ```haskell source=introspection
 import qualified Tidepool.Introspection as Introspection

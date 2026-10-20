@@ -451,7 +451,7 @@ consumer should reuse. Costs are as measured by the source path, not the target.
 | Verb | Current runtime path | Cost |
 | --- | --- | --- |
 | `currentScopeView` | `current_scope_provenance` → `structured_provenance` (`exomonad/actor/src/resident_workbench/compiler_query.rs:205-211`; `exomonad/actor/src/resident_workbench.rs:14561-14588`) | prepare+hash, no compiler query |
-| `scopeBindings` | runtime-owned: `IntrospectionReq::ScopeBindings` → `ResidentActorBoundary::WorldScopeBindings` → `resume_world_scope_bindings` → `public_module_query_source` gate → `capture_inspection_world_in` → `AdmittedInspectionWorld::scope_bindings` (`exomonad/actor/src/resident_workbench.rs:10871-10879`; `exomonad/actor/src/resident_workbench/world_enumeration.rs:106-166`; `tidepool/runtime/src/session/inspection.rs:490-527`). There is no `CompilerQuery::ScopeBindings` and no `InspectionQuery` for it | no compiler query, no extract worker; identity-only answer with observed/limit |
+| `scopeBindings` | runtime-owned: `IntrospectionReq::ScopeBindings` → `ResidentActorBoundary::WorldScopeBindings` → `resume_world_scope_bindings` → `public_module_query_source` gate → `capture_inspection_world_in` → `AdmittedInspectionWorld::scope_bindings` (`exomonad/actor/src/resident_workbench.rs:10871-10879`; `exomonad/actor/src/resident_workbench/world_enumeration.rs:110-215`; `tidepool/runtime/src/session/inspection.rs:490-535`). There is no `CompilerQuery::ScopeBindings` and no `InspectionQuery` for it | no compiler query, no extract worker; identity-only answer. `refsObserved` is the exact count of bindings in the admitted scope; `refs` may be truncated at `refsLimit` |
 | `moduleExports` | still the temporary compile-path route: `CompilerQuery::ModuleExports` → `InspectionQuery::BrowseBounded { expanded: false, budget: QUERY_RESULT_LIMIT }` (`exomonad/actor/src/resident_workbench/compiler_query.rs:119-123`), whose `InspectModuleBounded` path (`bridge/haskell/src/Tidepool/Introspection.hs:597-610`) compiles the inspection module. The accepted held-HPT world query (`bridge/haskell/src/Tidepool/GhcPipeline.hs:1777, 1822-1838`) is not wired | compiles today; accepted target: HPT lookup plus possible interface load, never `runCompileCycle`, with a typed refusal on miss |
 | `info` | `InspectionQuery::StructuredInfo` (`tidepool/runtime/src/session/inspection.rs:26-29, 896-898`) | interface load |
 | `typeOf` | `InspectionQuery::StructuredType` (`tidepool/runtime/src/session/inspection.rs:30-33, 899-901`) | interface load |
@@ -467,6 +467,13 @@ consumer should reuse. Costs are as measured by the source path, not the target.
   no `NameInfo` reference set to report. Those stay with the compiling `info`
   verb. `moduleExports` still returns the richer `NameList` because it still
   compiles.
+- The two enumeration answers count differently, and callers must not read one
+  rule into the other. `scopeBindings` counts every binding in the admitted
+  scope after dedupe and reports that exact total as `refsObserved`, then
+  truncates `refs` at `refsLimit`; the total stays exact when the list is
+  shorter. `moduleExports` and `typeSearch` stop the worker at
+  `QUERY_RESULT_LIMIT`, so their observed count is only what was retained:
+  `observed == limit` is a lower bound, not the true environment size.
 - `scopeBindings` covers one `query_scope`'s published value bindings only
   (`tidepool/toolchain/src/compiler_world.rs:369-370, 390-448`). Other scopes,
   non-value names (types, classes, constructors), and imported-but-unpublished
@@ -501,8 +508,10 @@ consumer should reuse. Costs are as measured by the source path, not the target.
   presentation/transport budget for one notebook answer, not a measured scope
   statistic; it is the boundary the provisional limit already used, and
   enforcement at the worker is the property that was missing.
-  `observed == limit` therefore means "at least limit": the true scope size is
-  not observable once the worker stops at the cap.
+  For `moduleExports` and `typeSearch`, `observed == limit` therefore means
+  "at least limit": the true environment size is not observable once the worker
+  stops at the cap. `scopeBindings` is not capped that way and keeps an exact
+  count.
 - `rowFit` is the deliberate exception. It keeps the complete, unbounded
   `Browse`/`ScopeBrowse` read because a cap can drop the asked-for identifier
   and turn a real answer into `FitUnknown`; its wire answer is a single `Fit`.
@@ -597,6 +606,6 @@ claim, and no row below is an integrated request-path run.
 | Entry-vs-pre-reply drift refused even for `Nothing` | the view moves between capture and reply; the answer is `ScopeChanged(before, after)` rather than the stale result | post-read re-observation in `resume_world_scope_bindings` (`exomonad/actor/src/resident_workbench/world_enumeration.rs:168-190`) | `UNRUN` |
 | `typeOfExpression` never evaluates | a compiled probe returns `ExpressionType` with no evaluation or side effect | probe compile and evaluation boundary (`bridge/protocol/src/effects/introspection.rs:154-167, 406-415`) | `UNRUN` |
 | `typeSearch` never evaluates | a compiled type-pattern probe returns `TypeMatches` with no evaluation or side effect | probe compile and evaluation boundary (`bridge/protocol/src/effects/introspection.rs:154-167, 438-447`) | `UNRUN` |
-| Enumeration is bounded at the worker | a module export or type-search answer larger than `QUERY_RESULT_LIMIT` returns at most `limit` entries, and `observed == limit` is read as "at least limit" rather than a true count | handler test `a_large_scope_cannot_encode_more_than_the_budget` (`exomonad/actor/src/resident_workbench/compiler_query.rs:1393`) plus the bounded plans `BrowseBounded`/`TypeSearchBounded`. `scopeBindings` is bounded runtime-side by `SCOPE_BINDING_LIMIT` with no extraction request | `UNRUN` (compiled with the unit-test target; no selector executed). `InspectionQuery::ScopeBrowseBounded` was deleted with the compiler-side verb |
+| Enumeration is bounded at the worker | a module export or type-search answer larger than `QUERY_RESULT_LIMIT` returns at most `limit` entries, and `observed == limit` is read as "at least limit" rather than a true count. `scopeBindings` instead reports the exact admitted-scope count and truncates only `refs` | handler test `a_large_scope_cannot_encode_more_than_the_budget` (`exomonad/actor/src/resident_workbench/compiler_query.rs:1393`) plus the bounded plans `BrowseBounded`/`TypeSearchBounded`. `scopeBindings` is bounded runtime-side by `SCOPE_BINDING_LIMIT` with no extraction request | `UNRUN` (compiled with the unit-test target; no selector executed). `InspectionQuery::ScopeBrowseBounded` was deleted with the compiler-side verb |
 | No compiler-side `scopeBindings` survives | no `CompilerQuery` names `scopeBindings`; `CompilerQuery::ScopeBindings` is deleted | structural assertion inside `enumeration_never_plans_a_probe_compile` | `PASS` — `resident_workbench::compiler_query::tests::enumeration_never_plans_a_probe_compile`, 1 executed |
 | No Lookup survives | repo-wide assertion finds no Lookup effect in prompts, fixtures, or generated artifacts | search/assertion over `exomonad/prompts`, fixtures, and generated outputs | `UNRUN` |
