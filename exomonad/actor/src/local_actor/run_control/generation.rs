@@ -1172,11 +1172,19 @@ impl RunState {
             } => (reserved, publisher),
             ActorGenerationRetirementPreparationOutcome::Refused(reason) => {
                 let identity = attempt.candidate.identity_observer();
-                record.retirement.core = GenerationRetirementCore::Completed {
-                    actor,
-                    candidate: identity,
-                    completion: GenerationRetirementCompletion::UnreservedRefused,
-                };
+                let displaced = std::mem::replace(
+                    &mut record.retirement.core,
+                    GenerationRetirementCore::Completed {
+                        actor,
+                        candidate: identity,
+                        completion: GenerationRetirementCompletion::UnreservedRefused,
+                    },
+                );
+                let driver = std::mem::replace(
+                    &mut record.retirement.driver,
+                    GenerationRetirementDriver::empty(),
+                );
+                drop((displaced, driver));
                 return Err(GenerationRetirementBeginFailure::Refused(reason));
             }
             ActorGenerationRetirementPreparationOutcome::Failed(error) => {
@@ -1601,9 +1609,26 @@ impl RunState {
     /// actual cleanup owners are still present. Native recovery has no maps and
     /// retains the SAME SourcesSettled capture instead.
     fn release_live_source_observations(&mut self, actor: ActorRef) {
-        let Some(record) = self.reservations.get(&actor) else {
+        let Some(record) = self.reservations.get_mut(&actor) else {
             return;
         };
+        if !matches!(
+            record.retirement.core,
+            GenerationRetirementCore::SourcesSettled { .. }
+        ) {
+            return;
+        }
+        // Closure/inventory disposal cannot discard any remaining affine core.
+        // Even if it panics, native evacuation moves SourcesSettled unchanged.
+        let driver = std::mem::replace(
+            &mut record.retirement.driver,
+            GenerationRetirementDriver::empty(),
+        );
+        drop(driver);
+        let record = self
+            .reservations
+            .get(&actor)
+            .expect("the canonical record remains present");
         let GenerationRetirementCore::SourcesSettled { cutoff, .. } = &record.retirement.core
         else {
             return;
@@ -1673,11 +1698,7 @@ impl RunState {
             candidate,
             completion,
         };
-        let driver = std::mem::replace(
-            &mut record.retirement.driver,
-            GenerationRetirementDriver::empty(),
-        );
-        drop((cutoff, driver));
+        drop(cutoff);
     }
 
     /// Both vectors remain empty while the owner is live. Each retained record
