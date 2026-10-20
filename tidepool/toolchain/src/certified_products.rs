@@ -20020,7 +20020,7 @@ pub(crate) mod tests {
             &packet(vec![batch_uses[1].clone()], &validation.inventory), &mut validation,
         ).unwrap();
         let merged = first.groups().merge(second.groups()).unwrap();
-        assert_eq!(merged.bindings(), BTreeSet::from([old_r, old_g, fresh_g, fresh_j]));
+        assert_eq!(merged.selected_rows().keys().copied().collect::<BTreeSet<_>>(), BTreeSet::from([old_r, old_g, fresh_g, fresh_j]));
         assert_eq!(merged.retained_bindings(), resolved.groups().retained_bindings());
         let mut foreign_validation = PackageInterfaceValidation::default();
         let foreign = inputs.resolve_native_demand(
