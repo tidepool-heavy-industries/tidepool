@@ -347,6 +347,39 @@ fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
             "ReloadPublicationUnconfirmed",
         ]
     );
+    let resource = reload
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadResource")
+        .unwrap();
+    let TypeShape::Sum { variants } = &resource.shape else {
+        panic!("reload resource owners must be distinct constructors")
+    };
+    use tidepool_protocol::hs::HsType;
+    for (constructor, fields) in [
+        (
+            "ReloadActorCompilerResource",
+            vec![HsType::Tuple(vec![HsType::Int, HsType::Int]), HsType::Text],
+        ),
+        (
+            "ReloadPreparationCompilerResource",
+            vec![HsType::Text, HsType::Text],
+        ),
+        (
+            "ReloadCompilerResource",
+            vec![
+                HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                HsType::Named("ReloadReservation"),
+                HsType::Int,
+            ],
+        ),
+    ] {
+        let variant = variants
+            .iter()
+            .find(|variant| variant.ctor == constructor)
+            .unwrap();
+        assert_eq!(variant.fields.types(), fields.iter().collect::<Vec<_>>());
+    }
     let generated = tidepool_protocol::actor_generated_files();
     let decoder = generated
         .iter()

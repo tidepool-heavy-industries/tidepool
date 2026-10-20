@@ -151,7 +151,9 @@ fn retirement_types() -> Vec<TypeDef> {
             variant("ReloadDisplayResource", vec![Named("ReloadOperation")]),
             variant("ReloadWatchResource", vec![address(), Int]),
             variant("ReloadUnclassifiedPhysicalResource", vec![Named("ReloadNativeIdentity")]),
-        ], &["Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs."]),
+            variant("ReloadActorCompilerResource", vec![address(), Text]),
+            variant("ReloadPreparationCompilerResource", vec![Text, Text]),
+        ], &["Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs. Actor-owned and preparation-owned compiler resources are distinct from invocation-owned ReloadCompilerResource. Their registration ids and preparation ids preserve exact unsigned decimal coordinates as Text; these observations grant no authority."]),
         sum("ReloadBlockerReason", "RlBlockerReason", vec![
             variant("ReloadActiveDependentWork", vec![]),
             variant("ReloadUnclassifiedWork", vec![]),

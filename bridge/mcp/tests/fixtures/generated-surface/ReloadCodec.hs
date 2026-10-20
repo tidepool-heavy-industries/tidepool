@@ -101,6 +101,31 @@ main = do
     toJSON (ReloadWorkbenchReservation "exec-issued" "attempt-b")) "reservation attempts collapsed"
   assert (toJSON (ReloadNativeLocal "18446744073709551615") /=
     toJSON (ReloadNativeRemote "0" "18446744073709551615")) "native identity tag or unsigned coordinates lost"
+  let maximumUnsigned = "18446744073709551615"
+      actorCompiler = ReloadActorCompilerResource (42, 7) maximumUnsigned
+      preparationCompiler = ReloadPreparationCompilerResource maximumUnsigned maximumUnsigned
+      invocationCompiler = ReloadCompilerResource (42, 7) (ReloadWorkbenchReservation "exec-issued" "attempt-a") 0
+      compilerResources = [actorCompiler, preparationCompiler, invocationCompiler]
+  mapM_ (\resource -> assert (fromJSON (toJSON resource) == Success resource)
+    "compiler resource observation did not roundtrip") compilerResources
+  assert (toJSON actorCompiler == object
+    ["tag" .= ("ReloadActorCompilerResource" :: String), "contents" .= ((42, 7) :: (Int, Int), maximumUnsigned :: T.Text)])
+    "actor compiler resource lost actor or unsigned registration coordinate"
+  assert (toJSON preparationCompiler == object
+    ["tag" .= ("ReloadPreparationCompilerResource" :: String), "contents" .= (maximumUnsigned :: T.Text, maximumUnsigned :: T.Text)])
+    "preparation compiler resource lost unsigned coordinates"
+  assert (toJSON actorCompiler /= toJSON preparationCompiler &&
+    toJSON actorCompiler /= toJSON invocationCompiler &&
+    toJSON preparationCompiler /= toJSON invocationCompiler)
+    "compiler resource owners collapsed"
+  let compilerReceipt = render ReloadAReopened
+        [ReloadResourceOutcome resource ReloadStopPending ReloadCleanupPending | resource <- compilerResources]
+  mapM_ (\fragment -> assert (fragment `T.isInfixOf` compilerReceipt)
+    "compiler resource presenter lost exact owner or coordinate")
+    [ "actor 42/7 compiler registration=18446744073709551615"
+    , "preparation 18446744073709551615 compiler registration=18446744073709551615"
+    , "actor 42/7 compiler exec-issued/attempt=attempt-a/registration=0"
+    ]
   assert (jsonSchema (Proxy :: Proxy ReloadRetirementReceipt) /= Null) "retirement receipt lacks generated schema"
 
   -- Cover every tuple arity supported by the actual JSON codecs. The missing
