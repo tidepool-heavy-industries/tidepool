@@ -2,12 +2,13 @@
 -- Authored nested do expressions remain opaque to this rewrite.
 module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
-  , ParsedSegmentDemand, prepareSegmentDemand
+  , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , SegmentDemandScope, newSegmentDemandScope
   ) where
 
 import Control.Exception (throwIO)
 import Control.Monad (forM)
+import qualified Data.ByteString as BS
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
@@ -51,7 +52,12 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 -- The source issuer has already checked these bytes against its protected
 -- recipe. This parser result is also the no-quasiquote proof required before
 -- the demand renamer can load any imported interface.
-data ParsedSegmentDemand = ParsedSegmentDemand DynFlags (Located (HsModule GhcPs))
+data ParsedSegmentDemand = ParsedSegmentDemand
+  CapturedGeneratedScaffoldSource DynFlags (Located (HsModule GhcPs))
+
+segmentDemandMatchesSource :: ParsedSegmentDemand -> FilePath -> BS.ByteString -> Bool
+segmentDemandMatchesSource (ParsedSegmentDemand captured _ _) path bytes =
+  capturedGeneratedScaffoldPath captured == path && capturedGeneratedScaffoldBytes captured == bytes
 
 prepareSegmentDemand :: TypedSegmentPlan -> DynFlags -> CapturedGeneratedScaffoldSource
   -> Either TypedSegmentFailure ParsedSegmentDemand
@@ -59,7 +65,7 @@ prepareSegmentDemand plan flags captured = case unP Parser.parseModule parser of
   PFailed _ -> Left UnprovedRootAbstraction
   POk _ parsed
     | null (quasiQuoteOccurrences flags parsed), roots parsed == [()] ->
-        Right (ParsedSegmentDemand flags parsed)
+        Right (ParsedSegmentDemand captured flags parsed)
     | otherwise -> Left UnprovedRootAbstraction
   where
     source = Text.unpack (TextEncoding.decodeUtf8 (capturedGeneratedScaffoldBytes captured))
@@ -100,7 +106,7 @@ newSegmentDemandScope environment bindings = do
 typedSegmentInputOccurrences :: HscEnv -> SegmentDemandScope binding -> ParsedSegmentDemand
   -> IO (Either TypedSegmentFailure [(String,binding)])
 typedSegmentInputOccurrences environment (SegmentDemandScope aliases bindings)
-    (ParsedSegmentDemand flags parsed) = do
+    (ParsedSegmentDemand _ flags parsed) = do
   let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
       probe = hscUpdateFlags (const probeFlags) environment
       syntax = unLoc parsed

@@ -4,6 +4,7 @@ import Control.Exception (bracket)
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
+import qualified Data.ByteString as BS
 import GHC
 import GHC.Driver.Backend (noBackend)
 import System.Directory
@@ -55,6 +56,12 @@ demandScopeChecks = do
             Left failure -> fail (name ++ ": parsing refused " ++ show failure)
             Right _ | expected == ParseRefusal -> fail (name ++ ": quote passed the parser gate")
             Right parsed -> do
+              let sealedPath = capturedGeneratedScaffoldPath captured
+                  sealedBytes = capturedGeneratedScaffoldBytes captured
+              unless (segmentDemandMatchesSource parsed sealedPath sealedBytes
+                  && not (segmentDemandMatchesSource parsed (sealedPath ++ ".other") sealedBytes)
+                  && not (segmentDemandMatchesSource parsed sealedPath (sealedBytes <> BS.singleton 0)))
+                (fail (name ++ ": quote proof lost its exact source identity"))
               demanded <- typedSegmentInputOccurrences environment scope parsed
               case (expected,demanded) of
                 (Bindings names,Right selected) | map fst selected == names -> pure ()
