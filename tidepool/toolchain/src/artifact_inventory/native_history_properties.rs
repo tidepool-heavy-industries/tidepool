@@ -1812,10 +1812,10 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
         let refused = supports[left].merge(&supports[right]);
         assert!(
             matches!(refused, Err(CompileError::ArtifactInventory(error))
-            if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+            if matches!(&error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict {
                 owner, existing, incoming,
-            } if original_facts[left].get(&owner) == Some(&existing)
-                && original_facts[right].get(&owner) == Some(&incoming) && existing != incoming))
+            } if original_facts[left].get(owner) == Some(existing)
+                && original_facts[right].get(owner) == Some(incoming) && existing != incoming))
         );
     }
     let inventories = supports
