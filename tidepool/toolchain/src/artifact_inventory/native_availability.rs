@@ -1812,15 +1812,22 @@ impl CheckedNativeAvailability {
                     .map(|group| group.binding.artifact()),
             );
         }
-        let originals = self
-            .entries
-            .iter()
-            .filter(|(id, _)| required_originals.contains(id))
-            .filter_map(|(id, entry)| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((*id, product)),
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut originals = BTreeMap::new();
+        for id in required_originals {
+            let entry = self.entries.get(&id).ok_or_else(|| {
+                CompileError::CompilerEvidence(Box::new(
+                    crate::certified_products::CertificationError::MissingRetainedCustody {
+                        artifact: id,
+                    },
+                ))
+            })?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootNotOriginal { artifact: id },
+                ));
+            };
+            originals.insert(id, product);
+        }
         crate::certified_products::validate_available_originals_with_validation(
             &originals,
             &advertised,
