@@ -40,6 +40,8 @@ mod failure_sources;
 pub(crate) mod invocation_output;
 mod production_entry;
 mod selected_session_values;
+#[cfg(test)]
+mod world_value_selection_tests;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 pub use production_entry::{
