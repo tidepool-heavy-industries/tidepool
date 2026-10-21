@@ -5815,7 +5815,7 @@ fn compile_invocation_inner(
             );
             if !portable && deployment.package_source_association().is_none() {
                 return Err(CompileAttemptError::Deployment(
-                    crate::toolchain::DeploymentAdmissionError::PackageSourceRequired,
+                    crate::toolchain::DeploymentAdmissionError::PackageSourceRequired.into(),
                 ));
             }
             match &policy {
