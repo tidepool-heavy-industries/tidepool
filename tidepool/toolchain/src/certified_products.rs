@@ -6360,7 +6360,13 @@ fn authenticate_original_binding_membership(
                         let entry = source
                             .artifacts()
                             .observed_payload(&descriptor.id)
-                            .expect("retained descriptor has its payload");
+                            .ok_or_else(|| {
+                                refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
+                                    ArtifactIdentityMismatch::refused(
+                                        ArtifactIdentityStage::MissingSelectedRow,
+                                    ),
+                                ))
+                            })?;
                         if located.replace((descriptor.id, Arc::clone(entry))).is_some() {
                             return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
                         }
