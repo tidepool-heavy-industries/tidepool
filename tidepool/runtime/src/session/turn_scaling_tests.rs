@@ -3189,6 +3189,21 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let producer_owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/historical-original/producer").unwrap(),
+        1,
+    )
+    .unwrap();
+    assert!(matches!(
+        resident
+            .initialize_durable_public_scope(producer_owner.clone(), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    let publication = ScalePublication::Durable {
+        owner: producer_owner,
+        recovery,
+    };
     let imports = SourceImports::from_specs(["qualified HistoricalOriginalG"]);
     try_execute_cell_with_template_imports(
         &mut resident,
@@ -3199,7 +3214,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         "historical_original_warm_child",
         "let historicalWarm = HistoricalOriginalG.g",
         0,
-        &ScalePublication::Ephemeral,
+        &publication,
         AuthorityChecks::Configured,
         &imports,
     )
@@ -3214,7 +3229,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         "historical_original_reader",
         include_str!("fixtures/historical-original-reader.hs"),
         CellDeclarationExpectation::Total(2),
-        &ScalePublication::Ephemeral,
+        &publication,
         AuthorityChecks::Configured,
         &SourceImports::new(),
         Some(41),
@@ -3303,7 +3318,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         "the capture must select only R as Original while retaining G/H as dependency custody"
     );
     let cold_owner = RecoveryPublicOwner::new(
-        &tidepool_repr::ActorPath::parse("root/historical-original").unwrap(),
+        &tidepool_repr::ActorPath::parse("root/historical-original/capture").unwrap(),
         1,
     )
     .unwrap();
@@ -3458,7 +3473,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         "historical_original_old_and_current_execution",
         include_str!("fixtures/historical-original-observe.hs"),
         CellDeclarationExpectation::Total(0),
-        &ScalePublication::Ephemeral,
+        &publication,
         AuthorityChecks::Configured,
         &imports,
         Some(41099),
@@ -3516,7 +3531,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
     drop(old_interface_bytes);
     drop(resident);
     drop(images);
-    drop(recovery);
+    drop(publication);
 
     for output in &disposable_outputs {
         if output.try_exists().unwrap() {
@@ -3550,6 +3565,10 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
     let public = persistent.recover_public_scope(&cold_owner).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let publication = ScalePublication::Durable {
+        owner: cold_owner.clone(),
+        recovery,
+    };
     let recovered_view = resident.compile_view_in(public).unwrap();
     let recovered = recovered_view.exact_declaration_context().unwrap();
     let descriptors = recovered.artifact_view().descriptors();
@@ -3581,7 +3600,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         "historical_original_cold_old_and_current_execution",
         include_str!("fixtures/historical-original-observe.hs"),
         CellDeclarationExpectation::Total(0),
-        &ScalePublication::Ephemeral,
+        &publication,
         AuthorityChecks::Configured,
         &imports,
         Some(41099),
