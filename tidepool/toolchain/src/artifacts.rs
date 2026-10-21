@@ -443,59 +443,6 @@ pub struct YieldSiteCollision {
 }
 
 impl YieldSites {
-    /// Test convenience for answer-only sites with no module information.
-    pub fn from_pairs(pairs: Vec<(u64, String)>) -> Self {
-        YieldSites {
-            by_site: pairs
-                .into_iter()
-                .map(|(site, ty)| {
-                    (
-                        site,
-                        YieldSite {
-                            reply_declaration: None,
-                            request_type_signatures: None,
-                            site,
-                            origin: "<test>".into(),
-                            ordinal: site,
-                            ty,
-                            modules: Vec::new(),
-                            heads: Vec::new(),
-                            inputs: Vec::new(),
-                            input_type_witnesses: Vec::new(),
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    /// Build an answer-only lookup from `(site, type, modules)` triples, for tests
-    /// that need output-type module resolution but no live inputs.
-    pub fn from_entries(entries: Vec<(u64, String, Vec<String>)>) -> Self {
-        YieldSites {
-            by_site: entries
-                .into_iter()
-                .map(|(site, ty, modules)| {
-                    (
-                        site,
-                        YieldSite {
-                            reply_declaration: None,
-                            request_type_signatures: None,
-                            site,
-                            origin: "<test>".into(),
-                            ordinal: site,
-                            ty,
-                            modules,
-                            heads: Vec::new(),
-                            inputs: Vec::new(),
-                            input_type_witnesses: Vec::new(),
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-
     /// Build a lookup from the compiler's complete typed-site records.
     pub fn from_sites(sites: Vec<YieldSite>) -> Result<Self, YieldSiteCollision> {
         let mut by_site: HashMap<u64, YieldSite> = HashMap::new();
@@ -3910,30 +3857,6 @@ impl AdmittedTurnOutput {
     }
 }
 
-/// Seal the exact worker-authored source and product sidecars of a successful
-/// resident turn. The runtime supplies the selected template's source path
-/// and the source text echoed by TurnOut, not the unspliced cell text.
-pub fn seal_turn_outputs(
-    offer: &SelectedModuleCandidateOffer,
-    output_dir: &Path,
-    source_path: &Path,
-    source: &str,
-    prepared: &Arc<PreparedProgram>,
-    target: &str,
-) -> Result<Option<SealedTurnProducts>, CompileError> {
-    seal_turn_outputs_inner(
-        offer,
-        output_dir,
-        source_path,
-        source,
-        prepared,
-        target,
-        None,
-        None,
-        OriginalOutputPublication::Transaction,
-    )
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OriginalOutputPublication {
     Transaction,
@@ -3995,42 +3918,6 @@ impl CompilerSidecar {
 
 fn compiler_evidence_failure(error: certified_products::CertificationError) -> CompileError {
     CompileError::CompilerEvidence(Box::new(error))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn seal_turn_outputs_inner(
-    offer: &SelectedModuleCandidateOffer,
-    output_dir: &Path,
-    source_path: &Path,
-    source: &str,
-    prepared: &Arc<PreparedProgram>,
-    target: &str,
-    identity_metadata: Option<(&DataConTable, &[YieldSite])>,
-    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
-    publication: OriginalOutputPublication,
-) -> Result<Option<SealedTurnProducts>, CompileError> {
-    // Standalone turns own their own admission; program turns share theirs.
-    seal_turn_outputs_with_validation(
-        offer,
-        offer
-            .exact
-            .as_ref()
-            .map(|request| request.receipt_admission()),
-        output_dir,
-        source_path,
-        source,
-        prepared,
-        target,
-        identity_metadata,
-        authored,
-        publication,
-        None,
-        None,
-        None,
-        None,
-        None,
-        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
