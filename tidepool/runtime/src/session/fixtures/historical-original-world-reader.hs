@@ -4,4 +4,4 @@ import qualified HistoricalOriginalG
 historicalRead :: Int
 historicalRead = HistoricalOriginalG.g
 
-historicalRead
+historicalReaderResult <- pure historicalRead

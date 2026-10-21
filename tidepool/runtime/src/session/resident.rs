@@ -13700,6 +13700,9 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
 mod activation_input_tests;
 
 #[cfg(test)]
+pub(in crate::session) use activation_input_tests::run_historical_original_recovery_fixture;
+
+#[cfg(test)]
 mod source_origin_tests {
     #[derive(Clone)]
     struct EmptyOutput;

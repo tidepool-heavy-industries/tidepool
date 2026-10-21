@@ -54,7 +54,9 @@ fn selected_package_roots(
 fn observed_package_cafs(
     resident: &mut TestSession,
     scope: ScopeId,
+    phase: &str,
 ) -> BTreeMap<CafKey, HeldPackageCaf> {
+    eprintln!("PACKAGE_INSTANCE_PHASE {phase}");
     let (domain, roots) = selected_package_roots(resident, scope);
     let mut observations = BTreeMap::<CafKey, HeldPackageCaf>::new();
     for lease in roots.into_values() {
@@ -311,8 +313,8 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     let installation_b = capsule_b.installation_scope().clone();
     assert_ne!(installation_a.scope(), installation_b.scope());
     // Read both roots before execution can collect or update either closure.
-    let initial_a = observed_package_cafs(&mut resident, installation_a.scope());
-    let initial_b = observed_package_cafs(&mut resident, installation_b.scope());
+    let initial_a = observed_package_cafs(&mut resident, installation_a.scope(), "initial_a");
+    let initial_b = observed_package_cafs(&mut resident, installation_b.scope(), "initial_b");
     assert!(
         !initial_a.is_empty(),
         "the real selected package groups must contain a memoizing CAF"
@@ -340,8 +342,8 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         );
     }
     run_package_source(&mut resident, capsule_a, &source_a);
-    let forced_a = observed_package_cafs(&mut resident, installation_a.scope());
-    let untouched_b = observed_package_cafs(&mut resident, installation_b.scope());
+    let forced_a = observed_package_cafs(&mut resident, installation_a.scope(), "forced_a");
+    let untouched_b = observed_package_cafs(&mut resident, installation_b.scope(), "untouched_b");
     let forced_key = initial_a.iter().find_map(|(key, initial)| {
         (!initial.evaluated && !initial_b[key].evaluated && forced_a[key].evaluated
             && !untouched_b[key].evaluated).then_some(*key)
@@ -351,7 +353,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     assert_same_package_instance(&initial_a[&forced_key], &forced_a[&forced_key]);
     assert_same_package_instance(&initial_b[&forced_key], &untouched_b[&forced_key]);
     run_package_source(&mut resident, capsule_b, &source_b);
-    let forced_b = observed_package_cafs(&mut resident, installation_b.scope());
+    let forced_b = observed_package_cafs(&mut resident, installation_b.scope(), "forced_b");
     assert_same_package_instance(&initial_b[&forced_key], &forced_b[&forced_key]);
     assert!(
         forced_b[&forced_key].evaluated,
@@ -385,17 +387,41 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     })
     .unwrap();
     resident.bootstrap_world_in(&recipe, &source_b);
-    public_package_cell(
+    let first_selection = public_package_cell(
         &mut resident,
         &recipe,
         "packageFirst",
         "if PackageProbe.packageProbe 0 > 0 then (42 :: Int) else 0",
         42,
     );
-    let public_first = observed_package_cafs(&mut resident, public_b);
-    let first_caf = public_first
-        .get(&forced_key)
-        .expect("the first B cell demands the SAME issued package CAF binding");
+    let public_first = observed_package_cafs(&mut resident, public_b, "public_first");
+    let first_caf = public_first.get(&forced_key).unwrap_or_else(|| {
+        let NativeInstanceLease::Package(expected) = &forced_b[&forced_key].lease else {
+            unreachable!()
+        };
+        let domains = resident.state.bindings().native_domain_selection_in(
+            resident.state.scope_tree(), public_b,
+        ).unwrap();
+        let observed = domains.roots().iter().filter_map(|(key, lease)| {
+            let NativeInstanceLease::Package(package) = lease else { return None; };
+            Some((key, lease.instance(), package.image().group() == expected.image().group(),
+                Arc::ptr_eq(package.image().image(), expected.image().image()),
+                package.image().group().owner(), package.image().group().binders()))
+        }).collect::<Vec<_>>();
+        let edges = |selection: &tidepool_toolchain::artifact_inventory::CompletedNativeSelection| {
+            selection.completion().package_bindings().filter_map(|binding| {
+                (binding.product().code() == expected.image().group()).then(|| (
+                    binding.binding(), binding.import_links().map(|(child, value)|
+                        (child.binding(), value)).collect::<Vec<_>>(),
+                ))
+            }).collect::<Vec<_>>()
+        };
+        let original = prepared.compiled().certification.as_ref().unwrap()
+            .native_selection.as_ref().unwrap();
+        panic!("the first B cell demands the SAME issued package CAF binding; expected={forced_key:?} expected_owner={:?} expected_binders={:?} current_domain={:?} original_edges={:?} first_edges={:?} all_observed=(key,instance,same_code,same_image,owner,binders){observed:?}",
+            expected.image().group().owner(), expected.image().group().binders(), domains.current(),
+            edges(original), edges(&first_selection));
+    });
     assert!(first_caf.evaluated);
     assert_ne!(first_caf.domain, forced_b[&forced_key].domain);
     assert_ne!(
@@ -403,12 +429,23 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         forced_b[&forced_key].lease.instance(),
         "public B and private installer I_B are separate physical domains"
     );
+    let primary_roles_before_second = resident
+        .state
+        .lib()
+        .current_exact_context_in(public_b)
+        .unwrap()
+        .compiler_input_roles();
     public_package_cell(
         &mut resident,
         &recipe,
         "packageSecond",
         "P.fst packageFirst + if PackageProbe.packageProbe 1 > 0 && PackageProbe.packageSibling '\\NUL' > 0 then 1 else 0",
         43,
+    );
+    assert_eq!(
+        resident.state.lib().current_exact_context_in(public_b).unwrap().compiler_input_roles(),
+        primary_roles_before_second,
+        "checked visible value TYPE inputs remain local to the stage; publication does not promote primary compiler roles",
     );
     let callable = public_package_function(
         &mut resident,
@@ -427,7 +464,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
             if identity == &callable)),
         "the common installer must consume an actual retained callable, not recompile its body");
-    let public_second = observed_package_cafs(&mut resident, public_b);
+    let public_second = observed_package_cafs(&mut resident, public_b, "public_second");
     assert!(assert_unchanged_public_caf(&public_second, forced_key, first_caf).evaluated);
     let (_, before_expression) = selected_package_roots(&resident, public_b);
     public_package_expression(&mut resident, &recipe);
@@ -439,8 +476,9 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         .collect::<Vec<_>>();
     assert!(!newly_selected.is_empty(),
         "the zero-name expression must genuinely select new package bindings: before={before_expression:?}, after={late_roots:?}");
-    let after_expression = observed_package_cafs(&mut resident, public_b);
+    let after_expression = observed_package_cafs(&mut resident, public_b, "after_expression");
     assert!(assert_unchanged_public_caf(&after_expression, forced_key, first_caf).evaluated);
+    public_package_expression_pair(&mut resident, &recipe);
 
     // The finite run has already sealed its acquired immutable products. Remove
     // its actual disposable compiler output, independently of the session root.
@@ -596,7 +634,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
             "the later B cell reuses its own already-installed package instance"
         );
     }
-    let public_after_cutoff = observed_package_cafs(&mut resident, public_b);
+    let public_after_cutoff = observed_package_cafs(&mut resident, public_b, "public_after_cutoff");
     assert!(assert_unchanged_public_caf(&public_after_cutoff, forced_key, first_caf).evaluated);
     eprintln!(
         "PACKAGE_CAF_HISTORY {:?} I_A={:?} I_B={:?} public_B={:?}",
@@ -735,7 +773,85 @@ fn public_package_function(
 }
 
 fn public_package_expression(resident: &mut TestSession, recipe: &InputRecipe) {
+    public_package_expression_cell(
+        resident,
+        recipe,
+        "if PackageProbe.packageLater 37 == 23 then (42 :: Int) else 0",
+        &[tidepool_toolchain::checked_cell::CheckedExpressionLift::Pure],
+    );
+}
+
+fn public_package_expression_pair(resident: &mut TestSession, recipe: &InputRecipe) {
+    use tidepool_toolchain::checked_cell::CheckedExpressionLift;
+
+    let captures = public_package_expression_cell(
+        resident,
+        recipe,
+        "if PackageProbe.packageLater 37 == 23 then (42 :: Int) else 0\npure (P.fst packageSecond + 1)",
+        &[CheckedExpressionLift::Pure, CheckedExpressionLift::Effectful],
+    );
+    let public = resident.public_context().lexical_scope;
+    let before_forcing = resident
+        .public_visibility_snapshot_in(public)
+        .unwrap()
+        .bindings;
+    let before_roles = resident
+        .state
+        .lib()
+        .current_exact_context_in(public)
+        .unwrap()
+        .compiler_input_roles();
+    for ((name, identity), (result_name, expected)) in captures.into_iter().zip([
+        ("packagePureExpressionResult", 42),
+        ("packageEffectfulExpressionResult", 44),
+    ]) {
+        let selection = public_package_cell(
+            resident,
+            recipe,
+            result_name,
+            &format!("{name} ()"),
+            expected,
+        );
+        assert!(selection.target_imports().iter().any(|import| matches!(import,
+            tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity: selected, .. }
+                if selected == &identity)),
+            "each result must apply its actual retained expression capture");
+        let after = resident.public_visibility_snapshot_in(public).unwrap();
+        assert!(
+            before_forcing
+                .iter()
+                .all(|previous| after.bindings.contains(previous)),
+            "forcing either capture must preserve every earlier public label and identity"
+        );
+        assert_eq!(
+            resident
+                .state
+                .lib()
+                .current_exact_context_in(public)
+                .unwrap()
+                .compiler_input_roles(),
+            before_roles
+        );
+    }
+}
+
+fn public_package_expression_cell(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    source: &str,
+    expected_lifts: &[tidepool_toolchain::checked_cell::CheckedExpressionLift],
+) -> Vec<(String, tidepool_repr::execution_schema::SymbolIdentity)> {
     let public = resident.public_context();
+    let before_bindings = resident
+        .public_visibility_snapshot_in(public.lexical_scope)
+        .unwrap()
+        .bindings;
+    let before_roles = resident
+        .state
+        .lib()
+        .current_exact_context_in(public.lexical_scope)
+        .unwrap()
+        .compiler_input_roles();
     let execution = begin_fixture_execution(resident);
     let private = execution.private_scope();
     resident
@@ -744,55 +860,104 @@ fn public_package_expression(resident: &mut TestSession, recipe: &InputRecipe) {
             ..public
         })
         .unwrap();
-    let cell = check_fixture_cell(
-        resident,
-        recipe,
-        "if PackageProbe.packageLater 37 == 23 then (42 :: Int) else 0",
-        execution.clone(),
-        0,
-    );
-    let (bound, compiled, reservation) = cell.compile_binding(resident, 0);
+    let cell = check_fixture_cell(resident, recipe, source, execution.clone(), 0);
+    assert_eq!(cell.checked.items.len(), expected_lifts.len());
+    let mut captures = Vec::<(String, tidepool_repr::execution_schema::SymbolIdentity)>::new();
+    for (index, expected_lift) in expected_lifts.iter().enumerate() {
+        assert_eq!(cell.prefix.snapshot().compiler_prefix().next_item(), index);
+        let (bound, compiled, reservation) = cell.compile_binding(resident, index);
+        assert!(Arc::ptr_eq(reservation.prefix(), &cell.prefix));
+        assert_eq!(
+            reservation.item().kind(),
+            tidepool_toolchain::checked_cell::CheckedItemKind::Expression
+        );
+        assert!(
+            reservation.item().binders().is_empty(),
+            "this successful item has zero authored names"
+        );
+        let [binder] = bound.as_slice() else {
+            panic!("the owner issues one actual observation per expression")
+        };
+        assert_eq!(reservation.observation_name(), Some(binder.name.as_str()));
+        assert!(before_bindings.iter().all(|(name, _)| name != &binder.name));
+        assert!(captures.iter().all(|(name, _)| name != &binder.name));
+        assert_eq!(
+            reservation.item().expression_lift().unwrap(),
+            Some(*expected_lift)
+        );
+        let completed = source_action(resident, |resident, settlement| {
+            resident.run_observation_with_sites(
+                compiled.code(),
+                binder,
+                reservation.generation(),
+                *expected_lift
+                    == tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(
+            matches!(completed, ResidentOutcome::Completed { .. }),
+            "the zero-name item captures its value before publication"
+        );
+        let identity = resident
+            .state
+            .bindings()
+            .get(tidepool_repr::SessionVarId::from_extract(binder.var_id))
+            .expect("expression completion owns its actual BindingEntry")
+            .value
+            .identity
+            .clone();
+        captures.push((binder.name.clone(), identity));
+        assert_eq!(
+            cell.prefix.snapshot().compiler_prefix().next_item(),
+            index + 1
+        );
+        assert_eq!(
+            resident
+                .public_visibility_snapshot_in(public.lexical_scope)
+                .unwrap()
+                .bindings,
+            before_bindings,
+            "private expression completion must not change the public bindings",
+        );
+    }
+    publish_checked_fixture(resident, &execution, expected_lifts.len());
+    let published = resident
+        .public_visibility_snapshot_in(public.lexical_scope)
+        .unwrap();
+    for previous in &before_bindings {
+        assert!(
+            published.bindings.contains(previous),
+            "earlier public binding identity changed"
+        );
+    }
+    for (name, identity) in &captures {
+        let id = published
+            .bindings
+            .iter()
+            .find_map(|(label, id)| (label == name).then_some(*id))
+            .expect("the same publication exposes each issued observation");
+        assert_eq!(
+            &resident.state.bindings().get(id).unwrap().value.identity,
+            identity
+        );
+    }
     assert_eq!(
-        reservation.item().kind(),
-        tidepool_toolchain::checked_cell::CheckedItemKind::Expression
+        resident
+            .state
+            .lib()
+            .current_exact_context_in(public.lexical_scope)
+            .unwrap()
+            .compiler_input_roles(),
+        before_roles,
+        "zero-name expression publication must not promote primary TYPE roles",
     );
-    assert!(
-        reservation.item().binders().is_empty(),
-        "this successful item has zero authored names"
-    );
-    let [binder] = bound.as_slice() else {
-        panic!("the owner issues one actual expression observation")
-    };
-    assert_eq!(reservation.observation_name(), Some(binder.name.as_str()));
-    let lift = reservation.item().expression_lift().unwrap();
-    assert!(
-        matches!(
-            lift,
-            Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Pure)
-        ),
-        "the actual pure-expression adapter must force its result before completion: {lift:?}"
-    );
-    let completed = source_action(resident, |resident, settlement| {
-        resident.run_observation_with_sites(
-            compiled.code(),
-            binder,
-            reservation.generation(),
-            false,
-            settlement,
-        )
-    })
-    .unwrap();
-    assert!(
-        matches!(completed, ResidentOutcome::Completed { .. }),
-        "the zero-name item executes before completion is published"
-    );
-    publish_checked_fixture(resident, &execution, 1);
     resident.set_run_context(public).unwrap();
-    drop(compiled);
-    drop(reservation);
     drop(cell);
     drop(execution);
     resident.retire_scope(private);
+    captures
 }
 
 fn prepare_package_source(

@@ -6,6 +6,13 @@ mod finite_source_world_history;
 #[path = "activation_input_tests/compiler_end_history.rs"]
 mod compiler_end_history;
 
+#[path = "activation_input_tests/historical_original_recovery.rs"]
+mod historical_original_recovery;
+
+pub(in crate::session) fn run_historical_original_recovery_fixture() {
+    historical_original_recovery::run();
+}
+
 use super::*;
 use crate::session::{
     insert_preamble_imports, resident_cell_check_template, resident_workbench_templates,
