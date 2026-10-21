@@ -976,19 +976,23 @@ projectPreparedPackageTarget env hostBindings context home components reach = do
           && (symbolUnit (globalIdentity global), symbolModule (globalIdentity global))
                `Set.notMember` homeModulePairs
           && toUnitId (moduleUnit (symbolOwner (globalIdentity global))) `Set.notMember` homeUnitIds
-      homeImports = Map.fromList
-        [ ( (Text.pack (unitString (moduleUnit (pmModule prepared)))
-            , Text.pack (moduleNameString (moduleName (pmModule prepared)))
-            , fromIntegral ordinal)
-          , [ globalIdentity global
-            | global <- projectedGlobals (projectedBody group)
-            , isPackageImport global ])
-        | prepared <- home
-        , (ordinal, _, Right evidence) <- projectPreparedModuleGroupResultsFor
-            (OriginalHomeProduct isHomeUnit) context prepared Nothing
-        , let group = projectedGroupWire evidence ]
   unless (all ((`Set.notMember` packageOwners) . pmModule) home)
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
+  homeRows <- forM home $ \prepared ->
+    forM (projectPreparedModuleGroupResultsFor
+          (OriginalHomeProduct isHomeUnit) context prepared Nothing) $ \(ordinal, _, outcome) ->
+         case outcome of
+           Left failure -> Left failure
+           Right evidence ->
+             let group = projectedGroupWire evidence
+                 key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
+                       , Text.pack (moduleNameString (moduleName (pmModule prepared)))
+                       , fromIntegral ordinal )
+             in Right ( key
+                      , [ globalIdentity global
+                        | global <- projectedGlobals (projectedBody group)
+                        , isPackageImport global ] )
+  let homeImports = Map.fromList (concat homeRows)
   products <- projectPreparedPackageGroupsWithIdentities context components reach identities
   let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
       imported = Set.fromList exports

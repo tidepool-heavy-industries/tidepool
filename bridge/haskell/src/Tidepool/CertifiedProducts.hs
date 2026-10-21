@@ -24,7 +24,7 @@ import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.Bits (shiftR)
 import Data.Array (listArray, elems, (!))
-import Data.List (find, foldl', mapAccumL)
+import Data.List (find, mapAccumL)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import qualified Data.Set as Set
@@ -213,7 +213,7 @@ canonicalizeOccurrences raws
       (normalize
         [ (classes ! i, [ childRef classes link | link <- rawImports raw ])
         | (i, raw) <- zip [0 .. n - 1] raws ])
-    childRef classes RawLinkInherited = (False, 0)
+    childRef _ RawLinkInherited = (False, 0)
     childRef classes (RawLinkLocal child) = (True, classes ! child)
     first table (partition, raw) = Map.insertWith (\_ old -> old) partition raw table
     materialize classes raw = PackageOccurrence
