@@ -114,17 +114,19 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     let dependency_id = entries[1].descriptor.id;
     let inventory = ArtifactInventory::default();
     let mut validation = PackageInterfaceValidation::default();
-    let selection =
+    let projected =
         CertifiedSourceSelection::from_projected_originals(&products, &validation.inventory)
             .unwrap();
     let fixed = inventory
         .bind_segment(
             &inventory.empty_view(),
             entries.clone(),
-            &selection,
+            &projected,
             &mut validation,
         )
         .unwrap();
+    let selection = fixed.source_selection().clone();
+    drop(projected);
     let mut sources = vec![(&authored, 3)];
     if explicit_dependency {
         sources.push((&dependency, 11));
@@ -261,6 +263,12 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     }
     let (last_inventory, last) = recover(&current);
     drop(current);
+    assert_ne!(
+        inventory.node_count(),
+        0,
+        "the completed selection retains its physical proof until released"
+    );
+    drop(selection);
     assert_eq!(groups(&last), expected_groups);
     assert_eq!(explicit_roots(&last), expected_roots);
     assert_eq!(inventory.node_count(), 0);
