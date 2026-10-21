@@ -5167,6 +5167,13 @@ impl CompilationOutputOwner {
         stderr: &[u8],
         error: CompileError,
     ) -> CompileError {
+        let metadata_failure = if !matches!(self, Self::Scratch(_))
+            && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")
+        {
+            retain_compiler_failure_metadata(self.path(), command, stderr).err()
+        } else {
+            None
+        };
         match self {
             Self::Scratch(directory) => {
                 retain_compiler_failure(directory.path(), command, stderr, error)
@@ -5175,6 +5182,9 @@ impl CompilationOutputOwner {
                 diagnostics: OriginalFailureDiagnostics::Hosted,
                 ..
             } => {
+                if let Some(failure) = metadata_failure {
+                    tracing::warn!(%failure, path = %self.path().display(), "compiler diagnostic metadata is incomplete");
+                }
                 tracing::warn!(path = %self.path().display(), "retained failed compiler artifacts");
                 error
             }
@@ -5186,6 +5196,12 @@ impl CompilationOutputOwner {
                 // Build CLIs have no tracing subscriber. A diagnostic write
                 // cannot replace the typed primary failure.
                 use std::io::Write;
+                if let Some(failure) = metadata_failure {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "compiler diagnostic metadata is incomplete: {failure}"
+                    );
+                }
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     "compiler artifacts retained at {}",
@@ -6576,6 +6592,48 @@ fn compile_invocation_inner(
     invocation_timing.advance("retained_entry_seal");
     invocation_timing.finish(true);
     Ok(CompilationOutput::Ordinary(artifacts))
+}
+
+// Persistent output owners already hold all raw payloads. Add only diagnostic
+// metadata absent from that owner, using the existing bounded source capture.
+fn retain_compiler_failure_metadata(
+    directory: &Path,
+    command: &ExtractCmd,
+    stderr: &[u8],
+) -> std::io::Result<()> {
+    fn write_missing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file.write_all(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::symlink_metadata(path)?.is_file() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other(
+                        "diagnostic metadata is not a regular file",
+                    ))
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    write_missing(
+        &directory.join("compiler-request.bin"),
+        &command.request_bytes(),
+    )?;
+    write_missing(
+        &directory.join("compiler-cwd.bin"),
+        std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+    )?;
+    write_missing(&directory.join("compiler.stderr"), stderr)?;
+    if !directory.join("consumed-sources.json").try_exists()? {
+        failure_sources::retain(directory, Vec::new())?;
+    }
+    Ok(())
 }
 
 /// Retain worker outputs and stderr after compilation or final sealing fails.
@@ -8038,11 +8096,34 @@ mod module_product_tests {
             panic!("failed retention must preserve the primary worker failure");
         };
         assert_eq!(diagnostics, original);
+        let declared_source = root.path().join("Owned.hs");
+        let source_bytes = b"module Owned where\n";
+        std::fs::write(&declared_source, source_bytes).unwrap();
+        let source_hash = crate::checked_cell::hash(source_bytes);
+        let evidence = crate::cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![crate::cache::SourceEvidence {
+                path: declared_source.clone(),
+                sha256: source_hash.clone(),
+            }],
+            resolutions: vec![],
+            packages: vec![],
+            modules: vec![],
+        };
+        let mut kept_paths = Vec::new();
         let inspection = tempfile::tempdir_in(root.path()).unwrap().keep();
         let preparation =
             production_entry::EntryPreparation::reserve(&root.path().join("entry")).unwrap();
+        let hosted =
+            production_entry::EntryPreparation::reserve(&root.path().join("hosted-entry")).unwrap();
         for owner in [
             CompilationOutputOwner::Inspection(inspection),
+            CompilationOutputOwner::Original {
+                preparation: hosted,
+                diagnostics: OriginalFailureDiagnostics::Hosted,
+            },
             CompilationOutputOwner::Original {
                 preparation,
                 diagnostics: OriginalFailureDiagnostics::BuildAction,
@@ -8050,6 +8131,13 @@ mod module_product_tests {
         ] {
             let path = owner.path().to_owned();
             std::fs::write(path.join("owned-raw-packet"), b"already retained").unwrap();
+            std::fs::write(
+                path.join("dependencies.json"),
+                serde_json::to_vec(&evidence).unwrap(),
+            )
+            .unwrap();
+            // Existing compiler output remains in place while missing metadata is added.
+            std::fs::write(path.join("compiler.stderr"), stderr.as_bytes()).unwrap();
             let error = owner.retain_failure(
                 &command,
                 stderr.as_bytes(),
@@ -8063,6 +8151,30 @@ mod module_product_tests {
             assert_eq!(
                 std::fs::read(path.join("owned-raw-packet")).unwrap(),
                 b"already retained"
+            );
+            assert_eq!(
+                std::fs::read(path.join("compiler-request.bin")).unwrap(),
+                executed_request
+            );
+            assert_eq!(
+                std::fs::read(path.join("compiler.stderr")).unwrap(),
+                stderr.as_bytes()
+            );
+            assert_eq!(
+                std::fs::read(path.join("compiler-cwd.bin")).unwrap(),
+                std::env::current_dir()
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+            );
+            assert!(path.join("consumed-sources.json").is_file());
+            kept_paths.push(path);
+        }
+        std::fs::remove_file(declared_source).unwrap();
+        for path in kept_paths {
+            assert_eq!(
+                std::fs::read(path.join("consumed-sources").join(&source_hash)).unwrap(),
+                source_bytes
             );
         }
         assert_eq!(
