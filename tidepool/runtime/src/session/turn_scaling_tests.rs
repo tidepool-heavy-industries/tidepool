@@ -3138,6 +3138,219 @@ fn following_declaration_publishes_current_source_selected_originals() {
 }
 
 #[test]
+fn historical_original_executes_old_child_beside_current_same_interface_source() {
+    use tidepool_toolchain::certified_products::SelectedNativeImport;
+
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("HistoricalOriginalG.hs");
+    let original_source = include_str!("fixtures/historical-original-g.hs");
+    std::fs::write(&source, original_source).unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1018),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let imports = SourceImports::from_specs(["qualified HistoricalOriginalG"]);
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "historical_original_warm_child",
+        "let historicalWarm = HistoricalOriginalG.g",
+        0,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+    )
+    .unwrap();
+    let mut historical = None;
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "historical_original_reader",
+        include_str!("fixtures/historical-original-reader.hs"),
+        CellDeclarationExpectation::Total(2),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::new(),
+        Some(41),
+        |program| {
+            let products = program.items().last().unwrap().native_products().unwrap();
+            let selected = products.native_source_products().unwrap();
+            let reader = selected
+                .groups()
+                .find(|row| {
+                    row.group()
+                        .group()
+                        .binders()
+                        .iter()
+                        .any(|binder| binder.occurrence == "historicalRead")
+                })
+                .expect("the actual declaration selects its reader group");
+            let child = selected
+                .groups()
+                .find(|row| row.group().owner().module == "HistoricalOriginalG")
+                .expect("the reader selects its actual original child");
+            assert!(reader.imports().iter().any(|import| {
+                matches!(import, SelectedNativeImport::Source { binding, .. }
+                    if *binding == child.binding())
+            }));
+            historical = Some((
+                reader.binding(),
+                reader.group().owner().clone(),
+                child.binding(),
+                child.group().owner().clone(),
+            ));
+        },
+    )
+    .unwrap();
+    let (reader_binding, reader_owner, old_binding, old_owner) = historical.unwrap();
+    let view = resident.compile_view_in(public).unwrap();
+    let context = view.exact_declaration_context().unwrap();
+    let descriptors = context.artifact_view().descriptors();
+    let child_role = context
+        .compiler_input_roles()
+        .into_iter()
+        .find(|role| {
+            descriptors.iter().any(|descriptor| {
+                descriptor.id == role.interface()
+                    && descriptor.owner.module == "HistoricalOriginalG"
+            })
+        })
+        .expect("the published reader retains its child's canonical interface");
+    assert!(
+        child_role.original().is_none(),
+        "declaration publication must leave only the parent as reusable source"
+    );
+    let old_product = context
+        .recovery_products()
+        .into_iter()
+        .find(|product| product.owner() == &old_owner)
+        .expect("the parent retains its exact original child's immutable bytes");
+    let old_interface_sha256 = sha2::Sha256::digest(old_product.interface_bytes());
+    assert!(context.compiler_input_roles().iter().any(|role| {
+        role.original().is_some()
+            && descriptors.iter().any(|descriptor| {
+                descriptor.id == role.interface() && descriptor.owner.module == reader_owner.module
+            })
+    }));
+
+    let current_source = original_source.replace("g = 41", "g = 99");
+    assert_ne!(current_source, original_source);
+    std::fs::write(&source, current_source).unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.push(root.path().to_path_buf());
+    let current = tidepool_testing::with_settlement(|settlement| {
+        crate::compile_runtime_targets(
+            &tidepool_toolchain::artifacts::CompileInvocation {
+                source: include_str!("fixtures/historical-original-probe.hs"),
+                targets: &["__prepared"],
+                include: &include,
+                fallback_module_name: "HistoricalOriginalProbe",
+            },
+            |_, _, _| {},
+            settlement,
+        )
+    })
+    .unwrap();
+    let current_products = current
+        .artifacts()
+        .native_source_products("__prepared")
+        .unwrap()
+        .unwrap();
+    let current_child = current_products
+        .groups()
+        .find(|row| row.group().owner().module == "HistoricalOriginalG")
+        .unwrap();
+    let current_owner = current_child.group().owner();
+    let current_product = current
+        .artifacts()
+        .recovery_products
+        .iter()
+        .find(|product| product.owner() == current_owner)
+        .unwrap();
+    assert_eq!(
+        old_interface_sha256,
+        sha2::Sha256::digest(current_product.interface_bytes()),
+        "old and current implementation must actually share the complete interface bytes"
+    );
+    assert_eq!(
+        old_owner.skinny_iface_sha256,
+        current_owner.skinny_iface_sha256
+    );
+    assert_ne!(old_owner.product_sha256, current_owner.product_sha256);
+    assert_ne!(old_binding, current_child.binding());
+    assert_eq!(
+        current
+            .run("__prepared", 1024 * 1024, &mut frunk::HNil, &(), |_| {})
+            .unwrap()
+            .to_json(),
+        serde_json::json!(99)
+    );
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "historical_original_old_and_current_execution",
+        include_str!("fixtures/historical-original-observe.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+        Some(41099),
+        |program| {
+            let mut selected_old = false;
+            let mut selected_current = false;
+            for item in program.items() {
+                let products = item.native_products().unwrap();
+                let selected = products.native_source_products().unwrap();
+                for row in selected.groups() {
+                    if row.binding() == reader_binding {
+                        selected_old = true;
+                        assert!(row.imports().iter().any(|import| {
+                            matches!(import, SelectedNativeImport::Source { binding, .. }
+                                if *binding == old_binding)
+                        }));
+                    }
+                    if row.group().owner().module == "HistoricalOriginalG"
+                        && row.group().owner().product_sha256 == current_owner.product_sha256
+                    {
+                        selected_current = true;
+                        assert_ne!(row.binding(), old_binding);
+                    }
+                }
+            }
+            assert!(
+                selected_old,
+                "the actual World stage must select the original parent"
+            );
+            assert!(
+                selected_current,
+                "the actual World stage must select the current child independently"
+            );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn same_cell_authored_import_retains_completed_quasiquote_support() {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();
