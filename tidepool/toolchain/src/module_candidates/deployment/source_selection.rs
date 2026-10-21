@@ -145,7 +145,7 @@ mod tests {
         fs::write(
             &catalog,
             serde_json::to_vec(&serde_json::json!({
-                "schema": 5,
+                "schema": super::super::CATALOG_SCHEMA,
                 "source_selection": selection,
             }))
             .unwrap(),
