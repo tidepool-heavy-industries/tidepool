@@ -22284,14 +22284,14 @@ mod package_code {
             let roots = roots
                 .iter()
                 .map(resolve)
-                .collect::<Result<BTreeSet<_>, _>>()?
-                .into_iter()
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             let parents = vec![Arc::clone(&acquired.lease)];
             let custody = roots
                 .iter()
                 .copied()
                 .map(InventoryNodeKey::Artifact)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>();
             let selection =
                 selection_snapshot_for_lease(&state, &BTreeMap::new(), &[], &custody, &parents);
@@ -22409,16 +22409,13 @@ mod package_code {
                 }
             }
             drop(state);
-            let roots = roots
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let roots = roots.to_vec();
             let custody = roots
                 .iter()
                 .copied()
                 .map(InventoryNodeKey::Artifact)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect();
             let retained = inventory.retain(
                 Vec::new(),
