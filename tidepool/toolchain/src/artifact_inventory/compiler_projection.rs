@@ -7614,10 +7614,16 @@ mod tests {
                 (
                     incoming_entries,
                     "IncomingWrapper",
-                    BTreeSet::from([NativeGroupKey {
-                        artifact: parent,
-                        original_ordinal: 7,
-                    }]),
+                    BTreeSet::from([
+                        NativeGroupKey {
+                            artifact: parent,
+                            original_ordinal: 7,
+                        },
+                        NativeGroupKey {
+                            artifact: child,
+                            original_ordinal: 9,
+                        },
+                    ]),
                 ),
             ]
             .map(|(entries, marker, groups)| {
@@ -7639,6 +7645,7 @@ mod tests {
                         &groups,
                     )
                     .unwrap();
+                assert_eq!(view.selected_native_groups(), groups);
                 CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&entries).unwrap(),
                     view,
