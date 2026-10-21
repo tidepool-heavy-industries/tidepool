@@ -2107,6 +2107,12 @@ mod selection_tests {
     use std::cell::Cell;
 
     fn installed_leases() -> (PreparedMachine<'static>, Vec<SourceInstanceLease>) {
+        installed_leases_in_selections([[2; 32], [2; 32]])
+    }
+
+    fn installed_leases_in_selections(
+        selections: [[u8; 32]; 2],
+    ) -> (PreparedMachine<'static>, Vec<SourceInstanceLease>) {
         let groups = [super::tests::group("a", 4, &[])];
         let inventory = GroupInventory::new(&groups).unwrap();
         let registry = ImageRegistry::new();
@@ -2120,7 +2126,7 @@ mod selection_tests {
         })
         .unwrap();
         let mut leases = Vec::new();
-        for _ in 0..2 {
+        for selection in selections {
             let receipt = machine
                 .install_shared_batch_with_leases(
                     vec![BatchProgram {
@@ -2133,7 +2139,7 @@ mod selection_tests {
                         NativeHomeBinding {
                             issuer: NativeArtifactBinding {
                                 artifact: [1; 32],
-                                selection: [2; 32],
+                                selection,
                             },
                             original_ordinal: images[0].group().original_ordinal(),
                         },
@@ -2411,6 +2417,59 @@ mod selection_tests {
                 "borrowed": {"elapsed_ns": borrowed.0, "allocations": borrowed_counts},
             })
         );
+    }
+
+    #[test]
+    fn exact_home_bindings_keep_same_binder_histories_distinct() {
+        let (mut machine, leases) = installed_leases_in_selections([[2; 32], [3; 32]]);
+        assert_eq!(leases[0].binder(), leases[1].binder());
+        assert_ne!(leases[0].binding(), leases[1].binding());
+        let tree = ScopeTree::new();
+        let mut table = BindingTable::new();
+        let domain = table
+            .native_domain_selection_in(&tree, ScopeId::ROOT)
+            .unwrap()
+            .current();
+        let incoming = leases
+            .into_iter()
+            .map(|lease| {
+                NativeInstanceAttachment::installed(domain, NativeInstanceLease::Home(lease))
+            })
+            .collect();
+        let admission = table
+            .register_source_instances_in_domains(&tree, ScopeId::ROOT, incoming, &machine)
+            .ok()
+            .unwrap();
+        let selected = table
+            .native_domain_selection_in(&tree, ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(selected.roots().len(), 2);
+        assert_eq!(
+            selected
+                .roots()
+                .values()
+                .map(NativeInstanceLease::instance)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        assert!(
+            table
+                .source_domain_selection_in(&tree, ScopeId::ROOT)
+                .is_err(),
+            "legacy binder-only selection cannot choose either exact history"
+        );
+        for lease in table
+            .rollback_source_admission(ScopeId::ROOT, &admission)
+            .unwrap()
+        {
+            assert!(machine.release(lease.handle()));
+        }
+        assert!(table
+            .native_domain_selection_in(&tree, ScopeId::ROOT)
+            .unwrap()
+            .roots()
+            .is_empty());
     }
 
     #[test]
