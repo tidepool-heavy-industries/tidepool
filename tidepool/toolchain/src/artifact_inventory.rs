@@ -23,6 +23,7 @@ pub use compiler_projection::{
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
     IssuedInputNativeDecisions, RecordedCompilerRole, RecordedInputNativeDecision, NativeSelectionCompletions,
+    NativeCompletionSnapshotFacts,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -7814,6 +7815,50 @@ impl ArtifactView {
             identity,
             generation,
             operation,
+        )
+    }
+
+    /// Validate a recorded completion's exact rows against acquired custody.
+    /// This does not select executable roots or qualify another Original.
+    pub(crate) fn validate_acquired_original_group_bindings(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(), CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        for binding in bindings {
+            crate::host_work::checkpoint()?;
+            operation.charge(1).map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if !owned.contains(&InventoryNodeKey::Group(*binding)) {
+                return Err(admission_failure(ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: binding.binding.artifact(), original_ordinal: binding.original_ordinal,
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn acquired_original_group_children(
+        &self,
+        group: NativeGroupBinding,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        original_group_children_in_scope(&state, &self.read_projection(&state).nodes, group, operation)
+    }
+
+    pub(crate) fn acquired_original_group_retained_binding(
+        &self,
+        group: NativeGroupBinding,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<ArtifactBinding, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        original_group_retained_binding_in_scope(
+            &state, &self.lease.payloads, &self.read_projection(&state).nodes,
+            group, identity, generation, operation,
         )
     }
 
@@ -21848,12 +21893,13 @@ mod package_code {
         }
     }
 
-    /// Existing acquisitions are exact terminals. A fresh identifier refers only
-    /// to a sealed product in this issuance, never to an ambient inventory lookup.
+    /// Held acquisitions are exact terminals. A planned product is not yet
+    /// bound: the issuer may inherit an exact prior row after ordered-child
+    /// reconciliation. It never selects from an ambient inventory.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) enum PackageCodeTarget {
         Held(PackageCodeBinding),
-        Fresh(ArtifactId),
+        Planned(ArtifactId),
     }
 
     pub(crate) struct PackageCodePlan {
@@ -22006,7 +22052,7 @@ mod package_code {
     impl IssuedPackageCodeGraph {
         pub(crate) fn issue(
             parent: &ArtifactView,
-            fresh: Vec<PackageCodePlan>,
+            incoming_plans: Vec<PackageCodePlan>,
             roots: Vec<PackageCodeTarget>,
             inherited: &[Arc<Self>],
             operation: &tidepool_repr::execution_schema::InventoryOperation,
@@ -22016,11 +22062,14 @@ mod package_code {
                     crate::certified_products::CertificationError::from(error),
                 ))
             };
+            operation.reserve::<Self>(1).map_err(account)?;
+            operation.reserve::<PackageCodeTarget>(roots.len()).map_err(account)?;
+            operation.reserve::<ArtifactBinding>(roots.len()).map_err(account)?;
             operation
-                .reserve::<PackageCodePlan>(fresh.len())
+                .reserve::<PackageCodePlan>(incoming_plans.len())
                 .map_err(account)?;
             let mut plans = BTreeMap::<ArtifactId, PackageCodePlan>::new();
-            for plan in fresh {
+            for plan in incoming_plans {
                 let id = plan.artifact_id();
                 let expected = plan.product.code().globals().len();
                 if plan.imports.len() != expected {
@@ -22051,7 +22100,7 @@ mod package_code {
                 crate::host_work::checkpoint()?;
                 operation.charge(1).map_err(account)?;
                 match target {
-                    PackageCodeTarget::Fresh(id) => {
+                    PackageCodeTarget::Planned(id) => {
                         if required.insert(id) {
                             let plan = plans
                                 .get(&id)
@@ -22078,7 +22127,7 @@ mod package_code {
             let product_for = |target: &PackageCodeTarget| -> Result<Arc<CertifiedPackageCodeProduct>, CompileError> {
             match target {
                 PackageCodeTarget::Held(held) => Ok(Arc::clone(held.product())),
-                PackageCodeTarget::Fresh(id) => plans.get(id).map(|plan| Arc::clone(&plan.product))
+                PackageCodeTarget::Planned(id) => plans.get(id).map(|plan| Arc::clone(&plan.product))
                     .ok_or_else(|| refusal(*id, PackageCodeRefusal::MissingProduct)),
             }
         };
@@ -22138,7 +22187,7 @@ mod package_code {
                                     PackageCodeTarget::Held(exact) => {
                                         child.binding == exact.binding
                                     }
-                                    PackageCodeTarget::Fresh(id) => {
+                                    PackageCodeTarget::Planned(id) => {
                                         candidates.get(id).is_some_and(|options| {
                                             options.contains_key(&child.binding)
                                         })
@@ -22202,7 +22251,7 @@ mod package_code {
             let provisional = ArtifactSelectionId([0; 32]);
             let node = |target: &PackageCodeTarget, scope| match target {
                 PackageCodeTarget::Held(held) => InventoryNodeKey::Artifact(held.binding),
-                PackageCodeTarget::Fresh(id) => InventoryNodeKey::Artifact(reused.get(id).map_or(
+                PackageCodeTarget::Planned(id) => InventoryNodeKey::Artifact(reused.get(id).map_or(
                     ArtifactBinding {
                         artifact: *id,
                         selection: scope,
@@ -22238,7 +22287,7 @@ mod package_code {
             let resolve = |target: &PackageCodeTarget| -> Result<ArtifactBinding, CompileError> {
                 match target {
                     PackageCodeTarget::Held(held) => Ok(held.binding),
-                    PackageCodeTarget::Fresh(id) => match reused.get(id) {
+                    PackageCodeTarget::Planned(id) => match reused.get(id) {
                         Some(held) => Ok(held.binding),
                         None => Ok(ArtifactBinding {
                             artifact: *id,
@@ -22251,7 +22300,7 @@ mod package_code {
             let mut payloads = BTreeMap::new();
             for id in &required {
                 operation.reserve::<PackageCodeImport>(plans[id].imports.len()).map_err(account)?;
-                let binding = resolve(&PackageCodeTarget::Fresh(*id))?;
+                let binding = resolve(&PackageCodeTarget::Planned(*id))?;
                 let product = Arc::clone(&plans[id].product);
                 payloads.insert(
                     *id,
@@ -22358,6 +22407,9 @@ mod package_code {
                     crate::certified_products::CertificationError::from(error),
                 ))
             };
+            operation.reserve::<Self>(1).map_err(account)?;
+            operation.reserve::<[ArtifactBinding; 2]>(roots.len()).map_err(account)?;
+            operation.reserve::<InventoryNodeKey>(roots.len()).map_err(account)?;
             let inventory = artifacts.inventory();
             let state = inventory.0.lock().expect("inventory lock");
             let owned = &artifacts.read_projection(&state).nodes;
@@ -22496,7 +22548,7 @@ mod package_code {
             let missing = IssuedPackageCodeGraph::issue(
                 &empty,
                 vec![],
-                vec![PackageCodeTarget::Fresh(absent)],
+                vec![PackageCodeTarget::Planned(absent)],
                 &[],
                 &operation,
             )

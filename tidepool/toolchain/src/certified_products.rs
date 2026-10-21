@@ -7800,6 +7800,10 @@ type OriginalGroupFacts<'a> = BTreeMap<
 pub(crate) enum SelectedOriginalGroupScope<'a> {
     View(&'a crate::artifact_inventory::ArtifactView),
     Contribution(&'a crate::artifact_inventory::NativeOfferContribution),
+    Acquired {
+        view: &'a crate::artifact_inventory::ArtifactView,
+        bindings: &'a BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+    },
 }
 
 impl SelectedOriginalGroupScope<'_> {
@@ -7810,6 +7814,10 @@ impl SelectedOriginalGroupScope<'_> {
         match self {
             Self::View(view) => view.original_group_bindings(operation),
             Self::Contribution(proof) => proof.original_group_bindings(operation),
+            Self::Acquired { view, bindings } => {
+                view.validate_acquired_original_group_bindings(bindings, operation)?;
+                Ok(bindings.iter().copied().collect())
+            }
         }
     }
     fn children(
@@ -7820,6 +7828,15 @@ impl SelectedOriginalGroupScope<'_> {
         match self {
             Self::View(view) => view.original_group_children(binding, operation),
             Self::Contribution(proof) => proof.original_group_children(binding, operation),
+            Self::Acquired { view, bindings } => {
+                let children = view.acquired_original_group_children(binding, operation)?;
+                if children.iter().any(|child| !bindings.contains(child)) {
+                    return Err(crate::CompileError::ExtractFailed(
+                        "acquired native completion omits an exact child binding".into(),
+                    ));
+                }
+                Ok(children)
+            }
         }
     }
     fn retained_binding(
@@ -7836,6 +7853,8 @@ impl SelectedOriginalGroupScope<'_> {
             Self::Contribution(proof) => {
                 proof.original_group_retained_binding(binding, identity, generation, operation)
             }
+            Self::Acquired { view, .. } => view
+                .acquired_original_group_retained_binding(binding, identity, generation, operation),
         }
     }
     fn has_home_owner(&self, unit: &str, module: &str) -> bool {
@@ -7846,10 +7865,44 @@ impl SelectedOriginalGroupScope<'_> {
         match self {
             Self::View(view) => view.has_observed_owner(&owner),
             Self::Contribution(proof) => proof.has_observed_original_owner(&owner),
+            Self::Acquired { view, .. } => view.has_observed_owner(&owner),
         }
     }
 }
 
+/// Restore only explicitly recorded acquired rows. The same certifier checks
+/// their complete exact children; no compiler role or execution root is added.
+pub(crate) fn certify_acquired_original_group_rows(
+    view: &crate::artifact_inventory::ArtifactView,
+    bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<SelectedScopeCertification, crate::CompileError> {
+    let mut available = BTreeMap::new();
+    for binding in bindings {
+        let entry = view
+            .observed_payload(&binding.binding.artifact())
+            .ok_or_else(|| {
+                crate::CompileError::ExtractFailed(
+                    "completion HOME payload is outside acquired custody".into(),
+                )
+            })?;
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(crate::CompileError::ExtractFailed(
+                "completion row is not HOME code".into(),
+            ));
+        };
+        available.insert(binding.binding.artifact(), product);
+    }
+    let mut validator = OriginalValidationInventory::selected(&available, &validation.inventory)
+        .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
+    validator
+        .certify_selected_scope(
+            SelectedOriginalGroupScope::Acquired { view, bindings },
+            &BTreeMap::new(),
+            validation,
+        )
+        .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))
+}
 pub(crate) struct OriginalValidationInventory<'a> {
     available: &'a BTreeMap<
         crate::artifact_inventory::ArtifactId,

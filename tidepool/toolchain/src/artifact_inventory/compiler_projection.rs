@@ -384,16 +384,273 @@ impl PartialEq for CompletedNativeSourceRow {
 }
 impl Eq for CompletedNativeSourceRow {}
 
+/// Immutable scalar completion facts are authenticated against acquired code
+/// and exact scoped edges before they can restore a live completion owner.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeCompletionSnapshotFacts {
+    pub(crate) version: u32,
+    pub(crate) producer_sha256: [u8; 32],
+    pub(crate) profile_sha256: [u8; 32],
+    #[serde(with = "native_completion_rows_wire")]
+    pub(crate) rows: imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
+    pub(crate) package_roots: Arc<[ArtifactBinding]>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeCompletionRowSnapshotFacts {
+    pub(crate) imports: Arc<[NativeCompletionImportSnapshotFacts]>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum NativeCompletionImportSnapshotFacts {
+    Source {
+        binding: NativeGroupBinding,
+        #[serde(with = "native_completion_value_wire")]
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+    Retained {
+        binding: ArtifactBinding,
+        #[serde(with = "native_completion_symbol_wire")]
+        identity: tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+    },
+    Package {
+        binding: ArtifactBinding,
+        #[serde(with = "native_completion_value_wire")]
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+}
+mod native_completion_value_wire {
+    use tidepool_repr::execution_schema::ValueId;
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &ValueId,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(value.0)
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ValueId, D::Error> {
+        use serde::Deserialize;
+        u32::deserialize(deserializer).map(ValueId)
+    }
+}
+mod native_completion_symbol_wire {
+    use tidepool_repr::execution_schema::SymbolIdentity;
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &SymbolIdentity,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::Serialize;
+        (
+            &value.unit,
+            &value.module,
+            &value.namespace,
+            &value.occurrence,
+            &value.record_parent,
+        )
+            .serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SymbolIdentity, D::Error> {
+        use serde::Deserialize;
+        let (unit, module, namespace, occurrence, record_parent) =
+            <(String, String, String, String, Option<String>)>::deserialize(deserializer)?;
+        Ok(SymbolIdentity {
+            unit,
+            module,
+            namespace,
+            occurrence,
+            record_parent,
+        })
+    }
+}
+mod native_completion_rows_wire {
+    use super::*;
+    pub(super) fn serialize<S: serde::Serializer>(
+        rows: &imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(rows.len()))?;
+        for row in rows {
+            sequence.serialize_element(&row)?;
+        }
+        sequence.end()
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>, D::Error>
+    {
+        use serde::Deserialize;
+        let rows = Vec::<(NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>)>::deserialize(
+            deserializer,
+        )?;
+        if rows.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(serde::de::Error::custom(
+                "noncanonical native completion row keys",
+            ));
+        }
+        Ok(rows.into_iter().collect())
+    }
+}
+impl NativeCompletionSnapshotFacts {
+    pub(crate) fn identity(&self) -> Result<[u8; 32], CompileError> {
+        self.identity_in(None)
+    }
+    fn identity_in(
+        &self,
+        operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<[u8; 32], CompileError> {
+        use sha2::{Digest, Sha256};
+        struct Writer<'a> {
+            hash: Sha256,
+            operation: Option<&'a tidepool_repr::execution_schema::InventoryOperation>,
+            refused: Option<CompileError>,
+        }
+        impl std::io::Write for Writer<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(operation) = self.operation {
+                    if let Err(error) = operation.charge(bytes.len()) {
+                        self.refused = Some(CompileError::CompilerEvidence(Box::new(error.into())));
+                        return Err(std::io::Error::other("native completion commitment budget"));
+                    }
+                }
+                self.hash.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = Writer {
+            hash: Sha256::new(),
+            operation,
+            refused: None,
+        };
+        writer
+            .hash
+            .update(b"Tidepool native selection completion v1\0");
+        if let Err(error) = ciborium::ser::into_writer(self, &mut writer) {
+            return Err(writer
+                .refused
+                .unwrap_or_else(|| failure(&format!("native completion identity: {error}"))));
+        }
+        Ok(writer.hash.finalize().into())
+    }
+}
+
 /// A selected executable closure owns its immutable products and exact links.
 /// It is separate from broader Original availability and Original certificate bytes.
 #[derive(Debug)]
 pub struct IssuedNativeSelectionCompletion {
+    producer_sha256: [u8; 32],
+    profile_sha256: [u8; 32],
     artifacts: ArtifactView,
     rows: imbl::OrdMap<NativeGroupBinding, Arc<CompletedNativeSourceRow>>,
     packages: Arc<super::IssuedPackageCodeGraph>,
     retained: Arc<[super::NativeBindingRequirement]>,
+    recorded: Arc<NativeCompletionSnapshotFacts>,
+    identity: [u8; 32],
 }
 impl IssuedNativeSelectionCompletion {
+    fn issue_parts(
+        producer_sha256: [u8; 32],
+        profile_sha256: [u8; 32],
+        artifacts: ArtifactView,
+        rows: imbl::OrdMap<NativeGroupBinding, Arc<CompletedNativeSourceRow>>,
+        packages: Arc<super::IssuedPackageCodeGraph>,
+        retained: Arc<[super::NativeBindingRequirement]>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<Self>, CompileError> {
+        operation
+            .reserve::<NativeCompletionRowSnapshotFacts>(rows.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        for row in rows.values() {
+            operation
+                .reserve::<NativeCompletionImportSnapshotFacts>(row.imports.len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            for import in row.imports.iter() {
+                if let CompletedNativeImport::Retained { identity, .. } = import {
+                    operation
+                        .charge(
+                            identity.unit.len()
+                                + identity.module.len()
+                                + identity.namespace.len()
+                                + identity.occurrence.len()
+                                + identity.record_parent.as_ref().map_or(0, String::len),
+                        )
+                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                }
+            }
+        }
+        operation
+            .reserve::<ArtifactBinding>(packages.roots().len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let recorded = Arc::new(NativeCompletionSnapshotFacts {
+            version: 1,
+            producer_sha256,
+            profile_sha256,
+            rows: rows
+                .iter()
+                .map(|(binding, row)| {
+                    (
+                        *binding,
+                        Arc::new(NativeCompletionRowSnapshotFacts {
+                            imports: row
+                                .imports
+                                .iter()
+                                .map(|link| match link {
+                                    CompletedNativeImport::Source { binding, value } => {
+                                        NativeCompletionImportSnapshotFacts::Source {
+                                            binding: *binding,
+                                            value: *value,
+                                        }
+                                    }
+                                    CompletedNativeImport::Retained {
+                                        binding,
+                                        identity,
+                                        generation,
+                                    } => NativeCompletionImportSnapshotFacts::Retained {
+                                        binding: *binding,
+                                        identity: identity.clone(),
+                                        generation: *generation,
+                                    },
+                                    CompletedNativeImport::Package { binding, value } => {
+                                        NativeCompletionImportSnapshotFacts::Package {
+                                            binding: binding.binding(),
+                                            value: *value,
+                                        }
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .into(),
+                        }),
+                    )
+                })
+                .collect(),
+            package_roots: packages.roots().to_vec().into(),
+        });
+        let identity = recorded.identity_in(Some(operation))?;
+        Ok(Arc::new(Self {
+            producer_sha256,
+            profile_sha256,
+            artifacts,
+            rows,
+            packages,
+            retained,
+            recorded,
+            identity,
+        }))
+    }
+    pub(crate) fn producer_sha256(&self) -> &[u8; 32] {
+        &self.producer_sha256
+    }
+    pub(crate) fn profile_sha256(&self) -> &[u8; 32] {
+        &self.profile_sha256
+    }
     pub fn rows(&self) -> impl ExactSizeIterator<Item = &Arc<CompletedNativeSourceRow>> {
         self.rows.values()
     }
@@ -411,8 +668,11 @@ impl IssuedNativeSelectionCompletion {
 }
 impl PartialEq for IssuedNativeSelectionCompletion {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows
+        self.producer_sha256 == other.producer_sha256
+            && self.profile_sha256 == other.profile_sha256
+            && self.rows == other.rows
             && self.retained == other.retained
+            && self.packages.roots() == other.packages.roots()
             && self
                 .packages
                 .bindings()
@@ -421,6 +681,182 @@ impl PartialEq for IssuedNativeSelectionCompletion {
     }
 }
 impl Eq for IssuedNativeSelectionCompletion {}
+
+fn restore_native_completion(
+    facts: &Arc<NativeCompletionSnapshotFacts>,
+    artifacts: &ArtifactView,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<Arc<IssuedNativeSelectionCompletion>, CompileError> {
+    use crate::certified_products::SelectedNativeImport;
+    if facts.version != 1 || facts.producer_sha256 == [0; 32] || facts.profile_sha256 == [0; 32] {
+        return Err(failure(
+            "unsupported native completion facts or missing provenance",
+        ));
+    }
+    validation
+        .inventory
+        .reserve::<NativeGroupBinding>(facts.rows.len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let bindings = facts.rows.keys().copied().collect::<BTreeSet<_>>();
+    let certified = crate::certified_products::certify_acquired_original_group_rows(
+        artifacts, &bindings, validation,
+    )?;
+    let products = certified.additional.into_iter().collect::<BTreeMap<_, _>>();
+    if products.len() != bindings.len() || certified.imports.len() != bindings.len() {
+        return Err(failure(
+            "native completion restoration omitted acquired HOME rows",
+        ));
+    }
+    let packages = super::IssuedPackageCodeGraph::from_issued(
+        artifacts,
+        &facts.package_roots,
+        &validation.inventory,
+    )?;
+    for binding in packages.bindings() {
+        let owner = binding.product().code().owner();
+        if owner.compiler_sha256 != facts.producer_sha256
+            || owner.profile_sha256 != facts.profile_sha256
+        {
+            return Err(failure(
+                "restored package completion differs from issued provenance",
+            ));
+        }
+    }
+    let mut package_roots = facts.package_roots.iter();
+    let mut rows = imbl::OrdMap::new();
+    let mut retained = BTreeSet::new();
+    for (binding, row) in &facts.rows {
+        let product = products
+            .get(binding)
+            .ok_or_else(|| failure("completion HOME product is absent"))?;
+        let acquired = artifacts
+            .observed_payload(&binding.binding.artifact())
+            .ok_or_else(|| failure("completion HOME payload is absent"))?;
+        if acquired.descriptor.producer_sha256 != facts.producer_sha256 {
+            return Err(failure(
+                "completion HOME producer differs from its issued record",
+            ));
+        }
+        let actual = certified
+            .imports
+            .get(binding)
+            .ok_or_else(|| failure("completion HOME slot proofs are absent"))?;
+        let definitions = product.group().definitions();
+        if row.imports.len() != actual.len() || actual.len() != definitions.globals().len() {
+            return Err(failure(
+                "completion HOME slot count differs from acquired body",
+            ));
+        }
+        validation
+            .inventory
+            .reserve::<CompletedNativeImport>(actual.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut imports = Vec::with_capacity(actual.len());
+        for ((recorded, actual), global) in row
+            .imports
+            .iter()
+            .zip(actual.iter())
+            .zip(definitions.globals())
+        {
+            let import = match (recorded, actual) {
+                (
+                    NativeCompletionImportSnapshotFacts::Source { binding, value },
+                    SelectedNativeImport::Source {
+                        binding: selected,
+                        value: exported,
+                    },
+                ) if binding == selected && value == exported && bindings.contains(selected) => {
+                    CompletedNativeImport::Source {
+                        binding: *binding,
+                        value: *value,
+                    }
+                }
+                (
+                    NativeCompletionImportSnapshotFacts::Retained {
+                        binding,
+                        identity,
+                        generation,
+                    },
+                    SelectedNativeImport::Retained {
+                        binding: selected,
+                        identity: observed,
+                        generation: issued,
+                    },
+                ) if binding == selected && identity == observed && generation == issued => {
+                    retained.insert(super::NativeBindingRequirement {
+                        artifact_id: binding.artifact,
+                        identity: identity.clone(),
+                        generation: *generation,
+                    });
+                    CompletedNativeImport::Retained {
+                        binding: *binding,
+                        identity: identity.clone(),
+                        generation: *generation,
+                    }
+                }
+                (
+                    NativeCompletionImportSnapshotFacts::Package { binding, value },
+                    SelectedNativeImport::Package {
+                        identity,
+                        interface_digest,
+                    },
+                ) if identity == &global.identity => {
+                    if package_roots.next() != Some(binding) {
+                        return Err(failure(
+                            "completion HOME package slot differs from its issued root order",
+                        ));
+                    }
+                    let selected = packages.get(*binding).ok_or_else(|| {
+                        failure("completion package slot is outside its acquired graph")
+                    })?;
+                    if selected.resolve_export(
+                        global,
+                        definitions.signatures(),
+                        interface_digest,
+                    )? != *value
+                    {
+                        return Err(failure(
+                            "completion package export differs from its issued slot",
+                        ));
+                    }
+                    CompletedNativeImport::Package {
+                        binding: selected,
+                        value: *value,
+                    }
+                }
+                _ => {
+                    return Err(failure(
+                        "completion slot differs from its exact acquired input proof",
+                    ))
+                }
+            };
+            imports.push(import);
+        }
+        rows.insert(
+            *binding,
+            Arc::new(CompletedNativeSourceRow {
+                binding: *binding,
+                product: Arc::new(product.clone()),
+                imports: imports.into(),
+            }),
+        );
+    }
+    let completion = IssuedNativeSelectionCompletion::issue_parts(
+        facts.producer_sha256,
+        facts.profile_sha256,
+        artifacts.retain_custody(packages.artifacts())?,
+        rows,
+        packages,
+        retained.into_iter().collect::<Vec<_>>().into(),
+        &validation.inventory,
+    )?;
+    if &completion.recorded != facts {
+        return Err(failure(
+            "native completion facts changed during acquired restoration",
+        ));
+    }
+    Ok(completion)
+}
 
 /// The final target may require an ordinary live value. Such a requirement
 /// cannot be used by the closed-source launch constructor as immutable code.
@@ -464,16 +900,28 @@ impl CompletedNativeSelection {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct NativeSelectionCompletions(imbl::Vector<Arc<IssuedNativeSelectionCompletion>>);
+pub(crate) struct NativeSelectionCompletions {
+    owners: imbl::Vector<Arc<IssuedNativeSelectionCompletion>>,
+    recorded: imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>>,
+}
 impl NativeSelectionCompletions {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<IssuedNativeSelectionCompletion>> {
-        self.0.iter()
+        self.owners.iter()
     }
     fn one(completion: Arc<IssuedNativeSelectionCompletion>) -> Self {
-        Self(imbl::Vector::unit(completion))
+        let recorded = imbl::OrdMap::unit(completion.identity, Arc::clone(&completion.recorded));
+        Self {
+            owners: imbl::Vector::unit(completion),
+            recorded,
+        }
+    }
+    pub(crate) fn recorded_facts(
+        &self,
+    ) -> &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>> {
+        &self.recorded
     }
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.owners.is_empty()
     }
     pub(crate) fn append(&self, incoming: &Self) -> Result<Self, CompileError> {
         let mut retained = self.clone();
@@ -492,14 +940,24 @@ impl NativeSelectionCompletions {
                     }
                 }
             }
-            retained.0.push_back(Arc::clone(completion));
+            if retained
+                .recorded
+                .get(&completion.identity)
+                .is_some_and(|prior| prior != &completion.recorded)
+            {
+                return Err(failure("native completion fact commitment collision"));
+            }
+            retained
+                .recorded
+                .insert(completion.identity, Arc::clone(&completion.recorded));
+            retained.owners.push_back(Arc::clone(completion));
         }
         Ok(retained)
     }
 }
 impl PartialEq for NativeSelectionCompletions {
     fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len()
+        self.owners.len() == other.owners.len()
             && self
                 .iter()
                 .all(|left| other.iter().any(|right| left == right))
@@ -557,7 +1015,7 @@ pub(crate) fn complete_native_selection(
                 if candidates.iter().any(|other| *other != *product) {
                     return Err(failure("package slot has competing captured code products"));
                 }
-                return Ok(super::PackageCodeTarget::Fresh(
+                return Ok(super::PackageCodeTarget::Planned(
                     ArtifactEntry::package_code(Arc::clone(product))
                         .descriptor
                         .id,
@@ -583,6 +1041,9 @@ pub(crate) fn complete_native_selection(
             ))
         };
     let mut package_roots = Vec::new();
+    operation
+        .reserve::<CompletedNativeSourceRow>(sources.groups().count())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let mut row_inputs = Vec::new();
     for row in sources.groups() {
         let mut prior = None;
@@ -692,7 +1153,7 @@ pub(crate) fn complete_native_selection(
             .charge(1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let id = match target {
-            super::PackageCodeTarget::Fresh(id) => id,
+            super::PackageCodeTarget::Planned(id) => id,
             super::PackageCodeTarget::Held(held) => {
                 if held_checked.insert(held.binding()) {
                     check_product(held.product())?;
@@ -722,6 +1183,9 @@ pub(crate) fn complete_native_selection(
             .map(|(global, seal)| package_target(global, seal))
             .collect::<Result<Vec<_>, _>>()?;
         pending.extend(imports.iter().cloned());
+        operation
+            .reserve::<super::PackageCodePlan>(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         plans.push(super::PackageCodePlan {
             product: Arc::clone(product),
             imports,
@@ -743,6 +1207,9 @@ pub(crate) fn complete_native_selection(
     let mut close = |links: &[SelectedNativeImport],
                      definitions: DefinitionsView<'_>|
      -> Result<Arc<[CompletedNativeImport]>, CompileError> {
+        operation
+            .reserve::<CompletedNativeImport>(links.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         links
             .iter()
             .zip(definitions.globals())
@@ -811,6 +1278,9 @@ pub(crate) fn complete_native_selection(
         );
     }
     drop(close);
+    operation
+        .reserve::<CompletedNativeTargetImport>(sources.target_requirements().len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let target_imports = sources
         .target_requirements()
         .iter()
@@ -858,12 +1328,15 @@ pub(crate) fn complete_native_selection(
         .acquired_artifacts()
         .retain_custody(packages.artifacts())?;
     Ok(Arc::new(CompletedNativeSelection {
-        completion: Arc::new(IssuedNativeSelectionCompletion {
+        completion: IssuedNativeSelectionCompletion::issue_parts(
+            *output.producer_sha256(),
+            *output.profile_sha256(),
             artifacts,
             rows,
             packages,
-            retained: retained.into_iter().collect::<Vec<_>>().into(),
-        }),
+            retained.into_iter().collect::<Vec<_>>().into(),
+            operation,
+        )?,
         target_imports,
     }))
 }
@@ -1811,7 +2284,7 @@ impl crate::declaration_context::RequestCompilerInputs {
                 .ok_or_else(|| failure("demanded compiler owner lacks its admitted row"))?;
             if row.interface.0.artifact != role.interface()
                 || &row.interface.1.descriptor.owner != owner
-                || row.interface.1.is_native()
+                || !row.interface.1.is_compiler_interface()
                 || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
                 || row.original.as_ref().is_some_and(|(_, entry)| {
                     &entry.descriptor.owner != owner || !entry.is_native()
@@ -2787,7 +3260,7 @@ impl CompilerSourceSupport {
                 retained
                     .artifacts
                     .insert(binding.artifact, Arc::clone(entry));
-                if !entry.is_native() {
+                if entry.is_compiler_interface() {
                     if retained
                         .interface_representatives
                         .get(owner)
@@ -2807,7 +3280,7 @@ impl CompilerSourceSupport {
                             .entries
                             .insert(owner.clone(), Arc::clone(representative));
                     }
-                } else if new_payload {
+                } else if entry.is_native() && new_payload {
                     if retained.ambiguous_native_owners.contains(owner) {
                         // The prior exact historical variants remain custody.
                     } else if retained
@@ -3062,6 +3535,31 @@ impl CompilerSourceSupport {
         }
     }
 
+    pub(crate) fn restore_native_completion_facts(
+        &self,
+        facts: &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Self, CompileError> {
+        let mut restored = NativeSelectionCompletions::default();
+        for (identity, recorded) in facts {
+            crate::host_work::checkpoint()?;
+            if recorded.identity_in(Some(&validation.inventory))? != *identity {
+                return Err(failure("native completion fact commitment differs from its record"));
+            }
+            let completion = restore_native_completion(recorded, &self.artifacts, validation)?;
+            restored = restored.append(&NativeSelectionCompletions::one(completion))?;
+        }
+        // Restoration replaces the recorded completion set; receiver facts
+        // cannot fill missing records in the requested snapshot.
+        let mut support = self.clone();
+        support.native_completions = NativeSelectionCompletions::default();
+        support.with_native_completion_refs(&restored)
+    }
+
+    pub(crate) fn native_completion_facts(&self) -> &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>> {
+        self.native_completions.recorded_facts()
+    }
+
     pub(crate) fn native_completions(&self) -> &NativeSelectionCompletions {
         &self.native_completions
     }
@@ -3211,11 +3709,18 @@ impl CompilerSourceSupport {
         &self,
         snapshot: &crate::exact_context::ExactContextSnapshot,
     ) -> Result<Self, CompileError> {
-        self.restore_native_maps(
+        if snapshot.native_completions.values().any(|facts| facts.producer_sha256 != snapshot.producer) {
+            return Err(failure("native completion belongs to another context producer"));
+        }
+        let restored = self.restore_native_maps(
             &snapshot.roles,
             &snapshot.offers,
             &snapshot.native_availability,
             &snapshot.input_decisions,
+        )?;
+        restored.restore_native_completion_facts(
+            &snapshot.native_completions,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
     }
 
@@ -4922,8 +5427,7 @@ impl CompilerInputProjection {
         original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
     ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
         if &interface.descriptor.owner != owner
-            || interface.is_native()
-            || matches!(interface.payload, ArtifactPayload::PackageCode(_))
+            || !interface.is_compiler_interface()
         {
             return Err(failure("compiler interface role has another owner or kind"));
         }
@@ -4958,6 +5462,97 @@ impl CompilerInputProjection {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_completion_fact_wire_keeps_full_rows_and_rejects_noncanonical_keys() {
+        use tidepool_repr::execution_schema::{SymbolIdentity, ValueId};
+        let group = |ordinal| NativeGroupBinding {
+            binding: NativeGroupIssuer {
+                artifact: ArtifactId([31; 32]),
+                selection: ArtifactSelectionId([41; 32]),
+            },
+            original_ordinal: ordinal,
+        };
+        let package = ArtifactBinding {
+            artifact: ArtifactId([51; 32]),
+            selection: ArtifactSelectionId([61; 32]),
+        };
+        // Pure wire data never enters a completion issuer in this control.
+        let facts = NativeCompletionSnapshotFacts {
+            version: 1,
+            producer_sha256: [71; 32],
+            profile_sha256: [81; 32],
+            rows: [
+                (
+                    group(7),
+                    Arc::new(NativeCompletionRowSnapshotFacts {
+                        imports: vec![
+                            NativeCompletionImportSnapshotFacts::Source {
+                                binding: group(11),
+                                value: ValueId(4),
+                            },
+                            NativeCompletionImportSnapshotFacts::Package {
+                                binding: package,
+                                value: ValueId(5),
+                            },
+                            NativeCompletionImportSnapshotFacts::Package {
+                                binding: package,
+                                value: ValueId(5),
+                            },
+                        ]
+                        .into(),
+                    }),
+                ),
+                (
+                    group(11),
+                    Arc::new(NativeCompletionRowSnapshotFacts {
+                        imports: vec![NativeCompletionImportSnapshotFacts::Retained {
+                            binding: package,
+                            identity: SymbolIdentity {
+                                unit: "fixture".into(),
+                                module: "Value".into(),
+                                namespace: "value".into(),
+                                occurrence: "captured".into(),
+                                record_parent: Some("Record".into()),
+                            },
+                            generation: 3,
+                        }]
+                        .into(),
+                    }),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            package_roots: vec![package, package].into(),
+        };
+        let encoded = fvm_ipld_encoding::to_vec(&facts).unwrap();
+        let decoded: NativeCompletionSnapshotFacts = fvm_ipld_encoding::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, facts);
+        assert_eq!(decoded.identity().unwrap(), facts.identity().unwrap());
+        for duplicate in [false, true] {
+            let mut wire: ciborium::value::Value =
+                ciborium::de::from_reader(encoded.as_slice()).unwrap();
+            let ciborium::value::Value::Map(fields) = &mut wire else {
+                panic!("fact object")
+            };
+            let (_, rows) = fields
+                .iter_mut()
+                .find(|(key, _)| key.as_text() == Some("rows"))
+                .unwrap();
+            let ciborium::value::Value::Array(rows) = rows else {
+                panic!("row sequence")
+            };
+            if duplicate {
+                rows.push(rows[0].clone());
+            } else {
+                rows.reverse();
+            }
+            let mut malformed = Vec::new();
+            ciborium::ser::into_writer(&wire, &mut malformed).unwrap();
+            assert!(
+                fvm_ipld_encoding::from_slice::<NativeCompletionSnapshotFacts>(&malformed).is_err()
+            );
+        }
+    }
     fn value_certificate(
         module: &str,
         requirements: Vec<ExactModuleIdentity>,

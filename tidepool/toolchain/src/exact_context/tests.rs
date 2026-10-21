@@ -808,7 +808,7 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     install(&store, materializer.finish().unwrap());
-    for version in [2, 3, 4, 5] {
+    for version in [2, 3, 4, 5, 6] {
         let mut materializer = Materializer::new(&store);
         let descriptor = ContextDescriptor {
             version,
@@ -819,11 +819,12 @@ fn old_selection_and_context_versions_are_rejected() {
             offers: lexical.root().clone(),
             native_availability: lexical.root().clone(),
             input_decisions: lexical.root().clone(),
+            native_completions: lexical.root().clone(),
         };
         let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
         install(&store, materializer.finish().unwrap());
         assert!(
-            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 6 with publication native authority")
+            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 7 with native completion facts")
         );
     }
 }
@@ -1184,7 +1185,7 @@ fn normalized_availability_hydration_refuses_broken_structural_references() {
 }
 
 #[test]
-fn context_v6_requires_normalized_availability_root() {
+fn context_v7_requires_normalized_availability_root() {
     #[derive(Serialize)]
     struct MissingAvailability {
         version: u32,
@@ -1194,6 +1195,7 @@ fn context_v6_requires_normalized_availability_root() {
         lexical: SnapshotMapRoot,
         offers: SnapshotMapRoot,
         input_decisions: Option<SnapshotMapRoot>,
+        native_completions: SnapshotMapRoot,
     }
     let store = MemoryBlockstore::new();
     let mut writer = Materializer::new(&store);
@@ -1203,13 +1205,14 @@ fn context_v6_requires_normalized_availability_root() {
     let missing = ContextRoot(
         writer
             .materialize_value(&MissingAvailability {
-                version: 6,
+                version: 7,
                 producer: [0; 32],
                 selection: valid.selection.root.clone(),
                 roles: valid.roles.root.clone(),
                 lexical: valid.lexical.root.clone(),
                 offers: valid.offers.root.clone(),
                 input_decisions: Some(valid.input_decisions.root.clone()),
+                native_completions: valid.native_completions.root.clone(),
             })
             .unwrap(),
     );
@@ -1600,4 +1603,72 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn context_v7_requires_completion_root_and_distinguishes_missing_storage() {
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let valid = writer
+        .materialize_context(None, &ExactContextSnapshot::empty())
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    #[derive(Serialize)]
+    struct WithoutCompletions {
+        version: u32,
+        producer: [u8; 32],
+        selection: SelectionRoot,
+        roles: SnapshotMapRoot,
+        lexical: SnapshotMapRoot,
+        offers: SnapshotMapRoot,
+        native_availability: SnapshotMapRoot,
+        input_decisions: SnapshotMapRoot,
+    }
+    let descriptor: ContextDescriptor = read_value(&store, valid.root().cid()).unwrap();
+    assert_eq!(descriptor.version, 7);
+    let mut writer = Materializer::new(&store);
+    let missing_field = ContextRoot(
+        writer
+            .materialize_value(&WithoutCompletions {
+                version: descriptor.version,
+                producer: descriptor.producer,
+                selection: descriptor.selection,
+                roles: descriptor.roles,
+                lexical: descriptor.lexical,
+                offers: descriptor.offers,
+                native_availability: descriptor.native_availability,
+                input_decisions: descriptor.input_decisions,
+            })
+            .unwrap(),
+    );
+    install(&store, writer.finish().unwrap());
+    assert!(matches!(hydrate_context(&store, &missing_field),
+        Err(SnapshotError::Malformed(message)) if message.contains("native_completions")));
+    let mut descriptor: ContextDescriptor = read_value(&store, valid.root().cid()).unwrap();
+    let absent = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(b"missing-completion-map"));
+    assert!(store.get(&absent).unwrap().is_none());
+    descriptor.native_completions = SnapshotMapRoot(absent);
+    let mut writer = Materializer::new(&store);
+    let missing_map = ContextRoot(writer.materialize_value(&descriptor).unwrap());
+    install(&store, writer.finish().unwrap());
+    assert!(matches!(hydrate_context(&store, &missing_map),
+        Err(SnapshotError::MissingBlock(cid)) if cid == absent));
+    let restored = hydrate_context(&store, valid.root()).unwrap();
+    assert!(restored.snapshot().native_completions.is_empty());
+    assert!(restored
+        .snapshot()
+        .selection()
+        .graph_selection()
+        .unwrap()
+        .native_groups
+        .is_empty());
+    let mut writer = Materializer::new(&store);
+    let unchanged = writer
+        .materialize_context(Some(&restored), restored.snapshot())
+        .unwrap();
+    assert_eq!(unchanged.root(), valid.root());
+    assert_eq!(
+        unchanged.native_completions.root,
+        valid.native_completions.root
+    );
 }

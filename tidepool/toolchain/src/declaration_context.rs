@@ -12602,6 +12602,7 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .recorded_input_decisions()
                 .clone(),
+            native_completions: self.owner.facts.compiler_support.native_completion_facts().clone(),
         }
     }
 
@@ -12623,6 +12624,7 @@ impl ExactDeclarationContext {
             || self.snapshot().offers != snapshot.offers
             || self.owner.facts.compiler_support.recorded_input_decisions()
                 != &snapshot.input_decisions
+            || self.owner.facts.compiler_support.native_completion_facts() != &snapshot.native_completions
         {
             return Err(failure(
                 "restored compiler availability differs from exact snapshot",
