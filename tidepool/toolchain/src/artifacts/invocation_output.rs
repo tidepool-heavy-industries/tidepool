@@ -896,11 +896,12 @@ mod tests {
         let first = completed("first");
         let second = completed("second");
         let package_bindings = |selection: &crate::artifact_inventory::CompletedNativeSelection| {
-            selection
-                .completion()
-                .package_bindings()
-                .map(|binding| binding.binding())
-                .collect::<BTreeSet<_>>()
+            let mut products = BTreeMap::<_, BTreeSet<_>>::new();
+            for binding in selection.completion().package_bindings() {
+                let exact = binding.binding();
+                products.entry(exact.artifact).or_default().insert(exact);
+            }
+            products
         };
         let first_packages = package_bindings(first);
         let second_packages = package_bindings(second);
@@ -912,9 +913,29 @@ mod tests {
             !second_packages.is_empty(),
             "the dependent target must retain actual package code"
         );
+        let mut shared_products = 0;
+        for (product, first_bindings) in &first_packages {
+            if let Some(second_bindings) = second_packages.get(product) {
+                shared_products += 1;
+                assert_eq!(
+                    first_bindings.len(),
+                    1,
+                    "one exact binding per common package product"
+                );
+                assert_eq!(
+                    second_bindings.len(),
+                    1,
+                    "one exact binding per common package product"
+                );
+                assert_eq!(
+                    first_bindings, second_bindings,
+                    "every common package product keeps its exact already-issued binding"
+                );
+            }
+        }
         assert!(
-            !first_packages.is_disjoint(&second_packages),
-            "overlapping package code keeps its exact already-issued binding"
+            shared_products > 0,
+            "the two targets must demand overlapping actual package code"
         );
         assert!(!first.target_imports().is_empty());
         assert!(!second.target_imports().is_empty());
