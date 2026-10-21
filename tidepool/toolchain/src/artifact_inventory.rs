@@ -7888,28 +7888,37 @@ impl ArtifactView {
     /// Retain matching owned payloads without choosing a compiler role or group.
     /// Native owner equality omits producer and certificate identity, so several
     /// independently issued artifacts can provide the same dependency bytes.
-    fn native_payload_custody_ids(
+    fn native_payload_custody_nodes(
         &self,
         owned: &imbl::OrdSet<InventoryNodeKey>,
-        initial: &BTreeSet<ArtifactId>,
-    ) -> BTreeSet<ArtifactId> {
-        let mut native_owners = BTreeMap::<NativeOwnerKey, Vec<ArtifactId>>::new();
-        for id in artifact_ids(owned) {
-            let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
+        initial: &BTreeSet<InventoryNodeKey>,
+    ) -> BTreeSet<InventoryNodeKey> {
+        let mut native_owners = BTreeMap::<NativeOwnerKey, Vec<InventoryNodeKey>>::new();
+        for node in owned {
+            let InventoryNodeKey::Artifact(binding) = node else {
+                continue;
+            };
+            let ArtifactPayload::Original(product) =
+                &self.lease.payloads[&binding.artifact].payload
+            else {
                 continue;
             };
             native_owners
                 .entry(NativeOwnerKey::from_owner(product.owner()))
                 .or_default()
-                .push(id);
+                .push(*node);
         }
         let mut retained = initial.clone();
+        let mut visited = BTreeSet::new();
         let mut pending = initial.iter().copied().collect::<Vec<_>>();
-        while let Some(id) = pending.pop() {
-            for required in self.lease.payloads[&id].native_owners.values() {
-                for &required_id in native_owners.get(required).into_iter().flatten() {
-                    if retained.insert(required_id) {
-                        pending.push(required_id);
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node.artifact()) {
+                continue;
+            }
+            for required in self.lease.payloads[&node.artifact()].native_owners.values() {
+                for &required_node in native_owners.get(required).into_iter().flatten() {
+                    if retained.insert(required_node) {
+                        pending.push(required_node);
                     }
                 }
             }
@@ -7942,36 +7951,21 @@ impl ArtifactView {
         }));
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
-        let initial = artifact_ids(&admitted_closure(&state, selected.iter().copied()));
-        let retained_ids = self.native_payload_custody_ids(owned, &initial);
-        // Hidden native dependencies preserve every owned issuer as custody;
-        // the explicit publication namespace remains the source choice.
-        let mut custody = owned
-            .iter()
-            .copied()
-            .filter(|node| {
-                matches!(node, InventoryNodeKey::Artifact(binding)
-                if retained_ids.contains(&binding.artifact)
-                    && !initial.contains(&binding.artifact))
-            })
-            .collect::<Vec<_>>();
+        let initial = admitted_closure(&state, selected.iter().copied())
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let retained = self.native_payload_custody_nodes(owned, &initial);
+        let mut custody = retained.difference(&initial).copied().collect::<Vec<_>>();
         custody.extend(self.roots().iter().copied().filter(|node| matches!(node,
             InventoryNodeKey::Group(group) if group.binding.artifact() != original && ids.contains(&group.binding.artifact()))));
-        if !selected.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact() == original)) {
-            let carrier = namespace[&original];
-            let ordinals = owned.iter().filter_map(|node| match node {
-                InventoryNodeKey::Group(group) if group.binding.artifact() == original => Some(group.original_ordinal),
-                _ => None,
-            }).collect::<BTreeSet<_>>();
-            for ordinal in ordinals {
-                custody.push(InventoryNodeKey::Group(resolve_group_binding(&state, owned, carrier, ordinal).map_err(|error| {
-                    self.trace_binding_ambiguity(carrier.artifact, Some(ordinal), "publication_roots_group_custody_fallback");
-                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace", ?original, ?carrier,
-                        selected_publication_roots = ?selected, custody_originals = ?retained_ids,
-                        "publication custody fallback root intent");
-                    error
-                })?));
-            }
+        if !selected.iter().any(|node| {
+            matches!(node,
+            InventoryNodeKey::Group(group) if group.binding.artifact() == original)
+        }) {
+            custody.extend(owned.iter().copied().filter(|node| {
+                matches!(node,
+                InventoryNodeKey::Group(group) if group.binding.artifact() == original)
+            }));
         }
 
         drop(state);
@@ -8278,23 +8272,16 @@ impl ArtifactView {
         // Qualify exact original carriers before traversing their complete
         // native dependency custody. Canonical roots retain these carriers
         // privately, without selecting their bodies for execution.
-        let initial = artifact_ids(&admitted_closure(
-            &state,
-            selected.iter().chain(carriers.iter()).copied(),
-        ));
-        let retained_ids = self.native_payload_custody_ids(owned, &initial);
+        let initial = admitted_closure(&state, selected.iter().chain(carriers.iter()).copied())
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let retained = self.native_payload_custody_nodes(owned, &initial);
         let mut custody_roots = carriers
             .into_iter()
             .filter(|node| !selected_nodes.contains(node))
             .collect::<Vec<_>>();
-        // These dependencies retain bytes, not a compiler or execution choice.
-        // Every required id came from matching payloads in this owned graph.
-        // Preserve each exact issuer instead of resolving its shared payload id.
-        custody_roots.extend(owned.iter().copied().filter(|node| {
-            matches!(node, InventoryNodeKey::Artifact(binding)
-                if retained_ids.contains(&binding.artifact)
-                    && !initial.contains(&binding.artifact))
-        }));
+        // These exact nodes retain bytes without selecting compiler roles or groups.
+        custody_roots.extend(retained.difference(&initial).copied());
         let retained_nodes =
             admitted_closure(&state, selected.iter().chain(custody_roots.iter()).copied());
         custody_roots.extend(owned.iter().copied().filter(|node| {
@@ -19286,6 +19273,71 @@ mod tests {
             drop(recovered);
             assert_eq!(recovered_inventory.node_count(), 0);
         }
+    }
+
+    #[test]
+    fn metadata_publication_retains_actual_group_issuers_without_selecting_them() {
+        let inventory = ArtifactInventory::default();
+        let original = Arc::new(issued_native_groups(
+            "PublicationMetadata",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let ArtifactPayload::Original(product) = &original.payload else {
+            unreachable!()
+        };
+        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let issue = |label: &str| {
+            inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![original.clone(), Arc::new(entry(label, &[]))],
+                    &BTreeSet::from([NativeGroupKey {
+                        artifact: original.descriptor.id,
+                        original_ordinal: 7,
+                    }]),
+                )
+                .unwrap()
+        };
+        let first = issue("MetadataFirst");
+        let second = issue("MetadataSecond");
+        let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap();
+        let metadata = first
+            .select_roots(vec![canonical.descriptor.id])
+            .unwrap()
+            .with_compiler_projection(&roles)
+            .unwrap()
+            .into_owned()
+            .retain_custody(&second)
+            .unwrap();
+        let before = metadata.capture_graph_selection();
+        assert!(metadata.selected_native_groups().is_empty());
+        assert_eq!(before.native_groups.len(), 2);
+        let published = metadata
+            .select_publication_roots(
+                original.descriptor.id,
+                vec![original.descriptor.id, canonical.descriptor.id],
+            )
+            .unwrap();
+        let after = published.capture_graph_selection();
+        assert_eq!(after.native_groups, before.native_groups);
+        assert!(published.selected_native_groups().is_empty());
+        assert!(after
+            .roots
+            .iter()
+            .all(|node| matches!(node, ArtifactBindingNode::Artifact(_))));
+        let recovery = ArtifactInventory::default();
+        let reopened = recovery
+            .recover_selection(
+                &recovery.empty_view(),
+                published.entries(),
+                &after,
+                &published.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(reopened.capture_graph_selection(), after);
+        assert!(reopened.selected_native_groups().is_empty());
     }
 
     #[test]
