@@ -2803,91 +2803,6 @@ fn current_product_owners<'a>(
     Ok(current)
 }
 
-impl<'a> ReceiptNativeInputDemand<'a> {
-    #[cfg(test)]
-    fn from_products(
-        receipt: &'a crate::certified_products::CertifiedReceipt,
-        products: &crate::certified_products::ParsedModuleProducts,
-        source: Option<&Arc<crate::artifact_inventory::CompilerSourceSupport>>,
-    ) -> Result<Self, CompileError> {
-        use crate::certified_products::ReceiptImportOwner;
-        let budget = NativeDemandBudget(Some(products.operation()));
-        let current = current_product_owners(receipt, products)?;
-        let resolved_originals = source
-            .map(|source| {
-                crate::certified_products::ResolvedOriginalBindings::issue(
-                    Arc::clone(source),
-                    Arc::clone(products.operation()),
-                    receipt
-                        .modules
-                        .iter()
-                        .flat_map(|module| &module.groups)
-                        .flat_map(|group| &group.globals)
-                        .chain(receipt.targets.values().flatten())
-                        .map(|global| &global.owner),
-                )
-                .map_err(compiler_evidence_failure)
-            })
-            .transpose()?;
-        let mut sources = Vec::new();
-        for global in receipt
-            .modules
-            .iter()
-            .flat_map(|module| &module.groups)
-            .flat_map(|group| &group.globals)
-            .chain(receipt.targets.values().flatten())
-        {
-            budget.checkpoint()?;
-            if let ReceiptImportOwner::OriginalBinding { unit, module, .. } = &global.owner {
-                let owner = identity(unit, module);
-                let (resolved, ordinal) = resolved_originals.as_ref()
-                    .and_then(|resolved| resolved.get(&global.owner))
-                    .ok_or_else(|| compiler_evidence_failure(
-                        crate::certified_products::CertificationError::InputDecision {
-                            owner,
-                            reason: crate::certified_products::InputDecisionRefusal::MissingContinuationOwner,
-                        }))?;
-                budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
-                sources.push(ExternalSourceGlobal {
-                    unit: Cow::Owned(resolved.unit.clone()),
-                    module: Cow::Owned(resolved.module.clone()),
-                    module_version: Some(Cow::Owned(resolved.module_version.clone())),
-                    original_ordinal: *ordinal,
-                    original_use: Some(&global.owner),
-                });
-                continue;
-            }
-            let ReceiptImportOwner::Source {
-                unit,
-                module,
-                module_version,
-                original_ordinal,
-                ..
-            } = &global.owner
-            else {
-                continue;
-            };
-            // Even when this output also defines the same module, an explicit
-            // version names a historical input and retains its issued choice.
-            if module_version.is_none() && current.contains(&(unit.as_str(), module.as_str())) {
-                continue;
-            }
-            budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
-            sources.push(ExternalSourceGlobal {
-                unit: Cow::Borrowed(unit),
-                module: Cow::Borrowed(module),
-                module_version: module_version.as_ref().map(Cow::Borrowed),
-                original_ordinal: *original_ordinal,
-                original_use: None,
-            });
-        }
-        Ok(Self {
-            sources,
-            resolved_originals,
-        })
-    }
-}
-
 impl DemandNativeInputs {
     pub(crate) fn cold(&self) -> &Arc<RequestCompilerInputs> {
         &self.cold
@@ -10452,7 +10367,9 @@ impl WorldProgramContinuation {
             ));
         }
         if !Arc::ptr_eq(products.operation(), initial.operation()) {
-            return Err(failure("World stage products have another accounting owner"));
+            return Err(failure(
+                "World stage products have another accounting owner",
+            ));
         }
         current_product_owners(receipt, products)?;
         let operation = Arc::clone(initial.operation());
@@ -22351,16 +22268,36 @@ mod tests {
     fn receipt_input_demand_fixture(
         receipt: &crate::certified_products::CertifiedReceipt,
     ) -> ReceiptNativeInputDemand<'_> {
-        let value = Value::Array(vec![
-            text("TPMOD"),
-            Value::Integer(1.into()),
-            Value::Array(vec![]),
-        ]);
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
-        let products =
-            crate::certified_products::ParsedModuleProducts::decode(&bytes, b"").unwrap();
-        ReceiptNativeInputDemand::from_products(receipt, &products, None).unwrap()
+        let sources = receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+            .map(|global| {
+                let crate::certified_products::ReceiptImportOwner::Source {
+                    unit,
+                    module,
+                    module_version,
+                    original_ordinal,
+                    ..
+                } = &global.owner
+                else {
+                    panic!("component demand data must explicitly name Source inputs");
+                };
+                ExternalSourceGlobal {
+                    unit: Cow::Borrowed(unit),
+                    module: Cow::Borrowed(module),
+                    module_version: module_version.as_ref().map(Cow::Borrowed),
+                    original_ordinal: *original_ordinal,
+                    original_use: None,
+                }
+            })
+            .collect();
+        ReceiptNativeInputDemand {
+            sources,
+            resolved_originals: None,
+        }
     }
 
     /// Untrusted group-demand DATA for the `DemandParent`/`DemandChild`
@@ -22415,23 +22352,11 @@ mod tests {
     }
 
     #[test]
-    fn receipt_native_inputs_keep_current_outputs_separate_from_historical_choices() {
+    fn native_product_owner_census_refuses_missing_and_duplicate_owners() {
         use crate::certified_products::{
-            AcceptedGlobal, CertifiedModuleReceipt, CertifiedReceipt, FinalizationEnvelope,
-            ParsedModuleProducts, ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
+            CertifiedModuleReceipt, CertifiedReceipt, FinalizationEnvelope, ParsedModuleProducts,
+            ProductOrigin, WorkerExecutionSource,
         };
-        use tidepool_repr::execution_schema::{InventoryOperation, RuntimeRep};
-        let (context, _) = metadata_fixture();
-        let cold = Arc::new(
-            ProtectedScaffoldRequirements::default()
-                .compiler_inputs(&context, None)
-                .unwrap(),
-        );
-        let owner = identity("fixture", "Joined");
-        let roots = BTreeSet::from([owner.clone()]);
-        // Untrusted decoded physical-output DATA. No source or native product
-        // authority is issued here; the real Some-input history supplies that
-        // producer/consumer gate through the complete product certifier.
         let output = Value::Array(vec![
             text("TPMOD"),
             Value::Integer(1.into()),
@@ -22444,32 +22369,7 @@ mod tests {
         ]);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&output, &mut bytes).unwrap();
-        let current = ParsedModuleProducts::decode(&bytes, b"").unwrap();
-        let global = AcceptedGlobal {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                unit: owner.unit.clone(),
-                module: owner.module.clone(),
-                namespace: "value".into(),
-                occurrence: "current".into(),
-                record_parent: None,
-            },
-            rep: RuntimeRep::LiftedRef,
-            entry_signature: None,
-            required_evaluated: false,
-            owner: ReceiptImportOwner::Source {
-                unit: owner.unit.clone(),
-                module: owner.module.clone(),
-                module_version: None,
-                original_ordinal: 0,
-                binder: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: owner.unit.clone(),
-                    module: owner.module.clone(),
-                    namespace: "value".into(),
-                    occurrence: "current".into(),
-                    record_parent: None,
-                },
-            },
-        };
+        let products = ParsedModuleProducts::decode(&bytes, b"").unwrap();
         for origin in [
             ProductOrigin::Fresh,
             ProductOrigin::RetainedCore,
@@ -22479,8 +22379,8 @@ mod tests {
                 package_products: Vec::new(),
                 modules: vec![CertifiedModuleReceipt {
                     origin,
-                    unit: owner.unit.clone(),
-                    module: owner.module.clone(),
+                    unit: "fixture".into(),
+                    module: "Joined".into(),
                     module_version: None,
                     skinny_iface_sha256: [0; 32],
                     product_sha256: [0; 32],
@@ -22489,96 +22389,24 @@ mod tests {
                     groups: vec![],
                     interface_requirements: BTreeMap::new(),
                 }],
-                targets: BTreeMap::from([("target".into(), vec![global.clone()])]),
+                targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
                 finalization: FinalizationEnvelope {
-                    profile: "native-input-demand-data".into(),
+                    profile: "owner-census-data".into(),
                     home_units: BTreeSet::new(),
                     modules: BTreeMap::new(),
                     value_interfaces: BTreeMap::new(),
                 },
                 source_recipe: WorkerExecutionSource::Ordinary,
             };
-            let inputs = ReceiptNativeInputDemand::from_products(&receipt, &current, None).unwrap();
-            assert!(
-                inputs.sources.is_empty(),
-                "actual current output is independent of origin label"
-            );
-            let operation = InventoryOperation::new(Default::default());
-            let demand = cold
-                .demanded_compiler_projection(&roots, &operation)
-                .unwrap();
-            let selected = cold
-                .demanded_native_inputs(demand, &BTreeSet::new(), &operation)
-                .unwrap();
-            assert!(!selected
-                .advertised_native_originals()
-                .0
-                .contains_key(&owner));
-            assert!(selected
-                .native_availability()
-                .0
-                .values()
-                .all(|row| row.original_owner().module != owner.module));
-            assert!(
-                selected
-                    .certify_receipt_groups(&inputs, &mut PackageInterfaceValidation::default())
-                    .unwrap()
-                    .groups()
-                    .is_empty(),
-                "no prior native group was manufactured"
-            );
-            let external = receipt_input_demand_fixture(&receipt);
             assert_eq!(
-                external.sources.len(),
-                1,
-                "a receipt row without current physical output remains external"
+                current_product_owners(&receipt, &products).unwrap().len(),
+                1
             );
-            let demand = cold
-                .demanded_compiler_projection(&roots, &operation)
-                .unwrap();
-            assert!(matches!(
-                cold.demanded_native_inputs(demand, &roots, &operation),
-                Err(DemandNativeInputsError::UnadvertisedOwner { .. })
-            ));
-
-            let mut duplicate_receipt = receipt.clone();
-            duplicate_receipt
-                .modules
-                .push(duplicate_receipt.modules[0].clone());
-            assert!(
-                ReceiptNativeInputDemand::from_products(&duplicate_receipt, &current, None)
-                    .is_err()
-            );
-            let mut mismatched_receipt = receipt.clone();
-            mismatched_receipt.modules[0].module = "MissingCurrentOwner".into();
-            assert!(
-                ReceiptNativeInputDemand::from_products(&mismatched_receipt, &current, None)
-                    .is_err()
-            );
-            let mut historical = global.clone();
-            let ReceiptImportOwner::Source { module_version, .. } = &mut historical.owner else {
-                unreachable!()
-            };
-            *module_version = Some(tidepool_repr::execution_schema::ModuleVersion([37; 32]));
-            receipt.targets.get_mut("target").unwrap().push(historical);
-            let mixed = ReceiptNativeInputDemand::from_products(&receipt, &current, None).unwrap();
-            assert_eq!(
-                mixed.sources.len(),
-                1,
-                "same-module historical choice survives a current output"
-            );
-            assert!(mixed.sources[0].module_version.is_some());
-            assert!(selected
-                .certify_receipt_groups(&mixed, &mut PackageInterfaceValidation::default())
-                .is_err());
-            let demand = cold
-                .demanded_compiler_projection(&roots, &operation)
-                .unwrap();
-            assert!(matches!(
-                cold.demanded_native_inputs(demand, &roots, &operation),
-                Err(DemandNativeInputsError::UnadvertisedOwner { .. })
-            ));
+            receipt.modules.push(receipt.modules[0].clone());
+            assert!(current_product_owners(&receipt, &products).is_err());
+            receipt.modules.clear();
+            assert!(current_product_owners(&receipt, &products).is_err());
         }
     }
 
