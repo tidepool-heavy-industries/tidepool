@@ -3690,6 +3690,19 @@ impl RequestCompilerInputs {
                         availability_payload_present = row.is_some(),
                         same_descriptor = payload.zip(row).is_some_and(|(payload, row)|
                             payload.descriptor == row.original.descriptor),
+                        same_native_witness = payload.zip(row).is_some_and(|(payload, row)|
+                            match (&payload.payload, &row.original.payload) {
+                                (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) =>
+                                    first.original_native().zip(second.original_native())
+                                        .is_some_and(|(first, second)| Arc::ptr_eq(first, second)),
+                                _ => false,
+                            }),
+                        same_source_digest = payload.zip(row).is_some_and(|(payload, row)|
+                            match (&payload.payload, &row.original.payload) {
+                                (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) =>
+                                    first.source_sha256() == second.source_sha256(),
+                                _ => false,
+                            }),
                         "demanded native payload identity refused");
                 }
                 same_payload
