@@ -2628,6 +2628,8 @@ impl CompilerSourceSupport {
         prefix_groups: &crate::declaration_context::DemandCertifiedGroups,
         stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
         original_bindings: &crate::certified_products::OriginalBindingSelection,
+        receipt: &crate::certified_products::CertifiedReceipt,
+        products: &crate::certified_products::ParsedModuleProducts,
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Arc<Self>, CompileError> {
         if !Arc::ptr_eq(stage.operation(), operation)
@@ -2648,10 +2650,65 @@ impl CompilerSourceSupport {
             prefix_groups,
             operation,
         )?;
-        let artifacts = projected
+        let mut artifacts = projected
             .artifacts
             .with_world_stage_initial_inputs(stage)?
             .retain_original_binding_metadata(original_bindings, operation)?;
+        // A fresh native body can reuse an already selected TYPE interface.
+        // Retain only matching returned owners as issuance candidates; the
+        // physical issuer still checks the finalized artifact identity and
+        // complete qualified edge row before reusing any binding.
+        let mut owners = Vec::new();
+        for product in products.products() {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(receipt.modules.len()))?;
+            let Some(module) = receipt
+                .modules
+                .iter()
+                .find(|module| module.unit == product.unit && module.module == product.module)
+            else {
+                return Err(failure("World fresh TYPE anchor lacks its receipt owner"));
+            };
+            if module.origin != crate::certified_products::ProductOrigin::Fresh {
+                continue;
+            }
+            charge(operation.charge(product.unit.len() + product.module.len()))?;
+            let owner = ExactModuleIdentity {
+                unit: product.unit.clone(),
+                module: product.module.clone(),
+            };
+            let Some(row) = self.selected.get(&owner) else {
+                continue;
+            };
+            let ArtifactPayload::Canonical(interface) = &row.interface.1.payload else {
+                continue;
+            };
+            charge(operation.charge(product.interface.len()))?;
+            if module.skinny_iface_sha256 != row.interface.1.descriptor.interface_sha256
+                || product.interface.as_slice() != interface.interface_bytes()
+            {
+                continue;
+            }
+            charge(operation.reserve::<ExactModuleIdentity>(1))?;
+            owners.push(owner);
+        }
+        if !owners.is_empty() {
+            // TYPE projection drops Original roles, native offers and choices.
+            // Its exact canonical dependency rows remain owned by the prefix.
+            let anchors = self
+                .selected_interfaces()?
+                .type_interfaces_for_owners(owners)?;
+            charge(
+                operation
+                    .reserve::<(ArtifactView, ResolvedCompilerRole)>(anchors.selected.rows.len()),
+            )?;
+            let additions = anchors
+                .selected
+                .iter()
+                .map(|(_, row)| (anchors.artifacts.clone(), row.clone()))
+                .collect::<Vec<_>>();
+            artifacts = artifacts.append_type_interfaces(&additions)?;
+        }
         let mut support = projected.as_ref().clone();
         support.artifacts = artifacts;
         Ok(Arc::new(support))
