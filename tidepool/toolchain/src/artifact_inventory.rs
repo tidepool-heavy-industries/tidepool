@@ -13799,7 +13799,9 @@ mod tests {
         };
         let resident = make_value();
         let captured = make_value();
-        let outsider = Arc::new(entry("OutsideCapturedCohort", &[]));
+        let outsider = make_value();
+        assert_eq!(resident.as_ref(), outsider.as_ref());
+        assert!(!resident.facts.same_owner(&outsider.facts));
         let available = inventory
             .admit_shared_with_demand(
                 &inventory.empty_view(),
