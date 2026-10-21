@@ -9244,6 +9244,7 @@ mod module_product_tests {
                 .action
                 .expect("actual World native preparation");
             if mixed && !cancel_after_end {
+                crate::compiler_world::native_demand::assert_captured_stage_input_refusals(&checked);
                 crate::declaration_context::assert_world_repeated_source_refusals(
                     &checked,
                     prepared.outputs[&4]
