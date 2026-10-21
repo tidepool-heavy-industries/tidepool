@@ -39,21 +39,36 @@ impl NominalImportOwner {
         packages: &BTreeMap<OwnerKey, PackageInterfaceWitness>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Self> {
+        let receipt = match receipt {
+            ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                original_ordinal,
+                binder,
+            } => {
+                let owner = authenticate_source_receipt_metadata(
+                    &unit,
+                    &module,
+                    module_version.as_ref(),
+                    original_ordinal,
+                    &binder,
+                    sources,
+                    selection,
+                )?;
+                return Ok(Self::Source {
+                    owner: owner.clone(),
+                    original_ordinal,
+                    binder,
+                });
+            }
+            receipt => receipt,
+        };
         Ok(
             match normalize_receipt_metadata(receipt, sources, selection, packages, validation)? {
-                ReceiptImportOwner::Source {
-                    unit,
-                    module,
-                    module_version,
-                    original_ordinal,
-                    binder,
-                } => Self::Source {
-                    owner: selection
-                        .receipt_source_member(&unit, &module, module_version.as_ref())?
-                        .clone(),
-                    original_ordinal,
-                    binder,
-                },
+                ReceiptImportOwner::Source { .. } => {
+                    unreachable!("Source metadata is authenticated directly")
+                }
                 ReceiptImportOwner::OriginalBinding {
                     unit,
                     module,

@@ -6366,6 +6366,28 @@ fn resolve_receipt_owner_with_validation(
 
 /// A cached original carries its own exact source domain. The compiler's
 /// current namespace may select another implementation of the same module.
+fn authenticate_source_receipt_metadata<'a>(
+    unit: &str,
+    module: &str,
+    module_version: Option<&ModuleVersion>,
+    original_ordinal: u32,
+    binder: &SymbolIdentity,
+    sources: &SourceGroupMap,
+    selection: &'a CertifiedSourceSelection,
+) -> CertResult<&'a CachedHomeOwner> {
+    let owner = selection.receipt_source_member(unit, module, module_version)?;
+    if !sources.contains_key(&(owner.clone(), original_ordinal, binder.clone())) {
+        return Err(source_closure_mismatch(
+            "receipt_source_metadata",
+            Some(owner),
+            original_ordinal,
+            binder,
+            Some(sources),
+        ));
+    }
+    Ok(owner)
+}
+
 fn normalize_receipt_metadata(
     import: ReceiptImportOwner,
     sources: &SourceGroupMap,
@@ -6381,19 +6403,15 @@ fn normalize_receipt_metadata(
             original_ordinal,
             binder,
         } => {
-            let owner = selection.receipt_source_member(&unit, &module, module_version.as_ref())?;
-            if sources
-                .get(&(owner.clone(), original_ordinal, binder.clone()))
-                .is_none()
-            {
-                return Err(source_closure_mismatch(
-                    "receipt_source_metadata",
-                    Some(owner),
-                    original_ordinal,
-                    &binder,
-                    Some(sources),
-                ));
-            }
+            let owner = authenticate_source_receipt_metadata(
+                &unit,
+                &module,
+                module_version.as_ref(),
+                original_ordinal,
+                &binder,
+                sources,
+                selection,
+            )?;
             Ok(ReceiptImportOwner::Source {
                 unit,
                 module,

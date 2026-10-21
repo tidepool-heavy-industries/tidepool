@@ -1175,8 +1175,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
     else {
         unreachable!()
     };
-    *module_version = Some(initial_b.owner().module_version.clone());
-    assert!(certify_products(
+    assert!(module_version.is_none());
+    *module_version = Some(current_b.owner().module_version.clone());
+    let explicit_version = certify_products(
         None,
         &changed_import,
         &promoted,
@@ -1188,16 +1189,24 @@ fn check_retained_core_promotion_history(item_count: usize) {
                     &input,
                     target_source,
                     &evidence_bytes,
-                    (&promoted).operation()
+                    (&promoted).operation(),
                 )
-                .unwrap()
+                .unwrap(),
         ),
         root.path(),
         &producer,
         &include,
         None,
     )
-    .is_err());
+    .err()
+    .expect("a raw retained-Core receipt cannot supply even its derived version");
+    assert!(
+        matches!(
+            &explicit_version,
+            CertificationError::Mismatch("retained source version must be derived")
+        ),
+        "unexpected explicit retained version refusal: {explicit_version:?}",
+    );
 
     let mut duplicate = promoted_packet.clone();
     let a_receipt = duplicate
