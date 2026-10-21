@@ -2,13 +2,18 @@ load("@prelude//haskell:toolchain.bzl", "HaskellPlatformInfo", "HaskellToolchain
 load("@prelude//rust:rust_toolchain.bzl", "PanicRuntime", "RustToolchainInfo")
 
 def _nix_rust_toolchain_impl(ctx):
+    if ctx.attrs.clippy_forbid:
+        fail("{} cannot project forbidden lints through Buck's RustToolchainInfo".format(ctx.label))
     return [
         DefaultInfo(),
         RustToolchainInfo(
             compiler = RunInfo(args = [ctx.attrs.python, ctx.attrs.test_source_wrapper,
                                       "--rustc", ctx.attrs.rustc, "--"]),
             rustdoc = RunInfo(args = [ctx.attrs.rustdoc]),
-            clippy_driver = RunInfo(args = [ctx.attrs.clippy] + ctx.attrs.clippy_flags),
+            clippy_driver = RunInfo(args = [ctx.attrs.clippy]),
+            allow_lints = ctx.attrs.clippy_allow,
+            warn_lints = ctx.attrs.clippy_warn,
+            deny_lints = ctx.attrs.clippy_deny,
             default_edition = "2021",
             panic_runtime = PanicRuntime("unwind"),
             rustc_target_triple = "x86_64-unknown-linux-gnu",
@@ -28,7 +33,10 @@ nix_rust_toolchain = rule(
         "clippy": attrs.string(),
         "linker": attrs.string(),
         "clippy_toml": attrs.source(),
-        "clippy_flags": attrs.list(attrs.string(), default = []),
+        "clippy_allow": attrs.list(attrs.string(), default = []),
+        "clippy_warn": attrs.list(attrs.string(), default = []),
+        "clippy_deny": attrs.list(attrs.string(), default = []),
+        "clippy_forbid": attrs.list(attrs.string(), default = []),
     },
     is_toolchain_rule = True,
 )

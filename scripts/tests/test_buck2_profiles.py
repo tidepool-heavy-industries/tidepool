@@ -43,7 +43,7 @@ def resolve(profile):
     return namespace, calls
 
 
-def toolchain_flags():
+def rust_toolchain():
     class Attrs:
         def __getattr__(self, name):
             return lambda *args, **kwargs: None
@@ -55,10 +55,16 @@ def toolchain_flags():
     load_definitions(ROOT / "toolchains/tidepool.bzl", namespace)
     context = SimpleNamespace(attrs=SimpleNamespace(
         python="/pinned/python", test_source_wrapper="wrapper.py", rustc="/pinned/rustc",
-        rustdoc="/pinned/rustdoc", clippy="/pinned/clippy", clippy_flags=[],
+        rustdoc="/pinned/rustdoc", clippy="/pinned/clippy",
+        clippy_allow=["clippy::allowed"], clippy_warn=["clippy::warned"],
+        clippy_deny=["clippy::denied"], clippy_forbid=[],
         linker="/pinned/linker", clippy_toml="clippy.toml",
     ))
-    return namespace["_nix_rust_toolchain_impl"](context)[1]["rustc_flags"]
+    return namespace["_nix_rust_toolchain_impl"](context)[1]
+
+
+def toolchain_flags():
+    return rust_toolchain()["rustc_flags"]
 
 
 class BuckProfileConfiguration(unittest.TestCase):
@@ -228,6 +234,13 @@ class BuckProfileConfiguration(unittest.TestCase):
                 self.assertEqual(toolchains[name]["link_flags"], [
                     "-fuse-ld=lld", "-B/pinned/lld/bin/", "-B/pinned/binutils/bin/",
                 ])
+
+    def test_nix_clippy_driver_keeps_flags_in_toolchain_lint_fields(self):
+        toolchain = rust_toolchain()
+        self.assertEqual(toolchain["clippy_driver"], {"args": ["/pinned/clippy"]})
+        self.assertEqual(toolchain["allow_lints"], ["clippy::allowed"])
+        self.assertEqual(toolchain["warn_lints"], ["clippy::warned"])
+        self.assertEqual(toolchain["deny_lints"], ["clippy::denied"])
 
 
 if __name__ == "__main__":
