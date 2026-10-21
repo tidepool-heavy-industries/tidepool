@@ -182,13 +182,14 @@ impl CapturedSourceOrigin {
     // Only the closed source-entry installer calls this for definitions that
     // its fresh native batch is about to instantiate. Existing physical imports
     // retain their own ProgramFacts in the batch installer.
-    pub(super) fn for_closed_entry_sites(
+    pub(super) fn for_closed_definition(
         &self,
-        sites: &[tidepool_repr::execution_schema::SiteRow],
+        definition: super::prepared::ClosedNativeDefinition<'_>,
     ) -> NativeSourceCustody {
         NativeSourceCustody {
             sites: Arc::new(
-                sites
+                definition
+                    .sites()
                     .iter()
                     .map(|site| (site.site, RuntimeSourceOrigin::Known(self.0.clone())))
                     .collect(),

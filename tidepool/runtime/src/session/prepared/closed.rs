@@ -49,15 +49,86 @@ impl ClosedImage {
 }
 
 struct ClosedProgram {
-    product: ClosedProduct,
     native: ClosedImage,
     imports: Vec<LocalExportRef>,
+}
+
+/// A cheap structural proof from the actual target/certification pair. It
+/// retains no images, live handles or source authority.
+pub(in crate::session) struct ClosedNativeSelection {
+    selection: Arc<CompletedNativeSelection>,
+    target: Arc<PreparedProgram>,
+    products: Vec<ClosedProduct>,
+}
+
+/// Definition membership lent only by an actual closed selection.
+pub(in crate::session) struct ClosedNativeDefinition<'a> {
+    definitions: DefinitionsView<'a>,
+}
+
+impl ClosedNativeDefinition<'_> {
+    pub(in crate::session) fn sites(&self) -> &[tidepool_repr::execution_schema::SiteRow] {
+        self.definitions.sites()
+    }
+}
+
+impl ClosedNativeSelection {
+    /// A known capture is distinct from absent or unready native evidence.
+    pub(in crate::session) fn from_code(
+        code: &super::super::turn::TurnCode<'_>,
+    ) -> Result<Option<Self>, PreparedRuntimeError> {
+        let selection = code
+            .certification()
+            .and_then(|certification| certification.native_selection.as_ref())
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        if !selection.completion().retained_requirements().is_empty()
+            || selection
+                .target_imports()
+                .iter()
+                .any(|import| matches!(import, CompletedNativeTargetImport::RetainedCapture { .. }))
+            || selection.completion().rows().any(|row| {
+                row.imports()
+                    .iter()
+                    .any(|import| matches!(import, CompletedNativeImport::Retained { .. }))
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            selection: Arc::clone(selection),
+            target: Arc::clone(code.prepared_owner()),
+            products: selection
+                .completion()
+                .rows()
+                .cloned()
+                .map(ClosedProduct::Home)
+                .chain(
+                    selection
+                        .completion()
+                        .package_bindings()
+                        .map(ClosedProduct::Package),
+                )
+                .collect(),
+        }))
+    }
+
+    fn target(&self) -> ClosedNativeDefinition<'_> {
+        ClosedNativeDefinition {
+            definitions: self.target.definitions(),
+        }
+    }
+
+    fn definition(&self, index: usize) -> ClosedNativeDefinition<'_> {
+        ClosedNativeDefinition {
+            definitions: self.products[index].definitions(),
+        }
+    }
 }
 
 /// Immutable code, acquired products and exact ordered local import choices.
 /// No field can represent an existing runtime handle or a lexical domain.
 pub(in crate::session) struct ClosedInstantiationPlan {
-    selection: Arc<CompletedNativeSelection>,
+    closed: ClosedNativeSelection,
     programs: Vec<ClosedProgram>,
     target: Arc<CompiledProgram>,
     target_entry: ValueId,
@@ -69,30 +140,10 @@ impl ClosedInstantiationPlan {
         compiled: &super::super::turn::CompiledTurn,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
-        let certification = compiled
-            .certification
-            .as_ref()
+        let closed = ClosedNativeSelection::from_code(&compiled.code())?
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let selection = certification
-            .native_selection
-            .as_ref()
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?
-            .clone();
-        if !selection.completion().retained_requirements().is_empty() {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-        }
-        let products: Vec<_> = selection
-            .completion()
-            .rows()
-            .cloned()
-            .map(ClosedProduct::Home)
-            .chain(
-                selection
-                    .completion()
-                    .package_bindings()
-                    .map(ClosedProduct::Package),
-            )
-            .collect();
+        let selection = &closed.selection;
+        let products = &closed.products;
         let mut indices = BTreeMap::new();
         for (index, product) in products.iter().enumerate() {
             let key = match product {
@@ -187,11 +238,10 @@ impl ClosedInstantiationPlan {
         )
         .map_err(PreparedRuntimeError::Compile)?;
         let programs = products
-            .into_iter()
+            .iter()
             .zip(imports)
             .enumerate()
-            .map(|(index, (product, imports))| ClosedProgram {
-                product,
+            .map(|(index, (_, imports))| ClosedProgram {
                 imports,
                 native: programs
                     .remove(&index)
@@ -199,7 +249,7 @@ impl ClosedInstantiationPlan {
             })
             .collect();
         let plan = Self {
-            selection,
+            closed,
             programs,
             target,
             target_entry: compiled.prepared().entry(),
@@ -360,13 +410,14 @@ impl PreparedEngine {
         let mut facts = plan
             .programs
             .iter()
-            .map(|program| {
+            .enumerate()
+            .map(|(index, program)| {
+                let product = &plan.closed.products[index];
                 let mut facts = ProgramFacts::from_image(program.native.image(), None);
-                facts.native_sources =
-                    origin.for_closed_entry_sites(program.product.definitions().sites());
-                facts.native_product = Some(match &program.product {
+                facts.native_sources = origin.for_closed_definition(plan.closed.definition(index));
+                facts.native_product = Some(match product {
                     ClosedProduct::Home(row) => NativeProductProof::ClosedHome {
-                        _selection: Arc::clone(&plan.selection),
+                        _selection: Arc::clone(&plan.closed.selection),
                         _binding: row.binding(),
                     },
                     ClosedProduct::Package(binding) => NativeProductProof::Package {
@@ -377,10 +428,9 @@ impl PreparedEngine {
             })
             .collect::<Vec<_>>();
         let mut target = ProgramFacts::from_image(&plan.target, Some(plan.target_entry));
-        target.native_sources =
-            origin.for_closed_entry_sites(&plan.target.definition_facts().sites);
+        target.native_sources = origin.for_closed_definition(plan.closed.target());
         target.native_product = Some(NativeProductProof::ClosedTarget {
-            _selection: Arc::clone(&plan.selection),
+            _selection: Arc::clone(&plan.closed.selection),
         });
         facts.push(target);
         let direct = facts
@@ -398,6 +448,7 @@ impl PreparedEngine {
         let mut requests = Vec::new();
         for (index, value) in requested {
             let program = &plan.programs[index];
+            let product = &plan.closed.products[index];
             let contract = program
                 .native
                 .image()
@@ -407,7 +458,7 @@ impl PreparedEngine {
                 continue;
             }
             requests.push(
-                match (&program.product, &program.native) {
+                match (product, &program.native) {
                     (ClosedProduct::Home(row), ClosedImage::Home(image)) => {
                         let binding = row.binding();
                         BatchLeaseRequest::for_home_code(

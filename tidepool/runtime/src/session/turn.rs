@@ -2181,7 +2181,7 @@ impl CompiledTurn {
             provenance: self.provenance.clone(),
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&self.asks),
-            prepared: std::borrow::Cow::Borrowed(self.prepared.as_ref()),
+            prepared: Arc::clone(&self.prepared),
             certification: std::borrow::Cow::Borrowed(&self.certification),
         }
     }
@@ -2193,19 +2193,19 @@ impl CompiledTurn {
             provenance: self.provenance.clone(),
             table: std::borrow::Cow::Owned(self.table),
             sites: std::borrow::Cow::Owned(self.asks),
-            prepared: std::borrow::Cow::Owned(Arc::unwrap_or_clone(self.prepared)),
+            prepared: self.prepared,
             certification: std::borrow::Cow::Owned(self.certification),
         }
     }
 }
 
-/// Immutable inputs for installation. Owned inputs move into the machine;
-/// borrowed inputs remain reusable and are copied only at installation.
+/// Immutable inputs for installation. Code retains its exact shared owner;
+/// metadata can be borrowed until an execution needs to retain it.
 #[derive(Clone)]
 pub struct TurnCode<'a> {
     table: std::borrow::Cow<'a, DataConTable>,
     pub(super) sites: std::borrow::Cow<'a, [YieldSite]>,
-    prepared: std::borrow::Cow<'a, PreparedProgram>,
+    prepared: Arc<PreparedProgram>,
     pub(super) certification: std::borrow::Cow<'a, Option<TurnCertification>>,
     pub(super) provenance: Arc<std::sync::OnceLock<super::resident::CompiledProvenancePlan>>,
 }
@@ -2216,6 +2216,10 @@ impl<'a> TurnCode<'a> {
     }
     pub fn prepared(&self) -> &PreparedProgram {
         self.prepared.as_ref()
+    }
+
+    pub(super) fn prepared_owner(&self) -> &Arc<PreparedProgram> {
+        &self.prepared
     }
 
     pub fn sites(&self) -> &[YieldSite] {
@@ -2288,7 +2292,7 @@ impl<'a> TurnCode<'a> {
         TurnCode {
             provenance: self.provenance.clone(),
             table: std::borrow::Cow::Borrowed(self.table()),
-            prepared: std::borrow::Cow::Borrowed(self.prepared()),
+            prepared: Arc::clone(&self.prepared),
             sites: std::borrow::Cow::Borrowed(self.sites.as_ref()),
             certification: std::borrow::Cow::Borrowed(self.certification.as_ref()),
         }
@@ -2299,7 +2303,7 @@ impl<'a> TurnCode<'a> {
         TurnCode {
             provenance: self.provenance,
             table: std::borrow::Cow::Owned(self.table.into_owned()),
-            prepared: std::borrow::Cow::Owned(self.prepared.into_owned()),
+            prepared: self.prepared,
             sites: std::borrow::Cow::Owned(self.sites.into_owned()),
             certification: std::borrow::Cow::Owned(self.certification.into_owned()),
         }
@@ -2332,7 +2336,7 @@ impl<'a> TurnCode<'a> {
         (
             self.table,
             self.sites,
-            self.prepared.into_owned(),
+            Arc::unwrap_or_clone(self.prepared),
             self.certification,
         )
     }

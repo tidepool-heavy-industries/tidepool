@@ -15,7 +15,7 @@ use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
 #[path = "prepared/closed.rs"]
 mod closed;
-pub(super) use closed::ClosedInstantiationPlan;
+pub(super) use closed::{ClosedInstantiationPlan, ClosedNativeDefinition};
 
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
