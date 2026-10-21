@@ -56,14 +56,15 @@ pub struct NativeDomainSelection {
 }
 
 impl NativeDomainSelection {
-    pub(crate) fn new(
+    fn checked_roots<'a>(
         current: SourceInstanceDomain,
         contains: impl Fn(&SourceInstanceDomain) -> bool,
-        entries: impl IntoIterator<Item = (SourceInstanceDomain, NativeInstanceLease)>,
-    ) -> Result<Self, DemandError> {
-        let mut roots: BTreeMap<ScopedNativeExport, NativeInstanceLease> = BTreeMap::new();
+        targets: impl IntoIterator<Item = SourceInstanceDomain>,
+        entries: impl IntoIterator<Item = (SourceInstanceDomain, &'a NativeInstanceLease)>,
+    ) -> Result<BTreeMap<ScopedNativeExport, &'a NativeInstanceLease>, DemandError> {
+        let mut roots: BTreeMap<ScopedNativeExport, &'a NativeInstanceLease> = BTreeMap::new();
         let mut anchors = BTreeMap::new();
-        if !contains(&current) {
+        if !contains(&current) || targets.into_iter().any(|target| !contains(&target)) {
             return Err(DemandError::MissingDomain(current));
         }
         for (domain, lease) in entries {
@@ -91,7 +92,30 @@ impl NativeDomainSelection {
             }
             roots.insert(key, lease);
         }
-        Ok(Self { current, roots })
+        Ok(roots)
+    }
+    pub(crate) fn validate<'a>(
+        current: SourceInstanceDomain,
+        contains: impl Fn(&SourceInstanceDomain) -> bool,
+        targets: impl IntoIterator<Item = SourceInstanceDomain>,
+        entries: impl IntoIterator<Item = (SourceInstanceDomain, &'a NativeInstanceLease)>,
+    ) -> Result<(), DemandError> {
+        Self::checked_roots(current, contains, targets, entries).map(|_| ())
+    }
+    pub(crate) fn new<'a>(
+        current: SourceInstanceDomain,
+        contains: impl Fn(&SourceInstanceDomain) -> bool,
+        targets: impl IntoIterator<Item = SourceInstanceDomain>,
+        entries: impl IntoIterator<Item = (SourceInstanceDomain, &'a NativeInstanceLease)>,
+    ) -> Result<Self, DemandError> {
+        let roots = Self::checked_roots(current, contains, targets, entries)?;
+        Ok(Self {
+            current,
+            roots: roots
+                .into_iter()
+                .map(|(key, lease)| (key, lease.clone()))
+                .collect(),
+        })
     }
     pub fn current(&self) -> SourceInstanceDomain {
         self.current
