@@ -7407,9 +7407,12 @@ impl ProgramSourceSupportState {
                     .get(owner)
                     .is_none_or(|previous| previous.descriptor.id != entry.descriptor.id)
             {
-                return Err(failure(
-                    "program support changed an inherited synthetic interface",
-                ));
+                return Err(failure(format_args!(
+                    "program support changed an inherited synthetic interface: phase=source-extension, owner={owner:?}, incoming={:?}, kind={:?}, prior={:?}",
+                    entry.descriptor.id,
+                    entry.descriptor.kind,
+                    retained.get(owner).map(|previous| previous.descriptor.id),
+                )));
             }
         }
         let extend_start = std::time::Instant::now();
@@ -11248,9 +11251,12 @@ impl WorldProgramSegment {
             } else if canonical_source_interface(entry).is_none()
                 && prior.is_none_or(|previous| previous.descriptor.id != entry.descriptor.id)
             {
-                return Err(failure(
-                    "program support changed an inherited synthetic interface",
-                ));
+                return Err(failure(format_args!(
+                    "program support changed an inherited synthetic interface: phase=stage-successor, owner={owner:?}, incoming={:?}, kind={:?}, prior={:?}",
+                    entry.descriptor.id,
+                    entry.descriptor.kind,
+                    prior.map(|previous| previous.descriptor.id),
+                )));
             }
         }
         let kind = |owner: &ExactModuleIdentity| {
