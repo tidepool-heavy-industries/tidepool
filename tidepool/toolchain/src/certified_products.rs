@@ -216,7 +216,7 @@ pub struct PackageProductOutput {
 ///               defining_interface_sha256, defining_version_sha256, imports]
 /// link = ["local", occurrence] | ["inherited"]
 /// target_roots = [[target_name, [link, ..]], ..]
-/// home_roots   = [[[unit, module], [link, ..]], ..]
+/// home_roots   = [[[unit, module, original_ordinal], [link, ..]], ..]
 /// ```
 /// Digest fields are raw 32-byte CBOR byte strings, matching `package_products`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,12 +224,13 @@ pub struct PackageLinks {
     version: u8,
     occurrences: Vec<PackageOccurrenceRow>,
     target_roots: BTreeMap<String, Vec<PackageLink>>,
-    home_roots: BTreeMap<(String, String), Vec<PackageLink>>,
+    home_roots: BTreeMap<(String, String, u32), Vec<PackageLink>>,
 }
 
 impl PackageLinks {
     /// Empty, version-1 manifest used by fixtures and receipts without any
     /// selected package occurrence. It is not production authority.
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
             version: 1,
@@ -248,15 +249,20 @@ impl PackageLinks {
     pub fn target_roots(&self) -> &BTreeMap<String, Vec<PackageLink>> {
         &self.target_roots
     }
-    pub fn home_roots(&self) -> &BTreeMap<(String, String), Vec<PackageLink>> {
+    pub fn home_roots(&self) -> &BTreeMap<(String, String, u32), Vec<PackageLink>> {
         &self.home_roots
     }
     pub fn target_links(&self, name: &str) -> Option<&[PackageLink]> {
         self.target_roots.get(name).map(Vec::as_slice)
     }
-    pub fn home_links(&self, unit: &str, module: &str) -> Option<&[PackageLink]> {
+    pub fn home_links(
+        &self,
+        unit: &str,
+        module: &str,
+        original_ordinal: u32,
+    ) -> Option<&[PackageLink]> {
         self.home_roots
-            .get(&(unit.to_owned(), module.to_owned()))
+            .get(&(unit.to_owned(), module.to_owned(), original_ordinal))
             .map(Vec::as_slice)
     }
 }
@@ -2067,7 +2073,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded ordinary `TPCERT11` tuple with exact owner rows shared
+/// Decode the worker's bounded ordinary `TPCERT12` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -2438,11 +2444,11 @@ fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 11 {
+    if version != 12 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 11,
+            expected: 12,
         });
     }
     if header.len() != 3 {
@@ -2659,16 +2665,21 @@ fn decode_package_links(
     let mut home_roots = BTreeMap::new();
     for entry in array(&row[3])? {
         let entry = sized(entry, 2)?;
-        let owner = sized(&entry[0], 2)?;
+        let owner = sized(&entry[0], 3)?;
         let unit = string(&owner[0])?.to_owned();
         let module = string(&owner[1])?.to_owned();
+        let original_ordinal = u32::try_from(number(&owner[2])?)
+            .map_err(|_| CertificationError::Receipt("package links home ordinal"))?;
         if unit.is_empty() || module.is_empty() {
             return Err(CertificationError::Receipt("package links home owner"));
         }
         let links = decode_package_links_list(&entry[1], operation)?;
         check_package_link_range(&links, occurrences.len())?;
         operation.charge(unit.len().saturating_add(module.len()))?;
-        if home_roots.insert((unit, module), links).is_some() {
+        if home_roots
+            .insert((unit, module, original_ordinal), links)
+            .is_some()
+        {
             return Err(CertificationError::Receipt("duplicate package links home"));
         }
     }
@@ -31715,7 +31726,7 @@ None,
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 9,
-                expected: 11
+                expected: 12
             })
         ));
         let mut trailing = encoded;
@@ -32328,7 +32339,7 @@ None,
     fn receipt_payload_mut(value: &mut Value) -> &mut Vec<Value> {
         let header = value.as_array_mut().unwrap();
         assert_eq!(header[0], value_text("TPCERT"));
-        assert_eq!(header[1], Value::Integer(11.into()));
+        assert_eq!(header[1], Value::Integer(12.into()));
         header[2].as_array_mut().unwrap()
     }
 
@@ -32341,7 +32352,7 @@ None,
     fn segment_item_receipt(receipt: &SegmentItemReceipt) -> Value {
         value_array([
             value_text("TPCERT"),
-            Value::Integer(11.into()),
+            Value::Integer(12.into()),
             value_array([
                 value_text("segment-item"),
                 value_array(receipt.globals.iter().map(value_global)),
@@ -32465,7 +32476,7 @@ None,
         ]));
         let payload =
             value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
-        value_array([value_text("TPCERT"), Value::Integer(11.into()), payload])
+        value_array([value_text("TPCERT"), Value::Integer(12.into()), payload])
     }
 
     fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
@@ -32933,7 +32944,7 @@ None,
         ]), &global.identity), Err(CertificationError::Receipt("retained package owner removed"))));
         let mut encoded_global = value_global(&global);
         encoded_global.as_array_mut().unwrap()[4] = legacy;
-        let item = value_array([value_text("TPCERT"), Value::Integer(11.into()), value_array([
+        let item = value_array([value_text("TPCERT"), Value::Integer(12.into()), value_array([
             value_text("segment-item"), value_array([encoded_global]), value_array([]), value_array([]),
         ])]);
         assert!(matches!(decode_segment_item_with_operation(&receipt_bytes(&item),
@@ -33389,7 +33400,7 @@ None,
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 11,
+                    expected: 12,
                     ..
                 })
             ));
@@ -33469,10 +33480,24 @@ None,
                 value_text("target"),
                 value_array([package_links_local(1)]),
             ])],
-            vec![value_array([
-                value_array([value_text("home"), value_text("Home")]),
-                value_array([package_links_local(0)]),
-            ])],
+            vec![
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(3.into()),
+                    ]),
+                    value_array([package_links_local(0)]),
+                ]),
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(9.into()),
+                    ]),
+                    value_array([package_links_inherited()]),
+                ]),
+            ],
         );
         let decoded = decode_package_links(&manifest, &products, &targets, &operation).unwrap();
         assert_eq!(decoded.version(), 1);
@@ -33480,7 +33505,9 @@ None,
         assert_eq!(decoded.occurrences()[0].id(), 0);
         assert_eq!(decoded.occurrences()[1].id(), 1);
         assert_eq!(decoded.target_links("target").unwrap().len(), 1);
-        assert_eq!(decoded.home_links("home", "Home").unwrap().len(), 1);
+        assert_eq!(decoded.home_links("home", "Home", 3).unwrap().len(), 1);
+        assert_eq!(decoded.home_links("home", "Home", 9).unwrap().len(), 1);
+        assert!(decoded.home_links("home", "Home", 7).is_none());
     }
 
     #[test]
@@ -33519,7 +33546,11 @@ None,
             vec![package_links_occurrence(0, [1; 32], value_array([]))],
             vec![],
             vec![value_array([
-                value_array([value_text("home"), value_text("Home")]),
+                value_array([
+                    value_text("home"),
+                    value_text("Home"),
+                    Value::Integer(7.into()),
+                ]),
                 value_array([package_links_local(7)]),
             ])],
         );
@@ -33570,6 +33601,35 @@ None,
             Err(CertificationError::Receipt(
                 "package links target is not a target"
             ))
+        ));
+
+        // A HOME owner key is (unit, module, original ordinal); a duplicate
+        // ordinal refuses, while distinct ordinals of one module are allowed.
+        let duplicate_home = package_links_manifest(
+            vec![],
+            vec![],
+            vec![
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(7.into()),
+                    ]),
+                    value_array([]),
+                ]),
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(7.into()),
+                    ]),
+                    value_array([]),
+                ]),
+            ],
+        );
+        assert!(matches!(
+            decode(&duplicate_home),
+            Err(CertificationError::Receipt("duplicate package links home"))
         ));
     }
 }
