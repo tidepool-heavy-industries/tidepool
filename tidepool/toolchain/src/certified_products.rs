@@ -20361,28 +20361,6 @@ pub(crate) mod tests {
                 observed += 1;
                 let accepted = source_target_observations(&[(&product, ordinal)]);
                 let target = prepared_target_fixture(&accepted);
-                let imported = certify_target_available_owners_from_membership_with_validation(
-                    &target,
-                    &accepted,
-                    &membership,
-                    &request.groups,
-                    &selection,
-                    &BTreeMap::new(),
-                    &mut validation,
-                );
-                if mode == "canonical" {
-                    assert!(matches!(
-                        &imported,
-                        Err(CertificationError::Mismatch(
-                            "source outside compiler selection"
-                        ))
-                    ));
-                } else if mode == "issued" && ordinal == 9001 {
-                    assert!(
-                        matches!(&imported, Err(CertificationError::OriginalAvailability(refusal))
-                        if refusal.owner == *product.owner() && refusal.original_ordinal == 9001)
-                    );
-                }
                 let observed_target =
                     AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory)
                         .unwrap();
@@ -20397,8 +20375,23 @@ pub(crate) mod tests {
                         &BTreeMap::new(),
                         &mut validation,
                     )
-                    .map(|selected| selected.artifacts().selected_native_groups())
-                    .map_err(|error| format!("selection: {error:?}"));
+                    .map(|selected| selected.artifacts().selected_native_groups());
+                if mode == "canonical" {
+                    assert!(matches!(
+                        &outcome,
+                        Err(crate::CompileError::CompilerEvidence(error))
+                            if matches!(error.as_ref(), CertificationError::Mismatch(
+                                "source outside compiler selection"
+                            ))
+                    ));
+                } else if mode == "issued" && ordinal == 9001 {
+                    assert!(matches!(
+                        &outcome,
+                        Err(crate::CompileError::CompilerEvidence(error))
+                            if matches!(error.as_ref(), CertificationError::OriginalAvailability(refusal)
+                                if refusal.owner == *product.owner() && refusal.original_ordinal == 9001)
+                    ));
+                }
                 let expected = mode == "full" || (mode == "issued" && ordinal == 7);
                 if expected {
                     let mut exact = view.selected_native_groups();
@@ -20738,13 +20731,6 @@ pub(crate) mod tests {
                         &mut validation,
                     )
                     .unwrap();
-                let membership = next
-                    .compiler_inputs()
-                    .available_original_sources(
-                        std::slice::from_ref(&product),
-                        &validation.inventory,
-                    )
-                    .unwrap();
                 let before_targets = physical
                     .physical_inputs()
                     .issued_artifacts()
@@ -20755,64 +20741,48 @@ pub(crate) mod tests {
                     observed += 1;
                     let accepted = source_target_observations(&[(&product, ordinal)]);
                     let target = prepared_target_fixture(&accepted);
-                    let imported = certify_target_available_owners_from_membership_with_validation(
+                    let observed_target = AuthenticatedTargetImports::issue(
                         &target,
                         &accepted,
-                        &membership,
-                        &next.groups,
-                        &next_selection,
-                        &BTreeMap::new(),
-                        &mut validation,
-                    );
-                    let category = match &imported {
-                        Ok(_) => "accepted".to_owned(),
-                        Err(CertificationError::OriginalAvailability(refusal)) => {
-                            format!("availability_refused:{}", refusal.original_ordinal)
-                        }
-                        Err(error) => format!("other_refusal:{error:?}"),
-                    };
-                    eprintln!("native_availability_handoff_consumer mode={mode} broaden={broaden} ordinal={ordinal} outcome={category}");
+                        &validation.inventory,
+                    )
+                    .unwrap();
+                    let outcome = next
+                        .compiler_inputs()
+                        .artifacts()
+                        .inventory()
+                        .select_native_target(
+                            physical.physical_inputs().physical_cohort().unwrap(),
+                            physical.source_selection(),
+                            observed_target,
+                            None,
+                            None,
+                            &[],
+                            &BTreeMap::new(),
+                            &mut validation,
+                        )
+                        .map(|selected| selected.artifacts().selected_native_groups());
+                    eprintln!("native_availability_handoff_consumer mode={mode} broaden={broaden} ordinal={ordinal} outcome={outcome:?}");
                     let allowed =
                         matches!(mode, "full" | "current") || (mode == "partial" && ordinal == 7);
-                    if !allowed
-                        && !matches!(&imported, Err(CertificationError::OriginalAvailability(refusal))
-                        if refusal.owner == *product.owner() && refusal.original_ordinal == ordinal)
-                    {
-                        unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected typed refusal actual={imported:?}"));
-                    }
                     if allowed {
-                        let Ok(_) = imported else {
-                            unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={imported:?}"));
-                            continue;
-                        };
-                        let observed_target = AuthenticatedTargetImports::issue(
-                            &target,
-                            &accepted,
-                            &validation.inventory,
-                        )
-                        .unwrap();
-                        let admitted = next
-                            .compiler_inputs()
-                            .artifacts()
-                            .inventory()
-                            .select_native_target(
-                                physical.physical_inputs().physical_cohort().unwrap(),
-                                physical.source_selection(),
-                                observed_target,
-                                None,
-                                None,
-                                &[],
-                                &BTreeMap::new(),
-                                &mut validation,
-                            )
-                            .unwrap();
                         let mut groups =
                             next.compiler_inputs().artifacts().selected_native_groups();
                         groups.insert(NativeGroupKey {
                             artifact: entry.descriptor.id,
                             original_ordinal: ordinal,
                         });
-                        assert_eq!(admitted.artifacts().selected_native_groups(), groups);
+                        match outcome {
+                            Ok(actual) => assert_eq!(actual, groups),
+                            Err(error) => unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={error:?}")),
+                        }
+                    } else if !matches!(
+                        &outcome,
+                        Err(crate::CompileError::CompilerEvidence(error))
+                            if matches!(error.as_ref(), CertificationError::OriginalAvailability(refusal)
+                                if refusal.owner == *product.owner() && refusal.original_ordinal == ordinal)
+                    ) {
+                        unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected typed refusal actual={outcome:?}"));
                     }
                 }
                 assert_eq!(
@@ -22851,21 +22821,6 @@ pub(crate) mod tests {
             assert!(baseline.selected_native_groups().is_empty());
             let accepted = source_target_observations(&[(&original, 8)]);
             let target = prepared_target_fixture(&accepted);
-            assert!(certify_target_owners(&target, &accepted, &[], &BTreeMap::new()).is_err());
-            certify_target_available_owners_with_validation(
-                &target,
-                &accepted,
-                &products,
-                &[],
-                &CertifiedSourceSelection::from_projected_originals(
-                    &products,
-                    &validation.inventory,
-                )
-                .unwrap(),
-                &BTreeMap::new(),
-                &mut validation,
-            )
-            .unwrap();
             let selection = CertifiedSourceSelection::from_projected_originals(
                 &products,
                 &validation.inventory,
@@ -22912,7 +22867,6 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             assert_eq!(groups.len(), 2);
-            certify_target_owners(&target, &accepted, &groups, &BTreeMap::new()).unwrap();
             let observed =
                 AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory)
                     .unwrap();
@@ -22954,20 +22908,23 @@ pub(crate) mod tests {
                 unreachable!()
             };
             *original_ordinal = 100;
-            assert!(certify_target_available_owners_with_validation(
-                &target,
-                &stale,
-                &products,
-                &[],
-                &CertifiedSourceSelection::from_projected_originals(
-                    &products,
-                    &validation.inventory
-                )
-                .unwrap(),
-                &BTreeMap::new(),
-                &mut validation
-            )
-            .is_err());
+            let observed =
+                AuthenticatedTargetImports::issue(&target, &stale, &validation.inventory).unwrap();
+            assert!(matches!(
+                inventory.select_native_target(
+                    completed.physical_inputs().physical_cohort().unwrap(),
+                    completed.source_selection(),
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                ),
+                Err(crate::CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), CertificationError::OriginalAvailability(refusal)
+                        if refusal.owner == *original.owner() && refusal.original_ordinal == 100)
+            ));
             let missing = vec![entries[0].clone()];
             let partial_inventory = ArtifactInventory::default();
             let partial = partial_inventory
@@ -25228,16 +25185,45 @@ pub(crate) mod tests {
             ))
         ));
         let sealed = encode_home_certification(&a, &[fake_package.clone()], &packages).unwrap();
-        let mut target = testing::wire_program();
-        target.globals = fake_package.group.globals().to_vec();
-        let target = testing::prepare(target).unwrap();
         let accepted = decode_home_witness(&sealed).unwrap().groups.remove(0).2;
+        let target = prepared_target_fixture(&accepted);
+        let home = full_native_fixture("B", vec![(7, vec![])], 7);
+        let native = Arc::new(
+            crate::artifact_inventory::ArtifactEntry::original([1; 32], home.clone()).unwrap(),
+        );
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let mut validation = PackageInterfaceValidation::default();
+        let selection =
+            CertifiedSourceSelection::from_projected_originals(&[home], &validation.inventory)
+                .unwrap();
+        let completed = inventory
+            .bind_segment(
+                &inventory.empty_view(),
+                vec![native],
+                &selection,
+                &mut validation,
+            )
+            .unwrap();
+        let before = inventory.metrics().issued_scope_nodes;
+        let observed =
+            AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory).unwrap();
         assert!(matches!(
-            certify_target_owners(&target, &accepted, &[gb], &packages),
-            Err(CertificationError::Mismatch(
-                "home owner downgraded to package"
-            ))
+            inventory.select_native_target(
+                completed.physical_inputs().physical_cohort().unwrap(),
+                completed.source_selection(),
+                observed,
+                None,
+                None,
+                &[],
+                &packages,
+                &mut validation,
+            ),
+            Err(crate::CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), CertificationError::Mismatch(
+                    "target home owner downgraded to package"
+                ))
         ));
+        assert_eq!(inventory.metrics().issued_scope_nodes, before);
         std::fs::write(path, [0x43]).unwrap();
         assert!(matches!(
             validate_home_certification(&sealed, &a),
@@ -31205,7 +31191,7 @@ None,
             required_evaluated: false,
             required_generation: Some(7),
         });
-        let prepared = testing::prepare(wire).unwrap();
+        let prepared = Arc::new(testing::prepare(wire).unwrap());
         let selected = AcceptedGlobal {
             identity: identity.clone(),
             rep: RuntimeRep::LiftedRef,
@@ -31216,19 +31202,26 @@ None,
                 generation: 7,
             },
         };
+        let operation = InventoryOperation::new(Default::default());
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &[selected.clone()], &operation).unwrap();
+        assert!(Arc::ptr_eq(observed.target(), &prepared));
         assert_eq!(
-            certify_target_owners(&prepared, &[selected.clone()], &[], &BTreeMap::new()).unwrap(),
-            vec![PendingImportOwner::Retained {
+            observed.owners(),
+            &[ReceiptImportOwner::Retained {
                 identity,
                 generation: 7,
-            }]
+            }],
         );
         let mut stale = selected;
         stale.owner = ReceiptImportOwner::Retained {
             identity: stale.identity.clone(),
             generation: 8,
         };
-        assert!(certify_target_owners(&prepared, &[stale], &[], &BTreeMap::new()).is_err());
+        assert!(matches!(
+            AuthenticatedTargetImports::issue(&prepared, &[stale], &operation),
+            Err(CertificationError::Mismatch("global owner"))
+        ));
     }
 
     #[test]
