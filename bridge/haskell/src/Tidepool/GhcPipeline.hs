@@ -5218,17 +5218,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           [reference] -> pure (Just reference)
           _ -> throwIO (OriginalNativeNameConflict name)
         referenceForName name = do
-          -- A reexport preserves the defining Name, but its module has a
-          -- different selected Original association. Keep the exact defining
-          -- association when present; facade membership cannot replace it.
-          defining <- uniqueReference name
+          -- Original association follows the defining Name. A facade export
+          -- cannot substitute its own Original for a package-backed name;
+          -- absent defining custody leaves the symbol on the package path.
+          uniqueReference name
             [reference | (owner,_,reference) <- nativeOriginalInputs
               , nameModule_maybe name == Just owner]
-          case defining of
-            Just _ -> pure defining
-            Nothing -> uniqueReference name
-              [reference | (_,iface,reference) <- nativeOriginalInputs
-                , any (name `elem`) (map availNames (mi_exports iface))]
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->
