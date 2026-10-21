@@ -20937,11 +20937,15 @@ pub(crate) mod request_tests {
                     context.clone(), wrong_reference, None, Some(&layers),
                 ), Err(crate::KernelInvocationFailure::Rejected { .. })));
                 for valid_answer in [true, false] {
+                    let observation = workbench
+                        .capture_observation_scaffold(&context)
+                        .await
+                        .expect("the actual invocation retains its checked observation scaffold");
                     let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
                     let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None).unwrap();
                     let private = Arc::new(workbench_runner_for_test(&workbench).begin_private_execution(
                         context.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(),
-                        None,
+                        Some(observation),
                     ).await.unwrap());
                     let mut private_context = context.clone();
                     private_context.placement.lexical_scope = private.private_scope;
