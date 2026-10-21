@@ -3617,7 +3617,7 @@ impl SealedTurnProducts {
     pub fn published_source_original_selection(
         &self,
         revision: &str,
-        public_root: &crate::declaration_context::ExactModuleIdentity,
+        public_root: &crate::declaration_join::ExactModuleIdentity,
     ) -> Result<Arc<crate::declaration_context::PublishedSourceOriginalSelection>, CompileError>
     {
         let original = self.original_compile_input.as_ref().ok_or_else(|| {
