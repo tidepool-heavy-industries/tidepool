@@ -1,14 +1,14 @@
 # Joined compiler/runtime verification gates
 
-Source-disposition checkpoint: `1bc62389107534661207cc6ca1cd413a768117c5`, on
-`integration/compiler-query-warm-final`. The executed compiler/custody cohort
+Source-disposition checkpoint: `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`,
+on `integration/compiler-query-warm-final`. The executed compiler/custody cohort
 below remains exact `b856a75d5c`; later source changes do not inherit its results.
 Integrated source is not executed acceptance. This ledger separates compiler/custody checks,
 predecessor results and held ordinary-workflow gates. The
 [G2 contract](../g2-completion.md) owns acceptance; the
 [compiler map](../../../../docs/compiler-work-map.md) owns current dataflow.
 
-## Current joined compiler/custody qualification
+## Exact b856 compiler/custody qualification
 
 `engine_completion` owns this bounded qualification at exact `b856a75d5c` in
 `/srv/swarm/checkouts/tidepool-demand-products-20261020`. Its
@@ -35,6 +35,18 @@ Do not provision a cold lane or duplicate these runs from documentation work.
 Update a row only from its terminal report: source OID, actual executable/resource
 hashes, selected/executed counts, exit status, logs and separate cleanup evidence.
 The plan's output names must not be reused; a new run needs a fresh root.
+
+## Later resource and request-owner checks
+
+These are exact-source results, not reruns of the full b856 cohort or G2.
+`engine_completion` retains commands, executable/resource hashes and cleanup
+fields in the linked observations.
+
+| Source / consumer | Executed result and limit |
+|---|---|
+| `abf4a739ff`: toolchain/runtime compilation; direct Portable; accepted join custody | Compilation passed, 34 actions. Portable 1/1 passed with process cleanup confirmed, compiler cleanup not observed. Owned accepted-join custody 1/1 passed with process/compiler cleanup confirmed. Source pairing failed 1/1 with `IoNotFound` after inspection; retained-entry selection executed zero because of an incorrect ignored selector. Neither was a pass. Logs are under [resource evidence](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/). |
+| `6c61c6dcb1426877a98ea9d20cf707e010fd02a1`: actual request materialization | [Request-owner observation](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/exact-request-owner-observation.json): `swarm-build just check tidepool-toolchain` passed, 11 actions; `//tidepool/toolchain:toolchain_source_proof_pairing_test` executed/passed 1, exit 0, process/compiler cleanup confirmed. Actual request rows replace persistent-context relookup; existing consumed-source receipts passed unchanged. No World/catalog qualification. |
+| `3c86ac3682`: corrected retained-entry selector | [Corrected observation](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-resources-retained-fixed-observation.json): `//tidepool/toolchain:toolchain_retained_entry_refusal_test` executed/passed 1, exit 0, process/compiler cleanup confirmed. The earlier zero-execution selection remains invalid evidence. No World/catalog qualification. |
 
 ## Predecessor evidence, not joined acceptance
 
@@ -85,25 +97,32 @@ append another `--exact` or substitute an uncounted generic wrapper.
 
 ## Remaining route disposition
 
-The current closed installer retains a validated product/image recipe and scoped
-instance authority. Captured/open installation still reaches scoped resolution
-and the older package `code_exports` route. The common installer and once-only
-issuance changes remain feature work; do not describe these consumers as unified.
-Common installer candidate `c043` has production compilation evidence only;
-cfg(test) fixture migration and once-only issuance remain WIP. That feature
-compilation does not qualify canonical installation or the held histories.
-World native-demand stage batches are retained but segment certification still
-reconstructs demand from receipts. Nominal metadata membership grants no native
-demand. See the compiler map for the owning callers.
+The reviewed common source uses one `NativeInstantiationPlan` installation core
+for captured/open code and the closed adapter. Machine-global `code_exports`
+and the older certified-turn installer are removed. World segment certification
+consumes the checked stage owner and its exact initial selection; the empty
+prefix `ReceiptNativeInputDemand` supplies SOURCE/TYPE projection only. These
+source corrections supersede the old deletion/reconstruction tasks; they do not
+qualify the held ordinary histories.
 
-Finite preparation/validation APIs remain. Query migration and removal of unused
-raw Joined materialization APIs do not establish compiler-route exclusivity.
-Property and component cases complement the real finite → installer → public
-World journey; their counts cannot replace it.
+Physical current-product issuance/carry is implemented in reviewed Original
+source. Target consumers still lower/rematch imports, and Ordinary startup can
+reach installation without current source facts. The map separates confirmed
+handoffs, observed imported-target/TYPE failures and predicted runtime authority
+risks. Accepted Plan B requires ordered exact selectors, nominal metadata without
+execution permission, and actual source facts for each installation; scaffolding
+is not consumer cutover. New execution receipts must name the exact merged
+source and cannot inherit prior component passes.
+
+Finite preparation is intentional for the explicit unprepared developer/fixture
+installer and test surfaces. Ordinary actor checked cells require World.
+Nonchecked binding/mount completion still reaches finite retraction/declaration
+validation. These concrete callers, listed in the map, remain a separate route
+disposition obligation; API names alone do not establish another ordinary path.
 
 ## G2 boundary
 
-No complete G2 acceptance is recorded at `1bc6238910`. Ordinary/mixed/source-defined
+No complete G2 acceptance is recorded here. Ordinary/mixed/source-defined
 cells, private inputs, discovery, default reload and caller-loss retention still
 need joined evidence. Freeze one matched bundle, verify the selected Persona
 spec/tools/initial memory, then run bounded real DeepSeek turns through those

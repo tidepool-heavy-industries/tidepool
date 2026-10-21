@@ -1,8 +1,8 @@
 # Compiler work and authority map
 
-This map describes source at `b856a75d5c7ba344632e1935d3c4c4d5192ea5b8`
-(2026-10-20), on `integration/compiler-query-warm-final`. It separates the
-implemented path from accepted G2 work still being received. Source inspection
+This map describes source at `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`
+(2026-10-20), on `integration/compiler-query-warm-final`. It separates
+implemented mechanisms from the remaining G2 boundaries. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
 release qualification or a performance improvement.
 
@@ -19,8 +19,8 @@ boundaries, not disjoint timing phases.
 | Source/request → compiler inputs | Runtime [source admission](../tidepool/runtime/src/session/source_admission.rs), [cell admission](../tidepool/runtime/src/session/admission.rs) and [inspection](../tidepool/runtime/src/session/inspection.rs) retain the actual source, target lease, current-view observations and ordered cell reservation. | `prepare_cell_program_admitted_inner` in [turn.rs](../tidepool/runtime/src/session/turn.rs) checks preparation admission and execution purpose before dispatch. `run_admitted_compiler_world` / `run_admitted_world_scope_inspection` acquire a World or answer under their own admission. A captured view describes state; it grants neither source access nor execution. |
 | Inputs → held compiler World | Rust [CompilerWorldRestoration / CompilerWorld](../tidepool/toolchain/src/compiler_world.rs) retain producer/profile, exact context, compiler-input projection, bindings and lexical facts. Haskell [HeldCompilerWorld](../bridge/haskell/src/Tidepool/GhcPipeline.hs) retains admitted input facts, realization, backing and prepared modules. | [Main.hs](../bridge/haskell/app/Main.hs) dispatches exact-input acquisition to `scopedEnsureWorld`. `runHeldWorldSource` serves cell/observation preparation; `runWorldPublicModule` resolves public modules from captured source selection. Realization/residency is an observation of a worker admission, not a lease or runtime permission. |
 | World/finite request → captured compiler output | Haskell [CompilerRequest](../bridge/haskell/src/Tidepool/CompilerRequest.hs) acquires `PreparedOutputAuthority` before compilation and returns `NativeOutputs` with its product context or explicit `PortableOutputs`. [CompilerProducts](../bridge/haskell/src/Tidepool/CompilerProducts.hs) retains package bodies and captured defining interfaces under the actual producer/profile; World completion also carries the same request's pending dependencies. | Rust [invocation_output.rs](../tidepool/toolchain/src/artifacts/invocation_output.rs) owns named output layouts and `CapturedNativeOutput`, whose private World/Finite variants retain bytes, provenance and inventory operation. Finite native extraction requires an admitted package-service profile; portable output cannot issue native products. [Certified products](../tidepool/toolchain/src/certified_products.rs) authenticate the captured bytes. A reply alone cannot seal executable output. |
-| Captured output → executable selection | [World native-demand resolver](../tidepool/toolchain/src/compiler_world/native_demand.rs) retains initial request inputs, inventory operation, shared acquisitions and stage batches of `ResolvedNativeDemand`. [WorldProgramContinuation](../tidepool/toolchain/src/declaration_context.rs) retains that request alongside advancing source/TYPE inputs and the actual preceding native product. | `issue_segment_originals` still derives demand from receipts; the retained native stage batches have no downstream certification consumer yet. `finish_cell_program_admitted` separately requires matching transaction origin, Clean/NotStarted closure and host cancellation authority before sealing. Retired/Unconfirmed closure refuses. Available bytes or metadata membership do not select a body. |
-| Sealed selection → runtime installation | [ClosedInstantiationPlan](../tidepool/runtime/src/session/prepared/closed.rs) retains ordered imports and `ClosedCompiledProduct`: each HOME row or package binding is paired with its own compiled image. [ResidentSession](../tidepool/runtime/src/session/resident.rs) installs that plan for prepared source or a closed checked cell. Captured/open code still uses [PersistentSession::install_certified_turn_in](../tidepool/runtime/src/session/persistent.rs) and scoped resolution. | [BindingTable](../tidepool/codegen/src/binding_table.rs) owns scoped instance registration. Closed plan construction validates the batch; installation reuses it under the actual source origin and domain. Immutable image sharing grants no access to another instance. The older captured/open installer still consults machine-wide `code_exports` for package imports. This is a partial cutover, not a claim about every installation path. |
+| Captured output → executable selection | [World native-demand resolver](../tidepool/toolchain/src/compiler_world/native_demand.rs) retains initial request inputs, inventory operation, shared acquisitions and stage batches of `ResolvedNativeDemand`. [WorldProgramContinuation](../tidepool/toolchain/src/declaration_context.rs) retains that request alongside advancing source/TYPE inputs and the actual preceding native product. | `issue_segment_originals` calls `WorldProgramContinuation::stage_inputs`, which checks the actual request/stage/inventory owner and carries its selected groups. Advancing prefix inputs supply SOURCE/TYPE support; their empty `ReceiptNativeInputDemand` does not reconstruct executable demand. `OriginalBindingSelection::from_world_stage` preserves executable selection separately from nominal references. `finish_cell_program_admitted` separately requires matching transaction origin, Clean/NotStarted closure and host cancellation authority before sealing. Retired/Unconfirmed closure refuses. Available bytes or metadata membership do not select a body. |
+| Sealed selection → runtime installation | [NativeInstantiationPlan](../tidepool/runtime/src/session/prepared/closed.rs) retains ordered exact imports and each HOME row/package binding paired with its compiled image. `ClosedInstantiationPlan` restricts that same plan to closed code. [PersistentSession](../tidepool/runtime/src/session/persistent.rs) resolves scoped native domains, retained bindings and captured handles. | `admit_turn_code_in` in [resident.rs](../tidepool/runtime/src/session/resident.rs) admits the plan. Captured/open installation and the closed adapter reach `PreparedEngine::install_native_turn`; the old `code_exports` installer is removed. [BindingTable](../tidepool/codegen/src/binding_table.rs) owns scoped instances. Source facts still require the actual installation owner: the Ordinary attribution gap below is not repaired merely by sharing the installer. |
 | Successful item → successor/publication/recovery | [CellProgram::item_successor / declaration_item_successor](../tidepool/toolchain/src/compiler_world.rs) issue `CheckedWorldSuccessor` from the actual ordered item, predecessor and installed delta. [CompilerSourceSupport](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) carries issued native completions through input transformations. Runtime [admission.rs](../tidepool/runtime/src/session/admission.rs) owns settlement; [persistent.rs](../tidepool/runtime/src/session/persistent.rs) owns public promotion. | `adopt_checked_world_successor_in` replaces `Tip.exact_context` and `Tip.inspection_world` together under source/target admission, then invalidates the cached compile view. Public promotion commits bindings and the prepared World with the manifest claim. [Exact-context writer/reader](../tidepool/toolchain/src/exact_context.rs) requires version 7 with native completion facts. [Recovery hydration](../tidepool/runtime/src/session/recovery_hydration.rs) restores selected facts; graph observation supplies no execution/source authority. The integrated structures still need joined workflow qualification. |
 
 `PreparedOutputAuthority` obtains native provenance from the active
@@ -99,55 +99,74 @@ Rust graph work. Observations such as `last_admission_residency` may already be
 stale after END. Preserve the issued owners through the next consumer instead
 of reconstructing them from module names, generation labels or retained catalogs.
 
-## Remaining routes at this source revision
+## Remaining boundaries and routes
 
-- **Closed versus captured/open code:** `PreparedSourceEntry::prepare` retains
-  an `Arc<ClosedInstantiationPlan>`; startup borrows it without another resolution.
-  Checked cells try structural closedness and otherwise retain scoped resolution.
-  [TurnCode](../tidepool/runtime/src/session/turn.rs) shares its prepared program
-  through `Arc`; optional certification/output evidence and the captured/open
-  route remain distinct from the closed installer.
-- **Receipt reconstruction:** `issue_segment_originals` in
-  [declaration_context.rs](../tidepool/toolchain/src/declaration_context.rs) still
-  calls `ReceiptNativeInputDemand::from_products` and `demand_inputs` against
-  advancing prefix inputs. Initial acquisition batches are retained separately;
-  their existence does not establish that downstream admission reuses them.
+- **Target selection:** physical current-product issuance and carry are shared;
+  target certification still lowers Original references to `PendingImportOwner::Source` in
+  [certified_products.rs](../tidepool/toolchain/src/certified_products.rs).
+  `certified_target_source_groups` in
+  [artifact_inventory.rs](../tidepool/toolchain/src/artifact_inventory.rs)
+  searches incoming entries before the target has populated them. Later
+  `for_ordinary_target`, `with_certified_groups` and `resolve` rematch logical
+  imports. The empty-entry refusal is an observed failure in the reviewed
+  imported-target cases; loss of exact binding choice during later rematching
+  remains a source-derived risk, not an observed runtime result.
+- **Source authority:** `TurnCertification::current_native_sources` in
+  [turn.rs](../tidepool/runtime/src/session/turn.rs) supplies current facts only
+  for Execution. Recovered Ordinary startup reaches the common installer through
+  `run_root_startup` in
+  [resident_workbench.rs](../exomonad/actor/src/resident_workbench.rs).
+  `NativeInstallationSources::current` fills missing facts with Unknown;
+  `install_admitted_turn` replaces installed provenance with those facts.
+  This is a confirmed handoff gap and a predicted authority failure, without
+  an observed post-membership runtime failure. Prepared-source startup carries
+  an explicit closed source origin through the same installation core.
+- **TYPE admission:** the reported Haskell stage-input missing-module failure
+  occurs before Rust target admission. Source-less captured TYPE support and
+  executable target selection are separate obligations; repairing one cannot
+  qualify the other. Original/Canonical interface custody is integrated;
+  Joined/Value producers in
+  [SessionArtifacts](../bridge/haskell/src/Tidepool/SessionArtifacts.hs) and
+  [DeclarationJoin](../bridge/haskell/src/Tidepool/DeclarationJoin.hs) retain
+  pinned external-root observations. Their interface/sidecar ownership does
+  not imply capture of every referenced package body.
 - **Accumulated completion work:** `NativeSelectionCompletions::append` in
   [compiler_projection.rs](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs)
-  now indexes owners by completion identity and exact HOME row conflicts by
-  `NativeGroupBinding`, avoiding the prior scan through retained owners.
-  Incoming rows still require checks. `with_native_completion_refs` and
-  `refreshed_native_facts` each fold accumulated completion custody; those folds
-  remain, and no end-to-end timing saving is established.
-- **Captured/open package imports:** `install_certified_turn` in
-  [prepared.rs](../tidepool/runtime/src/session/prepared.rs) checks
-  `self.code_exports` before target definitions for `ImportOwner::Package`.
-  Package lookup, staging and export publication remain on this older route;
-  their presence does not describe the closed plan's instance selection.
-- **Finite preparation:** `prepare_cell_program_admitted_inner` in
-  [turn.rs](../tidepool/runtime/src/session/turn.rs) takes the World branch when
-  admission has a World reservation, otherwise uses `ModuleCandidateOffer`.
-  The [route disposition ledger](../plans/shared-warm-compiler/completion/tests/verification-ledger.md#remaining-route-disposition)
-  tracks remaining finite declaration validation/retraction callers. World
-  observation dispatch does not prove repository-wide compiler-route exclusivity.
-
-These are confirmed source routes. Whether each still fails an ordinary joined
-history, and its cost on a frozen bundle, requires the corresponding execution
-evidence. No new behavioral or timing result is inferred here.
+  indexes completion owners and exact HOME row conflicts. Incoming rows still
+  require checks; `with_native_completion_refs` and `refreshed_native_facts`
+  still fold accumulated custody. No end-to-end timing saving is established.
+- **Intentional finite bootstrap and test surface:**
+  `agent_spec/preparation.rs::compile_installer` uses a retained prepared entry
+  when available, otherwise the explicit developer/fixture
+  `compile_unprepared_installer` → `run_turn` path. The ordinary actor
+  `prepare_checked_host_cell` requires `CellProgramBasis::World`; it has no
+  finite fallback after a failed World cell. Finite checked-cell admission
+  remains exercised by `checked_quoter_program` and exact-recovery tests.
+- **Remaining production binding/retraction route:**
+  `resident.rs::bind_prepared`, reached by nonchecked completion and
+  `mount_host_handle_prepared`, can call
+  `persistent.rs::bind_replacing_decls_in` → `retract_value_heads_in` →
+  `SessionLib::prepare_retraction_in`. An attached generation candidate then
+  reaches declaration validation and `run_inspections_strict` in
+  [session/mod.rs](../tidepool/runtime/src/session/mod.rs). This is a concrete
+  remaining finite mechanism. Direct `run_admitted_inspections` callers are
+  tests; their presence does not establish a second ordinary query route.
 
 ## Receiving G2 work
 
 The [G2 contract](../plans/shared-warm-compiler/completion/g2-completion.md)
-owns decisions, assignment and integration order. This table describes the
-remaining boundary, rather than treating every part of G2 as absent from source.
+owns assignment and acceptance. The accepted Plan B extends these existing
+owners: one physical issuer, ordered exact target selectors, nominal metadata
+without execution permission, and actual source facts for each installation.
+It does not add another installation framework. Target-selector scaffolding is
+not a completed consumer cutover or qualification result.
 
-| Boundary | Accepted remaining contract |
+| Boundary | Remaining acceptance |
 |---|---|
-| World demand consumption | Consume the actual initial acquisition/stage owners together with advancing source/TYPE prefix facts and captured source closure. Preserve latent exact requirements and nominal metadata separately from executable choices; remove receipt-based demand reconstruction. Atomic prefix and persistent predecessor support are already implemented. |
-| Runtime cutover | Common installation and once-only issuance remain feature work. Captured/open installation, `code_exports` and RetainedPackage routes still require their own cutover; the implemented closed product/image pair and domain-owned installer do not prove those routes migrated. |
-| Custody qualification | Original/Canonical custody and parsed HOME authentication are integrated source; exact joined ordinary-workflow qualification remains open. Joined/Value producers in [SessionArtifacts](../bridge/haskell/src/Tidepool/SessionArtifacts.hs) and [DeclarationJoin](../bridge/haskell/src/Tidepool/DeclarationJoin.hs) observe pinned installed external package roots; their owned interface/sidecar bytes do not imply ownership of every referenced package body. No captured-path defect or complete TYPE/recovery qualification is established for those producers by this map. |
-| Native build qualification | Native build actions require `bind_owned` and the declared compiler-service deployment through [package qualification](../build/package/qualification.py); portable actions remain direct. Owner-specific diagnostics and pre-cleanup child observation are implemented. Actual catalog production and exact frozen-bundle qualification remain separate execution gates. |
-| Joined ordinary workflow | Follow real finite source → installer → public World → repeated package-using cells; retire A and execute a new B cell while retaining genuine captured-A refusal. Qualify discovery, private inputs, default reload and caller loss, then selected Persona startup and real DeepSeek smoke on one frozen bundle. |
+| Exact target and TYPE admission | Carry the actual prepared target and ordered nominal references into its consumer; remove logical target rematches without promoting metadata into executable selection. Repair and execute the separate captured TYPE admission boundary. |
+| Per-install source authority | Carry the actual installing operation's source facts through the common installer, including Ordinary startup and captures. Component compilation does not establish the joined authority history. |
+| Native build and custody qualification | Native actions require `bind_owned` and declared compiler-service resources; portable actions remain direct. Qualify actual catalog production and the exact frozen bundle through [package qualification](../build/package/qualification.py). Retain exact-source limits on custody/recovery passes. |
+| Joined ordinary workflow | Execute finite source → installer → public World → repeated package-using cells, A retirement and new B execution with genuine captured-A refusal. Qualify discovery, private inputs, reload and caller loss before selected Persona startup and real DeepSeek smoke on one bundle. |
 
 G2 includes ordinary-workflow correctness. The G2 contract assigns the full
 force/fork/callback/process-recovery matrices and full campaign M1–M3 to G3;
