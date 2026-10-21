@@ -11383,6 +11383,14 @@ impl ExactDeclarationContext {
             .retain_custody(target.artifacts())?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
+    pub(crate) fn retain_completed_native_selection(
+        self,
+        completed: &crate::artifact_inventory::CompletedNativeSelection,
+    ) -> Result<Self, CompileError> {
+        let support = self.compiler_source_support().with_native_selection_completion(completed)?;
+        Ok(self.rebuild(|facts| facts.compiler_support = support))
+    }
+
     pub(crate) fn retain_issued_native_inputs(
         self,
         inputs: &OriginalCompilerInputs,

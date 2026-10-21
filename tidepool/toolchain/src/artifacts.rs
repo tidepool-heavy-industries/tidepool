@@ -3499,6 +3499,10 @@ pub struct PhysicalCurrentNativeTarget<'a> {
 }
 
 impl PhysicalCurrentNativeTarget<'_> {
+    pub(crate) fn definitions(&self) -> tidepool_repr::execution_schema::DefinitionsView<'_> {
+        self.prepared.definitions()
+    }
+
     pub fn sites(&self) -> impl Iterator<Item = u64> + '_ {
         self.prepared.sites().iter().map(|site| site.site)
     }
@@ -3542,6 +3546,10 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
+    pub(crate) fn acquired_artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
+        self._resolved.artifacts()
+    }
+
     /// Ordered links selected by this target issuer. Package entries remain
     /// obligations until an executable completion supplies actual code bindings.
     /// Closed preparation cannot substitute a live retained binding.
@@ -3561,7 +3569,7 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
-    fn issue(
+    pub(crate) fn issue(
         resolved: crate::artifact_inventory::ResolvedNativeSourceTarget<'a>,
         prepared: &'a PreparedProgram,
     ) -> Result<Self, CompileError> {

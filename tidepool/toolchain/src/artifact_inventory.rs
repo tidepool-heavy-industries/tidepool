@@ -18,7 +18,7 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{
     CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
-    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion,
+    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion, CompletedNativeSelection,
 };
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
@@ -555,6 +555,7 @@ impl TargetNativeInputs {
         }
         Ok(CertifiedTargetNativeInputs {
             target: self,
+            completed: None,
             groups,
             links: if needs_retained_owner { TargetNativeLinks::RetainedInputs } else {
                 TargetNativeLinks::Immutable(links.into())
@@ -658,6 +659,7 @@ impl TargetNativeInputs {
 /// products. Graph-only compiler consumers cannot issue runtime source proofs.
 #[derive(Debug)]
 pub(crate) struct CertifiedTargetNativeInputs {
+    completed: Option<Arc<CompletedNativeSelection>>,
     target: TargetNativeInputs,
     groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
     links: TargetNativeLinks,
@@ -677,6 +679,27 @@ impl std::ops::Deref for CertifiedTargetNativeInputs {
 }
 
 impl CertifiedTargetNativeInputs {
+    /// Complete this exact physical target without changing its selected HOME
+    /// roots or compiler roles. Missing package code remains a refusal.
+    pub(crate) fn complete_native_selection(
+        mut self,
+        prepared: &tidepool_repr::execution_schema::PreparedProgram,
+        packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+        inherited: &CompilerSourceSupport,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(self.resolve_sources()?, prepared)?;
+        let completed = compiler_projection::complete_native_selection(
+            &sources, packages, inherited.native_completions(), operation,
+        )?;
+        self.completed = Some(completed);
+        Ok(self)
+    }
+
+    pub(crate) fn completed_selection(&self) -> Option<&Arc<CompletedNativeSelection>> {
+        self.completed.as_ref()
+    }
+
     pub(crate) fn certified_groups(
         &self,
     ) -> &crate::declaration_context::CertifiedArtifactGroupBindings {
