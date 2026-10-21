@@ -9,6 +9,7 @@ module Tidepool.CertifiedProducts
   , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
   , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
   , PackageLink(..), PackageOccurrence(..), PackageLinks(..), PackageLinkIndex(..)
+  , RawOccurrence(..), RawLink(..), canonicalizeOccurrences
   , emptyPackageLinks, emptyPackageLinkIndex, linkForOccurrence, encodePackageLinks ) where
 
 import Prelude hiding (product)
@@ -22,7 +23,8 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.Bits (shiftR)
-import Data.List (find, mapAccumL)
+import Data.Array (listArray, elems, (!))
+import Data.List (find, foldl', mapAccumL)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import qualified Data.Set as Set
@@ -163,6 +165,76 @@ encodePackageLinks links = array
       [encodeString target, list encodeLink roots]
     encodeHomeRoots ((unit, name, ordinal), roots) = array
       [array [encodeString unit, encodeString name, encodeWord ordinal], list encodeLink roots]
+
+-- A producer-internal occurrence before cross-target canonicalization. Child
+-- references are raw emission indices within one retainPreparedPackageTargets
+-- result; canonicalizeOccurrences replaces them with deduplicated row ids.
+data RawOccurrence = RawOccurrence
+  { rawEnvelopeSha256 :: !BS.ByteString
+  , rawUnit :: !T.Text
+  , rawModule :: !T.Text
+  , rawDefiningInterfaceSha256 :: !BS.ByteString
+  , rawDefiningVersionSha256 :: !BS.ByteString
+  , rawImports :: [RawLink]
+  } deriving (Eq, Show)
+
+data RawLink
+  = RawLinkLocal !Int
+  | RawLinkInherited
+  deriving (Eq, Ord, Show)
+
+-- Exact occurrence canonicalization by finite partition refinement. Two raw
+-- nodes collapse iff their label (envelope plus defining owner facts) and
+-- their ordered child partitions agree recursively; distinct child histories
+-- stay distinct and repeated/cyclic references are preserved without a global
+-- symbol map or recursive digests. Canonical ids are assigned in first raw
+-- occurrence order and the returned rows are one deduplicated representative
+-- per class, in that same order.
+canonicalizeOccurrences :: [RawOccurrence] -> ([PackageOccurrence], Map.Map Int Word32)
+canonicalizeOccurrences raws
+  | null raws = ([], Map.empty)
+  | otherwise =
+      let initial = listArray bounds (normalize (map label raws))
+          final = fixPoint step initial
+          representatives = Map.elems (foldl' first Map.empty (zip (elems final) raws))
+          rows = map (materialize final) representatives
+          indexMap = Map.fromList
+            [ (index, fromIntegral (final ! index))
+            | index <- [0 .. n - 1] ]
+      in (rows, indexMap)
+  where
+    n = length raws
+    bounds = (0, n - 1)
+    label raw = ( rawEnvelopeSha256 raw, rawUnit raw, rawModule raw
+                , rawDefiningInterfaceSha256 raw, rawDefiningVersionSha256 raw )
+    step classes = listArray bounds
+      (normalize
+        [ (classes ! i, [ childRef classes link | link <- rawImports raw ])
+        | (i, raw) <- zip [0 .. n - 1] raws ])
+    childRef classes RawLinkInherited = (False, 0)
+    childRef classes (RawLinkLocal child) = (True, classes ! child)
+    first table (partition, raw) = Map.insertWith (\_ old -> old) partition raw table
+    materialize classes raw = PackageOccurrence
+      { packageOccurrenceEnvelopeSha256 = rawEnvelopeSha256 raw
+      , packageOccurrenceUnit = rawUnit raw
+      , packageOccurrenceModule = rawModule raw
+      , packageOccurrenceDefiningInterfaceSha256 = rawDefiningInterfaceSha256 raw
+      , packageOccurrenceDefiningVersionSha256 = rawDefiningVersionSha256 raw
+      , packageOccurrenceImports =
+          [ case link of
+              RawLinkLocal child -> PackageLinkLocal (fromIntegral (classes ! child))
+              RawLinkInherited -> PackageLinkInherited
+          | link <- rawImports raw ]
+      }
+    fixPoint f x = let next = f x in if next == x then x else fixPoint f next
+
+-- Stable class ids 0..k-1 assigned in first-appearance order.
+normalize :: Ord a => [a] -> [Int]
+normalize = reverse . snd . foldl' assign (Map.empty, [])
+  where
+    assign (table, out) x = case Map.lookup x table of
+      Just classId -> (table, classId : out)
+      Nothing -> let classId = Map.size table in (Map.insert x classId table, classId : out)
 
 data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner

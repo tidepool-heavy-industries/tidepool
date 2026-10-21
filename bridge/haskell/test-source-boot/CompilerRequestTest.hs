@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -46,7 +46,10 @@ import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..)
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
-import Tidepool.CertifiedProducts (captureSelectedPackageWitnesses, encodeReceiptIdentity)
+import Tidepool.CertifiedProducts
+  ( captureSelectedPackageWitnesses, encodeReceiptIdentity
+  , PackageLink(..), PackageOccurrence(..), RawOccurrence(..), RawLink(..)
+  , canonicalizeOccurrences )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 
 -- The Rust receipt consumer expects null/text, independently of the execution
@@ -62,6 +65,49 @@ nativeReceiptIdentityChecks = forM_ [Nothing, Just (Text.pack "Record")] $ \pare
   case deserialiseFromBytes decodeTerm (BL.fromStrict (toStrictByteString (encodeReceiptIdentity symbol))) of
     Right (remaining, actual) | BL.null remaining && actual == expected -> pure ()
     other -> fail ("compiler receipt symbol grammar changed: " ++ show other)
+
+-- Exact cross-target occurrence canonicalization: two targets sharing an
+-- identical parent+child graph collapse to shared rows, while a sibling with
+-- the same parent envelope but a different child partition stays distinct.
+packageOccurrenceCanonicalization :: IO ()
+packageOccurrenceCanonicalization = do
+  let unit = Text.pack "unit"
+      moduleNameText = Text.pack "Module"
+      interface = BS.replicate 32 1
+      version = BS.replicate 32 2
+      raw envelope imports = RawOccurrence envelope unit moduleNameText interface version imports
+      raws =
+        [ raw (BS.pack [80]) [RawLinkLocal 1]   -- target A parent
+        , raw (BS.pack [67]) []                 -- target A child
+        , raw (BS.pack [80]) [RawLinkLocal 3]   -- target B identical parent
+        , raw (BS.pack [67]) []                 -- target B identical child
+        , raw (BS.pack [80]) [RawLinkLocal 5]   -- sibling: same envelope, different child
+        , raw (BS.pack [68]) []                 -- sibling child
+        ]
+      expectedRows =
+        [ PackageOccurrence (BS.pack [80]) unit moduleNameText interface version [PackageLinkLocal 1]
+        , PackageOccurrence (BS.pack [67]) unit moduleNameText interface version []
+        , PackageOccurrence (BS.pack [80]) unit moduleNameText interface version [PackageLinkLocal 3]
+        , PackageOccurrence (BS.pack [68]) unit moduleNameText interface version []
+        ]
+      expectedIndex = Map.fromList [(0, 0), (1, 1), (2, 0), (3, 1), (4, 2), (5, 3)]
+      (rows, indexMap) = canonicalizeOccurrences raws
+  unless (rows == expectedRows)
+    (fail ("package occurrence canonicalization changed rows: " ++ show rows))
+  unless (indexMap == expectedIndex)
+    (fail ("package occurrence canonicalization changed ids: " ++ show indexMap))
+  -- A supported finite cycle must terminate and collapse to one self-referring
+  -- row rather than hang or emit a second distinct occurrence.
+  let cycleRaws =
+        [ RawOccurrence (BS.pack [69]) unit moduleNameText interface version [RawLinkLocal 1]
+        , RawOccurrence (BS.pack [69]) unit moduleNameText interface version [RawLinkLocal 0]
+        ]
+      expectedCycleRows =
+        [ PackageOccurrence (BS.pack [69]) unit moduleNameText interface version [PackageLinkLocal 0]
+        ]
+      (cycleRows, _) = canonicalizeOccurrences cycleRaws
+  unless (cycleRows == expectedCycleRows)
+    (fail ("package occurrence cyclic canonicalization changed rows: " ++ show cycleRows))
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do

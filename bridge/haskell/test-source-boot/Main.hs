@@ -3,7 +3,7 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
-import CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
+import CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, packageOccurrenceCanonicalization)
 import CompilerRequestTest (checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
@@ -21,6 +21,7 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "source-boot"
   [ testCase "compiler receipt symbol parents use null or text" nativeReceiptIdentityChecks
+  , testCase "package occurrence canonicalization collapses shared graphs" packageOccurrenceCanonicalization
   , testCase "finite native output separates package products with captured interfaces" nativePackageOutputChecks
   , testCase "native output requires admitted provenance and portable stays explicit" nativeOutputProvenanceChecks
   , testCase "completed compiler request histories" completedRequestHistories
