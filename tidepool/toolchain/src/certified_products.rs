@@ -1581,7 +1581,6 @@ pub enum ArtifactIdentityStage {
     MissingModuleMapCanonical,
     MissingInterfacePayload,
     NominalOwnerDiffers,
-    NominalBinderDiffers,
     NominalMembershipDiffers,
     ModuleInterfaceDiffers,
 }
@@ -6389,10 +6388,13 @@ pub(crate) fn original_reference_payload_member<'a>(
     else {
         return Err(refuse(InputDecisionRefusal::NativeOwnerMismatch));
     };
+    // The binder names the symbol's defining site, which for re-exports is the
+    // defining module (for example ghc-internal:GHC.Internal.Base behind a
+    // Tidepool.Prelude export), not the module identity that requested the
+    // binding. Membership itself is proven below by exact binder identity in
+    // the product's issued witness groups.
     let mismatch = if product.owner().unit != *unit || product.owner().module != *module {
         Some(ArtifactIdentityStage::NominalOwnerDiffers)
-    } else if binder.unit != *unit || binder.module != *module {
-        Some(ArtifactIdentityStage::NominalBinderDiffers)
     } else if original_entry.descriptor.id != original.artifact
         || interface_entry.descriptor.id != interface.artifact
     {
