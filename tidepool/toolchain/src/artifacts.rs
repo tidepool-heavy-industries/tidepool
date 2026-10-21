@@ -695,15 +695,24 @@ impl AppliedModuleCandidateOffer {
         let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
-            self.read_admitted_turn(
-                directory.path(),
-                request.supports_compile_input_identity(),
-                &run,
-                &deployment,
-            )
-            .map_err(|error| {
-                self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
-            })?
+            if self
+                .activation_preview_unavailable(directory.path())
+                .map_err(|error| {
+                    self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
+                })?
+            {
+                (None, None)
+            } else {
+                self.read_admitted_turn(
+                    directory.path(),
+                    request.supports_compile_input_identity(),
+                    &run,
+                    &deployment,
+                )
+                .map_err(|error| {
+                    self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
+                })?
+            }
         } else {
             (None, None)
         };
@@ -1024,6 +1033,7 @@ pub fn prepare_world_cell_program(
                 let admitted = admit_native_target_products(
                     *program.producer_sha256(),
                     &target,
+                    &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
                     segment.package_products(),
                     segment
@@ -2391,8 +2401,7 @@ impl ModuleCandidateOffer {
         let prepared = (|| -> Result<_, CompileError> {
             let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-            if self.exact.is_some()
-                || !request.is_turn()
+            if !request.is_turn()
                 || request.include_paths()
                     != self
                         .include
@@ -4248,6 +4257,9 @@ fn seal_turn_outputs_with_validation(
         }
         None => None,
     };
+    let physical_native_output = native_output.map(|(output, _)| output).ok_or_else(|| {
+        CompileError::ExtractFailed("native target lacks completed output authority".into())
+    })?;
     let inherited_inputs = request_admission.map(|request| request.compiler_inputs());
     let no_inherited_inputs = crate::artifact_inventory::CompilerSourceSupport::empty();
     let inherited_support = inherited_inputs
@@ -4258,6 +4270,7 @@ fn seal_turn_outputs_with_validation(
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
             .sha256(),
         prepared,
+        physical_native_output,
         &certified,
         &package_products,
         inherited_support,
@@ -4473,6 +4486,7 @@ struct AdmittedNativeTargetProducts {
 fn admit_native_target_products(
     producer: [u8; 32],
     prepared: &Arc<PreparedProgram>,
+    output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
     inherited: &crate::artifact_inventory::CompilerSourceSupport,
@@ -4595,7 +4609,13 @@ fn admit_native_target_products(
         target: admitted_target
             .bind_target(typed_entry, pending_imports)
             .with_certified_groups(Arc::clone(&selected_groups))?
-            .complete_native_selection(prepared, packages, inherited, &validation.inventory)?,
+            .complete_native_selection(
+                prepared,
+                output,
+                packages,
+                inherited,
+                &validation.inventory,
+            )?,
         certified_groups: Arc::clone(selected_groups.groups()),
         package_interfaces,
     })
@@ -6361,6 +6381,7 @@ fn compile_invocation_inner(
                         .with_certified_groups(Arc::clone(&selected_groups))?
                         .complete_native_selection(
                             target.prepared.prepared(),
+                            &native_output,
                             &package_products,
                             compiler_inputs
                                 .as_ref()
