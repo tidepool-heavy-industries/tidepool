@@ -8942,10 +8942,7 @@ mod module_product_tests {
                             CheckedPlannedCellSlot::Bind { value: 31 },
                             CheckedPlannedCellSlot::Declaration { declaration: 32 },
                             CheckedPlannedCellSlot::Bind { value: 33 },
-                            CheckedPlannedCellSlot::Expression {
-                                capture: 34,
-                                observation_name: "mixedObservation".into(),
-                            },
+                            CheckedPlannedCellSlot::Bind { value: 34 },
                             CheckedPlannedCellSlot::Bind { value: 35 },
                         ]
                     } else {
