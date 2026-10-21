@@ -10336,7 +10336,17 @@ mod module_product_tests {
                 )
             },
         );
-        assert!(matches!(failed.action, Err(CompileError::WorkerFailure(_))));
+        let Err(CompileError::Diagnostics(diagnostics)) = &failed.action else {
+            panic!(
+                "malformed source must yield source diagnostics: {:?}",
+                failed.action
+            );
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, diag::DiagnosticSeverity::Error);
+        let span = diagnostics[0].span.as_ref().unwrap();
+        assert_eq!(Path::new(&span.file), invalid_source);
+        assert_eq!((span.start_line, span.start_col), (3, 1));
         assert_eq!(failed.close, CompilerTransactionClose::Clean);
         let failed_raw = root.path().join("invalid-entry.preparing/raw");
         assert!(!failed_output.exists());
@@ -10370,6 +10380,15 @@ mod module_product_tests {
         assert!(failed_raw.join("compiler.stderr").is_file());
         assert!(failed_raw.join("compiler.stdout").is_file());
         assert!(failed_raw.join("compiler-request.bin").is_file());
+        let retained_report = tidepool_extract_report::decode_report(
+            &std::fs::read(failed_raw.join("compiler.stdout")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            retained_report.outcome,
+            tidepool_extract_report::ExtractOutcome::SourceFailure
+        );
+        assert_eq!(&retained_report.diagnostics, diagnostics);
         assert!(retained.join("inputs.json").is_file());
         assert!(output.join("raw/certified-products.cbor").is_file());
     }
