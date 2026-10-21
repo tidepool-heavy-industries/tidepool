@@ -4582,7 +4582,7 @@ mod tests {
         fs::write(&physical_path, &bytes).unwrap();
         let expected: [u8; 32] = Sha256::digest(&bytes).into();
         let before = package_interface_io();
-        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default()));
         let (_, observations) =
             PackageInterfaceValidation::capture_entry(root.path(), operation, |validation| {
                 validation.verify_captured(&issuing_path, &physical_path, &expected, &bytes)?;
