@@ -861,6 +861,12 @@ rust_filegroup(
         "src/actor_host/fixtures/m3_recursive_setup.hs": "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs",
         "src/actor_host/fixtures/narrow_parent_forwarding.hs": "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs",
         "src/actor_host/fixtures/ordinary_demand_probe.hs": "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs",
+        "src/actor_host/fixtures/ordinary_history_binding.hs": "exomonad/host/src/actor_host/fixtures/ordinary_history_binding.hs",
+        "src/actor_host/fixtures/ordinary_history_declaration.hs": "exomonad/host/src/actor_host/fixtures/ordinary_history_declaration.hs",
+        "src/actor_host/fixtures/ordinary_history_empty_import.hs": "exomonad/host/src/actor_host/fixtures/ordinary_history_empty_import.hs",
+        "src/actor_host/fixtures/ordinary_history_later_use.hs": "exomonad/host/src/actor_host/fixtures/ordinary_history_later_use.hs",
+        "src/actor_host/fixtures/ordinary_history_mixed.hs": "exomonad/host/src/actor_host/fixtures/ordinary_history_mixed.hs",
+        "src/actor_host/fixtures/ordinary_history_retained.hs": "exomonad/host/src/actor_host/fixtures/ordinary_history_retained.hs",
         "src/actor_host/fixtures/persona_shared_jev_agent_spec.hs": "exomonad/host/src/actor_host/fixtures/persona_shared_jev_agent_spec.hs",
         "src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs": "exomonad/host/src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs",
         "src/actor_host/fixtures/persona_snapshot_refusals.hs": "exomonad/host/src/actor_host/fixtures/persona_snapshot_refusals.hs",
@@ -1132,6 +1138,12 @@ tidepool_rust_binary(
         "exomonad/host/src/actor_host/fixtures/m3_recursive_root.hs",
         "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs",
         "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_binding.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_declaration.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_empty_import.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_later_use.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_mixed.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_retained.hs",
         "exomonad/host/src/actor_host/fixtures/request_reload_agent_spec.hs",
         "exomonad/host/src/actor_host/fixtures/retained_handler_agent_spec.hs",
         "exomonad/host/src/actor_host/fixtures/retained_handler_tools.hs",
@@ -3038,6 +3050,12 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs": "src/actor_host/fixtures/m3_recursive_setup.hs",
         "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs": "src/actor_host/fixtures/narrow_parent_forwarding.hs",
         "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs": "src/actor_host/fixtures/ordinary_demand_probe.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_binding.hs": "src/actor_host/fixtures/ordinary_history_binding.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_declaration.hs": "src/actor_host/fixtures/ordinary_history_declaration.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_empty_import.hs": "src/actor_host/fixtures/ordinary_history_empty_import.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_later_use.hs": "src/actor_host/fixtures/ordinary_history_later_use.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_mixed.hs": "src/actor_host/fixtures/ordinary_history_mixed.hs",
+        "exomonad/host/src/actor_host/fixtures/ordinary_history_retained.hs": "src/actor_host/fixtures/ordinary_history_retained.hs",
         "exomonad/host/src/actor_host/fixtures/persona_shared_jev_agent_spec.hs": "src/actor_host/fixtures/persona_shared_jev_agent_spec.hs",
         "exomonad/host/src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs": "src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs",
         "exomonad/host/src/actor_host/fixtures/persona_snapshot_refusals.hs": "src/actor_host/fixtures/persona_snapshot_refusals.hs",
@@ -4238,6 +4256,48 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f64656d616e645f70726f62652e6873",
     src = "src/actor_host/fixtures/ordinary_demand_probe.hs",
     out = "ordinary_demand_probe.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f686973746f72795f62696e64696e672e6873",
+    src = "src/actor_host/fixtures/ordinary_history_binding.hs",
+    out = "ordinary_history_binding.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f686973746f72795f6465636c61726174696f6e2e6873",
+    src = "src/actor_host/fixtures/ordinary_history_declaration.hs",
+    out = "ordinary_history_declaration.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f686973746f72795f656d7074795f696d706f72742e6873",
+    src = "src/actor_host/fixtures/ordinary_history_empty_import.hs",
+    out = "ordinary_history_empty_import.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f686973746f72795f6c617465725f7573652e6873",
+    src = "src/actor_host/fixtures/ordinary_history_later_use.hs",
+    out = "ordinary_history_later_use.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f686973746f72795f6d697865642e6873",
+    src = "src/actor_host/fixtures/ordinary_history_mixed.hs",
+    out = "ordinary_history_mixed.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6f7264696e6172795f686973746f72795f72657461696e65642e6873",
+    src = "src/actor_host/fixtures/ordinary_history_retained.hs",
+    out = "ordinary_history_retained.hs",
     visibility = ["PUBLIC"],
 )
 

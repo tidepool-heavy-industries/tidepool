@@ -1,5 +1,8 @@
 //! Real parked inputs through thin original-type issuance and affine mounting.
 
+#[path = "activation_input_tests/finite_source_world_history.rs"]
+mod finite_source_world_history;
+
 use super::*;
 use crate::session::{
     insert_preamble_imports, resident_cell_check_template, resident_workbench_templates,
@@ -101,7 +104,15 @@ impl TestSession {
 
     fn bootstrap_world(&mut self, recipe: &InputRecipe) {
         let source = self.public_source.clone();
-        let scope = self.public_scope();
+        self.bootstrap_world_in(recipe, &source);
+    }
+
+    fn bootstrap_world_in(
+        &mut self,
+        recipe: &InputRecipe,
+        source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    ) {
+        let scope = source.scope();
         let admitted = self
             .resident
             .capture_inspection_world_in(scope, &recipe.reference, source.original_source())
@@ -5417,10 +5428,11 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .public_visibility_snapshot_in(producer_scope)
         .unwrap();
     assert_ne!(installed.source_instances, before.source_instances);
-    assert!(installed
-        .source_instances
-        .iter()
-        .any(|key| key.binder.binder.module == private_declaration));
+    assert!(installed.source_instances.iter().any(|key| resident
+        .state
+        .bindings()
+        .native_instance(key)
+        .is_some_and(|lease| lease.export().module == private_declaration)));
     let (submission, activation) = fixture.deliver(&mut resident, reservation_hole, 1);
     let site = parked_site(&mut resident, &activation);
     let realm = resident.parked_realm(&activation).unwrap();
@@ -5495,7 +5507,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
                 .map(|(binder, lease)| {
                     (
                         binder.clone(),
-                        tidepool_codegen::binding_table::SourceLeaseKey::of(lease),
+                        tidepool_codegen::binding_table::SourceLeaseKey {
+                            instance: lease.instance(),
+                            value: lease.value(),
+                        },
                         lease.handle(),
                     )
                 })
@@ -6494,6 +6509,10 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
             .request_result_type_witness(site, &submission)
             .unwrap();
         assert_eq!(expected_response.as_ref(), layout.response());
+        assert!(matches!(
+            resident.request_result_type_witness(site ^ 1, &submission),
+            Err(ResidentError::InvalidActivationInput { site: rejected }) if rejected == site ^ 1
+        ));
 
         let row = resident
             .parked
@@ -6538,7 +6557,12 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
             fixture.resume_activation(&mut resident, activation),
             ResidentOutcome::Completed { .. }
         ));
+        let retired_submission = submission.clone();
         let outcome = settle_request_submission(&mut resident, submission);
+        assert!(matches!(
+            resident.request_result_type_witness(site, &retired_submission),
+            Err(ResidentError::InvalidActivationInput { site: rejected }) if rejected == site
+        ));
         if index == 0 {
             reservation = suspended(outcome);
         } else {

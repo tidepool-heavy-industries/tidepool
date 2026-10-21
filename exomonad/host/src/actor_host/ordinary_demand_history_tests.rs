@@ -631,6 +631,39 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
                 "encoding_counts_are_demands_not_evaluations":true}));
             prior_images = images;
         }
+        let semantic_history: [(&str, &str, Option<&str>, &[&str]); 6] = [
+            ("binding", include_str!("fixtures/ordinary_history_binding.hs"), Some("True"), &["statement", "expression"]),
+            ("declaration", include_str!("fixtures/ordinary_history_declaration.hs"), None, &["declaration"]),
+            ("retained", include_str!("fixtures/ordinary_history_retained.hs"), Some("True"), &["declaration", "statement", "expression"]),
+            ("empty-import", include_str!("fixtures/ordinary_history_empty_import.hs"), Some("True"), &["declaration", "expression"]),
+            ("mixed", include_str!("fixtures/ordinary_history_mixed.hs"), Some("True"), &["declaration", "statement", "expression"]),
+            ("later-use", include_str!("fixtures/ordinary_history_later_use.hs"), Some("True"), &["expression"]),
+        ];
+        for (label, source, expected, kinds) in semantic_history {
+            let call = format!("ordinary-history-{label}");
+            let operation = round.operation(&call);
+            round.call(&call, source);
+            round = host.while_operation_succeeds(&operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root))
+                .await.expect("the actual hosted cell commits before its successor request");
+            let receipt = round.settled_output(&call);
+            assert_eq!(receipt["status"], "committed", "{label}: {receipt}");
+            let items = receipt["items"].as_array().expect("actual cell item receipts");
+            assert!(!items.is_empty(), "{label}: {receipt}");
+            for kind in kinds {
+                assert!(items.iter().any(|item| item["kind"] == *kind),
+                    "{label} did not execute its required {kind} item: {receipt}");
+            }
+            if let Some(expected) = expected {
+                round.assert_authored_value(&host.runtime.store(), &origin, &call, expected);
+            } else {
+                assert!(items.iter().all(|item| item["kind"] == "declaration"),
+                    "declaration-only cell acquired an executable item: {receipt}");
+            }
+            record_phase(&phases, json!({"phase":format!("ordinary-history-{label}"),
+                "operation":operation, "semantic_store_receipt_verified":expected.is_some(),
+                "required_item_kinds":kinds}));
+        }
         round.finish();
     })).await;
 }

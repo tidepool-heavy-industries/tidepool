@@ -83,7 +83,9 @@ use tidepool_repr::{DataConId, PrincipalId};
 mod batch;
 #[cfg(test)]
 mod literal_manifest_tests;
-pub use batch::{BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram};
+pub use batch::{
+    BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram, NativeExportRequest,
+};
 
 /// A compiled program and its custody. Deliberately !Send: code custody, its
 /// VM context, and every live heap root stay on the thread that enters

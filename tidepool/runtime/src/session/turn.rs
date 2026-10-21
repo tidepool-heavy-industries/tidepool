@@ -16,10 +16,12 @@ use ciborium::value::Value as CborValue;
 #[cfg(test)]
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
+#[cfg(test)]
+use tidepool_toolchain::artifacts::SelectedModuleCandidateOffer;
 use tidepool_toolchain::artifacts::{
     compiler_scratch_directory, decode_turn_nominal_heads as decode_nominal_heads,
-    decode_turn_yield_sites as decode_asks, seal_turn_outputs, AppliedModuleCandidateOffer,
-    CompilerDiagnosticCapture, ModuleCandidateOffer, SelectedModuleCandidateOffer,
+    decode_turn_yield_sites as decode_asks, AppliedModuleCandidateOffer, CompilerDiagnosticCapture,
+    ModuleCandidateOffer,
 };
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 #[cfg(test)]
@@ -28,11 +30,7 @@ use tidepool_toolchain::checked_cell::{ExactCheckedCell, ExactCheckedItem, Exact
 use tidepool_toolchain::extract_module_name;
 use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 
-use tidepool_repr::execution_schema::{
-    parse_program, DecodeLimits, PreparedProgram, SymbolIdentity,
-};
-#[cfg(test)]
-use tidepool_repr::serial::read_metadata;
+use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::DataConTable;
 
@@ -1662,6 +1660,9 @@ pub struct TurnCertification {
     /// Retain the actual output's selecting owner. Group summaries cannot
     /// reconstruct its exact target roots or ordered dependency choices.
     pub(super) original_output: Option<Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
+    pub(super) native_group_proofs: Arc<[tidepool_toolchain::artifacts::OwnedNativeSourceProduct]>,
+    pub(super) native_selection:
+        Option<Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>>,
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
@@ -1679,6 +1680,13 @@ pub(super) struct CurrentNativeSources<'a> {
 }
 
 impl<'a> CurrentNativeSources<'a> {
+    pub(super) fn group_proof(
+        &self,
+        pending: &PendingCertifiedGroup,
+    ) -> Result<Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>, CompileError> {
+        selected_group_proof(&self.products, pending)
+    }
+
     pub(super) fn from_targets(
         targets: &'a crate::RuntimePreparedTargets,
         name: &str,
@@ -1737,6 +1745,20 @@ impl<'a> CurrentNativeSources<'a> {
         }
         sources
     }
+}
+
+pub(super) fn selected_group_proof(
+    products: &tidepool_toolchain::artifacts::ResolvedNativeSourceProducts<'_>,
+    pending: &PendingCertifiedGroup,
+) -> Result<Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>, CompileError> {
+    let mut rows = products.groups().filter(|row| row.matches_group(pending));
+    let selected = rows.next();
+    if rows.next().is_some() {
+        return Err(CompileError::ExtractFailed(
+            "native group requires an exact selected binding occurrence".into(),
+        ));
+    }
+    Ok(selected.map(|row| row.to_owned()))
 }
 
 /// Checked runtime output is ready only with its original prefix owner.
@@ -1816,6 +1838,8 @@ impl Default for TurnCertification {
     fn default() -> Self {
         Self {
             original_output: None,
+            native_selection: None,
+            native_group_proofs: Arc::from([]),
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
             groups: Arc::from([]),
@@ -1865,15 +1889,27 @@ impl TurnCertification {
     pub(crate) fn from_artifacts(
         artifacts: &crate::CompiledArtifacts,
         target: &crate::TargetArtifact,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CompileError> {
+        let native_group_proofs = target
+            .native_source_products()?
+            .map(|products| {
+                products
+                    .groups()
+                    .map(|row| row.to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into();
+        Ok(Self {
+            native_group_proofs,
+            native_selection: target.completed_native_selection().cloned(),
             artifact_view: artifacts.artifact_view.clone(),
             groups: artifacts.certified_groups.clone().into(),
             target_owners: target.pending_imports.clone(),
             package_interfaces: target.package_interfaces.clone(),
             recovery_products: artifacts.recovery_products.clone().into(),
             ..Default::default()
-        }
+        })
     }
 
     pub(super) fn host_prototype(&self) -> Result<Self, CompileError> {
@@ -2010,6 +2046,8 @@ impl CompiledTurn {
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
             original_output: Some(Arc::clone(products)),
+            native_selection: products.completed_native_selection().cloned(),
+            native_group_proofs: Arc::from([]),
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
@@ -2143,7 +2181,7 @@ impl CompiledTurn {
             provenance: self.provenance.clone(),
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&self.asks),
-            prepared: std::borrow::Cow::Borrowed(self.prepared.as_ref()),
+            prepared: Arc::clone(&self.prepared),
             certification: std::borrow::Cow::Borrowed(&self.certification),
         }
     }
@@ -2155,19 +2193,19 @@ impl CompiledTurn {
             provenance: self.provenance.clone(),
             table: std::borrow::Cow::Owned(self.table),
             sites: std::borrow::Cow::Owned(self.asks),
-            prepared: std::borrow::Cow::Owned(Arc::unwrap_or_clone(self.prepared)),
+            prepared: self.prepared,
             certification: std::borrow::Cow::Owned(self.certification),
         }
     }
 }
 
-/// Immutable inputs for installation. Owned inputs move into the machine;
-/// borrowed inputs remain reusable and are copied only at installation.
+/// Immutable inputs for installation. Code retains its exact shared owner;
+/// metadata can be borrowed until an execution needs to retain it.
 #[derive(Clone)]
 pub struct TurnCode<'a> {
     table: std::borrow::Cow<'a, DataConTable>,
     pub(super) sites: std::borrow::Cow<'a, [YieldSite]>,
-    prepared: std::borrow::Cow<'a, PreparedProgram>,
+    prepared: Arc<PreparedProgram>,
     pub(super) certification: std::borrow::Cow<'a, Option<TurnCertification>>,
     pub(super) provenance: Arc<std::sync::OnceLock<super::resident::CompiledProvenancePlan>>,
 }
@@ -2178,6 +2216,10 @@ impl<'a> TurnCode<'a> {
     }
     pub fn prepared(&self) -> &PreparedProgram {
         self.prepared.as_ref()
+    }
+
+    pub(super) fn prepared_owner(&self) -> &Arc<PreparedProgram> {
+        &self.prepared
     }
 
     pub fn sites(&self) -> &[YieldSite] {
@@ -2250,7 +2292,7 @@ impl<'a> TurnCode<'a> {
         TurnCode {
             provenance: self.provenance.clone(),
             table: std::borrow::Cow::Borrowed(self.table()),
-            prepared: std::borrow::Cow::Borrowed(self.prepared()),
+            prepared: Arc::clone(&self.prepared),
             sites: std::borrow::Cow::Borrowed(self.sites.as_ref()),
             certification: std::borrow::Cow::Borrowed(self.certification.as_ref()),
         }
@@ -2261,7 +2303,7 @@ impl<'a> TurnCode<'a> {
         TurnCode {
             provenance: self.provenance,
             table: std::borrow::Cow::Owned(self.table.into_owned()),
-            prepared: std::borrow::Cow::Owned(self.prepared.into_owned()),
+            prepared: self.prepared,
             sites: std::borrow::Cow::Owned(self.sites.into_owned()),
             certification: std::borrow::Cow::Owned(self.certification.into_owned()),
         }
@@ -2282,21 +2324,16 @@ impl<'a> TurnCode<'a> {
         Ok(code)
     }
 
-    /// Installation consumes the program while preserving borrowed metadata.
+    /// Installation keeps the issued code allocation and borrowed metadata.
     pub(super) fn into_parts(
         self,
     ) -> (
         std::borrow::Cow<'a, DataConTable>,
         std::borrow::Cow<'a, [YieldSite]>,
-        PreparedProgram,
+        Arc<PreparedProgram>,
         std::borrow::Cow<'a, Option<TurnCertification>>,
     ) {
-        (
-            self.table,
-            self.sites,
-            self.prepared.into_owned(),
-            self.certification,
-        )
+        (self.table, self.sites, self.prepared, self.certification)
     }
 }
 
@@ -2917,31 +2954,22 @@ fn compile_activation_renderer_inner(
         cmd.session_root(root);
     }
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
-    let offer = offer.apply_to(cmd, temp.path())?;
+    let offer = offer.prepare_admitted_turn(cmd, temp.path())?;
     let cmd = offer.command();
-    let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
-    let run = endpoint
-        .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
-            settlement(close)
-        })
-        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?;
-    diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
-    timing::log_interface_counts(&run.output.stderr);
-    forward_extract_timing(&String::from_utf8_lossy(&run.output.stderr), "extract");
-    crate::diag::decode_extract_result(
-        run.output.status.success(),
-        &run.output.stdout,
-        &run.output.stderr,
-    )
-    .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
+    let admitted = offer.execute_admitted_turn(endpoint, settlement)?;
+    let output = admitted.compiler_output();
+    timing::log_interface_counts(&output.stderr);
+    forward_extract_timing(&String::from_utf8_lossy(&output.stderr), "extract");
+    crate::diag::decode_extract_result(output.status.success(), &output.stdout, &output.stderr)
+        .map_err(|error| offer.retain_failure(admitted.directory(), &cmd, &output.stderr, error))?;
     if offer
-        .activation_preview_unavailable(temp.path())
-        .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?
+        .activation_preview_unavailable(admitted.directory())
+        .map_err(|error| offer.retain_failure(admitted.directory(), &cmd, &output.stderr, error))?
     {
         return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
     }
-    let result = decode_turn_output_dir(temp.path(), &offer, None)
-        .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
+    let result = decode_admitted_turn_output(&admitted, None)
+        .map_err(|error| offer.retain_failure(admitted.directory(), &cmd, &output.stderr, error))?;
     let TurnResult::Expr { compiled, .. } = result else {
         return Err(CompileError::ExtractFailed(
             "activation preview produced a binding or declaration".into(),
@@ -4807,39 +4835,12 @@ fn compile_turn(
         cmd.session_root(root);
     }
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
-    let ordinary_admitted = req.exact_context.is_none();
-    let offer = if ordinary_admitted {
-        offer.prepare_admitted_turn(cmd, temp.path())?
-    } else {
-        offer.apply_to(cmd, temp.path())?
-    };
+    let offer = offer.prepare_admitted_turn(cmd, temp.path())?;
     let cmd = offer.command();
-    enum TurnCompilerOutput {
-        Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
-        Direct(tidepool_extract_cmd::ExtractRun),
-    }
-    let diagnostics =
-        (!ordinary_admitted).then(|| CompilerDiagnosticCapture::start(temp.path(), &cmd));
-    let run = if ordinary_admitted {
-        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, settlement)?)
-    } else {
-        TurnCompilerOutput::Direct(
-            endpoint
-                .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
-                    settlement(close)
-                })
-                .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?,
-        )
-    };
-    let (output, elapsed, output_dir) = match &run {
-        TurnCompilerOutput::Admitted(run) => {
-            (run.compiler_output(), run.elapsed(), run.directory())
-        }
-        TurnCompilerOutput::Direct(run) => (&run.output, run.elapsed, temp.path()),
-    };
-    if let Some(diagnostics) = diagnostics {
-        diagnostics.completed(output_dir, &cmd, output.status.success(), &output.stderr);
-    }
+    let run = offer.execute_admitted_turn(endpoint, settlement)?;
+    let output = run.compiler_output();
+    let elapsed = run.elapsed();
+    let output_dir = run.directory();
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -4876,10 +4877,7 @@ fn compile_turn(
         });
     }
 
-    let decoded = match &run {
-        TurnCompilerOutput::Admitted(run) => decode_admitted_turn_output(run, None),
-        TurnCompilerOutput::Direct(_) => decode_turn_output_dir(output_dir, &offer, None),
-    };
+    let decoded = decode_admitted_turn_output(&run, None);
     let mut result = decoded.map_err(|error| TurnFailure {
         error: offer.retain_failure(
             output_dir,
@@ -4903,10 +4901,7 @@ fn compile_turn(
                 }
             }),
     })?;
-    let compile_identity = match &run {
-        TurnCompilerOutput::Admitted(run) => run.original_compile_input(),
-        TurnCompilerOutput::Direct(_) => None,
-    };
+    let compile_identity = run.original_compile_input();
     if let Some(identity) = compile_identity {
         let compiled = match &mut result {
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
@@ -5054,6 +5049,8 @@ fn compiled_native_output(
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
                 original_output: Some(Arc::clone(products)),
+                native_selection: products.completed_native_selection().cloned(),
+                native_group_proofs: Arc::from([]),
                 artifact_view: products.artifact_view().clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports().to_vec(),
@@ -5071,145 +5068,6 @@ fn compiled_native_output(
         certification.validate_checked_table(&compiled.table)?;
     }
     Ok(compiled)
-}
-
-/// Decode one item's full output directory into a [`TurnResult`]: the
-/// `TurnOut` CBOR sidecar (`turn.cbor`) plus, for a `Bind`/`Expr` verdict,
-/// `result.cbor`/`meta.cbor` off the SAME directory.
-fn decode_turn_output_dir(
-    dir: &Path,
-    offer: &SelectedModuleCandidateOffer,
-    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
-) -> Result<TurnResult, CompileError> {
-    let turn_out_path = dir.join("turn.cbor");
-    if !turn_out_path.exists() {
-        return Err(CompileError::MissingOutput(turn_out_path));
-    }
-    let turn_out_bytes = std::fs::read(&turn_out_path)?;
-    let turn_out = decode_turn_out(&turn_out_bytes)?;
-
-    match turn_out {
-        DecodedTurnOut::Decl {
-            binders,
-            items,
-            source,
-        } => Ok(TurnResult::Decl(DeclarationReceipt {
-            binders,
-            items,
-            source,
-        })),
-        DecodedTurnOut::Bind {
-            binders,
-            variant,
-            bound,
-            asks,
-            wrapped_source,
-        } => {
-            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer, admission)?;
-            Ok(TurnResult::Bind {
-                binders,
-                bound,
-                variant,
-                compiled,
-                wrapped_source,
-            })
-        }
-        DecodedTurnOut::Expr {
-            variant,
-            asks,
-            wrapped_source,
-        } => {
-            let compiled = read_compiled_turn(dir, asks, &wrapped_source, offer, admission)?;
-            Ok(TurnResult::Expr {
-                variant,
-                compiled,
-                wrapped_source,
-            })
-        }
-    }
-}
-
-/// Read one compiled artifact and register its warning metadata. `asks` comes
-/// from the already-decoded turn result, not a parallel sidecar.
-fn read_compiled_turn(
-    output_dir: &Path,
-    asks: Vec<YieldSite>,
-    wrapped_source: &str,
-    offer: &SelectedModuleCandidateOffer,
-    admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
-) -> Result<CompiledTurn, CompileError> {
-    let meta_path = output_dir.join("meta.cbor");
-    if !meta_path.exists() {
-        return Err(CompileError::MissingOutput(meta_path));
-    }
-    let cbor_read_start = std::time::Instant::now();
-    let meta_bytes = std::fs::read(&meta_path)?;
-    let cbor_read_bytes = meta_bytes.len() as u64;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_CBOR_READ,
-        cbor_read_start.elapsed(),
-        cbor_read_bytes,
-    );
-
-    let deserialize_start = std::time::Instant::now();
-    let prepared = read_prepared_program(output_dir)?;
-    let (table, warnings) =
-        tidepool_repr::serial::read_metadata_for_program(&meta_bytes, &prepared)?;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_CBOR_DESERIALIZE,
-        deserialize_start.elapsed(),
-        0,
-    );
-    // Runtime unresolved-error naming — see lib.rs twin sites.
-
-    let module = extract_module_name(wrapped_source).unwrap_or_else(|| "Input".into());
-    let source_path = output_dir.join(format!("{module}.hs"));
-    let sealed = seal_turn_outputs(
-        offer,
-        output_dir,
-        &source_path,
-        wrapped_source,
-        &prepared,
-        PREPARED_SCAFFOLD_TARGET,
-    )?
-    .map(Arc::new);
-
-    compiled_native_output(
-        &table,
-        &warnings,
-        asks,
-        prepared,
-        sealed.as_ref(),
-        admission,
-    )
-}
-
-/// Read the prepared-STG program the worker wrote for this turn. A requested
-/// program that is absent is a missing output.
-fn read_prepared_program(output_dir: &Path) -> Result<Arc<PreparedProgram>, CompileError> {
-    let path = output_dir.join(format!("{PREPARED_SCAFFOLD_TARGET}.prepared.cbor"));
-    if !path.exists() {
-        return Err(CompileError::MissingOutput(path));
-    }
-    let prepared_read_start = std::time::Instant::now();
-    let bytes = std::fs::read(&path)?;
-    let prepared_read_bytes = bytes.len() as u64;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_PREPARED_READ,
-        prepared_read_start.elapsed(),
-        prepared_read_bytes,
-    );
-    let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    parse_program(&bytes, &requirements, DecodeLimits::default())
-        .map(Arc::new)
-        .map_err(|error| CompileError::ExtractFailed(format!("{path:?}: {error}")))
 }
 
 /// The decoded shape of the `TurnOut` CBOR sidecar, before `run_turn` reads

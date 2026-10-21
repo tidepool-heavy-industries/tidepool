@@ -728,6 +728,20 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn shared_group_imports(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&'a Arc<[crate::certified_products::SelectedNativeImport]>, CompileError> {
+        if !self.target.groups().contains(&binding) {
+            return Err(failure(
+                "native source links are outside their resolved target",
+            ));
+        }
+        self.groups
+            .shared_imports(binding)
+            .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
+    }
+
     pub(crate) fn completed_selection(&self) -> Option<&'a Arc<CompletedNativeSelection>> {
         self.completed
     }
@@ -771,11 +785,13 @@ pub(crate) struct ResolvedNativeTarget<'a> {
     entry_binding: Option<NativeGroupBinding>,
 }
 
-impl ResolvedNativeTarget<'_> {
-    pub(crate) fn artifacts(&self) -> &ArtifactView {
+impl<'a> ResolvedNativeTarget<'a> {
+    pub(crate) fn artifacts(&self) -> &'a ArtifactView {
         self.owner.artifacts()
     }
+}
 
+impl ResolvedNativeTarget<'_> {
     pub(crate) fn has_only_current_source(&self, group: NativeGroupBinding) -> bool {
         self.sources
             .0

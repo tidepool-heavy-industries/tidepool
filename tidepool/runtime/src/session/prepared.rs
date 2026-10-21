@@ -13,21 +13,25 @@ use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
+#[path = "prepared/closed.rs"]
+mod closed;
+pub(super) use closed::{ClosedInstantiationPlan, ClosedNativeDefinition};
+
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
+#[cfg(test)]
+use tidepool_codegen::prepared_program::SourceInstanceDomain;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
-    InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel,
-    ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
-    PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
-    ScopedDemandedImage, ScopedSourceBinder, SourceBinder, SourceInstanceAttachment,
-    SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
+    InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, NativeInstanceAttachment,
+    NativeInstanceLease, PackageLiteral, Parcel, ParkRequest, PreparedCallOptions,
+    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as CodegenPreparedOuter, PreparedReplyEvidence, PreparedResult,
+    PreparedResultBatch, ProgramId, RunOptions, ScopedDemandedImage, ScopedSourceBinder,
+    SourceBinder, SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
 };
-#[cfg(test)]
-use tidepool_codegen::prepared_program::{ScopedCertifiedGroup, SourceInstanceDomain};
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
 // separate `tidepool_codegen` dependency of their own.
@@ -36,10 +40,10 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, CertifiedGroupCode, ConstructorIdentity,
-    ConstructorReply, DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue,
-    JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature,
-    SiteDelivery, SiteRow, SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, ConstructorIdentity, ConstructorReply,
+    DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError,
+    MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow,
+    SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
 };
 use tidepool_repr::type_graph::{
     DataView, DeclarationForm as GraphDeclarationForm, GraphLimits, TypeCursor, TypeEdge,
@@ -707,8 +711,25 @@ impl From<LinkError> for PreparedRuntimeError {
 /// The facts about an installed program the session still needs after the
 /// machine has taken its code: the declared entry and, per top-level binding,
 /// the identity and entry signature an importer links against.
+enum NativeProductProof {
+    Source {
+        _product: tidepool_toolchain::artifacts::OwnedNativeSourceProduct,
+    },
+    ClosedHome {
+        _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+        _binding: tidepool_toolchain::artifact_inventory::NativeGroupBinding,
+    },
+    Package {
+        _binding: tidepool_toolchain::artifact_inventory::PackageCodeBinding,
+    },
+    ClosedTarget {
+        _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+    },
+}
+
 struct ProgramFacts {
     native_sources: NativeSourceCustody,
+    native_product: Option<NativeProductProof>,
     entry: Option<ValueId>,
     definitions: Arc<DefinitionFacts>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
@@ -769,48 +790,11 @@ pub(crate) struct ScopedTargetImage {
     sources: NativeSourceCustody,
 }
 
-/// Immutable native definitions without runtime import or scope authority.
-struct NativeCodePlan {
-    target: ImageTarget,
-    groups: Vec<NativeGroupImage>,
-}
-
-struct NativeGroupImage {
-    code: CertifiedGroupCode,
-    image: Arc<CompiledProgram>,
-}
-
-impl NativeCodePlan {
-    fn retained_images(
-        &self,
-        registry: &Arc<ImageRegistry>,
-        resolved: &super::persistent::ResolvedCertifiedTurn,
-    ) -> Result<NativeImageBundle, PreparedRuntimeError> {
-        if self.groups.len() != resolved.groups.len()
-            || self
-                .groups
-                .iter()
-                .zip(&resolved.groups)
-                .any(|(saved, current)| saved.code != current.group().original().code_identity())
-        {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-        }
-        let target = Arc::as_ptr(&self.target.image) as usize;
-        Ok(NativeImageBundle {
-            registry: registry.clone(),
-            images: std::iter::once(self.target.image.clone())
-                .chain(self.groups.iter().map(|group| group.image.clone()))
-                .map(|image| (Arc::as_ptr(&image) as usize, image))
-                .collect(),
-            target,
-        })
-    }
-}
-
 /// Native code and source evidence from the same selected runtime group.
 pub(crate) struct SelectedNativeImage {
     native: DemandedImage,
     sources: NativeSourceCustody,
+    proof: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
 }
 
 impl SelectedNativeImage {
@@ -824,7 +808,11 @@ impl SelectedNativeImage {
                 .iter()
                 .map(|site| site.site),
         );
-        Self { native, sources }
+        Self {
+            native,
+            sources,
+            proof: None,
+        }
     }
     pub(crate) fn group(&self) -> &CertifiedGroup {
         self.native.group()
@@ -855,22 +843,6 @@ impl std::ops::Deref for ScopedTargetImage {
 }
 
 impl ScopedTargetImage {
-    /// Discard scoped admission, retaining code only. The result cannot install
-    /// or certify that its inputs form a closed runtime instantiation.
-    fn into_neutral_code(self) -> NativeCodePlan {
-        NativeCodePlan {
-            target: self.base,
-            groups: self
-                .demanded
-                .into_iter()
-                .map(|selected| NativeGroupImage {
-                    code: selected.native.group().code_identity(),
-                    image: selected.native.image().clone(),
-                })
-                .collect(),
-        }
-    }
-
     pub(crate) fn demanded(&self) -> &[SelectedNativeImage] {
         &self.demanded
     }
@@ -1048,6 +1020,10 @@ impl NativeImageBundle {
         let target = CompiledProgram::prepare_target_code(
             compiled.prepared(),
             &target_literals,
+            // Activation preview retains its source-only preparation contract.
+            // External package literals require the completed package recipe;
+            // this route cannot supply their storage or installation authority.
+            &BTreeMap::new(),
             &literals,
             registry,
         )
@@ -1204,7 +1180,7 @@ fn immutable_literal_owners(
 pub struct PreparedSourceEntry {
     compiled: Arc<super::turn::CompiledTurn>,
     registry: Arc<ImageRegistry>,
-    native: NativeCodePlan,
+    pub(super) native: Arc<ClosedInstantiationPlan>,
 }
 
 impl PreparedSourceEntry {
@@ -1243,23 +1219,11 @@ impl PreparedSourceEntry {
         ) {
             return Err(super::resident::ResidentError::UnsealedStartupEntry);
         }
-        // Resolution uses the existing source-group owner with an empty lexical
-        // environment. Any retained notebook dependency is therefore refused.
-        let state = super::persistent::PersistentSession::new(None, 0);
-        let resolved = state.resolve_certification_in(
-            tidepool_codegen::scope::ScopeId::ROOT,
-            &compiled.prepared(),
-            certification,
-        )?;
-        let target = ScopedTargetImage::compile_scoped(
-            compiled.prepared().as_ref().clone(),
-            &resolved,
-            &registry,
-        )?;
+        let native = Arc::new(ClosedInstantiationPlan::prepare(&compiled, &registry)?);
         Ok(Self {
             compiled,
             registry,
-            native: target.into_neutral_code(),
+            native,
         })
     }
 
@@ -1298,13 +1262,6 @@ impl PreparedSourceEntry {
 
     pub fn image_registry(&self) -> &Arc<ImageRegistry> {
         &self.registry
-    }
-
-    pub(super) fn retained_native_images(
-        &self,
-        resolved: &super::persistent::ResolvedCertifiedTurn,
-    ) -> Result<NativeImageBundle, PreparedRuntimeError> {
-        self.native.retained_images(&self.registry, resolved)
     }
 }
 
@@ -1474,10 +1431,11 @@ impl ImageTarget {
             .into_iter()
             .zip(resolved.groups.iter().cloned())
             .map(|(image, group)| {
-                let (group, sources) = group.into_parts();
+                let (group, sources, proof) = group.into_parts();
                 ScopedDemandedImage::admit(image, group).map(|image| SelectedNativeImage {
                     native: image.into_image(),
                     sources,
+                    proof,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1670,8 +1628,8 @@ pub(crate) struct CertifiedTurnInstall {
     pub(super) native_sources: NativeSourceCustody,
     pub target: ProgramId,
     pub groups: Vec<ProgramId>,
-    pub leases: Vec<SourceInstanceLease>,
-    pub domain_leases: Vec<SourceInstanceAttachment>,
+    pub leases: Vec<NativeInstanceLease>,
+    pub domain_leases: Vec<NativeInstanceAttachment>,
     admitted: Vec<AdmittedProgramFacts>,
     package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
     exports: BTreeMap<SymbolIdentity, CodeExport>,
@@ -2065,6 +2023,7 @@ impl ProgramFacts {
             native_sources: NativeSourceCustody::unknown(
                 definitions.sites.iter().map(|site| site.site),
             ),
+            native_product: None,
             entry,
             settled: None,
             definitions,
@@ -4542,8 +4501,8 @@ impl PreparedEngine {
         bindings: &mut BindingTable,
         scopes: &tidepool_codegen::scope::ScopeTree,
         scope: tidepool_codegen::scope::ScopeId,
-        attachments: Vec<SourceInstanceAttachment>,
-    ) -> Result<tidepool_codegen::binding_table::SourceScopeAdmission, Vec<SourceInstanceAttachment>>
+        attachments: Vec<NativeInstanceAttachment>,
+    ) -> Result<tidepool_codegen::binding_table::SourceScopeAdmission, Vec<NativeInstanceAttachment>>
     {
         bindings.register_source_instances_in_domains(scopes, scope, attachments, &self.machine)
     }
@@ -4882,7 +4841,7 @@ impl PreparedEngine {
         }
 
         let mut late_leases = BTreeMap::new();
-        let mut late_attachments = Vec::<SourceInstanceAttachment>::new();
+        let mut late_attachments = Vec::<NativeInstanceAttachment>::new();
         let mut late_roots = BTreeMap::<
             (
                 tidepool_codegen::prepared_program::GroupInstanceId,
@@ -4890,7 +4849,7 @@ impl PreparedEngine {
             ),
             usize,
         >::new();
-        let mut new_late_roots = Vec::<SourceInstanceLease>::new();
+        let mut new_late_roots = Vec::<NativeInstanceLease>::new();
         for (key, requested) in late_sources {
             let physical = (requested.anchor().instance(), requested.binder().clone());
             let existing = bindings.retained_source_sibling_attachment(requested);
@@ -4920,7 +4879,10 @@ impl PreparedEngine {
                 new_late_roots.push(lease.clone());
             }
             late_roots.entry(physical).or_insert(late_attachments.len());
-            late_leases.insert(key, lease);
+            let NativeInstanceLease::Home(home) = lease else {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            };
+            late_leases.insert(key, home);
             late_attachments.push(attachment);
         }
 
@@ -4932,6 +4894,10 @@ impl PreparedEngine {
                     facts.native_sources = selected
                         .sources
                         .select(facts.sites.iter().map(|site| site.site));
+                    facts.native_product = selected
+                        .proof
+                        .clone()
+                        .map(|product| NativeProductProof::Source { _product: product });
                     facts
                 })
                 .collect();
@@ -5230,11 +5196,29 @@ impl PreparedEngine {
             let requests = source_needed
                 .iter()
                 .map(|binder| {
-                    let &(group, _) = source
+                    let &(group, value) = source
                         .get(binder)
                         .expect("source edge selected an in-batch binder");
-                    BatchLeaseRequest::for_demanded(group, &demanded[group].native, &binder.source)
-                        .map_err(PreparedRuntimeError::Install)
+                    let proof = demanded[group]
+                        .proof
+                        .as_ref()
+                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    let binding = proof.binding();
+                    let key = tidepool_codegen::prepared_program::NativeHomeBinding {
+                        issuer: tidepool_codegen::prepared_program::NativeArtifactBinding {
+                            artifact: binding.binding.artifact().0,
+                            selection: binding.binding.selection().0,
+                        },
+                        original_ordinal: binding.original_ordinal,
+                    };
+                    BatchLeaseRequest::for_home(
+                        group,
+                        &demanded[group].native,
+                        key,
+                        binder.domain,
+                        value,
+                    )
+                    .map_err(PreparedRuntimeError::Install)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let installed = self
@@ -5381,7 +5365,7 @@ impl PreparedEngine {
     pub(crate) fn abort_certified_turn(
         &mut self,
         staged: CertifiedTurnInstall,
-        tokens: Vec<SourceInstanceLease>,
+        tokens: Vec<NativeInstanceLease>,
     ) -> Result<(), PreparedRuntimeError> {
         assert!(
             staged.leases.is_empty(),
@@ -7008,7 +6992,8 @@ pub(super) mod tests {
                     let certification = super::super::turn::TurnCertification::from_artifacts(
                         &products.artifacts,
                         target,
-                    );
+                    )
+                    .unwrap();
                     let resolved = raw
                         .resolve_certification_in(scope, target.prepared.prepared(), &certification)
                         .unwrap();
@@ -7586,7 +7571,7 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(installed.groups.len(), 2);
         assert_eq!(installed.leases.len(), 1);
-        assert_eq!(installed.leases[0].binder().binder.occurrence, "reader");
+        assert_eq!(installed.leases[0].export().occurrence, "reader");
         let leases = std::mem::take(&mut installed.leases);
         let literal_program = installed.groups[1];
         let id = engine.commit_certified_turn(installed);
@@ -8134,7 +8119,7 @@ pub(super) mod tests {
             let lease = installed
                 .leases
                 .iter()
-                .find(|lease| lease.binder().binder == testing::identity("Fixture", name))
+                .find(|lease| lease.export() == &testing::identity("Fixture", name))
                 .unwrap();
             assert_eq!(lease.value(), id);
             let direct = engine
@@ -8397,7 +8382,10 @@ pub(super) mod tests {
             .all(|id| engine.programs[id].entry.is_none()));
         let selected = installed_leases
             .iter()
-            .find(|lease| lease.binder() == &root)
+            .find_map(|lease| match lease {
+                NativeInstanceLease::Home(home) if home.binder() == &root => Some(home),
+                NativeInstanceLease::Home(_) | NativeInstanceLease::Package(_) => None,
+            })
             .unwrap();
         let result = engine
             .machine
@@ -8890,12 +8878,30 @@ pub(super) mod tests {
                 .find(|source| source.instance == key.instance.raw())
                 .unwrap();
             assert_eq!(source.machine_incarnation, incarnation.0);
-            assert_eq!(source.module_version, key.binder.version.0);
-            assert_eq!(source.binder.unit, key.binder.binder.unit);
-            assert_eq!(source.binder.module, key.binder.binder.module);
-            assert_eq!(source.binder.namespace, key.binder.binder.namespace);
-            assert_eq!(source.binder.occurrence, key.binder.binder.occurrence);
-            assert_eq!(source.binder.record_parent, key.binder.binder.record_parent);
+            assert_eq!(source.value, key.value.0);
+            let NativeInstanceLease::Home(lease) = session.bindings().native_instance(key).unwrap()
+            else {
+                panic!("HOME fixture published package custody");
+            };
+            let super::super::recovery::RecoveryNativeBinding::Home {
+                artifact,
+                selection,
+                original_ordinal,
+                module_version,
+                binder,
+            } = &source.binding
+            else {
+                panic!("HOME recovery observation lost its kind");
+            };
+            assert_eq!(*artifact, lease.binding().issuer.artifact);
+            assert_eq!(*selection, lease.binding().issuer.selection);
+            assert_eq!(*original_ordinal, lease.original_ordinal());
+            assert_eq!(*module_version, lease.binder().version.0);
+            assert_eq!(binder.unit, lease.binder().binder.unit);
+            assert_eq!(binder.module, lease.binder().binder.module);
+            assert_eq!(binder.namespace, lease.binder().binder.namespace);
+            assert_eq!(binder.occurrence, lease.binder().binder.occurrence);
+            assert_eq!(binder.record_parent, lease.binder().binder.record_parent);
         }
         let stale = PublicationDecision::new();
         assert!(matches!(
@@ -9201,7 +9207,9 @@ pub(super) mod tests {
         assert_eq!(first_leases.len(), 1);
         assert_eq!(engine.commit_certified_turn(first), first_target);
         assert!(engine.unpin(first_target));
-        let anchor = first_leases.pop().unwrap();
+        let NativeInstanceLease::Home(anchor) = first_leases.pop().unwrap() else {
+            panic!("HOME fixture selected package custody");
+        };
         let existing = BTreeMap::from([(binder("a"), anchor.clone())]);
         let anchors = HashMap::from([((groups[0].owner().clone(), 11), anchor.clone())]);
         let mut wrong_owner = groups[0].owner().clone();

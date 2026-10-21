@@ -14240,6 +14240,73 @@ pub(crate) mod tests {
             .available_original_sources(std::slice::from_ref(product), &operation)
             .unwrap();
         let sources = membership.overlay(&request.groups, &operation).unwrap();
+        // This partial issuer owns 7's graph, not merely a Full carrier with a
+        // narrower execution choice. Code membership for 11 cannot invent its
+        // absent dependency proof, even for an unused fresh sibling body.
+        let held_groups = source
+            .artifacts()
+            .original_group_bindings(&operation)
+            .unwrap();
+        assert_eq!(held_groups.len(), 1);
+        assert_eq!(held_groups[0].binding.artifact(), original.artifact);
+        assert_eq!(held_groups[0].original_ordinal, 7);
+        let fresh = fixture_finalized_product_with_requirements(
+            full_native_fixture(
+                "LatentSiblingConsumer",
+                vec![
+                    (
+                        2,
+                        vec![PendingImportOwner::Source {
+                            owner: product.owner().clone(),
+                            original_ordinal: 7,
+                            binder: testing::identity("BoundOriginal", "entry_7"),
+                        }],
+                    ),
+                    (
+                        3,
+                        vec![PendingImportOwner::Source {
+                            owner: product.owner().clone(),
+                            original_ordinal: 11,
+                            binder: testing::identity("BoundOriginal", "entry_11"),
+                        }],
+                    ),
+                ],
+                8,
+            ),
+            producer,
+            Some(BTreeMap::from([(
+                (owner.unit.clone(), owner.module.clone()),
+                product.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
+        let fresh_entry = Arc::new(ArtifactEntry::original(producer, fresh.clone()).unwrap());
+        let mut fresh_selection = selection.clone();
+        fresh_selection
+            .admit_current(
+                fresh.owner(),
+                ProductOrigin::Fresh,
+                fresh.module_interface().unwrap(),
+                &operation,
+            )
+            .unwrap();
+        fresh_selection
+            .bind_produced_originals(&IssuedGroupCandidates::bind(Arc::from([]), &[fresh]).unwrap())
+            .unwrap();
+        let before = source.artifacts().capture_graph_selection();
+        let refused = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut fresh_selection,
+            source.artifacts(),
+            vec![fresh_entry],
+        );
+        assert!(
+            matches!(refused,
+            Err(crate::CompileError::ArtifactInventory(ref error))
+                if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: original.artifact, original_ordinal: 11,
+                }),
+            "unused sibling still needs its actual child proof: {refused:?}"
+        );
+        assert_eq!(source.artifacts().capture_graph_selection(), before);
         let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
         for (reference, ordinal) in references.into_iter().zip([7, 11]) {
             let result = resolve_receipt_owner_with_validation(

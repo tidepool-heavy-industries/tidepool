@@ -18,9 +18,11 @@ use tidepool_codegen::binding_table::{
     BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
+#[cfg(test)]
+use tidepool_codegen::prepared_program::SourceInstanceLease;
 use tidepool_codegen::prepared_program::{
-    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId, ResidencyCounts,
-    SourceBinder, SourceGroupOutline, SourceInstanceLease,
+    ImageRegistry, InheritedSourceDemand, NativeInstanceLease, PendingGroupInventory, ProgramId,
+    ResidencyCounts, SourceBinder, SourceGroupOutline,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -73,6 +75,7 @@ pub(crate) struct ResolvedCertifiedTurn {
 pub(crate) struct ResolvedSourceGroup {
     group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
     sources: NativeSourceCustody,
+    proof: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
 }
 
 impl ResolvedSourceGroup {
@@ -88,7 +91,11 @@ impl ResolvedSourceGroup {
                 .iter()
                 .map(|site| site.site),
         );
-        Self { group, sources }
+        Self {
+            group,
+            sources,
+            proof: None,
+        }
     }
     pub(crate) fn group(&self) -> &tidepool_codegen::prepared_program::ScopedCertifiedGroup {
         &self.group
@@ -99,8 +106,9 @@ impl ResolvedSourceGroup {
     ) -> (
         tidepool_codegen::prepared_program::ScopedCertifiedGroup,
         NativeSourceCustody,
+        Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
     ) {
-        (self.group, self.sources)
+        (self.group, self.sources, self.proof)
     }
 }
 
@@ -480,7 +488,7 @@ struct RecoveryInitialization {
     scope: ScopeId,
     owner_epoch: u64,
     machine_incarnation: Option<tidepool_repr::SessionId>,
-    sources: Vec<SourceInstanceLease>,
+    sources: Vec<NativeInstanceLease>,
 }
 
 /// The committed fact from moving one name into the persistent binding store.
@@ -522,10 +530,6 @@ impl Drop for PersistentSession {
 enum NativeInstallationSource<'a> {
     Unwitnessed,
     Checked(super::turn::CurrentNativeSources<'a>),
-    ClosedEntry {
-        entry: &'a super::PreparedSourceEntry,
-        source: &'a super::resident::CapturedSourceOrigin,
-    },
 }
 
 impl PersistentSession {
@@ -884,24 +888,6 @@ impl PersistentSession {
         )
     }
 
-    pub(super) fn resolve_closed_source_entry_in(
-        &self,
-        scope: ScopeId,
-        entry: &super::PreparedSourceEntry,
-        source: &super::resident::CapturedSourceOrigin,
-    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
-        let code = entry.compiled().code();
-        let certification = code
-            .certification()
-            .expect("PreparedSourceEntry retains sealed original certification");
-        self.resolve_certification_with_sources(
-            scope,
-            code.prepared(),
-            certification,
-            NativeInstallationSource::ClosedEntry { entry, source },
-        )
-    }
-
     pub(crate) fn resolve_runtime_target_in(
         &self,
         scope: ScopeId,
@@ -913,7 +899,8 @@ impl PersistentSession {
             .targets
             .get(name)
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let certification = TurnCertification::from_artifacts(&targets.artifacts, target);
+        let certification = TurnCertification::from_artifacts(&targets.artifacts, target)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         let current = super::turn::CurrentNativeSources::from_targets(targets, name)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         self.resolve_certification_with_sources(
@@ -1111,16 +1098,39 @@ impl PersistentSession {
             .map(|scoped| scoped.into_demand())
             .collect();
         let mut groups = Vec::with_capacity(plans.len());
+        let products = certification
+            .original_output
+            .as_ref()
+            .map(|output| output.native_source_products())
+            .transpose()
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         for plan in plans {
             let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
             groups.push(ResolvedSourceGroup {
+                proof: match (&products, &origin) {
+                    (Some(products), _) => super::turn::selected_group_proof(products, pending),
+                    (None, NativeInstallationSource::Checked(current)) => {
+                        current.group_proof(pending)
+                    }
+                    (None, _) => {
+                        let mut proofs = certification
+                            .native_group_proofs
+                            .iter()
+                            .filter(|proof| proof.matches_group(pending));
+                        let proof = proofs.next();
+                        if proofs.next().is_some() {
+                            Err(crate::CompileError::ExtractFailed(
+                                "native group requires an exact selected binding occurrence".into(),
+                            ))
+                        } else {
+                            Ok(proof.cloned())
+                        }
+                    }
+                }
+                .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?,
                 sources: match &origin {
                     NativeInstallationSource::Checked(current) => current.group(pending),
-                    NativeInstallationSource::ClosedEntry { entry, source } => {
-                        debug_assert!(std::ptr::eq(prepared, entry.compiled().prepared().as_ref()));
-                        source.for_closed_entry_sites(pending.group().definitions().sites())
-                    }
                     NativeInstallationSource::Unwitnessed => NativeSourceCustody::unknown(
                         pending
                             .group()
@@ -1144,9 +1154,6 @@ impl PersistentSession {
             groups,
             target_sources: match &origin {
                 NativeInstallationSource::Checked(current) => current.target(),
-                NativeInstallationSource::ClosedEntry { source, .. } => {
-                    source.for_closed_entry_sites(prepared.sites())
-                }
                 NativeInstallationSource::Unwitnessed => {
                     NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
                 }
@@ -1258,7 +1265,7 @@ impl PersistentSession {
             .or(self.machine.as_mut())
             .expect("certified machine exists or was constructed");
         engine.set_invocation_cancel(self.invocation_cancel.clone());
-        let mut staged = engine.install_certified_turn(
+        let staged = engine.install_certified_turn(
             target,
             source_evidence,
             inherited_needed,
@@ -1267,6 +1274,54 @@ impl PersistentSession {
             &self.bindings,
             &exact_sources,
         )?;
+        self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
+    }
+
+    pub(super) fn install_closed_turn_in(
+        &mut self,
+        scope: ScopeId,
+        metadata: &DataConTable,
+        plan: &super::prepared::ClosedInstantiationPlan,
+        origin: &super::resident::CapturedSourceOrigin,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
+        self.admit_source_work_in(scope)?;
+        let selection = self
+            .bindings
+            .native_domain_selection_in(&self.scopes, scope)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        let admitted_metadata = self.stage_install_metadata(
+            Some(metadata),
+            plan.target_constructors(),
+            plan.dependency_constructors(),
+        )?;
+        let mut bootstrap = if self.machine.is_none() {
+            Some(PreparedEngine::empty_certified(
+                self.nursery_size,
+                self.image_registry.clone(),
+            )?)
+        } else {
+            None
+        };
+        let engine = bootstrap
+            .as_mut()
+            .or(self.machine.as_mut())
+            .expect("closed machine exists or was constructed");
+        engine.set_invocation_cancel(self.invocation_cancel.clone());
+        let staged = engine.install_closed_turn(plan, origin, &selection, &self.bindings)?;
+        self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
+    }
+
+    fn finish_certified_turn_in(
+        &mut self,
+        scope: ScopeId,
+        mut bootstrap: Option<PreparedEngine>,
+        mut staged: super::prepared::CertifiedTurnInstall,
+        admitted_metadata: DataConTable,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
+        let engine = bootstrap
+            .as_mut()
+            .or(self.machine.as_mut())
+            .expect("staged machine remains installed");
         let tokens = std::mem::take(&mut staged.leases);
         let admitted = engine
             .admit_source_instances(
@@ -1384,10 +1439,7 @@ impl PersistentSession {
         released
     }
 
-    fn release_source_instance_roots(
-        &mut self,
-        leases: Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
-    ) -> usize {
+    fn release_source_instance_roots(&mut self, leases: Vec<NativeInstanceLease>) -> usize {
         let mut released = 0;
         for lease in leases {
             if self
@@ -3157,18 +3209,46 @@ impl PersistentSession {
                             path: self.lib().root.clone(),
                             detail: "native source lease has no owning machine incarnation".into(),
                         })?;
-                let identity = key.binder.binder.clone();
+                let lease = self.bindings.native_instance(&key).ok_or_else(|| {
+                    SessionError::RecoveryManifest {
+                        path: self.lib().root.clone(),
+                        detail: "native instance observation lost its physical custody owner"
+                            .into(),
+                    }
+                })?;
+                let identity = lease.export();
+                let binder = super::recovery::RecoverySourceIdentity {
+                    unit: identity.unit.clone(),
+                    module: identity.module.clone(),
+                    namespace: identity.namespace.clone(),
+                    occurrence: identity.occurrence.clone(),
+                    record_parent: identity.record_parent.clone(),
+                };
+                let binding = match lease {
+                    NativeInstanceLease::Home(home) => {
+                        let key = home.binding();
+                        super::recovery::RecoveryNativeBinding::Home {
+                            artifact: key.issuer.artifact,
+                            selection: key.issuer.selection,
+                            original_ordinal: key.original_ordinal,
+                            module_version: home.binder().version.0,
+                            binder,
+                        }
+                    }
+                    NativeInstanceLease::Package(package) => {
+                        let key = package.binding();
+                        super::recovery::RecoveryNativeBinding::Package {
+                            artifact: key.artifact,
+                            selection: key.selection,
+                            binder,
+                        }
+                    }
+                };
                 Ok(super::recovery::RecoveryPublicSourceInstance {
                     machine_incarnation: incarnation.0,
                     instance: key.instance.raw(),
-                    module_version: key.binder.version.0,
-                    binder: super::recovery::RecoverySourceIdentity {
-                        unit: identity.unit,
-                        module: identity.module,
-                        namespace: identity.namespace,
-                        occurrence: identity.occurrence,
-                        record_parent: identity.record_parent,
-                    },
+                    value: key.value.0,
+                    binding,
                 })
             })
             .collect()
@@ -3352,7 +3432,7 @@ impl PersistentSession {
     fn validate_recovery_native_dependencies(
         &self,
         scope: ScopeId,
-        sources: &[SourceInstanceLease],
+        sources: &[NativeInstanceLease],
     ) -> Result<(), SessionError> {
         if !sources.is_empty()
             && (self.machine_incarnation.is_none()
@@ -3408,10 +3488,9 @@ impl PersistentSession {
                 .zip(&initialization.sources)
                 .any(|(current, original)| {
                     current.instance() != original.instance()
-                        || current.binder() != original.binder()
+                        || current.export() != original.export()
                         || current.handle() != original.handle()
-                        || current.owner() != original.owner()
-                        || current.original_ordinal() != original.original_ordinal()
+                        || current.binding_key() != original.binding_key()
                         || current.value() != original.value()
                         || current.entry_signature() != original.entry_signature()
                 })
@@ -6727,6 +6806,12 @@ mod checkpoint_scope_tests {
         session
             .bindings
             .selected_source_instances_in(&session.scopes, scope)
+            .into_iter()
+            .map(|lease| match lease {
+                NativeInstanceLease::Home(home) => home,
+                NativeInstanceLease::Package(_) => panic!("HOME fixture selected package custody"),
+            })
+            .collect()
     }
 
     fn mint_fixture_origin(
@@ -6860,8 +6945,7 @@ mod checkpoint_scope_tests {
                 .iter()
                 .all(|lease| original
                     .iter()
-                    .any(|key| key.instance == lease.instance()
-                        && key.binder.as_ref() == lease.binder())));
+                    .any(|key| key.instance == lease.instance() && key.value == lease.value())));
             assert!(session.prepared_mut().unwrap().unpin(reused));
         }
         let fresh = session.mint_detached_scope(public).unwrap();
@@ -6935,12 +7019,20 @@ mod checkpoint_scope_tests {
         let later = session.mint_detached_scope(public).unwrap();
         let (late_target, late_keys) = install_selected_source_fixture(&mut session, later, "late");
         assert_eq!(late_keys.len(), 1);
-        assert_eq!(late_keys[0].binder.binder.occurrence, "late");
+        assert_eq!(
+            session
+                .bindings
+                .native_instance(&late_keys[0])
+                .unwrap()
+                .export()
+                .occurrence,
+            "late"
+        );
         for original in &keys_a {
             assert!(selected_sources(&session, later)
                 .iter()
                 .any(|lease| lease.instance() == original.instance
-                    && lease.binder() == original.binder.as_ref()));
+                    && lease.value() == original.value));
         }
         for target in [target_a, target_b, late_target] {
             assert!(session.prepared_mut().unwrap().unpin(target));

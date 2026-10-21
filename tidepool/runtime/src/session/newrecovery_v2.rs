@@ -90,8 +90,25 @@ pub(crate) struct RecoverySourceIdentity {
 pub(crate) struct RecoveryPublicSourceInstance {
     pub machine_incarnation: u64,
     pub instance: u32,
-    pub module_version: [u8; 32],
-    pub binder: RecoverySourceIdentity,
+    pub value: u32,
+    pub binding: RecoveryNativeBinding,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RecoveryNativeBinding {
+    Home {
+        artifact: [u8; 32],
+        selection: [u8; 32],
+        original_ordinal: u32,
+        module_version: [u8; 32],
+        binder: RecoverySourceIdentity,
+    },
+    Package {
+        artifact: [u8; 32],
+        selection: [u8; 32],
+        binder: RecoverySourceIdentity,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

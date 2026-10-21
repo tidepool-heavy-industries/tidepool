@@ -72,7 +72,7 @@ pub(crate) fn observe_context_materialization<T>(
     (value, work)
 }
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DomainSnapshot {
@@ -1606,13 +1606,19 @@ mod tests {
         let source = RecoveryPublicSourceInstance {
             machine_incarnation: u64::MAX,
             instance: u32::MAX,
-            module_version: [255; 32],
-            binder: RecoverySourceIdentity {
-                unit: "main".into(),
-                module: "Own".into(),
-                namespace: "value".into(),
-                occurrence: "entry".into(),
-                record_parent: None,
+            value: u32::MAX,
+            binding: RecoveryNativeBinding::Home {
+                artifact: [253; 32],
+                selection: [254; 32],
+                original_ordinal: u32::MAX,
+                module_version: [255; 32],
+                binder: RecoverySourceIdentity {
+                    unit: "main".into(),
+                    module: "Own".into(),
+                    namespace: "value".into(),
+                    occurrence: "entry".into(),
+                    record_parent: None,
+                },
             },
         };
         for owning in [&a, &b] {
@@ -1763,17 +1769,33 @@ mod tests {
         sources: std::collections::BTreeSet<RecoveryPublicSourceInstance>,
     }
     fn source(identity: u64) -> RecoveryPublicSourceInstance {
+        let binder = RecoverySourceIdentity {
+            unit: "main".into(),
+            module: "Own".into(),
+            namespace: "value".into(),
+            occurrence: format!("source{identity}"),
+            record_parent: None,
+        };
+        let binding = if identity % 2 == 0 {
+            RecoveryNativeBinding::Home {
+                artifact: [1; 32],
+                selection: [identity as u8; 32],
+                original_ordinal: u32::MAX,
+                module_version: [identity as u8; 32],
+                binder,
+            }
+        } else {
+            RecoveryNativeBinding::Package {
+                artifact: [2; 32],
+                selection: [identity as u8; 32],
+                binder,
+            }
+        };
         RecoveryPublicSourceInstance {
             machine_incarnation: identity,
             instance: u32::MAX,
-            module_version: [identity as u8; 32],
-            binder: RecoverySourceIdentity {
-                unit: "main".into(),
-                module: "Own".into(),
-                namespace: "value".into(),
-                occurrence: format!("source{identity}"),
-                record_parent: None,
-            },
+            value: u32::MAX,
+            binding,
         }
     }
     fn surface_operation() -> impl Strategy<Value = (SurfacePacketDisposition, u64, SurfaceEdit)> {

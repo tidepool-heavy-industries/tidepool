@@ -233,29 +233,31 @@ fn deserialize_request_type_signatures<'de, D: serde::Deserializer<'de>>(
 /// layout. The final live input is response authority, never authored progress.
 #[derive(Debug)]
 pub struct RequestInputLayout<'a> {
-    site: &'a YieldSite,
+    input: &'a crate::checked_cell::CanonicalInputTypeWitness,
+    progress: Option<&'a crate::checked_cell::CanonicalInputTypeWitness>,
+    response: &'a crate::checked_cell::CanonicalInputTypeWitness,
     signatures: &'a crate::checked_cell::RequestTypeSignatures,
 }
 
 impl<'a> RequestInputLayout<'a> {
     pub fn input(&self) -> &'a crate::checked_cell::CanonicalInputTypeWitness {
-        self.site.input_type_witnesses[0].as_ref().unwrap()
+        self.input
     }
 
     pub fn progress(&self) -> Option<&'a crate::checked_cell::CanonicalInputTypeWitness> {
-        self.signatures
-            .progress()
-            .map(|_| self.site.input_type_witnesses[1].as_ref().unwrap())
+        self.progress
     }
 
     pub fn response_index(&self) -> usize {
-        self.site.inputs.len() - 1
+        if self.progress.is_some() {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn response(&self) -> &'a crate::checked_cell::CanonicalInputTypeWitness {
-        self.site.input_type_witnesses[self.response_index()]
-            .as_ref()
-            .unwrap()
+        self.response
     }
 
     pub fn signatures(&self) -> &'a crate::checked_cell::RequestTypeSignatures {
@@ -267,7 +269,9 @@ impl<'a> RequestInputLayout<'a> {
 pub enum RequestInputLayoutError {
     #[error("request site {site} has no compiler-issued request signatures")]
     MissingSignatures { site: u64 },
-    #[error("request site {site} describes {actual} live input types, expected {expected} from its compiler-issued request signatures")]
+    #[error(
+        "request site {site} describes {actual} live input types, expected {expected} from its compiler-issued request signatures"
+    )]
     InputArity {
         site: u64,
         actual: usize,
@@ -313,13 +317,19 @@ impl YieldSite {
                 expected,
             });
         }
-        for (index, witness) in self.input_type_witnesses.iter().enumerate() {
-            if witness.is_none() {
-                return Err(RequestInputLayoutError::MissingWitness { site, index });
-            }
-        }
+        let witness = |index: usize| {
+            self.input_type_witnesses[index]
+                .as_ref()
+                .ok_or(RequestInputLayoutError::MissingWitness { site, index })
+        };
         Ok(RequestInputLayout {
-            site: self,
+            input: witness(0)?,
+            progress: if signatures.progress().is_some() {
+                Some(witness(1)?)
+            } else {
+                None
+            },
+            response: witness(expected - 1)?,
             signatures,
         })
     }
@@ -3581,7 +3591,42 @@ pub struct ResolvedNativeSourceProduct<'a> {
     group: &'a certified_products::PendingCertifiedGroup,
     binding: crate::artifact_inventory::NativeGroupBinding,
     physical_current: bool,
-    imports: &'a [certified_products::SelectedNativeImport],
+    imports: &'a Arc<[certified_products::SelectedNativeImport]>,
+    artifacts: &'a crate::artifact_inventory::ArtifactView,
+}
+
+/// Owned custody of one selected row and its exact ordered links. The acquired
+/// inventory remains held when the output that lent this row is released.
+#[derive(Clone)]
+pub struct OwnedNativeSourceProduct {
+    group: certified_products::PendingCertifiedGroup,
+    binding: crate::artifact_inventory::NativeGroupBinding,
+    imports: Arc<[certified_products::SelectedNativeImport]>,
+    _artifacts: crate::artifact_inventory::ArtifactView,
+}
+
+impl OwnedNativeSourceProduct {
+    pub fn matches_group(&self, group: &certified_products::PendingCertifiedGroup) -> bool {
+        self.group.same_issuance(group)
+    }
+    pub fn group(&self) -> &certified_products::PendingCertifiedGroup {
+        &self.group
+    }
+    pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
+        self.binding
+    }
+    pub fn imports(&self) -> &[certified_products::SelectedNativeImport] {
+        &self.imports
+    }
+}
+
+impl std::fmt::Debug for OwnedNativeSourceProduct {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwnedNativeSourceProduct")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
@@ -3594,6 +3639,15 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
     }
     pub fn imports(&self) -> &'a [certified_products::SelectedNativeImport] {
         self.imports
+    }
+
+    pub fn to_owned(&self) -> OwnedNativeSourceProduct {
+        OwnedNativeSourceProduct {
+            group: self.group.clone(),
+            binding: self.binding,
+            imports: Arc::clone(self.imports),
+            _artifacts: self.artifacts.clone(),
+        }
     }
 
     pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
@@ -3638,13 +3692,14 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         let mut rows = Vec::with_capacity(resolved.groups().len());
         for binding in resolved.groups().iter().copied() {
             let group = resolved.group(binding)?;
-            let imports = resolved.group_imports(binding)?;
+            let imports = resolved.shared_group_imports(binding)?;
             let physical_current = resolved.has_only_current_source(binding);
             rows.push(ResolvedNativeSourceProduct {
                 group,
                 binding,
                 physical_current,
                 imports,
+                artifacts: resolved.artifacts(),
             });
         }
         Ok(Self {
@@ -3666,15 +3721,38 @@ impl CompiledArtifacts {
             .targets
             .get(name)
             .ok_or_else(|| CompileError::ExtractFailed("native source target is absent".into()))?;
-        let Some(inputs) = &target.native_inputs else {
+        target.native_source_products()
+    }
+}
+
+impl TargetArtifact {
+    /// Borrow the completion issued for this exact physical target. It is
+    /// separate from broader Original availability and retained byte custody.
+    pub fn completed_native_selection(
+        &self,
+    ) -> Option<&Arc<crate::artifact_inventory::CompletedNativeSelection>> {
+        self.native_inputs.as_ref()?.completed_selection()
+    }
+
+    pub fn native_source_products(
+        &self,
+    ) -> Result<Option<ResolvedNativeSourceProducts<'_>>, CompileError> {
+        let Some(inputs) = &self.native_inputs else {
             return Ok(None);
         };
-        ResolvedNativeSourceProducts::issue(inputs.resolve_sources()?, target.prepared.prepared())
+        ResolvedNativeSourceProducts::issue(inputs.resolve_sources()?, self.prepared.prepared())
             .map(Some)
     }
 }
 
 impl SealedTurnProducts {
+    /// Borrow this output's already issued target links without resolving them again.
+    pub fn completed_native_selection(
+        &self,
+    ) -> Option<&Arc<crate::artifact_inventory::CompletedNativeSelection>> {
+        self.target.completed_selection()
+    }
+
     /// The execution context belongs to this completed output, including its
     /// issued native custody independently of the original compilation inputs.
     pub fn original_execution_context(

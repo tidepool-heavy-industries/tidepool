@@ -2114,6 +2114,46 @@ impl CheckedTurnCompletion {
             super::persistent::ValidatedRetainedSourceRef<'_>,
         ) -> Option<super::resident::NativeSourceCustody>,
     ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
+        self.install_native_in(session, scope, |session| {
+            session.install_certified_turn_in(
+                scope,
+                metadata,
+                target,
+                source_evidence,
+                inherited_needed,
+                retained_sources,
+            )
+        })
+    }
+
+    pub(crate) fn install_closed_turn_in(
+        &self,
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        metadata: &tidepool_repr::DataConTable,
+        plan: &super::prepared::ClosedInstantiationPlan,
+    ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
+        self.install_native_in(session, scope, |session| {
+            session.install_closed_turn_in(
+                scope,
+                metadata,
+                plan,
+                self.prefix.captured_source_origin(),
+            )
+        })
+    }
+
+    fn install_native_in(
+        &self,
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        install: impl FnOnce(
+            &mut PersistentSession,
+        ) -> Result<
+            super::persistent::InstalledCertifiedTurn,
+            super::prepared::PreparedRuntimeError,
+        >,
+    ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
         let association = {
             let state = self.prefix.state.lock();
             if !self.prefix.admission.belongs_to(session)
@@ -2153,14 +2193,7 @@ impl CheckedTurnCompletion {
         // This owner earns and retains the actual source transaction claims.
         // They permit finishing an admitted installation across a later fence;
         // an outer gate lock here would recursively lock the same admissions.
-        let installed = session.install_certified_turn_in(
-            scope,
-            metadata,
-            target,
-            source_evidence,
-            inherited_needed,
-            retained_sources,
-        )?;
+        let installed = install(session)?;
         if let Some(association) = association {
             let refreshed = session.compile_view_key_in(scope).map(|key| {
                 let mut base = association.base.clone();
@@ -2537,18 +2570,7 @@ fn checked_snapshot_with_basis(
     for key in &native_shares {
         frame(b"native");
         frame(&key.instance.raw().to_le_bytes());
-        frame(&key.binder.version.0);
-        frame(key.binder.binder.unit.as_bytes());
-        frame(key.binder.binder.module.as_bytes());
-        frame(key.binder.binder.namespace.as_bytes());
-        frame(key.binder.binder.occurrence.as_bytes());
-        match &key.binder.binder.record_parent {
-            Some(parent) => {
-                frame(&[1]);
-                frame(parent.as_bytes());
-            }
-            None => frame(&[0]),
-        }
+        frame(&key.value.0.to_le_bytes());
     }
     RuntimeCheckedPrefixSnapshot {
         session_root,
@@ -4838,14 +4860,7 @@ impl PersistentSession {
         }
         for key in &native_shares {
             frame(&key.instance.raw().to_le_bytes());
-            frame(&key.binder.version.0);
-            frame(key.binder.binder.unit.as_bytes());
-            frame(key.binder.binder.module.as_bytes());
-            frame(key.binder.binder.namespace.as_bytes());
-            frame(key.binder.binder.occurrence.as_bytes());
-            if let Some(parent) = &key.binder.binder.record_parent {
-                frame(parent.as_bytes());
-            }
+            frame(&key.value.0.to_le_bytes());
         }
         purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);

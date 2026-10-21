@@ -1,6 +1,10 @@
 //! Atomic installation of mutually importing native group images.
 
-use super::super::{DemandedImage, InheritedSourceDemand, SourceBinder, SourceInstanceLease};
+use super::super::{
+    DemandedHomeImage, DemandedImage, DemandedPackageImage, InheritedSourceDemand,
+    NativeArtifactBinding, NativeHomeBinding, NativeInstanceLease, PackageInstanceLease,
+    SourceBinder, SourceInstanceLease,
+};
 use super::*;
 use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
 
@@ -23,55 +27,292 @@ pub struct BatchProgram {
     pub imports: Vec<BatchImport>,
 }
 
+impl BatchProgram {
+    /// Validate a closed code-only recipe without allocating machine state.
+    /// Captured live values must use the separate installation boundary.
+    pub fn validate_closed(batch: &[Self]) -> Result<(), ExecutionError> {
+        for (index, candidate) in batch.iter().enumerate() {
+            if candidate.imports.len() != candidate.image.import_slots.len() {
+                return Err(ExecutionError::Invariant(
+                    "batch import count differs from image",
+                ));
+            }
+            for (position, (slot, origin)) in candidate
+                .image
+                .import_slots
+                .iter()
+                .zip(&candidate.imports)
+                .enumerate()
+            {
+                let BatchImport::Source { group, binding } = origin else {
+                    return Err(ExecutionError::Invariant(
+                        "closed native recipe contains a live import",
+                    ));
+                };
+                Self::validate_source(batch, index, position, slot, *group, *binding)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_source(
+        batch: &[Self],
+        index: usize,
+        import_position: usize,
+        slot: &super::super::plan::ImportSlot,
+        group: usize,
+        binding: ValueId,
+    ) -> Result<(), ExecutionError> {
+        let target = batch
+            .get(group)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let export = target
+            .image
+            .top_exports
+            .get(&binding)
+            .ok_or(ExecutionError::MissingEntry(binding))?;
+        if export.identity != slot.identity
+            || slot
+                .entry_signature
+                .as_ref()
+                .is_some_and(|expected| export.entry_signature.as_ref() != Some(expected))
+        {
+            return Err(ExecutionError::BatchImportContract(Box::new(
+                super::super::BatchImportContractMismatch {
+                    program: index,
+                    import_position,
+                    owner: None,
+                    selected: super::super::BatchImportSelection::Source { group, binding },
+                    required_identity: slot.identity.clone(),
+                    offered_identity: Some(export.identity.clone()),
+                    required_signature: slot.entry_signature.clone(),
+                    offered_signature: export.entry_signature.clone(),
+                },
+            )));
+        }
+        if export.rep != slot.rep {
+            return Err(ExecutionError::ImportShape {
+                identity: Box::new(slot.identity.clone()),
+                expected: ImportShapeFact::Representation(slot.rep),
+                found: ImportShapeFact::Representation(export.rep),
+            });
+        }
+        if slot.required_evaluated && !export.evaluated {
+            return Err(ExecutionError::ImportShape {
+                identity: Box::new(slot.identity.clone()),
+                expected: ImportShapeFact::Evaluated(true),
+                found: ImportShapeFact::Evaluated(false),
+            });
+        }
+        if let Some(literal) = &slot.literal {
+            if target.image.byte_tops.get(&binding).map(Arc::as_ref) != Some(literal.as_ref()) {
+                return Err(ExecutionError::BatchSourceContract(Box::new(
+                    slot.identity.clone(),
+                )));
+            }
+        }
+        if let Some(source) = &slot.literal_source {
+            if target
+                .image
+                .source_literal_producer
+                .as_ref()
+                .is_none_or(|(value, producer)| *value != binding || producer != source)
+                || export.identity != source.binder.binder
+                || source.binder.version != source.owner.module_version
+            {
+                return Err(ExecutionError::BatchSourceContract(Box::new(
+                    slot.identity.clone(),
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One exact source binder to root as part of the atomic install. Only
 /// requested binders receive a handle; unused exports acquire no lease.
 pub struct BatchLeaseRequest {
     group: usize,
+    export: NativeExportRequest,
+}
+
+/// One exact immutable export request, usable for a fresh batch or a sibling
+/// root in an already selected physical instance.
+pub struct NativeExportRequest {
     image: Arc<CompiledProgram>,
-    owner: CachedHomeOwner,
-    original_ordinal: u32,
-    binder: SourceBinder,
+    evidence: LeaseRequestEvidence,
     binding: ValueId,
     domain: super::super::SourceInstanceDomain,
 }
 
-impl BatchLeaseRequest {
-    /// Select a binder from the exact certified image that will be installed
-    /// at `group`. The batch preflight also verifies pointer-identical image
-    /// custody before any machine mutation.
-    pub fn for_demanded(
-        group: usize,
+enum LeaseRequestEvidence {
+    Home {
+        key: NativeHomeBinding,
+        owner: CachedHomeOwner,
+        binder: SourceBinder,
+    },
+    Package {
+        key: NativeArtifactBinding,
+        image: Arc<DemandedPackageImage>,
+    },
+}
+
+impl NativeExportRequest {
+    pub fn for_home(
         demanded: &DemandedImage,
-        binder: &SourceBinder,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
     ) -> Result<Self, ExecutionError> {
-        let source = demanded.group();
-        let definitions = source.definitions();
-        let value = definitions
-            .bindings()
-            .iter()
-            .flat_map(|group| match group {
-                tidepool_repr::execution_schema::Group::NonRecursive(top) => {
-                    std::slice::from_ref(top)
-                }
-                tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
-            })
-            .find(|top| top.identity == binder.binder && source.binders().contains(&top.identity))
-            .map(|top| top.binding.id)
-            .ok_or_else(|| ExecutionError::BatchSourceContract(Box::new(binder.binder.clone())))?;
-        if binder.version != source.owner().module_version {
+        Self::home_export(
+            &demanded.group().code_identity(),
+            demanded.image(),
+            key,
+            domain,
+            value,
+        )
+    }
+
+    pub fn for_home_code(
+        demanded: &DemandedHomeImage,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        Self::home_export(demanded.code(), demanded.image(), key, domain, value)
+    }
+
+    fn home_export(
+        source: &tidepool_repr::execution_schema::CertifiedGroupCode,
+        image: &Arc<CompiledProgram>,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        let export = image
+            .top_exports
+            .get(&value)
+            .ok_or(ExecutionError::MissingEntry(value))?;
+        if source.original_ordinal() != key.original_ordinal
+            || !source.binders().contains(&export.identity)
+        {
             return Err(ExecutionError::BatchSourceContract(Box::new(
-                binder.binder.clone(),
+                export.identity.clone(),
             )));
         }
         Ok(Self {
-            group,
-            image: Arc::clone(demanded.image()),
-            owner: source.owner().clone(),
-            original_ordinal: source.original_ordinal(),
-            binder: binder.clone(),
+            image: Arc::clone(image),
             binding: value,
-            domain: demanded.domain(),
+            domain,
+            evidence: LeaseRequestEvidence::Home {
+                key,
+                owner: source.owner().clone(),
+                binder: SourceBinder {
+                    version: source.owner().module_version.clone(),
+                    binder: export.identity.clone(),
+                },
+            },
         })
+    }
+
+    pub fn for_package(
+        demanded: Arc<DemandedPackageImage>,
+        key: NativeArtifactBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        let export = demanded
+            .image()
+            .top_exports
+            .get(&value)
+            .ok_or(ExecutionError::MissingEntry(value))?;
+        if !demanded.group().binders().contains(&export.identity) {
+            return Err(ExecutionError::BatchSourceContract(Box::new(
+                export.identity.clone(),
+            )));
+        }
+        Ok(Self {
+            image: Arc::clone(demanded.image()),
+            binding: value,
+            domain,
+            evidence: LeaseRequestEvidence::Package {
+                key,
+                image: demanded,
+            },
+        })
+    }
+    fn key(&self) -> super::super::NativeBindingKey {
+        match &self.evidence {
+            LeaseRequestEvidence::Home { key, .. } => super::super::NativeBindingKey::Home(*key),
+            LeaseRequestEvidence::Package { key, .. } => {
+                super::super::NativeBindingKey::Package(*key)
+            }
+        }
+    }
+    fn into_lease(self, instance: GroupInstanceId, handle: PreparedHandle) -> NativeInstanceLease {
+        let export = &self.image.top_exports[&self.binding];
+        match self.evidence {
+            LeaseRequestEvidence::Home { key, owner, binder } => {
+                NativeInstanceLease::Home(SourceInstanceLease::new(
+                    instance,
+                    key,
+                    owner,
+                    key.original_ordinal,
+                    binder,
+                    self.binding,
+                    handle,
+                    export.entry_signature.clone(),
+                ))
+            }
+            LeaseRequestEvidence::Package { key, image } => {
+                NativeInstanceLease::Package(PackageInstanceLease::new(
+                    instance,
+                    key,
+                    image,
+                    export.identity.clone(),
+                    self.binding,
+                    handle,
+                    export.entry_signature.clone(),
+                ))
+            }
+        }
+    }
+}
+
+impl BatchLeaseRequest {
+    pub fn new(group: usize, export: NativeExportRequest) -> Self {
+        Self { group, export }
+    }
+    pub fn for_home(
+        group: usize,
+        demanded: &DemandedImage,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        NativeExportRequest::for_home(demanded, key, domain, value)
+            .map(|export| Self::new(group, export))
+    }
+    pub fn for_home_code(
+        group: usize,
+        demanded: &DemandedHomeImage,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        NativeExportRequest::for_home_code(demanded, key, domain, value)
+            .map(|export| Self::new(group, export))
+    }
+
+    pub fn for_package(
+        group: usize,
+        demanded: Arc<DemandedPackageImage>,
+        key: NativeArtifactBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        NativeExportRequest::for_package(demanded, key, domain, value)
+            .map(|export| Self::new(group, export))
     }
 }
 
@@ -81,8 +322,8 @@ pub struct BatchInstallReceipt {
     /// executable imports it transitively consumes, including itself. Indices
     /// refer to the same ordered `programs` receipt.
     pub causal_members: Vec<BTreeSet<usize>>,
-    pub leases: Vec<SourceInstanceLease>,
-    pub source_attachments: Vec<super::super::SourceInstanceAttachment>,
+    pub leases: Vec<NativeInstanceLease>,
+    pub source_attachments: Vec<super::super::NativeInstanceAttachment>,
 }
 
 struct Candidate {
@@ -96,6 +337,35 @@ struct Candidate {
 }
 
 impl PreparedMachine<'_> {
+    /// Root a newly requested export in the exact already selected instance.
+    /// Registration must still validate the retained anchor in the target domain.
+    pub fn retain_native_sibling(
+        &mut self,
+        anchor: &NativeInstanceLease,
+        request: NativeExportRequest,
+    ) -> Result<super::super::NativeInstanceAttachment, ExecutionError> {
+        self.handle_is_evaluated(anchor.handle())?;
+        let image = self
+            .programs
+            .get(&anchor.instance().program())
+            .ok_or(ExecutionError::UnknownProgram(anchor.instance().program()))?
+            .program
+            .get();
+        if anchor.binding_key() != request.key() || !std::ptr::eq(image, request.image.as_ref()) {
+            return Err(ExecutionError::BatchSourceContract(Box::new(
+                anchor.export().clone(),
+            )));
+        }
+        let domain = request.domain;
+        let handle = self.retain_top(anchor.instance().program(), request.binding)?;
+        let lease = request.into_lease(anchor.instance(), handle);
+        Ok(super::super::NativeInstanceAttachment::from_anchor(
+            domain,
+            lease,
+            anchor.clone(),
+        ))
+    }
+
     /// Root a newly demanded sibling binder from an exact lexical group
     /// instance already held by `anchor`. The original program's CAFs stay
     /// shared; this creates one new scoped handle without reinstalling code.
@@ -134,6 +404,7 @@ impl PreparedMachine<'_> {
         let handle = self.retain_top(anchor.instance().program(), value)?;
         Ok(SourceInstanceLease::new(
             anchor.instance(),
+            anchor.binding(),
             requested.owner().clone(),
             requested.original_ordinal(),
             binder.clone(),
@@ -147,10 +418,10 @@ impl PreparedMachine<'_> {
     pub fn retain_certified_source_attachment(
         &mut self,
         requested: &InheritedSourceDemand,
-    ) -> Result<super::super::SourceInstanceAttachment, ExecutionError> {
+    ) -> Result<super::super::NativeInstanceAttachment, ExecutionError> {
         let lease = self.retain_certified_source_top(requested)?;
         Ok(
-            super::super::SourceInstanceAttachment::inherited(requested, lease)
+            super::super::NativeInstanceAttachment::inherited(requested, lease)
                 .expect("machine validated exact sibling provenance"),
         )
     }
@@ -159,8 +430,8 @@ impl PreparedMachine<'_> {
     pub fn share_certified_source_attachment(
         &self,
         requested: &InheritedSourceDemand,
-        staged: &super::super::SourceInstanceAttachment,
-    ) -> Result<super::super::SourceInstanceAttachment, ExecutionError> {
+        staged: &super::super::NativeInstanceAttachment,
+    ) -> Result<super::super::NativeInstanceAttachment, ExecutionError> {
         let token = staged.lease();
         self.handle_is_evaluated(token.handle())?;
         self.handle_is_evaluated(requested.anchor().handle())?;
@@ -184,7 +455,12 @@ impl PreparedMachine<'_> {
                 requested.binder().binder.clone(),
             )));
         }
-        super::super::SourceInstanceAttachment::inherited(requested, token.clone()).map_err(|_| {
+        let NativeInstanceLease::Home(token) = token else {
+            return Err(ExecutionError::BatchSourceContract(Box::new(
+                requested.binder().binder.clone(),
+            )));
+        };
+        super::super::NativeInstanceAttachment::inherited(requested, token.clone()).map_err(|_| {
             ExecutionError::BatchSourceContract(Box::new(requested.binder().binder.clone()))
         })
     }
@@ -192,7 +468,7 @@ impl PreparedMachine<'_> {
     /// Validate a one-shot source attachment against this still-live machine.
     pub fn validate_source_attachment(
         &self,
-        attachment: &super::super::SourceInstanceAttachment,
+        attachment: &super::super::NativeInstanceAttachment,
     ) -> Result<(), ExecutionError> {
         let lease = attachment.lease();
         self.handle_is_evaluated(lease.handle())?;
@@ -202,16 +478,24 @@ impl PreparedMachine<'_> {
             .ok_or(ExecutionError::UnknownProgram(lease.instance().program()))?
             .program
             .get();
-        let mismatch =
-            || ExecutionError::BatchSourceContract(Box::new(lease.binder().binder.clone()));
-        if image.certified_source.as_ref()
-            != Some(&(lease.owner().clone(), lease.original_ordinal()))
-            || lease.binder().version != lease.owner().module_version
-        {
-            return Err(mismatch());
+        let mismatch = || ExecutionError::BatchSourceContract(Box::new(lease.export().clone()));
+        match lease {
+            NativeInstanceLease::Home(home) => {
+                if image.certified_source.as_ref()
+                    != Some(&(home.owner().clone(), home.original_ordinal()))
+                    || home.binder().version != home.owner().module_version
+                {
+                    return Err(mismatch());
+                }
+            }
+            NativeInstanceLease::Package(package) => {
+                if !std::ptr::eq(image, package.image().image().as_ref()) {
+                    return Err(mismatch());
+                }
+            }
         }
         let top = image.top_exports.get(&lease.value()).ok_or_else(mismatch)?;
-        if top.identity != lease.binder().binder
+        if &top.identity != lease.export()
             || top.entry_signature.as_ref() != lease.entry_signature()
         {
             return Err(mismatch());
@@ -259,7 +543,7 @@ impl PreparedMachine<'_> {
 
         let mut requested = HashSet::new();
         for request in &requests {
-            if !requested.insert((request.group, request.binding)) {
+            if !requested.insert((request.group, request.export.binding)) {
                 return Err(ExecutionError::Invariant("duplicate source lease request"));
             }
             let candidate = batch.get(request.group).ok_or(ExecutionError::Invariant(
@@ -268,19 +552,31 @@ impl PreparedMachine<'_> {
             let export = candidate
                 .image
                 .top_exports
-                .get(&request.binding)
-                .ok_or(ExecutionError::MissingEntry(request.binding))?;
-            if candidate.image.byte_tops.contains_key(&request.binding)
-                || !Arc::ptr_eq(&candidate.image, &request.image)
-                || candidate.image.certified_source.as_ref()
-                    != Some(&(request.owner.clone(), request.original_ordinal))
-                || export.identity != request.binder.binder
-                || request.binder.version != request.owner.module_version
-                || request.binder.binder.unit != request.owner.unit
-                || request.binder.binder.module != request.owner.module
+                .get(&request.export.binding)
+                .ok_or(ExecutionError::MissingEntry(request.export.binding))?;
+            let valid_evidence = match &request.export.evidence {
+                LeaseRequestEvidence::Home { key, owner, binder } => {
+                    candidate.image.certified_source.as_ref()
+                        == Some(&(owner.clone(), key.original_ordinal))
+                        && export.identity == binder.binder
+                        && binder.version == owner.module_version
+                        && binder.binder.unit == owner.unit
+                        && binder.binder.module == owner.module
+                }
+                LeaseRequestEvidence::Package { image, .. } => {
+                    Arc::ptr_eq(image.image(), &candidate.image)
+                        && image.group().binders().contains(&export.identity)
+                }
+            };
+            if candidate
+                .image
+                .byte_tops
+                .contains_key(&request.export.binding)
+                || !Arc::ptr_eq(&candidate.image, &request.export.image)
+                || !valid_evidence
             {
                 return Err(ExecutionError::BatchSourceContract(Box::new(
-                    request.binder.binder.clone(),
+                    export.identity.clone(),
                 )));
             }
         }
@@ -304,69 +600,14 @@ impl PreparedMachine<'_> {
             {
                 match origin {
                     BatchImport::Source { group, binding } => {
-                        let target = batch
-                            .get(*group)
-                            .ok_or(ExecutionError::UnknownPreparedHandle)?;
-                        let export = target
-                            .image
-                            .top_exports
-                            .get(binding)
-                            .ok_or(ExecutionError::MissingEntry(*binding))?;
-                        if export.identity != slot.identity
-                            || slot.entry_signature.as_ref().is_some_and(|expected| {
-                                export.entry_signature.as_ref() != Some(expected)
-                            })
-                        {
-                            return Err(ExecutionError::BatchImportContract(Box::new(
-                                super::super::BatchImportContractMismatch {
-                                    program: index,
-                                    import_position,
-                                    owner: None,
-                                    selected: super::super::BatchImportSelection::Source {
-                                        group: *group,
-                                        binding: *binding,
-                                    },
-                                    required_identity: slot.identity.clone(),
-                                    offered_identity: Some(export.identity.clone()),
-                                    required_signature: slot.entry_signature.clone(),
-                                    offered_signature: export.entry_signature.clone(),
-                                },
-                            )));
-                        }
-                        if export.rep != slot.rep {
-                            return Err(ExecutionError::ImportShape {
-                                identity: Box::new(slot.identity.clone()),
-                                expected: ImportShapeFact::Representation(slot.rep),
-                                found: ImportShapeFact::Representation(export.rep),
-                            });
-                        }
-                        if slot.required_evaluated && !export.evaluated {
-                            return Err(ExecutionError::ImportShape {
-                                identity: Box::new(slot.identity.clone()),
-                                expected: ImportShapeFact::Evaluated(true),
-                                found: ImportShapeFact::Evaluated(false),
-                            });
-                        }
-                        if let Some(literal) = &slot.literal {
-                            if target.image.byte_tops.get(binding).map(Arc::as_ref)
-                                != Some(literal.as_ref())
-                            {
-                                return Err(ExecutionError::BatchSourceContract(Box::new(
-                                    slot.identity.clone(),
-                                )));
-                            }
-                        }
-                        if let Some(source) = &slot.literal_source {
-                            if target.image.source_literal_producer.as_ref().is_none_or(
-                                |(value, producer)| value != binding || producer != source,
-                            ) || export.identity != source.binder.binder
-                                || source.binder.version != source.owner.module_version
-                            {
-                                return Err(ExecutionError::BatchSourceContract(Box::new(
-                                    slot.identity.clone(),
-                                )));
-                            }
-                        }
+                        BatchProgram::validate_source(
+                            batch.as_slice(),
+                            index,
+                            import_position,
+                            slot,
+                            *group,
+                            *binding,
+                        )?;
                     }
                     BatchImport::Existing {
                         handle,
@@ -632,19 +873,12 @@ impl PreparedMachine<'_> {
             .into_iter()
             .zip(handles)
             .map(|(request, handle)| {
-                let installed = &self.programs[&ids[request.group]];
-                let export = &installed.program.get().top_exports[&request.binding];
-                let lease = SourceInstanceLease::new(
-                    GroupInstanceId::from(ids[request.group]),
-                    request.owner,
-                    request.original_ordinal,
-                    request.binder,
-                    request.binding,
-                    handle,
-                    export.entry_signature.clone(),
-                );
-                source_attachments.push(super::super::SourceInstanceAttachment::installed(
-                    request.domain,
+                let domain = request.export.domain;
+                let lease = request
+                    .export
+                    .into_lease(GroupInstanceId::from(ids[request.group]), handle);
+                source_attachments.push(super::super::NativeInstanceAttachment::installed(
+                    domain,
                     lease.clone(),
                 ));
                 lease
@@ -666,14 +900,14 @@ impl PreparedMachine<'_> {
     ) -> Result<(), ExecutionError> {
         for request in requests {
             let candidate = &candidates[request.group];
-            let export = &candidate.image.top_exports[&request.binding];
-            let slot = candidate.image.top_slots[&request.binding];
+            let export = &candidate.image.top_exports[&request.export.binding];
+            let slot = candidate.image.top_slots[&request.export.binding];
             let word = candidate
                 .roots
                 .read(slot)
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
             if word == 0 {
-                return Err(ExecutionError::MissingEntry(request.binding));
+                return Err(ExecutionError::MissingEntry(request.export.binding));
             }
             // Candidate objects are fully initialized. No collection runs
             // before commit or rollback, and rollback releases this root.
@@ -1545,7 +1779,20 @@ mod tests {
                 CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
             })
             .unwrap();
-        let lease = BatchLeaseRequest::for_demanded(0, &images[0], &binder).unwrap();
+        let lease = BatchLeaseRequest::for_home(
+            0,
+            &images[0],
+            NativeHomeBinding {
+                issuer: NativeArtifactBinding {
+                    artifact: [1; 32],
+                    selection: [2; 32],
+                },
+                original_ordinal: images[0].group().original_ordinal(),
+            },
+            images[0].domain(),
+            ValueId(0),
+        )
+        .unwrap();
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
@@ -1573,7 +1820,7 @@ mod tests {
             panic!("one requested source binder must be materialized");
         };
         assert_eq!(source_lease.instance().program(), installed.programs[0]);
-        assert_eq!(source_lease.binder(), &binder);
+        assert_eq!(source_lease.export(), &binder.binder);
         let target_result = machine
             .run_entry_retained(
                 installed.programs[1],
@@ -1593,6 +1840,146 @@ mod tests {
             machine.handle_current_pointer(*returned),
             machine.handle_current_pointer(source_lease.handle())
         );
+        assert!(machine.release(*returned));
+        assert!(machine.release(source_lease.handle()));
+    }
+
+    #[test]
+    fn neutral_home_image_installs_exact_root_and_executes_without_live_import_ids() {
+        let groups = [certified_caf_group()];
+        let binder = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "caf"),
+        };
+        let registry = ImageRegistry::new();
+        let neutral = DemandedHomeImage::prepare(
+            groups[0].code_identity(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap();
+        let legacy = DemandedImage::compile_source_with_literals(
+            groups[0].clone(),
+            &registry,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(neutral.image(), legacy.image()));
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+        };
+        wire.globals.push(GlobalDecl {
+            identity: binder.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let target = registry
+            .get_or_compile_prepared(&prepared, || {
+                CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
+            })
+            .unwrap();
+        let lease = BatchLeaseRequest::for_home_code(
+            0,
+            &neutral,
+            NativeHomeBinding {
+                issuer: NativeArtifactBinding {
+                    artifact: [1; 32],
+                    selection: [2; 32],
+                },
+                original_ordinal: neutral.code().original_ordinal(),
+            },
+            super::super::super::SourceInstanceDomain::single(),
+            ValueId(0),
+        )
+        .unwrap();
+        assert!(matches!(
+            NativeExportRequest::for_home_code(
+                &neutral,
+                NativeHomeBinding {
+                    issuer: NativeArtifactBinding {
+                        artifact: [1; 32],
+                        selection: [2; 32]
+                    },
+                    original_ordinal: neutral.code().original_ordinal() + 1
+                },
+                super::super::super::SourceInstanceDomain::single(),
+                ValueId(0),
+            ),
+            Err(ExecutionError::BatchSourceContract(_))
+        ));
+        assert!(matches!(
+            NativeExportRequest::for_home_code(
+                &neutral,
+                NativeHomeBinding {
+                    issuer: NativeArtifactBinding {
+                        artifact: [1; 32],
+                        selection: [2; 32]
+                    },
+                    original_ordinal: neutral.code().original_ordinal()
+                },
+                super::super::super::SourceInstanceDomain::single(),
+                ValueId(999),
+            ),
+            Err(ExecutionError::MissingEntry(ValueId(999)))
+        ));
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let installed = machine
+            .install_shared_batch_with_leases(
+                vec![
+                    BatchProgram {
+                        image: Arc::clone(neutral.image()),
+                        imports: vec![],
+                    },
+                    BatchProgram {
+                        image: target,
+                        imports: vec![BatchImport::Source {
+                            group: 0,
+                            binding: ValueId(0),
+                        }],
+                    },
+                ],
+                vec![lease],
+            )
+            .unwrap();
+        assert_eq!(installed.programs.len(), 2);
+        let [source_lease] = installed.leases.as_slice() else {
+            panic!("one requested source binder must be materialized");
+        };
+        assert_eq!(source_lease.instance().program(), installed.programs[0]);
+        assert_eq!(source_lease.export(), &binder.binder);
+        assert!(!machine.handle_is_evaluated(source_lease.handle()).unwrap());
+        let target_result = machine
+            .run_entry_retained(
+                installed.programs[1],
+                prepared.entry(),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(returned)] = target_result.values.as_slice() else {
+            panic!("target must return its certified source CAF");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*returned),
+            machine.handle_current_pointer(source_lease.handle())
+        );
+        assert!(machine.handle_is_evaluated(source_lease.handle()).unwrap());
         assert!(machine.release(*returned));
         assert!(machine.release(source_lease.handle()));
     }
@@ -1819,13 +2206,18 @@ mod tests {
         let selected = &images[0];
         let image = Arc::clone(selected.image());
         let request = || {
-            BatchLeaseRequest::for_demanded(
+            BatchLeaseRequest::for_home(
                 0,
                 selected,
-                &SourceBinder {
-                    version: ModuleVersion([1; 32]),
-                    binder: testing::identity("Fixture", "caf"),
+                NativeHomeBinding {
+                    issuer: NativeArtifactBinding {
+                        artifact: [1; 32],
+                        selection: [2; 32],
+                    },
+                    original_ordinal: selected.group().original_ordinal(),
                 },
+                selected.domain(),
+                ValueId(0),
             )
             .unwrap()
         };
@@ -1840,7 +2232,10 @@ mod tests {
         })
         .unwrap();
         let mut mislabeled = request();
-        mislabeled.owner.product_sha256 = [9; 32];
+        let LeaseRequestEvidence::Home { owner, .. } = &mut mislabeled.export.evidence else {
+            panic!("HOME fixture");
+        };
+        owner.product_sha256 = [9; 32];
         assert!(matches!(
             machine.install_shared_batch_with_leases(batch(), vec![mislabeled]),
             Err(ExecutionError::BatchSourceContract(_))

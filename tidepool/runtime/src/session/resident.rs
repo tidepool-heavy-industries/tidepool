@@ -179,16 +179,17 @@ impl CapturedSourceOrigin {
         source.admitted_original_source().map(Self)
     }
 
-    // Only the closed source-entry installer calls this for definitions that
-    // its fresh native batch is about to instantiate. Existing physical imports
+    // A closed selection lends only definitions that its native batch is
+    // about to instantiate freshly. Existing physical imports
     // retain their own ProgramFacts in the batch installer.
-    pub(super) fn for_closed_entry_sites(
+    pub(super) fn for_closed_definition(
         &self,
-        sites: &[tidepool_repr::execution_schema::SiteRow],
+        definition: super::prepared::ClosedNativeDefinition<'_>,
     ) -> NativeSourceCustody {
         NativeSourceCustody {
             sites: Arc::new(
-                sites
+                definition
+                    .sites()
                     .iter()
                     .map(|site| (site.site, RuntimeSourceOrigin::Known(self.0.clone())))
                     .collect(),
@@ -3187,7 +3188,16 @@ impl PreparedCheckedTurn {
 struct AdmittedTurnCode<'a> {
     code: TurnCode<'a>,
     scope: ScopeId,
-    resolved: Option<super::persistent::ResolvedCertifiedTurn>,
+    resolved: NativeTurnAdmission,
+}
+
+enum NativeTurnAdmission {
+    Portable,
+    Scoped(super::persistent::ResolvedCertifiedTurn),
+    Closed {
+        plan: Arc<super::prepared::ClosedInstantiationPlan>,
+        origin: CapturedSourceOrigin,
+    },
 }
 
 /// Fallible compiler/display composition completed before native installation.
@@ -3901,6 +3911,39 @@ struct ParkedContinuation {
     provenance: Arc<ProgramProvenance>,
     // The native frame owns this lease until exact retirement or machine loss.
     resource_owners: Vec<ContinuationResourceOwner>,
+}
+
+/// Metadata authenticated for the actual live frame's compiler-issued site.
+struct AuthenticatedParkedSite<'a> {
+    site: u64,
+    metadata: &'a YieldSite,
+    interfaces: &'a AuthenticatedInputContext,
+    original_sources: &'a NativeSourceCustody,
+}
+
+impl AuthenticatedParkedSite<'_> {
+    fn canonical_input(
+        &self,
+        input: usize,
+    ) -> Result<&tidepool_toolchain::checked_cell::CanonicalInputTypeWitness, ResidentError> {
+        if self.metadata.input_type_witnesses.len() != self.metadata.inputs.len() {
+            return Err(ResidentError::InvalidActivationInput { site: self.site });
+        }
+        self.metadata
+            .input_type_witnesses
+            .get(input)
+            .and_then(Option::as_ref)
+            .ok_or(ResidentError::MissingActivationInputWitness { site: self.site })
+    }
+
+    fn singleton_input(
+        &self,
+    ) -> Result<&tidepool_toolchain::checked_cell::CanonicalInputTypeWitness, ResidentError> {
+        if self.metadata.inputs.len() != 1 {
+            return Err(ResidentError::InvalidActivationInput { site: self.site });
+        }
+        self.canonical_input(0)
+    }
 }
 
 /// A resident JIT session: one long-lived [`PreparedEngine`] whose heap and
@@ -5592,6 +5635,45 @@ where
         Ok(RequestReceiverEntry { custody, realm })
     }
 
+    fn authenticated_parked_site(
+        &self,
+        continuation: &str,
+        expected_site: Option<u64>,
+    ) -> Result<AuthenticatedParkedSite<'_>, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput {
+            site: expected_site.unwrap_or(0),
+        };
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == continuation)
+            .ok_or_else(invalid)?;
+        let site = self
+            .state
+            .prepared()
+            .and_then(|engine| engine.parked_site(entry.id))
+            .ok_or_else(invalid)?;
+        if expected_site.is_some_and(|expected| expected != site) {
+            return Err(invalid());
+        }
+        let interfaces = entry
+            .provenance
+            .authenticated_inputs
+            .get(&site)
+            .ok_or(ResidentError::UnauthenticatedActivationInputWitness { site })?;
+        let metadata = entry
+            .provenance
+            .sites
+            .get(&site)
+            .ok_or(ResidentError::InvalidActivationInput { site })?;
+        Ok(AuthenticatedParkedSite {
+            site,
+            metadata,
+            interfaces,
+            original_sources: &entry.provenance.original_sources,
+        })
+    }
+
     /// Capture the live payload and its input type from the same original
     /// parked request. The affine token retains the requesting program's
     /// provenance independently of the actor that will mount the value.
@@ -5602,26 +5684,10 @@ where
         site: u64,
     ) -> Result<RuntimeActivationInput, ResidentError> {
         let invalid = || ResidentError::InvalidActivationInput { site };
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == hole.cont_id())
-            .ok_or_else(invalid)?;
-        let parked_site = self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.parked_site(entry.id))
-            .ok_or_else(invalid)?;
-        if parked_site != site {
-            return Err(invalid());
-        }
-        let original_source = self.parked_original_source(hole)?;
-        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        if !provenance.authenticated_inputs.contains_key(&site) {
-            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
-        }
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let layout = metadata
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        let original_source = parked.original_sources.require_unique(site)?;
+        let layout = parked
+            .metadata
             .request_input_layout()
             .map_err(|error| match error {
                 crate::RequestInputLayoutError::WitnessArity { .. }
@@ -5634,14 +5700,13 @@ where
         let input_type = input_type_witness.signature().presentation().to_owned();
         let signatures = layout.signatures().clone();
         let progress_type_witness = layout.progress().map(|witness| Arc::new(witness.clone()));
-        let interfaces = provenance
-            .authenticated_inputs
-            .get(&site)
-            .ok_or_else(invalid)?;
+        let interfaces = parked.interfaces;
         let execution_owner = interfaces.execution.require_unique(site)?;
         let original_execution = execution_owner.context.clone();
         let type_evidence = self
-            .request_site_type_evidence(site)
+            .state
+            .prepared()
+            .and_then(|engine| engine.request_site_type_evidence(site))
             .ok_or_else(invalid)?
             .authenticate_request_types(signatures, &interfaces.types)
             .map_err(SessionError::Compile)?;
@@ -5679,29 +5744,8 @@ where
         continuation: &str,
     ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
     {
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == continuation)
-            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
-        let site = self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.parked_site(entry.id))
-            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
-        let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = Arc::clone(&entry.provenance);
-        if !provenance.authenticated_inputs.contains_key(&site) {
-            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
-        }
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.inputs.len() != 1 || metadata.input_type_witnesses.len() != 1 {
-            return Err(invalid());
-        }
-        let witness = metadata.input_type_witnesses[0]
-            .as_ref()
-            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
-        Ok(Arc::new(witness.clone()))
+        let parked = self.authenticated_parked_site(continuation, None)?;
+        Ok(Arc::new(parked.singleton_input()?.clone()))
     }
 
     pub fn capture_progress_publication(
@@ -5719,42 +5763,6 @@ where
         })
     }
 
-    fn parked_canonical_input_witness(
-        &mut self,
-        continuation: &str,
-        site: u64,
-        input: usize,
-    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
-    {
-        let invalid = || ResidentError::InvalidActivationInput { site };
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == continuation)
-            .ok_or_else(invalid)?;
-        if self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.parked_site(entry.id))
-            != Some(site)
-        {
-            return Err(invalid());
-        }
-        if !entry.provenance.authenticated_inputs.contains_key(&site) {
-            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
-        }
-        let metadata = entry.provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.input_type_witnesses.len() != metadata.inputs.len() {
-            return Err(invalid());
-        }
-        let witness = metadata
-            .input_type_witnesses
-            .get(input)
-            .and_then(Option::as_ref)
-            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
-        Ok(Arc::new(witness.clone()))
-    }
-
     /// Admission uses the submitted original site's final canonical response
     /// input, while its static unit reply remains independent.
     pub fn request_result_type_witness(
@@ -5764,10 +5772,12 @@ where
     ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
     {
         let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let layout = metadata.request_input_layout().map_err(|_| invalid())?;
-        self.parked_canonical_input_witness(hole.cont_id(), site, layout.response_index())
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        let layout = parked
+            .metadata
+            .request_input_layout()
+            .map_err(|_| invalid())?;
+        Ok(Arc::new(layout.response().clone()))
     }
 
     /// An observer's own parked typed helper issues its expected result type.
@@ -5787,13 +5797,8 @@ where
         hole: &ResidentHole,
     ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
     {
-        let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.inputs.len() != 1 {
-            return Err(invalid());
-        }
-        self.parked_canonical_input_witness(hole.cont_id(), site, 0)
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        Ok(Arc::new(parked.singleton_input()?.clone()))
     }
 
     pub fn capture_result_publication(
@@ -5819,7 +5824,8 @@ where
         if actual != site {
             return Err(invalid());
         }
-        let type_witness = self.parked_canonical_input_witness(hole.cont_id(), site, input)?;
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        let type_witness = Arc::new(parked.canonical_input(input)?.clone());
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?
             .ok_or_else(invalid)?;
@@ -7068,6 +7074,7 @@ where
             .table()
             .with_json_layout(json_runtime_layout_optional(code.prepared()));
         let (_constructor_table, _sites, prepared, certification) = code.into_parts();
+        let prepared = Arc::unwrap_or_clone(prepared);
         let (program, source_keys) = if let Some(certification) = certification.as_ref() {
             let resolved = self
                 .state
@@ -7600,7 +7607,7 @@ where
     }
 
     fn admit_turn_code_in<'a>(
-        &self,
+        &mut self,
         scope: ScopeId,
         code: TurnCode<'a>,
         authority: TurnInstallationAdmission<'_>,
@@ -7621,6 +7628,33 @@ where
                 Self::validate_activation_preview_code(spent.admission(), &code)?;
             }
         }
+        // A checked cell's actual settled prefix owns its installation origin.
+        // Closed immutable code can be instantiated under that source without
+        // borrowing live package exports from a prior source or domain.
+        if let Some(certification) = code.certification() {
+            if let Some(prefix) = certification.checked_prefix() {
+                if !certification
+                    .checked_execution()
+                    .is_some_and(|execution| execution.matches_target(code.prepared()))
+                {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                }
+                let registry = self.state.certified_image_registry();
+                if let Some(plan) =
+                    super::prepared::ClosedInstantiationPlan::prepare_code(&code, &registry)?
+                {
+                    let origin = prefix.captured_source_origin().clone();
+                    return Ok(AdmittedTurnCode {
+                        code,
+                        scope,
+                        resolved: NativeTurnAdmission::Closed {
+                            plan: Arc::new(plan),
+                            origin,
+                        },
+                    });
+                }
+            }
+        }
         let resolved = code
             .certification()
             .map(|certification| {
@@ -7631,7 +7665,7 @@ where
         Ok(AdmittedTurnCode {
             code,
             scope,
-            resolved,
+            resolved: resolved.map_or(NativeTurnAdmission::Portable, NativeTurnAdmission::Scoped),
         })
     }
 
@@ -7652,7 +7686,7 @@ where
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
         let mut retained = Vec::new();
-        if let Some(resolved) = &admission.resolved {
+        if let NativeTurnAdmission::Scoped(resolved) = &admission.resolved {
             let imports = resolved.target_owners.iter().chain(
                 resolved
                     .groups
@@ -8080,49 +8114,65 @@ where
             .admit_source_work_in(scope)
             .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
-        let (program, source_keys, native_sources) = if let Some(resolved) = resolved {
-            let target = match images {
-                TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
+        let (program, source_keys, native_sources) = match resolved {
+            NativeTurnAdmission::Closed { plan, origin } => match checked {
+                Some(checked) => {
+                    checked.install_closed_turn_in(&mut self.state, scope, &metadata, &plan)?
                 }
-                TurnImageAcquisition::Compile => {
-                    let registry = self.state.certified_image_registry();
-                    super::prepared::ScopedTargetImage::compile_scoped(
-                        prepared, &resolved, &registry,
-                    )?
+                None => self
+                    .state
+                    .install_closed_turn_in(scope, &metadata, &plan, &origin)?,
+            }
+            .into_parts(),
+            NativeTurnAdmission::Scoped(resolved) => {
+                let prepared = Arc::unwrap_or_clone(prepared);
+                let target = match images {
+                    TurnImageAcquisition::Ready { bundle } => {
+                        super::prepared::ScopedTargetImage::lookup_scoped(
+                            prepared, &resolved, bundle,
+                        )?
+                    }
+                    TurnImageAcquisition::Compile => {
+                        let registry = self.state.certified_image_registry();
+                        super::prepared::ScopedTargetImage::compile_scoped(
+                            prepared, &resolved, &registry,
+                        )?
+                    }
+                };
+                let retained_sources =
+                    |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+                        self.binding_provenance
+                            .get(&input.id().raw())
+                            .map(|p| p.source_custody())
+                    };
+                match checked {
+                    Some(checked) => checked.install_certified_turn_in(
+                        &mut self.state,
+                        scope,
+                        &metadata,
+                        target,
+                        &resolved.source_evidence,
+                        &resolved.inherited_needed,
+                        &retained_sources,
+                    )?,
+                    None => self.install_certified_turn_in(
+                        scope,
+                        &metadata,
+                        target,
+                        &resolved.source_evidence,
+                        &resolved.inherited_needed,
+                    )?,
                 }
-            };
-            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                self.binding_provenance
-                    .get(&input.id().raw())
-                    .map(|p| p.source_custody())
-            };
-            match checked {
-                Some(checked) => checked.install_certified_turn_in(
-                    &mut self.state,
-                    scope,
-                    &metadata,
-                    target,
-                    &resolved.source_evidence,
-                    &resolved.inherited_needed,
-                    &retained_sources,
-                )?,
-                None => self.install_certified_turn_in(
-                    scope,
-                    &metadata,
-                    target,
-                    &resolved.source_evidence,
-                    &resolved.inherited_needed,
-                )?,
+                .into_parts()
             }
-            .into_parts()
-        } else {
-            if matches!(images, TurnImageAcquisition::Ready { .. }) {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+            NativeTurnAdmission::Portable => {
+                if matches!(images, TurnImageAcquisition::Ready { .. }) {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                }
+                let (program, native_sources) =
+                    self.install_prepared_with_sources(Arc::unwrap_or_clone(prepared), &metadata)?;
+                (program, Default::default(), native_sources)
             }
-            let (program, native_sources) =
-                self.install_prepared_with_sources(prepared, &metadata)?;
-            (program, Default::default(), native_sources)
         };
         // Every fallible metadata check preceded installation. Runtime sources
         // come only from this exact installed outcome; missing evidence is Unknown.
@@ -8227,7 +8277,7 @@ where
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let (admission, compile_identity, native) = match input {
+        let (admission, compile_identity) = match input {
             StartupInput::Closed { entry, origin } => {
                 let code = entry.compiled().code();
                 let proof = code
@@ -8237,24 +8287,21 @@ where
                     .and_then(|certification| certification.ordinary_original())
                     .ok_or(ResidentError::UnsealedStartupEntry)?;
                 let identity = StartupCompileIdentity::Issued(proof.clone());
-                let resolved = self
-                    .state
-                    .resolve_closed_source_entry_in(scope, entry, origin)?;
-                let native = entry.retained_native_images(&resolved)?;
                 (
                     AdmittedTurnCode {
                         code,
                         scope,
-                        resolved: Some(resolved),
+                        resolved: NativeTurnAdmission::Closed {
+                            plan: Arc::clone(&entry.native),
+                            origin: origin.clone(),
+                        },
                     },
                     identity,
-                    Some(native),
                 )
             }
             StartupInput::Ordinary { code, identity } => (
                 self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?,
                 identity,
-                None,
             ),
         };
         let provenance = self.provenance_for(&admission)?;
@@ -8263,16 +8310,8 @@ where
             source_keys,
             provenance,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(
-            admission,
-            native
-                .as_ref()
-                .map_or(TurnImageAcquisition::Compile, |bundle| {
-                    TurnImageAcquisition::Ready { bundle }
-                }),
-            provenance,
-            None,
-        )?;
+        } =
+            self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
