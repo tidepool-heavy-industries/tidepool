@@ -5023,7 +5023,8 @@ impl ArtifactInventory {
             let canonicals = || {
                 supplied
                     .values()
-                    .filter(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)))
+                    .filter(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)
+                        | ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)))
             };
             let total = canonicals().count();
             for entry in canonicals().take(ROW_LIMIT) {
@@ -5074,7 +5075,7 @@ impl ArtifactInventory {
                     matches!(candidate, InventoryNodeKey::Artifact(binding) if binding.artifact == id)
                 }).count();
                 tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                    owner = ?entry.descriptor.owner, artifact = ?id,
+                    owner = ?entry.descriptor.owner, artifact = ?id, kind = ?entry.descriptor.kind,
                     parent_binding = ?previous,
                     parent_binding_owned = ?previous_node.map(|old| parent_nodes.contains(&old)),
                     parent_owned_canonical_bindings = parent_owned,
@@ -5083,11 +5084,11 @@ impl ArtifactInventory {
                     old_edges_omitted = ?old_total.map(|count| count.saturating_sub(EDGE_LIMIT)),
                     new_edges_omitted = new_total.saturating_sub(EDGE_LIMIT),
                     old_edges = ?old_sample, new_edges = ?new_sample,
-                    "canonical physical issuance binding observation");
+                    "compiler TYPE physical issuance binding observation");
             }
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                 total, emitted = total.min(ROW_LIMIT), omitted = total.saturating_sub(ROW_LIMIT),
-                complete = total <= ROW_LIMIT, "canonical physical issuance observation coverage");
+                complete = total <= ROW_LIMIT, "compiler TYPE physical issuance observation coverage");
         }
         let namespace = selected
             .keys()
