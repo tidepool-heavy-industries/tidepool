@@ -163,6 +163,27 @@ pub(crate) struct PackageInterfaceCustody {
 }
 
 impl PackageInterfaceCustody {
+    /// Independent recovery/candidate admission keeps its current selected-path
+    /// authentication. Completed output uses `from_native_output` instead.
+    pub(super) fn capture_verified_packages(
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Self> {
+        let mut interfaces = BTreeMap::new();
+        for (owner, witness) in packages {
+            verify_package_interface(validation, witness)?;
+            let bytes = validation.capture_owned_package_interface(&witness.selected_path, &witness.sha256)
+                .map_err(package_validation_error)?;
+            validation.inventory.reserve::<CertifiedPackageInterface>(1)?;
+            validation.inventory.reserve::<((String,String), Arc<CertifiedPackageInterface>)>(1)?;
+            validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()).saturating_mul(2))?;
+            interfaces.insert(owner.clone(), Arc::new(CertifiedPackageInterface {
+                unit: owner.0.clone(), module: owner.1.clone(), sha256: witness.sha256, bytes,
+            }));
+        }
+        Ok(Self { interfaces: Arc::new(interfaces) })
+    }
+
     pub(crate) fn from_native_output(
         output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         receipt: &CertifiedReceipt,
@@ -497,6 +518,7 @@ impl CertifiedPackageCodeProduct {
         relative_prefix: &Path,
         output: &PackageProductOutput,
         receipt: &CertifiedReceipt,
+        interfaces: &PackageInterfaceCustody,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Arc<Self>> {
         if !Arc::ptr_eq(program.operation(), &validation.inventory)
@@ -534,13 +556,9 @@ impl CertifiedPackageCodeProduct {
             .ok_or(CertificationError::Mismatch(
                 "package code defining interface",
             ))?;
-        let defining_interface = CertifiedPackageInterface::from_native_output(
-            program,
-            &owner.unit,
-            &owner.module,
-            interface,
-            validation,
-        )?;
+        let defining_interface = interfaces.get(&(owner.unit.clone(), owner.module.clone()))
+            .filter(|token| token.sha256() == &interface.sha256)
+            .cloned().ok_or(CertificationError::Mismatch("package code defining custody"))?;
         operation.reserve::<[u8; 32]>(code.globals().len())?;
         operation.reserve::<Arc<CertifiedPackageInterface>>(code.globals().len())?;
         let mut import_interface_witnesses = Vec::with_capacity(code.globals().len());
@@ -570,13 +588,9 @@ impl CertifiedPackageCodeProduct {
                 &SourceGroupMap::new(),
                 &receipt.packages,
             )?;
-            let captured = CertifiedPackageInterface::from_native_output(
-                program,
-                &global.identity.unit,
-                &global.identity.module,
-                witness,
-                validation,
-            )?;
+            let captured = interfaces.get(&(global.identity.unit.clone(),global.identity.module.clone()))
+                .filter(|token| token.sha256() == &witness.sha256)
+                .cloned().ok_or(CertificationError::Mismatch("package code import custody"))?;
             import_interface_witnesses.push(captured);
             import_interfaces.push(witness.sha256);
         }

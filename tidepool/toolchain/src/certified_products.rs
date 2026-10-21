@@ -19,6 +19,15 @@ use tidepool_repr::execution_schema::{
 mod package_code;
 pub use package_code::{CertifiedPackageInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageInterfaceRef};
 pub(crate) use package_code::PackageInterfaceCustody;
+
+/// Legacy independent certification authenticates current selected paths. This
+/// is not used by completed native output, whose captured issuer is mandatory.
+pub(crate) fn capture_independent_package_interfaces(
+    receipt: &CertifiedReceipt,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<PackageInterfaceCustody> {
+    PackageInterfaceCustody::capture_verified_packages(&receipt.packages, validation)
+}
 pub(crate) mod native_demand;
 pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
@@ -467,6 +476,7 @@ impl CertifiedSegmentOriginals {
         candidates: Option<&CandidateSet>,
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        package_interfaces: &PackageInterfaceCustody,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Self> {
         let compiler_inputs = source.exact().compiler_inputs();
@@ -491,6 +501,7 @@ impl CertifiedSegmentOriginals {
             authored,
             selected_values,
             produced,
+            package_interfaces,
             validation,
         )?;
         products.source_selection.produced_types = produced.cloned();
@@ -9536,6 +9547,8 @@ pub(crate) fn certify_products(
     include: &[PathBuf],
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> CertResult<CertifiedProducts> {
+    let mut validation = PackageInterfaceValidation::with_inventory(fresh_products.operation().clone());
+    let package_interfaces = capture_independent_package_interfaces(receipt, &mut validation)?;
     certify_products_with_validation(
         candidates,
         receipt,
@@ -9547,7 +9560,8 @@ pub(crate) fn certify_products(
         authored,
         &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
-        &mut PackageInterfaceValidation::with_inventory(fresh_products.operation().clone()),
+        &package_interfaces,
+        &mut validation,
     )
 }
 
@@ -9668,6 +9682,7 @@ pub(crate) fn certify_products_with_validation(
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     selected_session_values: &crate::artifacts::SelectedSessionValueOwners,
     produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+    package_interfaces: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedProducts> {
     if !Arc::ptr_eq(&validation.inventory, fresh_products.operation())
@@ -10345,6 +10360,7 @@ pub(crate) fn certify_products_with_validation(
         exact.map_or(&BTreeMap::new(), |admission| {
             admission.source().exact_source_imports()
         }),
+        package_interfaces,
         validation,
     )?;
     let mut admitted_interfaces = BTreeMap::new();

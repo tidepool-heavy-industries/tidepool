@@ -781,6 +781,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             &inventory,
         )
         .unwrap();
+    let package_interfaces = capture_independent_package_interfaces(&shared_receipt, &mut validation).unwrap();
     let shared = CertifiedSegmentOriginals::issue(
         shared_raw,
         shared_receipt,
@@ -792,6 +793,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
+        &package_interfaces,
         &mut validation,
     )
     .unwrap();

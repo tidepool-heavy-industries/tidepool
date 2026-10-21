@@ -3009,6 +3009,9 @@ impl SelectedModuleCandidateOffer {
             &receipt.modules,
             &source_admission.exact().source().evidence(),
         )?;
+        let package_interfaces = certified_products::capture_independent_package_interfaces(
+            &receipt, validation,
+        ).map_err(compiler_evidence_failure)?;
         let originals = certified_products::CertifiedSegmentOriginals::issue(
             parsed,
             receipt,
@@ -3020,6 +3023,7 @@ impl SelectedModuleCandidateOffer {
             self.selected.as_deref(),
             &self.selected_session_values,
             Some(produced),
+            &package_interfaces,
             validation,
         )
         .map_err(compiler_evidence_failure)?;
@@ -4212,8 +4216,13 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    let captured_package_interfaces = native_output
+        .map(|(output, receipt)| certified_products::PackageInterfaceCustody::from_native_output(output, receipt, validation)
+            .map_err(compiler_evidence_failure))
+        .transpose()?;
     let package_products = native_output
-        .map(|(output, receipt)| certify_native_package_products(output, receipt, validation))
+        .map(|(output, receipt)| certify_native_package_products(output, receipt,
+            captured_package_interfaces.as_ref().expect("captured native output custody"), validation))
         .transpose()?
         .unwrap_or_default();
     let valid =
@@ -4263,6 +4272,16 @@ fn seal_turn_outputs_with_validation(
             (products, Some(globals), Some(packages))
         }
         None => {
+            let independent_package_interfaces;
+            let package_interfaces = match &captured_package_interfaces {
+                Some(interfaces) => interfaces,
+                None => {
+                    independent_package_interfaces = certified_products::capture_independent_package_interfaces(
+                        ordinary_receipt.as_ref().expect("ordinary receipt"), validation,
+                    ).map_err(compiler_evidence_failure)?;
+                    &independent_package_interfaces
+                }
+            };
             timing::record_inventory_work(
                 "products.certify.before",
                 output_dir,
@@ -4281,6 +4300,7 @@ fn seal_turn_outputs_with_validation(
                 authored,
                 &offer.selected_session_values,
                 produced_types,
+                package_interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)?;
@@ -4534,6 +4554,7 @@ fn seal_turn_outputs_with_validation(
 fn certify_native_package_products(
     output: &invocation_output::CapturedNativeOutput<'_>,
     receipt: &certified_products::CertifiedReceipt,
+    interfaces: &certified_products::PackageInterfaceCustody,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Vec<Arc<certified_products::CertifiedPackageCodeProduct>>, CompileError> {
     output.validate_interfaces(receipt, validation)?;
@@ -4552,6 +4573,7 @@ fn certify_native_package_products(
                 Path::new(""),
                 product,
                 receipt,
+                interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)
@@ -6311,8 +6333,11 @@ fn compile_invocation_inner(
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
         let receipt = &native.receipt;
+        let captured_package_interfaces = certified_products::PackageInterfaceCustody::from_native_output(
+            &native_output, receipt, &mut validation,
+        ).map_err(compiler_evidence_failure)?;
         let package_products =
-            certify_native_package_products(&native_output, receipt, &mut validation)?;
+            certify_native_package_products(&native_output, receipt, &captured_package_interfaces, &mut validation)?;
         invocation_timing.advance("product_decode_and_freshness");
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
@@ -6339,6 +6364,7 @@ fn compile_invocation_inner(
                 authored,
                 &selected_session_values,
                 None,
+                &captured_package_interfaces,
                 &mut validation,
             )
             .map_err(compiler_evidence_failure)?;
