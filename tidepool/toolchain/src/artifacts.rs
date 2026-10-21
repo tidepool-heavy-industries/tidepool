@@ -12631,12 +12631,6 @@ mod source_proof_pairing_tests {
                 .collect::<Vec<_>>();
             assert_eq!(products.len(), 1);
             let product = &products[0];
-            let producer = certificate.toolchain_identity_sha256();
-            let entry = Arc::new(
-                crate::artifact_inventory::ArtifactEntry::original(producer, product.clone())
-                    .unwrap(),
-            );
-            assert!(entry.requirements.is_empty());
             let requirements =
                 crate::certified_products::original_native_requirements(product).unwrap();
             for (required_owner, dependency) in &requirements.artifact_edges {
@@ -12652,31 +12646,16 @@ mod source_proof_pairing_tests {
                 assert!(requirements.group_ordinals.contains(dependent_ordinal));
                 assert!(requirements.group_ordinals.contains(required_ordinal));
             }
-            let inventory = crate::artifact_inventory::ArtifactInventory::default();
-            let artifacts = inventory
-                .admit_shared_with_demand(
-                    &inventory.empty_view(),
-                    vec![entry.clone()],
-                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                )
-                .unwrap();
-            let projection =
-                crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[entry])
-                    .unwrap();
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &selection, &artifacts,
-            )
-            .unwrap();
-            let issued =
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .unwrap();
+            let issued = certificate
+                .compiler_source_support()
+                .source_support(&std::collections::BTreeSet::from([owner.clone()]))
+                .expect("select the actual compiler's issued support and physical cohort");
+            let selected = issued.projection().snapshot_roles();
+            assert_eq!(selected.len(), 1);
+            assert!(selected
+                .get(&owner)
+                .and_then(|role| role.original())
+                .is_some());
             let persisted =
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
