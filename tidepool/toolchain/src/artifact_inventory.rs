@@ -2082,21 +2082,6 @@ pub(crate) enum ArtifactPayload {
     PackageCode(Arc<crate::certified_products::CertifiedPackageCodeProduct>),
 }
 
-impl PartialEq for ArtifactPayload {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Original(left), Self::Original(right)) => left.same_durable_artifact(right),
-            (Self::Canonical(left), Self::Canonical(right)) => left == right,
-            (Self::Interface(left, left_role), Self::Interface(right, right_role)) => {
-                left_role == right_role && left == right
-            }
-            (Self::PackageCode(left), Self::PackageCode(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-impl Eq for ArtifactPayload {}
-
 impl ArtifactPayload {
     pub(crate) fn artifact_kind(&self) -> ArtifactKind {
         match self {
@@ -6015,19 +6000,20 @@ impl ViewLease {
         let owner = entry.descriptor.owner.clone();
         let kind = entry.payload.artifact_kind();
         if let Some(previous) = payloads.insert(id, entry) {
-            // Replacement by the same retained payload identity changes no
-            // census fact, however many aliases/bindings retain it. A merely
-            // equal owner name is not enough: a different payload of the
-            // other class must reclassify this exact acquisition.
-            if Arc::ptr_eq(&previous, &payloads[&id])
-                || (previous.descriptor.owner == owner && previous.payload == payloads[&id].payload)
-            {
+            // The census counts distinct payload IDs per owner, split between
+            // HOME ownership and generic observation. Only an owner or kind
+            // change alters a contribution: a different retained payload of
+            // the same owner and class contributes the same single fact, so
+            // comparing full payload bytes here only adds work without
+            // changing any count.
+            let previous_kind = previous.payload.artifact_kind();
+            if previous.descriptor.owner == owner && previous_kind == kind {
                 return;
             }
             Self::release_payload_owner(
                 owner_counts,
                 &previous.descriptor.owner,
-                previous.payload.artifact_kind(),
+                previous_kind,
             );
         }
         let counts = owner_counts.entry(owner).or_default();
@@ -10390,6 +10376,163 @@ mod tests {
         );
         assert_matches(&payloads, &counts);
         assert!(!counts.contains_key(&owner));
+    }
+
+    #[test]
+    fn same_class_different_payload_replacement_updates_only_changed_contributions() {
+        let owner = ExactModuleIdentity {
+            unit: "unit".into(),
+            module: "SameClass".into(),
+        };
+        let census = |payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>| {
+            let mut census: BTreeMap<ExactModuleIdentity, AcquiredOwnerCounts> = BTreeMap::new();
+            for entry in payloads.values() {
+                let counts = census.entry(entry.descriptor.owner.clone()).or_default();
+                counts.observed += 1;
+                if entry.payload.artifact_kind().is_home_ownership() {
+                    counts.home += 1;
+                }
+            }
+            census
+        };
+        let actual = |counts: &imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts>| {
+            counts
+                .iter()
+                .map(|(owner, counts)| (owner.clone(), *counts))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        let mut payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>> = imbl::OrdMap::new();
+        let mut counts: imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts> =
+            imbl::OrdMap::new();
+
+        let home = Arc::new(entry("SameClass", &[]));
+        let id = home.descriptor.id;
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::clone(&home));
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 1);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+
+        // A different HOME payload under the same owner and classification
+        // contributes the same single fact: no census update is required.
+        let different_home = {
+            let mut twin = home.as_ref().clone();
+            twin.payload = ArtifactPayload::Canonical(
+                crate::certified_products::fixture_source_module_interface(
+                    [2; 32],
+                    "unit",
+                    "SameClass",
+                    [9; 32],
+                    BTreeMap::new(),
+                    None,
+                ),
+            );
+            Arc::new(twin)
+        };
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::clone(&different_home));
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 0);
+        assert!(Arc::ptr_eq(&payloads[&id], &different_home));
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+        assert_eq!(actual(&counts), census(&payloads));
+
+        // Reclassify HOME to PackageCode under the same owner: the kind change
+        // releases the HOME contribution and acquires the package observation.
+        let package = crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+            "unit",
+            "SameClass",
+            9,
+        );
+        let package_id = package.artifact_id();
+        let package_entry = ArtifactEntry::package_code(Arc::clone(&package));
+        let mut package_twin = package_entry.clone();
+        package_twin.descriptor.id = id;
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        ViewLease::insert_payload(
+            &mut payloads,
+            &mut counts,
+            id,
+            Arc::new(package_twin),
+        );
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 2);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 0
+            })
+        );
+        assert_eq!(actual(&counts), census(&payloads));
+
+        // A different PackageCode payload under the same owner and
+        // classification is also not a new census fact.
+        let other_package =
+            crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+                "unit",
+                "SameClass",
+                11,
+            );
+        let different_package = {
+            let mut twin = payloads[&id].as_ref().clone();
+            twin.payload = ArtifactPayload::PackageCode(Arc::clone(&other_package));
+            Arc::new(twin)
+        };
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, different_package);
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 0);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 0
+            })
+        );
+        assert_eq!(actual(&counts), census(&payloads));
+        assert_ne!(package.artifact_id(), other_package.artifact_id());
+        assert_ne!(package_id, id);
+
+        // A changed owner under the same classification releases the old
+        // owner and acquires the new one.
+        let other_owner = ExactModuleIdentity {
+            unit: "unit".into(),
+            module: "SameClassOther".into(),
+        };
+        let mut moved = payloads[&id].as_ref().clone();
+        moved.descriptor.owner = other_owner.clone();
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::new(moved));
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 2);
+        assert!(!counts.contains_key(&owner));
+        assert_eq!(
+            counts.get(&other_owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 0
+            })
+        );
+        assert_eq!(actual(&counts), census(&payloads));
+
+        // Removal/retirement clears the final owner entirely.
+        let removed = payloads.remove(&id).unwrap();
+        ViewLease::release_payload_owner(
+            &mut counts,
+            &removed.descriptor.owner,
+            removed.payload.artifact_kind(),
+        );
+        assert!(!counts.contains_key(&other_owner));
+        assert_eq!(actual(&counts), census(&payloads));
     }
 
     #[test]
