@@ -2013,6 +2013,38 @@ impl BindingTable {
         Some(released)
     }
 
+    pub fn retained_native_sibling_attachment(
+        &self,
+        domain: crate::prepared_program::SourceInstanceDomain,
+        anchor: &NativeInstanceLease,
+        value: tidepool_repr::execution_schema::ValueId,
+    ) -> Option<crate::prepared_program::NativeInstanceAttachment> {
+        let retained_anchor = &self
+            .source_instances
+            .get(&SourceLeaseKey::of(anchor))?
+            .token;
+        if !same_source_lease(retained_anchor, anchor) {
+            return None;
+        }
+        let token = &self
+            .source_instances
+            .get(&SourceLeaseKey {
+                instance: anchor.instance(),
+                value,
+            })?
+            .token;
+        if token.binding_key() != anchor.binding_key() {
+            return None;
+        }
+        Some(
+            crate::prepared_program::NativeInstanceAttachment::from_anchor(
+                domain,
+                token.clone(),
+                anchor.clone(),
+            ),
+        )
+    }
+
     /// An exact existing sibling root can be attached to a second captured
     /// domain only through its already selected physical group anchor.
     pub fn retained_source_sibling_attachment(
@@ -2174,6 +2206,12 @@ impl BindingTable {
                     .flat_map(|record| record.selected.iter().cloned())
             })
             .collect()
+    }
+
+    /// Observe the canonical descriptor already held by this table. Recovery
+    /// encoding cannot reconstruct a lease from a physical key.
+    pub fn native_instance(&self, key: &SourceLeaseKey) -> Option<&NativeInstanceLease> {
+        self.source_instances.get(key).map(|record| &record.token)
     }
 
     pub fn native_domain_selection_in(

@@ -133,6 +133,12 @@ impl BatchProgram {
 /// requested binders receive a handle; unused exports acquire no lease.
 pub struct BatchLeaseRequest {
     group: usize,
+    export: NativeExportRequest,
+}
+
+/// One exact immutable export request, usable for a fresh batch or a sibling
+/// root in an already selected physical instance.
+pub struct NativeExportRequest {
     image: Arc<CompiledProgram>,
     evidence: LeaseRequestEvidence,
     binding: ValueId,
@@ -151,9 +157,8 @@ enum LeaseRequestEvidence {
     },
 }
 
-impl BatchLeaseRequest {
+impl NativeExportRequest {
     pub fn for_home(
-        group: usize,
         demanded: &DemandedImage,
         key: NativeHomeBinding,
         domain: super::super::SourceInstanceDomain,
@@ -173,7 +178,6 @@ impl BatchLeaseRequest {
             )));
         }
         Ok(Self {
-            group,
             image: Arc::clone(demanded.image()),
             binding: value,
             domain,
@@ -189,7 +193,6 @@ impl BatchLeaseRequest {
     }
 
     pub fn for_package(
-        group: usize,
         demanded: Arc<DemandedPackageImage>,
         key: NativeArtifactBinding,
         domain: super::super::SourceInstanceDomain,
@@ -206,7 +209,6 @@ impl BatchLeaseRequest {
             )));
         }
         Ok(Self {
-            group,
             image: Arc::clone(demanded.image()),
             binding: value,
             domain,
@@ -215,6 +217,68 @@ impl BatchLeaseRequest {
                 image: demanded,
             },
         })
+    }
+    fn key(&self) -> super::super::NativeBindingKey {
+        match &self.evidence {
+            LeaseRequestEvidence::Home { key, .. } => super::super::NativeBindingKey::Home(*key),
+            LeaseRequestEvidence::Package { key, .. } => {
+                super::super::NativeBindingKey::Package(*key)
+            }
+        }
+    }
+    fn into_lease(self, instance: GroupInstanceId, handle: PreparedHandle) -> NativeInstanceLease {
+        let export = &self.image.top_exports[&self.binding];
+        match self.evidence {
+            LeaseRequestEvidence::Home { key, owner, binder } => {
+                NativeInstanceLease::Home(SourceInstanceLease::new(
+                    instance,
+                    key,
+                    owner,
+                    key.original_ordinal,
+                    binder,
+                    self.binding,
+                    handle,
+                    export.entry_signature.clone(),
+                ))
+            }
+            LeaseRequestEvidence::Package { key, image } => {
+                NativeInstanceLease::Package(PackageInstanceLease::new(
+                    instance,
+                    key,
+                    image,
+                    export.identity.clone(),
+                    self.binding,
+                    handle,
+                    export.entry_signature.clone(),
+                ))
+            }
+        }
+    }
+}
+
+impl BatchLeaseRequest {
+    pub fn new(group: usize, export: NativeExportRequest) -> Self {
+        Self { group, export }
+    }
+    pub fn for_home(
+        group: usize,
+        demanded: &DemandedImage,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        NativeExportRequest::for_home(demanded, key, domain, value)
+            .map(|export| Self::new(group, export))
+    }
+    pub fn for_package(
+        group: usize,
+        demanded: Arc<DemandedPackageImage>,
+        key: NativeArtifactBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        NativeExportRequest::for_package(demanded, key, domain, value)
+            .map(|export| Self::new(group, export))
     }
 }
 
@@ -239,6 +303,35 @@ struct Candidate {
 }
 
 impl PreparedMachine<'_> {
+    /// Root a newly requested export in the exact already selected instance.
+    /// Registration must still validate the retained anchor in the target domain.
+    pub fn retain_native_sibling(
+        &mut self,
+        anchor: &NativeInstanceLease,
+        request: NativeExportRequest,
+    ) -> Result<super::super::NativeInstanceAttachment, ExecutionError> {
+        self.handle_is_evaluated(anchor.handle())?;
+        let image = self
+            .programs
+            .get(&anchor.instance().program())
+            .ok_or(ExecutionError::UnknownProgram(anchor.instance().program()))?
+            .program
+            .get();
+        if anchor.binding_key() != request.key() || !std::ptr::eq(image, request.image.as_ref()) {
+            return Err(ExecutionError::BatchSourceContract(Box::new(
+                anchor.export().clone(),
+            )));
+        }
+        let domain = request.domain;
+        let handle = self.retain_top(anchor.instance().program(), request.binding)?;
+        let lease = request.into_lease(anchor.instance(), handle);
+        Ok(super::super::NativeInstanceAttachment::from_anchor(
+            domain,
+            lease,
+            anchor.clone(),
+        ))
+    }
+
     /// Root a newly demanded sibling binder from an exact lexical group
     /// instance already held by `anchor`. The original program's CAFs stay
     /// shared; this creates one new scoped handle without reinstalling code.
@@ -416,7 +509,7 @@ impl PreparedMachine<'_> {
 
         let mut requested = HashSet::new();
         for request in &requests {
-            if !requested.insert((request.group, request.binding)) {
+            if !requested.insert((request.group, request.export.binding)) {
                 return Err(ExecutionError::Invariant("duplicate source lease request"));
             }
             let candidate = batch.get(request.group).ok_or(ExecutionError::Invariant(
@@ -425,9 +518,9 @@ impl PreparedMachine<'_> {
             let export = candidate
                 .image
                 .top_exports
-                .get(&request.binding)
-                .ok_or(ExecutionError::MissingEntry(request.binding))?;
-            let valid_evidence = match &request.evidence {
+                .get(&request.export.binding)
+                .ok_or(ExecutionError::MissingEntry(request.export.binding))?;
+            let valid_evidence = match &request.export.evidence {
                 LeaseRequestEvidence::Home { key, owner, binder } => {
                     candidate.image.certified_source.as_ref()
                         == Some(&(owner.clone(), key.original_ordinal))
@@ -441,8 +534,11 @@ impl PreparedMachine<'_> {
                         && image.group().binders().contains(&export.identity)
                 }
             };
-            if candidate.image.byte_tops.contains_key(&request.binding)
-                || !Arc::ptr_eq(&candidate.image, &request.image)
+            if candidate
+                .image
+                .byte_tops
+                .contains_key(&request.export.binding)
+                || !Arc::ptr_eq(&candidate.image, &request.export.image)
                 || !valid_evidence
             {
                 return Err(ExecutionError::BatchSourceContract(Box::new(
@@ -743,35 +839,12 @@ impl PreparedMachine<'_> {
             .into_iter()
             .zip(handles)
             .map(|(request, handle)| {
-                let installed = &self.programs[&ids[request.group]];
-                let export = &installed.program.get().top_exports[&request.binding];
-                let lease = match request.evidence {
-                    LeaseRequestEvidence::Home { key, owner, binder } => {
-                        NativeInstanceLease::Home(SourceInstanceLease::new(
-                            GroupInstanceId::from(ids[request.group]),
-                            key,
-                            owner,
-                            key.original_ordinal,
-                            binder,
-                            request.binding,
-                            handle,
-                            export.entry_signature.clone(),
-                        ))
-                    }
-                    LeaseRequestEvidence::Package { key, image } => {
-                        NativeInstanceLease::Package(PackageInstanceLease::new(
-                            GroupInstanceId::from(ids[request.group]),
-                            key,
-                            image,
-                            export.identity.clone(),
-                            request.binding,
-                            handle,
-                            export.entry_signature.clone(),
-                        ))
-                    }
-                };
+                let domain = request.export.domain;
+                let lease = request
+                    .export
+                    .into_lease(GroupInstanceId::from(ids[request.group]), handle);
                 source_attachments.push(super::super::NativeInstanceAttachment::installed(
-                    request.domain,
+                    domain,
                     lease.clone(),
                 ));
                 lease
@@ -793,14 +866,14 @@ impl PreparedMachine<'_> {
     ) -> Result<(), ExecutionError> {
         for request in requests {
             let candidate = &candidates[request.group];
-            let export = &candidate.image.top_exports[&request.binding];
-            let slot = candidate.image.top_slots[&request.binding];
+            let export = &candidate.image.top_exports[&request.export.binding];
+            let slot = candidate.image.top_slots[&request.export.binding];
             let word = candidate
                 .roots
                 .read(slot)
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
             if word == 0 {
-                return Err(ExecutionError::MissingEntry(request.binding));
+                return Err(ExecutionError::MissingEntry(request.export.binding));
             }
             // Candidate objects are fully initialized. No collection runs
             // before commit or rollback, and rollback releases this root.
@@ -1985,7 +2058,7 @@ mod tests {
         })
         .unwrap();
         let mut mislabeled = request();
-        let LeaseRequestEvidence::Home { owner, .. } = &mut mislabeled.evidence else {
+        let LeaseRequestEvidence::Home { owner, .. } = &mut mislabeled.export.evidence else {
             panic!("HOME fixture");
         };
         owner.product_sha256 = [9; 32];

@@ -92,8 +92,8 @@ impl Drop for ActiveIntrinsicScope<'_> {
 }
 pub use machine::{
     BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram, GroupInstanceId,
-    ImportBindings, ManagedBuilder, ManagedField, ManagedNode, ParkRequest, PreparedCallOptions,
-    PreparedCompileSnapshot, PreparedHandle, PreparedInput, PreparedMachine,
+    ImportBindings, ManagedBuilder, ManagedField, ManagedNode, NativeExportRequest, ParkRequest,
+    PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle, PreparedInput, PreparedMachine,
     PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
     Quiescent, ResidencyCounts, RetirementReceipt,
 };
