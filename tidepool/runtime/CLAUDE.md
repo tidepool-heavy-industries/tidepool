@@ -56,10 +56,18 @@ retain the primary action error alongside their close observation. Renderable sl
 native target, reachable original-group images and literal storage are prepared.
 They retain immutable native custody, never rendered values or scoped installation
 plans. Each consumer resolves imports and source domains against its fresh scope
-before installation. Ready installation carries the complete native bundle and
-only looks up its exact keys; absent, in-flight, expired or unheld images are typed
-integrity refusals before installation. Opaque and unavailable outcomes retain no
-native image bundle.
+before installation. Ready installation retains the same immutable plan and its
+images. It refuses a different code/selection owner before installation, without
+compiling or reconstructing the plan from registry presence. Opaque and unavailable
+outcomes retain no native image bundle.
+
+Closed ordinary native code pairs a checked restriction of that same plan with
+its actual installing source transaction and existing lexical scope. An open or
+unsealed ordinary output cannot borrow checked source authority. Checked execution
+requires its actual runtime prefix and selected physical source membership;
+historical HOME rows keep their recorded provenance. Existing native instance
+anchors retain their original ProgramFacts. Explicit prepared-source startup owns
+its separate fresh-domain semantics.
 
 Compiled turns retain immutable provenance selections and context identities.
 Installation creates fresh runtime execution observations and still resolves
