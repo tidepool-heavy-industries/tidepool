@@ -3042,7 +3042,8 @@ pub(crate) fn spec_effect_preflight(
                         user_lines: None,
                         line_offset: 0,
                         col_indent: 0,
-                        drop_foreign_gen_warnings_except: None,
+                        generated_warnings:
+                            tidepool_toolchain::diag::GeneratedWarningPolicy::KeepAll,
                         source: &source,
                     },
                 );
@@ -3936,7 +3937,7 @@ fn render_root_compile_failure(
                     user_lines: None,
                     line_offset: 0,
                     col_indent: 0,
-                    drop_foreign_gen_warnings_except: None,
+                    generated_warnings: tidepool_toolchain::diag::GeneratedWarningPolicy::KeepAll,
                     source,
                 },
             )

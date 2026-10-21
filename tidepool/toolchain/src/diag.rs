@@ -112,6 +112,15 @@ fn truncate_head(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Which generated session-library warnings survive presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedWarningPolicy<'a> {
+    KeepAll,
+    DropAll,
+    /// Keep only the exact compiler-reported path, without suffix matching.
+    KeepOnly(&'a str),
+}
+
 /// Options controlling how [`render_diagnostics`] partitions/remaps/labels a
 /// diagnostics report for display.
 pub struct RenderOpts<'a> {
@@ -147,12 +156,10 @@ pub struct RenderOpts<'a> {
     /// Subtract from a diagnostic's column before display (the wrapper's
     /// indent). A column already `<=` this indent is shown raw, unshifted.
     pub col_indent: usize,
-    /// When `Some(keep_path)`, a WARNING diagnostic whose file matches the
-    /// generated-lib-module pattern (`Tidepool/Session/Lib/G` substring) and
-    /// is NOT `keep_path` is dropped — session-lib generation warnings are
-    /// dependency noise that would otherwise ride every later item's errors.
-    /// Pass `Some("")` to drop every foreign gen warning unconditionally.
-    pub drop_foreign_gen_warnings_except: Option<&'a str>,
+    /// Filter warnings whose file contains `Tidepool/Session/Lib/G`.
+    /// Session-library generation warnings from dependencies would otherwise
+    /// ride every later item's errors. Errors and unlocated warnings survive.
+    pub generated_warnings: GeneratedWarningPolicy<'a>,
     /// The assembled module source text (or candidate source), for building
     /// a gutter/caret excerpt by indexing into it by line number.
     pub source: &'a str,
@@ -301,7 +308,7 @@ pub fn render_diagnostics_structured(
     // can legitimately leave zero total diagnostics.
     let after_gen_drop: Vec<&ExtractDiag> = diags
         .iter()
-        .filter(|d| !is_dropped_foreign_gen_warning(d, opts.drop_foreign_gen_warnings_except))
+        .filter(|d| !is_dropped_foreign_gen_warning(d, opts.generated_warnings))
         .collect();
 
     // User-lines fallout partition.
@@ -375,28 +382,21 @@ fn diagnostic_blocks(
     let mut structured = Vec::new();
     let mut warning_blocks: Vec<(StructuredDiagnostic, usize, usize)> = Vec::new();
     for d in diags {
-        let diagnostic = if raw {
-            structure_one_raw(d, opts)
-        } else {
-            structure_one(d, opts)
-        };
+        let projection = project_diagnostic(d, opts, raw);
+        let diagnostic = &projection.structured;
         if diagnostic.severity == DiagnosticLevel::Warning {
             if let Some((_, _, count)) = warning_blocks
                 .iter_mut()
-                .find(|(previous, _, _)| previous == &diagnostic)
+                .find(|(previous, _, _)| previous == diagnostic)
             {
                 *count += 1;
-                structured.push(diagnostic);
+                structured.push(projection.structured);
                 continue;
             }
             warning_blocks.push((diagnostic.clone(), blocks.len(), 1));
         }
-        blocks.push(if raw {
-            render_one_raw(d, opts)
-        } else {
-            render_one(d, opts)
-        });
-        structured.push(diagnostic);
+        blocks.push(projection.render(opts.source));
+        structured.push(projection.structured);
     }
     for (_, index, count) in warning_blocks {
         if count > 1 {
@@ -419,16 +419,17 @@ fn severity_counts(diags: &[&ExtractDiag]) -> String {
     }
 }
 
-fn is_dropped_foreign_gen_warning(d: &ExtractDiag, keep_path: Option<&str>) -> bool {
-    let Some(keep) = keep_path else {
-        return false;
-    };
+fn is_dropped_foreign_gen_warning(d: &ExtractDiag, policy: GeneratedWarningPolicy<'_>) -> bool {
     let Some(span) = &d.span else {
         return false;
     };
     d.severity == DiagnosticSeverity::Warning
         && span.file.contains("Tidepool/Session/Lib/G")
-        && span.file != keep
+        && match policy {
+            GeneratedWarningPolicy::KeepAll => false,
+            GeneratedWarningPolicy::DropAll => true,
+            GeneratedWarningPolicy::KeepOnly(keep) => span.file != keep,
+        }
 }
 
 fn is_in_anchor_file(d: &ExtractDiag, anchor: &str) -> bool {
@@ -468,15 +469,8 @@ fn span_in_range(d: &ExtractDiag, start: usize, end: usize) -> bool {
     }
 }
 
-/// The display coordinate space one diagnostic renders under: the label to
-/// show (`opts.label`/`<expr>`-style when the span is in the user-code
-/// region, `opts.anchor`/raw otherwise), the 1-based display line, and
-/// whether that line is inside the user-code region (which alone decides
-/// whether the column also gets `opts.col_indent` stripped). Computed ONCE
-/// and shared by [`render_one`]'s header AND its gutter excerpt below — the
-/// two must never disagree about which line number they're reporting (a
-/// header claiming `<turn>:6` while the gutter printed the raw generated-file
-/// line, e.g. `42`, was exactly the reported defect this fixes).
+/// Anchor-relative display coordinates. Only authored lines have their
+/// wrapper indentation removed; generated preamble coordinates stay raw.
 struct DisplayCoord<'a> {
     label: &'a str,
     line: usize,
@@ -523,199 +517,149 @@ fn looks_like_wrapper_scaffold(line: &str) -> bool {
     MARKERS.iter().any(|m| line.contains(m))
 }
 
-/// The data form of the header [`render_one`] prints, computed from the same
-/// [`display_coord`] decision and the same column-strip rule. Held to that by
-/// `structured_location_matches_rendered_header` below, which re-parses the
-/// rendered header and compares.
-fn structure_one(d: &ExtractDiag, opts: &RenderOpts<'_>) -> StructuredDiagnostic {
-    let location = match &d.span {
-        None => DiagnosticLocation::Unlocated,
-        Some(span) => match display_coord(span, opts) {
-            // In the user's own region: header and gutter both show the
-            // offset-corrected line, and only here is the wrapper indent
-            // stripped from the column.
-            Some(coord) if coord.in_user_region => {
-                let strip_col = |c: u32| {
-                    let c = c as usize;
-                    if c > opts.col_indent {
-                        c - opts.col_indent
-                    } else {
-                        c
-                    }
-                };
-                let strip_line = |l: u32| {
-                    let l = l as usize;
-                    if l > opts.line_offset {
-                        l - opts.line_offset
-                    } else {
-                        l
-                    }
-                };
-                DiagnosticLocation::Authored {
-                    label: coord.label.to_string(),
-                    start_line: coord.line as u32,
-                    start_col: strip_col(span.start_col) as u32,
-                    end_line: strip_line(span.end_line) as u32,
-                    end_col: strip_col(span.end_col) as u32,
-                }
-            }
-            // The anchor file's generated preamble: the header shows the
-            // anchor's own name and raw, unshifted coordinates.
-            Some(coord) => DiagnosticLocation::Foreign {
-                file: coord.label.to_string(),
-                start_line: coord.line as u32,
-                start_col: span.start_col,
-                end_line: span.end_line,
-                end_col: span.end_col,
-            },
-            // Some other file entirely: raw path, raw coordinates.
-            None => DiagnosticLocation::Foreign {
-                file: span.file.clone(),
-                start_line: span.start_line,
-                start_col: span.start_col,
-                end_line: span.end_line,
-                end_col: span.end_col,
-            },
-        },
-    };
-    StructuredDiagnostic {
-        severity: d.severity.into(),
-        location,
-        message: drop_scaffold_relevant_binds(&d.message, opts),
-    }
+/// One presentation decision, shared by the text and structured output.
+/// Raw compiler diagnostics remain borrowed and unchanged.
+struct DiagnosticProjection {
+    structured: StructuredDiagnostic,
+    // Anchored single-line headers include an end column, even if stripping
+    // indentation makes it equal to the start column. Foreign/raw headers do
+    // not. Remapped coordinates alone cannot recover either distinction.
+    show_end_col: bool,
+    excerpt: Option<SourceExcerpt>,
 }
 
-/// The data form of [`render_one_raw`]'s header: never remapped, because the
-/// all-wrapper appendix never remaps either.
-fn structure_one_raw(d: &ExtractDiag, opts: &RenderOpts<'_>) -> StructuredDiagnostic {
-    StructuredDiagnostic {
-        severity: d.severity.into(),
-        location: match &d.span {
-            Some(span) => DiagnosticLocation::Foreign {
-                file: span.file.clone(),
-                start_line: span.start_line,
-                start_col: span.start_col,
-                end_line: span.end_line,
-                end_col: span.end_col,
-            },
-            None => DiagnosticLocation::Unlocated,
-        },
-        message: drop_scaffold_relevant_binds(&d.message, opts),
-    }
+struct SourceExcerpt {
+    raw_line: usize,
+    caret_start: usize,
+    caret_width: usize,
 }
 
-fn render_one(d: &ExtractDiag, opts: &RenderOpts<'_>) -> String {
-    let coord = d.span.as_ref().and_then(|span| display_coord(span, opts));
-    let header = match (&d.span, &coord) {
-        (Some(span), Some(coord)) => {
-            // Only strip the wrapper's column indent inside the user-code
-            // region — a preamble-region diagnostic already shows a raw,
-            // unshifted line (via `coord.line` above), so its column must
-            // stay raw too, or the two disagree about which coordinate space
-            // they're in.
+fn project_diagnostic(d: &ExtractDiag, opts: &RenderOpts<'_>, raw: bool) -> DiagnosticProjection {
+    // The all-wrapper appendix retains raw paths and coordinates, with no
+    // excerpt: its spans identify generated framing rather than authored text.
+    let coord = (!raw)
+        .then(|| d.span.as_ref().and_then(|span| display_coord(span, opts)))
+        .flatten();
+    let location = match (&d.span, &coord) {
+        (Some(span), Some(coord)) if coord.in_user_region => {
             let strip_col = |c: u32| {
                 let c = c as usize;
-                if coord.in_user_region && c > opts.col_indent {
+                if c > opts.col_indent {
                     c - opts.col_indent
                 } else {
                     c
                 }
             };
-            let start_col = strip_col(span.start_col);
-            if span.start_line == span.end_line && span.end_col != span.start_col {
-                format!(
-                    "{}:{}:{start_col}-{}: {}:",
-                    coord.label,
-                    coord.line,
-                    strip_col(span.end_col),
-                    d.severity
-                )
-            } else {
-                format!(
-                    "{}:{}:{start_col}: {}:",
-                    coord.label, coord.line, d.severity
-                )
-            }
-        }
-        (Some(span), None) => format!(
-            "{}:{}:{}: {}:",
-            span.file, span.start_line, span.start_col, d.severity
-        ),
-        (None, _) => format!("{}:", d.severity),
-    };
-
-    let scrubbed_message = drop_scaffold_relevant_binds(&d.message, opts);
-
-    let mut out = header;
-
-    // Gutter/caret excerpt: only for a single-line span, indexed by the
-    // SOURCE's own (raw, un-remapped) line number — this excerpt reads
-    // straight out of `opts.source`, which is the assembled/candidate
-    // module — but DISPLAYED under the same `coord.line` the header used, and
-    // omitted entirely when the indexed line is itself wrapper scaffold (a
-    // GHC span that lands, numerically, inside the user-code range but whose
-    // real content is generated template text — never shown as if it were
-    // the user's own code).
-    if let Some(span) = &d.span {
-        if coord.as_ref().is_some_and(|coord| coord.in_user_region) {
-            if span.start_line == span.end_line {
-                if let Some(src_line) = (span.start_line as usize)
-                    .checked_sub(1)
-                    .and_then(|line| opts.source.lines().nth(line))
-                {
-                    if !looks_like_wrapper_scaffold(src_line) {
-                        let disp_line = coord.as_ref().map_or(span.start_line as usize, |c| c.line);
-                        let gutter = format!("{disp_line}");
-                        out.push_str(&format!("\n{:>width$} |\n", "", width = gutter.len()));
-                        out.push_str(&format!("{gutter} | {src_line}\n"));
-                        let start = span.start_col.saturating_sub(1) as usize;
-                        let width = (span.end_col.saturating_sub(span.start_col)).max(1) as usize;
-                        out.push_str(&format!(
-                            "{:>gwidth$} | {:>start$}{}",
-                            "",
-                            "",
-                            "^".repeat(width),
-                            gwidth = gutter.len(),
-                            start = start
-                        ));
-                    }
+            let strip_line = |l: u32| {
+                let l = l as usize;
+                if l > opts.line_offset {
+                    l - opts.line_offset
+                } else {
+                    l
                 }
+            };
+            DiagnosticLocation::Authored {
+                label: coord.label.to_string(),
+                start_line: coord.line as u32,
+                start_col: strip_col(span.start_col) as u32,
+                end_line: strip_line(span.end_line) as u32,
+                end_col: strip_col(span.end_col) as u32,
             }
         }
+        (Some(span), _) => DiagnosticLocation::Foreign {
+            file: coord
+                .as_ref()
+                .map_or_else(|| span.file.clone(), |coord| coord.label.to_string()),
+            start_line: span.start_line,
+            start_col: span.start_col,
+            end_line: span.end_line,
+            end_col: span.end_col,
+        },
+        (None, _) => DiagnosticLocation::Unlocated,
+    };
+    let show_end_col = coord.is_some()
+        && d.span
+            .as_ref()
+            .is_some_and(|span| span.start_line == span.end_line && span.end_col != span.start_col);
+    let excerpt = d.span.as_ref().and_then(|span| {
+        if !coord.as_ref().is_some_and(|coord| coord.in_user_region)
+            || span.start_line != span.end_line
+        {
+            return None;
+        }
+        Some(SourceExcerpt {
+            raw_line: (span.start_line as usize).checked_sub(1)?,
+            caret_start: span.start_col.saturating_sub(1) as usize,
+            caret_width: (span.end_col.saturating_sub(span.start_col)).max(1) as usize,
+        })
+    });
+    DiagnosticProjection {
+        structured: StructuredDiagnostic {
+            severity: d.severity.into(),
+            location,
+            message: drop_scaffold_relevant_binds(&d.message, opts),
+        },
+        show_end_col,
+        excerpt,
     }
-    for line in scrubbed_message.lines() {
-        out.push_str("\n    ");
-        out.push_str(line);
-    }
-    out
 }
 
-/// Render one diagnostic RAW, never remapped to `opts.label`/`<expr>`
-/// coordinates and never with a gutter/caret excerpt — used ONLY for the
-/// all-wrapper batch's "underlying diagnostic(s)" appendix
-/// ([`render_diagnostics`]): these diagnostics are, by construction, NOT in
-/// the user's own code, so a remapped position would misattribute them and a
-/// source excerpt would show generated wrapper text. The real
-/// `file:line:col` plus the scrubbed message is still fully actionable —
-/// unlike outright suppression.
-fn render_one_raw(d: &ExtractDiag, opts: &RenderOpts<'_>) -> String {
-    let header = match &d.span {
-        Some(span) => format!(
-            "{}:{}:{}: {}:",
-            span.file, span.start_line, span.start_col, d.severity
-        ),
-        None => format!("{}:", d.severity),
-    };
-    let scrubbed_message = drop_scaffold_relevant_binds(&d.message, opts);
-    let mut out = header;
-    out.push('\n');
-    for line in scrubbed_message.lines() {
-        out.push_str("    ");
-        out.push_str(line);
-        out.push('\n');
+impl DiagnosticProjection {
+    fn render(&self, source: &str) -> String {
+        let diagnostic = &self.structured;
+        let mut out = match &diagnostic.location {
+            DiagnosticLocation::Authored {
+                label,
+                start_line,
+                start_col,
+                end_col,
+                ..
+            }
+            | DiagnosticLocation::Foreign {
+                file: label,
+                start_line,
+                start_col,
+                end_col,
+                ..
+            } => {
+                if self.show_end_col {
+                    format!(
+                        "{label}:{start_line}:{start_col}-{end_col}: {}:",
+                        diagnostic.severity
+                    )
+                } else {
+                    format!("{label}:{start_line}:{start_col}: {}:", diagnostic.severity)
+                }
+            }
+            DiagnosticLocation::Unlocated => format!("{}:", diagnostic.severity),
+        };
+        if let (Some(excerpt), DiagnosticLocation::Authored { start_line, .. }) =
+            (&self.excerpt, &diagnostic.location)
+        {
+            if let Some(line) = source
+                .lines()
+                .nth(excerpt.raw_line)
+                .filter(|line| !looks_like_wrapper_scaffold(line))
+            {
+                let gutter = start_line.to_string();
+                out.push_str(&format!("\n{:>width$} |\n", "", width = gutter.len()));
+                out.push_str(&format!("{gutter} | {line}\n"));
+                out.push_str(&format!(
+                    "{:>gwidth$} | {:>start$}{}",
+                    "",
+                    "",
+                    "^".repeat(excerpt.caret_width),
+                    gwidth = gutter.len(),
+                    start = excerpt.caret_start
+                ));
+            }
+        }
+        for line in diagnostic.message.lines() {
+            out.push_str("\n    ");
+            out.push_str(line);
+        }
+        out
     }
-    out.pop();
-    out
 }
 
 /// Parse a `(bound at <file>:<line>:<col>)` suffix, searched from the right
@@ -1073,7 +1017,7 @@ mod tests {
                 user_lines: Some(&[(33, 40)]),
                 line_offset: 33,
                 col_indent: 2,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1110,7 +1054,7 @@ mod tests {
                 user_lines: Some(&[(2, 3)]),
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1148,7 +1092,7 @@ mod tests {
                 user_lines: Some(&[(2, 3)]),
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1202,7 +1146,7 @@ mod tests {
                 user_lines: Some(&[(2, 3)]),
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1212,60 +1156,80 @@ mod tests {
     }
 
     #[test]
-    fn foreign_gen_warning_dropped_own_gen_kept() {
-        let source = "";
-        let foreign = ExtractDiag {
-            span: Some(DiagSpan {
-                file: "Tidepool/Session/Lib/G25.hs".into(),
-                start_line: 33,
-                start_col: 35,
-                end_line: 33,
-                end_col: 40,
-            }),
-            severity: DiagnosticSeverity::Warning,
-            message: "partial head".into(),
-        };
-        let own = ExtractDiag {
-            span: Some(DiagSpan {
-                file: "Tidepool/Session/Lib/G26.hs".into(),
-                start_line: 3,
-                start_col: 1,
-                end_line: 3,
-                end_col: 5,
-            }),
-            severity: DiagnosticSeverity::Warning,
-            message: "user warning".into(),
-        };
-        let got = render_diagnostics(
-            &[foreign.clone(), own.clone()],
-            &RenderOpts {
-                anchor: "Tidepool/Session/Lib/G26.hs",
-                label: "<decl>",
-                user_lines: None,
-                line_offset: 0,
-                col_indent: 0,
-                drop_foreign_gen_warnings_except: Some("Tidepool/Session/Lib/G26.hs"),
-                source,
+    fn generated_warning_policy_preserves_exact_path_matching() {
+        let own = "Tidepool/Session/Lib/G26.hs";
+        let input = [
+            diag(
+                "Tidepool/Session/Lib/G25.hs",
+                1,
+                1,
+                1,
+                2,
+                DiagnosticSeverity::Warning,
+                "older",
+            ),
+            diag(own, 1, 1, 1, 2, DiagnosticSeverity::Warning, "own"),
+            diag(
+                "/tmp/Tidepool/Session/Lib/G26.hs",
+                1,
+                1,
+                1,
+                2,
+                DiagnosticSeverity::Warning,
+                "absolute",
+            ),
+            diag(own, 1, 1, 1, 2, DiagnosticSeverity::Error, "error"),
+            diag(
+                "Library.hs",
+                1,
+                1,
+                1,
+                2,
+                DiagnosticSeverity::Warning,
+                "ordinary",
+            ),
+            ExtractDiag {
+                span: None,
+                severity: DiagnosticSeverity::Warning,
+                message: "unlocated".into(),
             },
-        );
-        assert!(!got.contains("partial head"), "{got}");
-        assert!(got.contains("user warning"), "{got}");
-
-        // keep_path = "" drops all gen warnings, including "own".
-        let got2 = render_diagnostics(
-            &[foreign, own],
-            &RenderOpts {
-                anchor: "Tidepool/Session/Lib/G26.hs",
-                label: "<decl>",
-                user_lines: None,
-                line_offset: 0,
-                col_indent: 0,
-                drop_foreign_gen_warnings_except: Some(""),
-                source,
-            },
-        );
-        assert!(!got2.contains("partial head"), "{got2}");
-        assert!(!got2.contains("user warning"), "{got2}");
+        ];
+        let original = input.clone();
+        for (policy, expected) in [
+            (
+                GeneratedWarningPolicy::KeepAll,
+                vec!["error", "older", "own", "absolute", "ordinary", "unlocated"],
+            ),
+            (
+                GeneratedWarningPolicy::KeepOnly(own),
+                vec!["error", "own", "ordinary", "unlocated"],
+            ),
+            (
+                GeneratedWarningPolicy::DropAll,
+                vec!["error", "ordinary", "unlocated"],
+            ),
+        ] {
+            let rendered = render_diagnostics_structured(
+                &input,
+                &RenderOpts {
+                    anchor: "Expr.hs",
+                    label: "<decl>",
+                    user_lines: None,
+                    line_offset: 0,
+                    col_indent: 0,
+                    generated_warnings: policy,
+                    source: "",
+                },
+            );
+            let messages: Vec<_> = rendered
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect();
+            assert_eq!(messages, expected, "{policy:?}");
+            assert_eq!(rendered.text.split("\n\n").count(), expected.len());
+        }
+        assert_eq!(input, original);
     }
 
     #[test]
@@ -1287,7 +1251,7 @@ mod tests {
                 user_lines: None,
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source: "",
             },
         );
@@ -1319,7 +1283,7 @@ mod tests {
              (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)\n\
              Probable fix: use a type annotation",
         );
-        let got = render_diagnostics(
+        let rendered = render_diagnostics_structured(
             &[d],
             &RenderOpts {
                 anchor: "Expr.hs",
@@ -1327,9 +1291,14 @@ mod tests {
                 user_lines: Some(&[(2, 2)]),
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
+        );
+        let got = &rendered.text;
+        assert_eq!(
+            rendered.diagnostics[0].message,
+            "* Ambiguous type variable `f0' arising from a use of `pure'\nProbable fix: use a type annotation"
         );
         assert!(!got.contains("__b ::"), "{got}");
         assert!(!got.contains("Relevant bindings include"), "{got}");
@@ -1350,7 +1319,7 @@ mod tests {
             user_lines: Some(&[(2, 2)]),
             line_offset: 0,
             col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source: "",
         };
         let got = drop_scaffold_relevant_binds(msg, &opts);
@@ -1373,7 +1342,7 @@ mod tests {
             user_lines: Some(&[(2, 2)]),
             line_offset: 0,
             col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source: "",
         };
         let got = drop_scaffold_relevant_binds(msg, &opts);
@@ -1392,7 +1361,7 @@ mod tests {
             user_lines: Some(&[(2, 2)]),
             line_offset: 0,
             col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source: "",
         };
         let got = drop_scaffold_relevant_binds(msg, &opts);
@@ -1413,7 +1382,7 @@ mod tests {
             user_lines: Some(&[(2, 2)]),
             line_offset: 0,
             col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source: "",
         };
         let got = drop_scaffold_relevant_binds(msg, &opts);
@@ -1477,7 +1446,7 @@ mod tests {
                 user_lines: Some(&[(2, 2), (3, 3)]),
                 line_offset: 2,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1511,7 +1480,7 @@ mod tests {
                 user_lines: Some(&[(1, 1), (3, 3)]),
                 line_offset: 3,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1545,7 +1514,7 @@ mod tests {
                 user_lines: Some(&[(3, 3)]),
                 line_offset: 2,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1581,7 +1550,7 @@ mod tests {
                 user_lines: Some(&[(1, 2)]),
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1609,7 +1578,7 @@ mod tests {
             user_lines: Some(&[(1, 40)]),
             line_offset: 33,
             col_indent: 2,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source,
         };
         // One in the user's own region (remapped), one in the anchor's
@@ -1705,7 +1674,7 @@ mod tests {
                 user_lines: None,
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source: "",
             },
         );
@@ -1747,7 +1716,7 @@ mod tests {
             user_lines: Some(&[(33, 40)]),
             line_offset: 33,
             col_indent: 2,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source: &source,
         };
         let text = render_diagnostics(std::slice::from_ref(&d), &opts());
@@ -1787,7 +1756,7 @@ mod tests {
                 user_lines: None,
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
                 source,
             },
         );
@@ -1808,6 +1777,60 @@ mod tests {
 
     proptest::proptest! {
         #[test]
+        fn projected_coordinates_match_parsed_headers(
+            kind in 0u8..4,
+            start_line in proptest::prop_oneof![0u32..12, proptest::strategy::Just(u32::MAX)],
+            line_delta in 0u32..3,
+            start_col in 0u32..8,
+            col_width in 0u32..8,
+            line_offset in proptest::prop_oneof![0usize..16, proptest::strategy::Just(usize::MAX)],
+            col_indent in proptest::prop_oneof![0usize..16, proptest::strategy::Just(usize::MAX)],
+        ) {
+            let mut input = diag(
+                if kind == 1 { "C:\\λ\\SomeExpr.hs" } else { "C:\\λ\\Expr.hs" },
+                start_line, start_col, start_line.saturating_add(line_delta), start_col + col_width,
+                DiagnosticSeverity::Error, "source error λ",
+            );
+            if kind == 2 { input.span = None; }
+            let original = input.clone();
+            let rendered = render_diagnostics_structured(std::slice::from_ref(&input), &RenderOpts {
+                anchor: "Expr.hs", label: "<cell>",
+                user_lines: (kind == 3).then_some(&[][..]),
+                line_offset, col_indent,
+                generated_warnings: GeneratedWarningPolicy::KeepAll,
+                source: "",
+            });
+            proptest::prop_assert_eq!(input, original);
+            proptest::prop_assert_eq!(rendered.diagnostics.len(), 1);
+            // The all-wrapper framing is a separate block; its underlying
+            // header uses the same grammar as an ordinary diagnostic.
+            let header = header_of(rendered.text.rsplit("\n\n").next().unwrap());
+            let diagnostic = &rendered.diagnostics[0];
+            proptest::prop_assert_eq!(&diagnostic.message, "source error λ");
+            let coordinate = header.strip_suffix(": error:");
+            match &diagnostic.location {
+                DiagnosticLocation::Authored { label, start_line, start_col, end_col, .. }
+                | DiagnosticLocation::Foreign { file: label, start_line, start_col, end_col, .. } => {
+                    let mut parts = coordinate.expect("located header").rsplitn(3, ':');
+                    let columns = parts.next().unwrap();
+                    let line: u32 = parts.next().unwrap().parse().unwrap();
+                    let file = parts.next().unwrap();
+                    let (column, range_end) = match columns.split_once('-') {
+                        Some((start, end)) => (start, Some(end.parse::<u32>().unwrap())),
+                        None => (columns, None),
+                    };
+                    proptest::prop_assert_eq!(file, label);
+                    proptest::prop_assert_eq!(line, *start_line);
+                    proptest::prop_assert_eq!(column.parse::<u32>().unwrap(), *start_col);
+                    if let Some(end) = range_end {
+                        proptest::prop_assert_eq!(end, *end_col);
+                    }
+                }
+                DiagnosticLocation::Unlocated => proptest::prop_assert_eq!(header, "error:"),
+            }
+        }
+
+        #[test]
         fn presentation_preserves_errors_and_warning_occurrences(
             chars in proptest::collection::vec(proptest::char::any(), 0..32),
             copies in 2usize..8,
@@ -1824,7 +1847,7 @@ mod tests {
             let rendered = render_diagnostics_structured(&input, &RenderOpts {
                 anchor: "Expr.hs", label: "<cell>", user_lines: None,
                 line_offset: 0, col_indent: 0,
-                drop_foreign_gen_warnings_except: None, source: "λ = \"é\"",
+                generated_warnings: GeneratedWarningPolicy::KeepAll, source: "λ = \"é\"",
             });
             proptest::prop_assert_eq!(input, original);
             proptest::prop_assert_eq!(rendered.diagnostics.len(), copies + 3);
@@ -1856,7 +1879,7 @@ mod tests {
             user_lines: Some(&[(2, 2)]),
             line_offset: 0,
             col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: GeneratedWarningPolicy::KeepAll,
             source: "generated\nauthored",
         };
         let rendered = render_diagnostics_structured(&[warning.clone(), warning.clone()], &opts);
@@ -1920,7 +1943,7 @@ mod tests {
                 user_lines: Some(&[(1, 1)]),
                 line_offset: 0,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: Some(""),
+                generated_warnings: GeneratedWarningPolicy::DropAll,
                 source,
             },
         );

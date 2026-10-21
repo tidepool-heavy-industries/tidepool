@@ -345,7 +345,7 @@ impl DeclarationValidationFailure {
                 user_lines: None,
                 line_offset,
                 col_indent: 0,
-                drop_foreign_gen_warnings_except: Some(&self.anchor),
+                generated_warnings: crate::diag::GeneratedWarningPolicy::KeepOnly(&self.anchor),
                 source: &self.source,
             },
         );

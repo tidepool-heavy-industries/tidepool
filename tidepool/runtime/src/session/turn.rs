@@ -1324,7 +1324,7 @@ pub fn render_turn_compile_rejection(
             user_lines: user_lines.as_ref().map(std::slice::from_ref),
             line_offset,
             col_indent,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: crate::diag::GeneratedWarningPolicy::KeepAll,
             source,
         },
     );
@@ -1356,7 +1356,7 @@ pub fn render_cell_compile_rejection(error: &CompileError, cell_text: &str) -> C
             user_lines: None,
             line_offset: 0,
             col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
+            generated_warnings: crate::diag::GeneratedWarningPolicy::KeepAll,
             source: cell_text,
         },
     );
