@@ -453,23 +453,24 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         CertifiedSourceSelection::from_compiler_inputs(public_inputs, &public_validation.inventory)
             .unwrap();
     let inventory = public_inputs.artifacts().inventory();
-    let mut bound = inventory
-        .bind_segment(
-            public_inputs.artifacts(),
-            Vec::new(),
-            &public_selection,
-            &mut public_validation,
-        )
-        .unwrap();
+    let observed = certified_products::AuthenticatedTargetImports::issue(
+        &target,
+        &accepted,
+        &public_validation.inventory,
+    )
+    .unwrap();
     let public_before = public_inputs.artifacts().clone();
     let public_original_hash = public_original.semantic_sha256();
     let refused = inventory
-        .admit_bound_target(
-            &mut bound,
+        .select_native_target(
             public_inputs.artifacts(),
-            NativeArtifactDemand::CertifiedTargetImports(&imports),
-            Vec::new(),
             &public_selection,
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut public_validation,
         )
         .err()
         .expect("another request's Source imports cannot select an empty public choice");

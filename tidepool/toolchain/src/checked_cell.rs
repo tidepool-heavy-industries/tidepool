@@ -5731,9 +5731,13 @@ mod tests {
     fn checked_target_demands_wrapper_dependency_separately_from_authored_entry() {
         use super::*;
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, NativeArtifactDemand, NativeGroupKey,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeArtifactDemand,
+            NativeGroupKey,
         };
-        use crate::certified_products::{self, AcceptedGlobal, ReceiptImportOwner};
+        use crate::certified_products::{
+            self, AcceptedGlobal, AuthenticatedTargetImports, CertifiedSourceSelection,
+            ReceiptImportOwner,
+        };
         use crate::recovery_artifacts::PackageInterfaceValidation;
         use tidepool_repr::execution_schema::{
             testing, GlobalDecl, Group, ModuleVersion, RuntimeRep,
@@ -5770,6 +5774,18 @@ mod tests {
             unreachable!()
         };
         top.identity = testing::identity("Authored", "entry_8");
+        let authored_target = Arc::new(testing::prepare(wire.clone()).unwrap());
+        let mut changed_wire = wire.clone();
+        changed_wire.expressions.nodes[0] =
+            tidepool_repr::execution_schema::ExprFrame::Return(vec![
+                tidepool_repr::execution_schema::Atom::Scalar(
+                    tidepool_repr::execution_schema::ScalarLiteral::Int {
+                        bits: 64,
+                        bytes: 43_i64.to_be_bytes().to_vec(),
+                    },
+                ),
+            ]);
+        let changed_target = Arc::new(testing::prepare(changed_wire).unwrap());
         let wrapper_binder = testing::identity("Wrapper", "entry_8");
         wire.globals = vec![GlobalDecl {
             identity: wrapper_binder.clone(),
@@ -5778,7 +5794,7 @@ mod tests {
             required_evaluated: false,
             required_generation: None,
         }];
-        let target = testing::prepare(wire).unwrap();
+        let target = Arc::new(testing::prepare(wire).unwrap());
         let plans = vec![CheckedTypedSegmentPlan {
             digest: hex(&[2; 32]),
             root: "authored_origin".into(),
@@ -5833,6 +5849,38 @@ mod tests {
             [1; 32],
         )
         .unwrap();
+        let authored_entry = CheckedTypedEntry::issue_program_item(
+            directory.path(),
+            &request,
+            admission,
+            &plans,
+            0,
+            source,
+            &authored_target,
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "Authored".into(),
+            },
+            &products,
+            [1; 32],
+        )
+        .unwrap();
+        let changed_entry = CheckedTypedEntry::issue_program_item(
+            directory.path(),
+            &request,
+            admission,
+            &plans,
+            0,
+            source,
+            &changed_target,
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "Authored".into(),
+            },
+            &products,
+            [1; 32],
+        )
+        .unwrap();
         for (module, ordinal) in [("WrongOwner", 8), ("Authored", 12), ("Authored", 99)] {
             let wrong_owner = crate::declaration_join::ExactModuleIdentity {
                 unit: "fixture".into(),
@@ -5873,7 +5921,7 @@ mod tests {
             &mut validation,
         )
         .unwrap();
-        let imports = certified_products::certify_target_owners(
+        certified_products::certify_target_owners(
             &target,
             &accepted,
             &original_groups,
@@ -5892,21 +5940,61 @@ mod tests {
             .collect::<Vec<_>>();
         let inventory = ArtifactInventory::default();
         let baseline = inventory
-            .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &BTreeSet::new())
-            .unwrap();
-        let authored_admission = inventory
-            .admit_product_artifacts(
-                &baseline,
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
                 entries.clone(),
-                NativeArtifactDemand::VerifiedTarget {
-                    entry: &entry,
-                    imports: &[],
-                },
-                None,
+                NativeArtifactDemand::ScopeInterfaces,
             )
-            .unwrap()
-            .into_target()
             .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let selection = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &baseline.metadata_snapshot(),
+            &validation.inventory,
+        )
+        .unwrap();
+        let fixed = inventory
+            .bind_segment(&baseline, entries.clone(), &selection, &mut validation)
+            .unwrap();
+        let physical = fixed.physical_inputs().issued_artifacts();
+        let observed =
+            AuthenticatedTargetImports::issue(&authored_target, &[], &validation.inventory)
+                .unwrap();
+        let authored_admission = inventory
+            .select_native_target(
+                physical,
+                fixed.source_selection(),
+                observed,
+                Some(authored_entry.clone()),
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        let before = inventory.metrics();
+        let observed =
+            AuthenticatedTargetImports::issue(&authored_target, &[], &validation.inventory)
+                .unwrap();
+        assert!(
+            inventory
+                .select_native_target(
+                    physical,
+                    fixed.source_selection(),
+                    observed,
+                    Some(changed_entry),
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .is_err(),
+            "same entry symbol with a different target body cannot borrow its typed entry"
+        );
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes,
+            before.issued_scope_nodes
+        );
         let authored_only = authored_admission.artifacts();
         let authored_groups =
             crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
@@ -5923,18 +6011,23 @@ mod tests {
             &BTreeMap::new()
         )
         .is_err());
+        assert!(
+            AuthenticatedTargetImports::issue(&target, &[], &validation.inventory).is_err(),
+            "the wrapper's declared import cannot disappear from its observation"
+        );
+        let observed =
+            AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory).unwrap();
         let complete_admission = inventory
-            .admit_product_artifacts(
-                &baseline,
-                entries.clone(),
-                NativeArtifactDemand::VerifiedTarget {
-                    entry: &entry,
-                    imports: &imports,
-                },
+            .select_native_target(
+                physical,
+                fixed.source_selection(),
+                observed,
+                Some(entry.clone()),
                 None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
-            .unwrap()
-            .into_target()
             .unwrap();
         let complete = complete_admission.artifacts().clone();
         assert_eq!(
@@ -5948,10 +6041,8 @@ mod tests {
             ])
         );
         assert_eq!(complete.artifact_ids(), baseline.artifact_ids());
-        let authored_target = authored_admission.bind_target(Some(entry.clone()), vec![]);
-        let complete_target = complete_admission.bind_target(Some(entry.clone()), imports.clone());
-        let authored_resolved = authored_target.resolve().unwrap();
-        let complete_resolved = complete_target.resolve().unwrap();
+        let authored_resolved = authored_admission.resolve().unwrap();
+        let complete_resolved = complete_admission.resolve().unwrap();
         let authored_sites = authored_resolved.native_sites().unwrap();
         assert_eq!(authored_sites.ids().collect::<Vec<_>>(), vec![80]);
         let complete_sites = complete_resolved.native_sites().unwrap();
@@ -6006,14 +6097,41 @@ mod tests {
             .is_err());
         }
         let missing_inventory = ArtifactInventory::default();
-        assert!(missing_inventory
+        let missing_view = missing_inventory
             .admit_shared_with_demand(
                 &missing_inventory.empty_view(),
                 vec![entries[0].clone()],
-                NativeArtifactDemand::VerifiedTarget {
-                    entry: &entry,
-                    imports: &imports
-                }
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let missing_projection =
+            CompilerInputProjection::from_issued_entries(&entries[..1]).unwrap();
+        let missing_selection = CertifiedSourceSelection::from_compiler_projection(
+            &missing_projection,
+            &missing_view.metadata_snapshot(),
+            &validation.inventory,
+        )
+        .unwrap();
+        let missing_fixed = missing_inventory
+            .bind_segment(
+                &missing_view,
+                vec![entries[0].clone()],
+                &missing_selection,
+                &mut validation,
+            )
+            .unwrap();
+        let observed =
+            AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory).unwrap();
+        assert!(missing_inventory
+            .select_native_target(
+                missing_fixed.physical_inputs().issued_artifacts(),
+                missing_fixed.source_selection(),
+                observed,
+                Some(entry),
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
             .is_err());
     }
