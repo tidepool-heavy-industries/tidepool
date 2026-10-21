@@ -231,7 +231,7 @@ fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coord
     let interrupted_root = dir.path().join("interrupted-owner");
     let interrupted = owned_command(&interrupted_root)
         .arg("--")
-        .arg("/bin/sh")
+        .arg(std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"))
         .args([
             "-c",
             r#"kill "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID"; exit 37"#,

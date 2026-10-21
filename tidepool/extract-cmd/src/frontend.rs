@@ -1621,7 +1621,9 @@ mod tests {
             evidence.configure_child(&mut command);
             evidence.write_lifecycle(&report, OwnedLifecycleState::Running).unwrap();
             let outcome = directory.path().join("owned-compiler-outcome.json");
-            let child = crate::process::command("/bin/sh").args(["-c", &format!("exit {code}")]).status();
+            let child = crate::process::command(
+                std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"),
+            ).args(["-c", &format!("exit {code}")]).status();
             let observed = OwnedChildLifecycle::observe(evidence, &report, &outcome, child);
             let result = observed.finish(|succeeded| {
                 let before_cleanup: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
@@ -1675,9 +1677,11 @@ mod tests {
             if fail_initial_publication {
                 std::fs::create_dir(&report).unwrap();
             }
-            let child = crate::process::command("/bin/sh")
-                .args(["-c", "exit 37"])
-                .status();
+            let child = crate::process::command(
+                std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"),
+            )
+            .args(["-c", "exit 37"])
+            .status();
             let owner = OwnedChildLifecycle::observe(evidence, &report, &outcome, child);
             let mut cleanup_ran = false;
             let result = owner.finish(|succeeded| {
