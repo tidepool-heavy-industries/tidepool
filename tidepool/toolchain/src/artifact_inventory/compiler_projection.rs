@@ -422,23 +422,44 @@ impl PartialEq for IssuedNativeSelectionCompletion {
 }
 impl Eq for IssuedNativeSelectionCompletion {}
 
+/// The final target may require an ordinary live value. Such a requirement
+/// cannot be used by the closed-source launch constructor as immutable code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletedNativeTargetImport {
+    Source {
+        binding: NativeGroupBinding,
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+    RetainedCapture {
+        identity: tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+    },
+    Package {
+        binding: super::PackageCodeBinding,
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+}
+
 /// The final target's ordered slots and its selected dependency completion are
 /// coissued from the same resolved physical target. Context custody may retain
 /// the dependency completion without granting another target these slots.
 #[derive(Debug)]
 pub struct CompletedNativeSelection {
     completion: Arc<IssuedNativeSelectionCompletion>,
-    target_imports: Arc<[CompletedNativeImport]>,
+    target_imports: Arc<[CompletedNativeTargetImport]>,
 }
 impl CompletedNativeSelection {
     pub fn completion(&self) -> &Arc<IssuedNativeSelectionCompletion> {
         &self.completion
     }
-    pub fn target_imports(&self) -> &[CompletedNativeImport] {
+    pub fn target_imports(&self) -> &[CompletedNativeTargetImport] {
         &self.target_imports
     }
     pub fn group_imports(&self, binding: NativeGroupBinding) -> Option<&[CompletedNativeImport]> {
-        self.completion.rows.get(&binding).map(|row| row.imports.as_ref())
+        self.completion
+            .rows
+            .get(&binding)
+            .map(|row| row.imports.as_ref())
     }
 }
 
@@ -495,18 +516,22 @@ pub(crate) fn complete_native_selection(
     inherited: &NativeSelectionCompletions,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Arc<CompletedNativeSelection>, CompileError> {
-    use crate::certified_products::SelectedNativeImport;
+    use crate::certified_products::{SelectedNativeImport, SelectedNativeTargetImport};
     use tidepool_repr::execution_schema::{DefinitionsView, GlobalDecl};
 
     if !std::ptr::eq(output.operation().as_ref(), operation) {
-        return Err(failure("native completion belongs to another output operation"));
+        return Err(failure(
+            "native completion belongs to another output operation",
+        ));
     }
     let check_product = |product: &crate::certified_products::CertifiedPackageCodeProduct| {
         let owner = product.code().owner();
         if &owner.compiler_sha256 != output.producer_sha256()
             || &owner.profile_sha256 != output.profile_sha256()
         {
-            return Err(failure("package completion differs from actual target compiler/profile"));
+            return Err(failure(
+                "package completion differs from actual target compiler/profile",
+            ));
         }
         Ok(())
     };
@@ -620,11 +645,43 @@ pub(crate) fn complete_native_selection(
             prior.map(|row| row.as_ref()),
         )?;
     }
-    gather(
-        sources.target_link_requirements()?,
-        sources.target().definitions(),
-        None,
-    )?;
+    let target = sources.target();
+    let definitions = target.definitions();
+    if sources.target_requirements().len() != definitions.globals().len() {
+        return Err(failure(
+            "target completion slots differ from physical definitions",
+        ));
+    }
+    for (link, global) in sources
+        .target_requirements()
+        .iter()
+        .zip(definitions.globals())
+    {
+        match link {
+            SelectedNativeTargetImport::Package {
+                identity,
+                interface_digest,
+            } => {
+                if identity != &global.identity {
+                    return Err(failure(
+                        "target package obligation differs from physical global",
+                    ));
+                }
+                package_roots.push(package_target(global, interface_digest)?);
+            }
+            SelectedNativeTargetImport::RetainedCapture {
+                identity,
+                generation,
+            } => {
+                if identity != &global.identity || global.required_generation != Some(*generation) {
+                    return Err(failure(
+                        "target capture differs from its compiler-issued global",
+                    ));
+                }
+            }
+            SelectedNativeTargetImport::Source { .. } => {}
+        }
+    }
     let mut plans = Vec::new();
     let mut pending = package_roots.clone();
     let mut reached = BTreeSet::new();
@@ -753,11 +810,45 @@ pub(crate) fn complete_native_selection(
             }),
         );
     }
-    let target_imports = close(
-        sources.target_link_requirements()?,
-        sources.target().definitions(),
-    )?;
     drop(close);
+    let target_imports = sources
+        .target_requirements()
+        .iter()
+        .zip(definitions.globals())
+        .map(|(link, global)| match link {
+            SelectedNativeTargetImport::Source { binding, value } => {
+                if !selected_groups.contains(binding) {
+                    return Err(failure("target completion omitted an exact source root"));
+                }
+                Ok(CompletedNativeTargetImport::Source {
+                    binding: *binding,
+                    value: *value,
+                })
+            }
+            SelectedNativeTargetImport::RetainedCapture {
+                identity,
+                generation,
+            } => Ok(CompletedNativeTargetImport::RetainedCapture {
+                identity: identity.clone(),
+                generation: *generation,
+            }),
+            SelectedNativeTargetImport::Package {
+                interface_digest, ..
+            } => {
+                let binding = packages
+                    .get(
+                        *roots
+                            .next()
+                            .ok_or_else(|| failure("target package root is absent"))?,
+                    )
+                    .ok_or_else(|| failure("target package root lacks its acquired row"))?;
+                let value =
+                    binding.resolve_export(global, definitions.signatures(), interface_digest)?;
+                Ok(CompletedNativeTargetImport::Package { binding, value })
+            }
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?
+        .into();
     if roots.next().is_some() {
         return Err(failure(
             "completed package graph has unconsumed target slots",
