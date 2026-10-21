@@ -431,12 +431,6 @@ impl NativeInstantiationPlan {
         })
     }
 
-    pub(in crate::session) fn restrict_closed(self: &Arc<Self>) -> Option<ClosedInstantiationPlan> {
-        (!has_retained_inputs(&self.selection)).then(|| ClosedInstantiationPlan {
-            native: Arc::clone(self),
-        })
-    }
-
     pub(in crate::session) fn matches_code(&self, code: &super::super::turn::TurnCode<'_>) -> bool {
         Arc::ptr_eq(&self.target_definitions, code.prepared_owner())
             && code
@@ -827,6 +821,10 @@ impl RetainedNativeRequirement {
 impl NativeInstantiation {
     pub(in crate::session) fn plan(&self) -> &NativeInstantiationPlan {
         &self.plan
+    }
+
+    pub(in crate::session) fn shares_plan(&self, plan: &Arc<NativeInstantiationPlan>) -> bool {
+        Arc::ptr_eq(&self.plan, plan)
     }
 
     pub(in crate::session) fn retained_requirements(

@@ -7604,6 +7604,9 @@ where
                 Self::validate_activation_preview_code(spent.admission(), &code)?;
             }
         }
+        self.state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::SourceAdmission)?;
         let resolved = if code.certification().is_some() {
             let plan = match images {
                 Some(images) => images.native_plan(&code)?,
@@ -8080,6 +8083,13 @@ where
             .state
             .admit_source_work_in(scope)
             .map_err(SessionError::from)?;
+        if let TurnImageAcquisition::Ready { bundle } = images {
+            let held = bundle.native_plan(&code)?;
+            if !matches!(&resolved, NativeTurnAdmission::Native(resolved) if resolved.shares_plan(&held))
+            {
+                return Err(PreparedRuntimeError::MissingPreparedNativeImage.into());
+            }
+        }
         let (metadata, sites, prepared, certification) = code.into_parts();
         let (program, source_keys, native_sources) = match resolved {
             NativeTurnAdmission::Closed { plan, origin } => match checked {

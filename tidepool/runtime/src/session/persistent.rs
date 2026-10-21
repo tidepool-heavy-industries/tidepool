@@ -165,6 +165,10 @@ pub(crate) struct ResolvedNativeTurn {
 }
 
 impl ResolvedNativeTurn {
+    pub(super) fn shares_plan(&self, plan: &Arc<super::prepared::NativeInstantiationPlan>) -> bool {
+        self.instantiation.shares_plan(plan)
+    }
+
     pub(super) fn retained_ids(&self) -> impl Iterator<Item = SessionVarId> + '_ {
         self.captures.values().map(|capture| capture.id)
     }
@@ -900,13 +904,7 @@ impl PersistentSession {
         let current = certification
             .current_native_sources(code.prepared())
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        let sources = match (plan.restrict_closed(), certification.checked_prefix()) {
-            (Some(closed), Some(prefix)) => super::prepared::NativeInstallationSources::closed(
-                &closed,
-                prefix.captured_source_origin(),
-            ),
-            _ => super::prepared::NativeInstallationSources::current(&plan, current.as_ref()),
-        };
+        let sources = super::prepared::NativeInstallationSources::current(&plan, current.as_ref());
         let selection = self
             .bindings
             .native_domain_selection_in(&self.scopes, scope)

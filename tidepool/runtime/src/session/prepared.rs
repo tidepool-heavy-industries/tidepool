@@ -865,35 +865,18 @@ impl ScopedTargetImage {
 /// Strong custody of native code and its literal storage, with no installed state.
 pub(crate) struct NativeImageBundle {
     plan: Arc<NativeInstantiationPlan>,
-    registry: Arc<ImageRegistry>,
-    images: BTreeMap<usize, Arc<CompiledProgram>>,
-    target: usize,
 }
 
 impl std::fmt::Debug for NativeImageBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeImageBundle")
-            .field("images", &self.images.len())
-            .field(
-                "target",
-                &self
-                    .images
-                    .get(&self.target)
-                    .map(|image| image.image_instance_id()),
-            )
+            .field("images", &self.plan.images().count())
+            .field("target", &self.plan.target_image().image_instance_id())
             .finish()
     }
 }
 
 impl NativeImageBundle {
-    fn holds(&self, image: &Arc<CompiledProgram>) -> bool {
-        // The strong owner prevents address reuse while this index is live.
-        // Registry equality remains the native selection authority.
-        self.images
-            .get(&(Arc::as_ptr(image) as usize))
-            .is_some_and(|held| Arc::ptr_eq(held, image))
-    }
-
     pub(crate) fn prepare_activation_renderer(
         compiled: &super::turn::CompiledTurn,
         registry: &Arc<ImageRegistry>,
@@ -918,62 +901,30 @@ impl NativeImageBundle {
             &compiled.code(),
             registry,
         )?);
-        let images = plan
-            .images()
-            .map(|image| (Arc::as_ptr(image) as usize, Arc::clone(image)))
-            .collect();
-        let target = Arc::as_ptr(plan.target_image()) as usize;
-        Ok(Self {
-            plan,
-            registry: Arc::clone(registry),
-            images,
-            target,
-        })
+        Ok(Self { plan })
     }
 
     pub(in crate::session) fn native_plan(
         &self,
         code: &super::turn::TurnCode<'_>,
     ) -> Result<Arc<NativeInstantiationPlan>, PreparedRuntimeError> {
-        if !self.plan.matches_code(code) || self.plan.images().any(|image| !self.holds(image)) {
+        if !self.plan.matches_code(code) {
             return Err(PreparedRuntimeError::MissingPreparedNativeImage);
         }
         Ok(Arc::clone(&self.plan))
     }
 
     #[cfg(test)]
-    pub(super) fn omitting_image(&self, key: usize) -> Self {
-        Self {
-            plan: Arc::clone(&self.plan),
-            registry: self.registry.clone(),
-            images: self
-                .images
-                .iter()
-                .filter(|(address, _)| **address != key)
-                .map(|(address, image)| (*address, image.clone()))
-                .collect(),
-            target: self.target,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn omitting_target_image(&self) -> Self {
-        self.omitting_image(self.target)
-    }
-
-    #[cfg(test)]
-    pub(super) fn image_owners(&self) -> impl ExactSizeIterator<Item = &Arc<CompiledProgram>> {
-        self.images.values()
+    pub(super) fn image_owners(&self) -> impl Iterator<Item = &Arc<CompiledProgram>> {
+        self.plan.images()
     }
 
     pub(super) fn image_instances(&self) -> impl Iterator<Item = u64> + '_ {
-        self.images.values().map(|image| image.image_instance_id())
+        self.plan.images().map(|image| image.image_instance_id())
     }
 
     pub(super) fn target_image_instance(&self) -> Option<u64> {
-        self.images
-            .get(&self.target)
-            .map(|image| image.image_instance_id())
+        Some(self.plan.target_image().image_instance_id())
     }
 }
 
@@ -1099,7 +1050,6 @@ fn target_owners_match(prepared: &PreparedProgram, owners: &[ImportOwner]) -> bo
 #[derive(Clone, Copy)]
 enum NativeImageAcquisition<'a> {
     Compile(&'a ImageRegistry),
-    Ready(&'a NativeImageBundle),
 }
 
 impl NativeImageAcquisition<'_> {
@@ -1112,18 +1062,6 @@ impl NativeImageAcquisition<'_> {
         match self {
             Self::Compile(registry) => {
                 DemandedImage::compile_source_with_literals(group, registry, packages, sources)
-            }
-            Self::Ready(bundle) => {
-                let image = DemandedImage::lookup_source_with_literals(
-                    group,
-                    &bundle.registry,
-                    packages,
-                    sources,
-                )?;
-                if !bundle.holds(image.image()) {
-                    return Err(DemandError::MissingPreparedNativeImage);
-                }
-                Ok(image)
             }
         }
     }
@@ -1139,18 +1077,6 @@ impl NativeImageAcquisition<'_> {
                 prepared, owners, sources, registry,
             )
             .map_err(PreparedRuntimeError::Compile),
-            Self::Ready(bundle) => {
-                let image = CompiledProgram::lookup_prepared_with_source_literals(
-                    prepared,
-                    owners,
-                    sources,
-                    &bundle.registry,
-                )
-                .map_err(PreparedRuntimeError::Compile)?
-                .filter(|image| bundle.holds(image))
-                .ok_or(PreparedRuntimeError::MissingPreparedNativeImage)?;
-                Ok(image)
-            }
         }
     }
 }
@@ -1401,14 +1327,6 @@ impl ScopedTargetImage {
             resolved,
             NativeImageAcquisition::Compile(registry),
         )
-    }
-
-    pub(crate) fn lookup_scoped(
-        prepared: PreparedProgram,
-        resolved: &super::persistent::ResolvedCertifiedTurn,
-        bundle: &NativeImageBundle,
-    ) -> Result<Self, PreparedRuntimeError> {
-        ImageTarget::acquire_scoped(prepared, resolved, NativeImageAcquisition::Ready(bundle))
     }
 
     fn qualified_source(&self, source: &SourceBinder) -> Result<ScopedSourceBinder, DemandError> {
