@@ -540,7 +540,8 @@ impl ClassifiedNativeCohort {
                     .reserve::<CohortNativeRequirement>(imports.len())
                     .map_err(|error| evidence(error.into()))?;
                 let mut obligations = Vec::new();
-                for reference in imports {
+                for import in imports {
+                    let reference = import.reference();
                     crate::host_work::checkpoint()?;
                     operation
                         .charge(1)
@@ -560,12 +561,9 @@ impl ClassifiedNativeCohort {
                         module: module.clone(),
                     };
                     let requirement = match reference {
-                        ReceiptImportOwner::Source { .. } => match current
-                            .available_source_dependency(
-                                reference,
-                                &metadata.artifacts,
-                                operation,
-                            )? {
+                        ReceiptImportOwner::Source { .. } => match import
+                            .available_source_dependency(&metadata.artifacts, operation)?
+                        {
                             CurrentSourceDependency::Local(child) => {
                                 let child = child.key();
                                 operation

@@ -2980,6 +2980,40 @@ impl<'a> CompletedTargetProductRef<'a> {
     }
 }
 
+/// A normalized nominal import borrowed from one authenticated current group.
+/// Its source metadata has already passed the raw compiler receipt validator.
+#[derive(Clone, Copy)]
+pub(crate) struct CurrentProductImport<'a> {
+    current: CurrentProductRef<'a>,
+    reference: &'a ReceiptImportOwner,
+}
+
+impl<'a> CurrentProductImport<'a> {
+    pub(crate) fn reference(&self) -> &'a ReceiptImportOwner {
+        self.reference
+    }
+
+    pub(crate) fn available_source_dependency(
+        &self,
+        entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
+            crate::artifact_inventory::ArtifactId,
+        >,
+        operation: &InventoryOperation,
+    ) -> Result<CurrentSourceDependency<'a>, crate::CompileError> {
+        self.current
+            .available_source_dependency(self.reference, entries, operation)
+    }
+
+    pub(crate) fn current_source_child(
+        &self,
+        entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
+            crate::artifact_inventory::ArtifactId,
+        >,
+    ) -> CertResult<Option<CurrentProductRef<'a>>> {
+        self.current.current_source_child(self.reference, entries)
+    }
+}
+
 pub(crate) enum CurrentSourceDependency<'a> {
     Local(CurrentProductRef<'a>),
     Issued(crate::declaration_context::ChosenNativeGroupSupport),
@@ -3022,7 +3056,7 @@ impl<'a> CurrentProductRef<'a> {
             .available_group(reference, operation)
     }
 
-    pub(crate) fn available_source_dependency(
+    fn available_source_dependency(
         &self,
         reference: &ReceiptImportOwner,
         entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
@@ -3035,9 +3069,9 @@ impl<'a> CurrentProductRef<'a> {
         let ReceiptImportOwner::Source {
             unit,
             module,
-            module_version,
             original_ordinal,
             binder,
+            ..
         } = reference
         else {
             return Err(evidence(CertificationError::Mismatch(
@@ -3045,8 +3079,7 @@ impl<'a> CurrentProductRef<'a> {
             )));
         };
         let owner = self
-            .selection
-            .receipt_source_member(unit, module, module_version.as_ref())
+            .nominal_source_owner(reference, None)
             .map_err(evidence)?;
         let native = self
             .selection
@@ -3143,13 +3176,39 @@ impl<'a> CurrentProductRef<'a> {
         )
     }
 
-    pub(crate) fn nominal_imports(&self) -> CertResult<&'a [ReceiptImportOwner]> {
+    pub(crate) fn nominal_imports(
+        &self,
+    ) -> CertResult<impl ExactSizeIterator<Item = CurrentProductImport<'a>> + 'a> {
         let crate::artifact_inventory::ArtifactPayload::Original(product) = &self.entry.payload
         else {
             return Err(CertificationError::Mismatch("current native payload kind"));
         };
-        original_native_group_imports(product, self.ordinal)
-            .ok_or(CertificationError::Mismatch("current native group witness"))
+        let imports = original_native_group_imports(product, self.ordinal)
+            .ok_or(CertificationError::Mismatch("current native group witness"))?;
+        let current = *self;
+        Ok(imports
+            .iter()
+            .map(move |reference| CurrentProductImport { current, reference }))
+    }
+
+    fn nominal_source_owner(
+        &self,
+        reference: &ReceiptImportOwner,
+        ordinal: Option<u32>,
+    ) -> CertResult<&'a CachedHomeOwner> {
+        let ReceiptImportOwner::Source {
+            unit,
+            module,
+            module_version: Some(version),
+            ..
+        } = reference
+        else {
+            return Err(CertificationError::Mismatch(
+                "current Source metadata lacks its normalized version",
+            ));
+        };
+        self.selection
+            .exact_source_owner_with_demand(unit, module, Some(version), ordinal)
     }
 
     pub(crate) fn operation(&self) -> Option<&'a InventoryOperation> {
@@ -3161,7 +3220,7 @@ impl<'a> CurrentProductRef<'a> {
 
     /// Only actual current-cohort Source membership can extend this traversal.
     /// Inherited sources retain their already sealed dependency proof.
-    pub(crate) fn current_source_child(
+    fn current_source_child(
         &self,
         reference: &ReceiptImportOwner,
         entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
@@ -3171,21 +3230,16 @@ impl<'a> CurrentProductRef<'a> {
         let ReceiptImportOwner::Source {
             unit,
             module,
-            module_version,
             original_ordinal,
             binder,
+            ..
         } = reference
         else {
             return Err(CertificationError::Mismatch(
                 "current Source reference kind",
             ));
         };
-        let owner = self.selection.receipt_source_owner(
-            unit,
-            module,
-            module_version.as_ref(),
-            *original_ordinal,
-        )?;
+        let owner = self.nominal_source_owner(reference, Some(*original_ordinal))?;
         let Some(native) = self
             .selection
             .modules
@@ -4788,6 +4842,22 @@ impl CertifiedSourceSelection {
                 }
                 _ => {}
             }
+        }
+        self.exact_source_owner_with_demand(unit, module, version, ordinal)
+    }
+
+    fn exact_source_owner_with_demand(
+        &self,
+        unit: &str,
+        module: &str,
+        version: Option<&ModuleVersion>,
+        ordinal: Option<u32>,
+    ) -> CertResult<&CachedHomeOwner> {
+        if let Some(selected) = self
+            .modules
+            .get(&(unit.to_owned(), module.to_owned()))
+            .and_then(ReceiptSourceSelection::native)
+        {
             if version.is_some_and(|version| version != &selected.owner.module_version) {
                 return Err(CertificationError::Mismatch("source module version"));
             }

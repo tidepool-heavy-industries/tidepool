@@ -1318,10 +1318,11 @@ pub(crate) fn validate_current_stage_native_inputs<'a>(
         }
         budget.reserve::<(NativeGroupKey, [usize; 4])>(1)?;
         visited.insert(current.key());
-        for reference in current
+        for import in current
             .nominal_imports()
             .map_err(compiler_evidence_failure)?
         {
+            let reference = import.reference();
             crate::host_work::checkpoint()?;
             budget.checkpoint()?;
             match reference {
@@ -1329,8 +1330,8 @@ pub(crate) fn validate_current_stage_native_inputs<'a>(
                     .require_actual_stage_original_use(reference)
                     .map_err(compiler_evidence_failure)?,
                 crate::certified_products::ReceiptImportOwner::Source { .. } => {
-                    if let Some(child) = current
-                        .current_source_child(reference, entries)
+                    if let Some(child) = import
+                        .current_source_child(entries)
                         .map_err(compiler_evidence_failure)?
                     {
                         if !visited.contains(&child.key()) {
