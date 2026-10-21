@@ -1708,11 +1708,18 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
                    target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
                    accepted: &[AcceptedGlobal],
                    validation: &mut PackageInterfaceValidation| {
+        let mut selected = selection.clone();
+        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selected,
+            view,
+            Vec::new(),
+            validation,
+        )?;
         let observed = AuthenticatedTargetImports::issue(target, accepted, &validation.inventory)
             .map_err(compiler_evidence_failure)?;
         let demanded = view.inventory().select_native_target(
-            view,
-            selection,
+            physical.physical_cohort()?,
+            &selected,
             observed,
             None,
             None,
@@ -2629,9 +2636,17 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             unreachable!()
         };
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-            inputs,
-            &validation.inventory,
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                inputs,
+                &validation.inventory,
+            )
+            .unwrap();
+        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            inputs.artifacts(),
+            Vec::new(),
+            &mut validation,
         )
         .unwrap();
         let source = inputs.artifacts();
@@ -2665,7 +2680,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         let target = source
             .inventory()
             .select_native_target(
-                source,
+                physical.physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -2864,9 +2879,16 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         "private body metadata would incorrectly preserve this replay root if used as compiler policy"
     );
     let mut validation = PackageInterfaceValidation::default();
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+    let mut selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         inputs,
         &validation.inventory,
+    )
+    .unwrap();
+    let physical = OriginalCompilerInputs::issue_segment_native_availability(
+        &mut selection,
+        inputs.artifacts(),
+        Vec::new(),
+        &mut validation,
     )
     .unwrap();
     // Exercise the worker's raw receipt boundary, rather than an already
@@ -2915,7 +2937,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let result = inputs.artifacts().inventory().select_native_target(
-                inputs.artifacts(),
+                physical.physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -3021,7 +3043,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .artifacts()
         .inventory()
         .select_native_target(
-            inputs.artifacts(),
+            physical.physical_cohort().unwrap(),
             &selection,
             observed,
             None,
@@ -4291,12 +4313,19 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 .all(|role| role.original().is_none()));
             assert!(inputs.artifacts().selected_native_groups().is_empty());
             let mut validation = PackageInterfaceValidation::default();
-            let selection =
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
                     &validation.inventory,
                 )
                 .unwrap();
+            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                inputs.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
             let group = crate::certified_products::original_available_groups(&native)
                 .unwrap()
                 .find(|group| group.original_ordinal() == 9001)
@@ -4326,7 +4355,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let demanded = inputs.artifacts().inventory().select_native_target(
-                inputs.artifacts(),
+                physical.physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -6902,11 +6931,30 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             .unwrap();
         let inputs = request.compiler_inputs();
         let mut validation = PackageInterfaceValidation::default();
-        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-            inputs,
-            &validation.inventory,
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                inputs,
+                &validation.inventory,
+            )
+            .unwrap();
+        let permissions = [7, 9001].map(|ordinal| {
+            selection.permits_native_group(entry.descriptor.id, native.owner(), ordinal)
+        });
+        // This target has no fresh native products. Empty physical issuance
+        // records that cohort without changing its request's input permissions.
+        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            inputs.artifacts(),
+            Vec::new(),
+            &mut validation,
         )
         .unwrap();
+        assert_eq!(
+            [7, 9001].map(|ordinal| {
+                selection.permits_native_group(entry.descriptor.id, native.owner(), ordinal)
+            }),
+            permissions,
+        );
         for demanded in [7, 9001] {
             let group = crate::certified_products::original_available_groups(&native)
                 .unwrap()
@@ -6937,7 +6985,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let admitted = inputs.artifacts().inventory().select_native_target(
-                inputs.artifacts(),
+                physical.physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -6989,7 +7037,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         let observed =
             AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
         let denied = inputs.artifacts().inventory().select_native_target(
-            inputs.artifacts(),
+            physical.physical_cohort().unwrap(),
             &selection,
             observed,
             None,
@@ -7288,12 +7336,19 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
             if interface_only {
                 let inputs = request.compiler_inputs();
                 let mut validation = PackageInterfaceValidation::default();
-                let selection =
+                let mut selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         inputs,
                         &validation.inventory,
                     )
                     .unwrap();
+                let physical = OriginalCompilerInputs::issue_segment_native_availability(
+                    &mut selection,
+                    inputs.artifacts(),
+                    Vec::new(),
+                    &mut validation,
+                )
+                .unwrap();
                 let ArtifactPayload::Original(native) = &entry.payload else {
                     unreachable!()
                 };
@@ -7338,7 +7393,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                         .artifacts()
                         .inventory()
                         .select_native_target(
-                            inputs.artifacts(),
+                            physical.physical_cohort().unwrap(),
                             &selection,
                             observed,
                             None,
@@ -10350,6 +10405,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
                     &mut validation,
                 )
                 .unwrap();
+                assert!(output.physical_cohort().is_ok());
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
                     .unwrap()
             })
@@ -10377,7 +10433,10 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     )
     .unwrap();
     let view = inputs.artifacts().clone();
-    assert!(selection.complete_native_entries(&view, &operation).unwrap().is_empty());
+    assert!(selection
+        .complete_native_entries(&view, &operation)
+        .unwrap()
+        .is_empty());
     let entry = view
         .metadata_snapshot()
         .artifacts
@@ -10449,6 +10508,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     assert_eq!(*entry, reference);
     let calls = original_entry_construction_calls();
     let issued = OriginalCompilerInputs::from_selection(&selection, &view).unwrap();
+    assert!(issued.physical_cohort().is_err());
     assert_eq!(original_entry_construction_calls() - calls, 0);
     assert!(Arc::ptr_eq(
         &entry,

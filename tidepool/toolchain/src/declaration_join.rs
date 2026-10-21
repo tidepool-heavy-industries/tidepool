@@ -3091,12 +3091,19 @@ mod authored_tests {
                 .unwrap();
             let inputs = request.compiler_inputs();
             let mut validation = PackageInterfaceValidation::default();
-            let selection =
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
                     &validation.inventory,
                 )
                 .unwrap();
+            let physical = crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                inputs.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
             let chosen = *groups.iter().next().unwrap();
             let original = crate::certified_products::finalize_original_for_inventory(
                 certificate.product().clone(),
@@ -3148,7 +3155,7 @@ mod authored_tests {
                 .artifacts()
                 .inventory()
                 .select_native_target(
-                    inputs.artifacts(),
+                    physical.physical_cohort().unwrap(),
                     &selection,
                     observed,
                     None,
@@ -3190,7 +3197,7 @@ mod authored_tests {
                     .artifacts()
                     .inventory()
                     .select_native_target(
-                        inputs.artifacts(),
+                        physical.physical_cohort().unwrap(),
                         &selection,
                         denied,
                         None,

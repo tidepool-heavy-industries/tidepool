@@ -20255,9 +20255,17 @@ mod tests {
             .compiler_inputs(&Arc::new(context.clone()), None)
             .unwrap();
         let mut validation = PackageInterfaceValidation::default();
-        let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-            &inputs,
-            &validation.inventory,
+        let mut selected =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                &inputs,
+                &validation.inventory,
+            )
+            .unwrap();
+        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selected,
+            inputs.artifacts(),
+            Vec::new(),
+            &mut validation,
         )
         .unwrap();
         let observed =
@@ -20266,7 +20274,7 @@ mod tests {
             .artifacts()
             .inventory()
             .select_native_target(
-                inputs.artifacts(),
+                physical.physical_cohort().unwrap(),
                 &selected,
                 observed,
                 None,
@@ -20490,12 +20498,19 @@ mod tests {
                 .compiler_inputs(acquired, None)
                 .unwrap();
             let mut validation = PackageInterfaceValidation::default();
-            let selected =
+            let mut selected =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &actual,
                     &validation.inventory,
                 )
                 .unwrap();
+            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selected,
+                actual.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
             let observed =
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
@@ -20503,7 +20518,7 @@ mod tests {
                 .artifacts()
                 .inventory()
                 .select_native_target(
-                    actual.artifacts(),
+                    physical.physical_cohort().unwrap(),
                     &selected,
                     observed,
                     None,
@@ -25183,12 +25198,19 @@ mod tests {
                 tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
             };
             let mut validation = PackageInterfaceValidation::default();
-            let selection =
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
                     &validation.inventory,
                 )
                 .unwrap();
+            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                inputs.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
             let prepared = prepared_target_fixture(vec![GlobalDecl {
                 identity: binding.identity.clone(),
                 rep: RuntimeRep::LiftedRef,
@@ -25213,7 +25235,7 @@ mod tests {
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let target = inputs.artifacts().inventory().select_native_target(
-                inputs.artifacts(),
+                physical.physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -25845,12 +25867,19 @@ mod tests {
                 crate::certified_products::ReceiptImportOwner::Retained { generation: 11, .. }
             ));
             let mut validation = PackageInterfaceValidation::default();
-            let selection =
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
                     &validation.inventory,
                 )
                 .unwrap();
+            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                inputs.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
             let prepared = prepared_target_fixture(vec![GlobalDecl {
                 identity: binding.identity.clone(),
                 rep: RuntimeRep::LiftedRef,
@@ -25878,7 +25907,7 @@ mod tests {
                 .artifacts()
                 .inventory()
                 .select_native_target(
-                    inputs.artifacts(),
+                    physical.physical_cohort().unwrap(),
                     &selection,
                     observed,
                     None,
@@ -29945,9 +29974,17 @@ mod tests {
             panic!("the selected compiler role remains the issued Original");
         };
         let mut validation = PackageInterfaceValidation::default();
-        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-            inputs,
-            &validation.inventory,
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                inputs,
+                &validation.inventory,
+            )
+            .unwrap();
+        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            inputs.artifacts(),
+            Vec::new(),
+            &mut validation,
         )
         .unwrap();
         let accepted = [3, 7]
@@ -30001,7 +30038,7 @@ mod tests {
             .artifacts()
             .inventory()
             .select_native_target(
-                inputs.artifacts(),
+                physical.physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
