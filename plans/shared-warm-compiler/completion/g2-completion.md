@@ -129,6 +129,15 @@ issued closure, while unselected nominal metadata retains custody without
 acquiring execution. If current publication promises cannot express that
 distinction, resolve the promise at its owner before changing consumers.
 
+This tranche does not automatically complete a partially available parent when
+a later request acquires more child permissions. Its published subset remains
+the subset actually issued. Selecting another parent group requires a genuine
+new parent proof/offer and an explicit choice; child permission alone cannot
+manufacture that offer. If an ordinary G2 history requires demand-time parent
+completion, retain that counterexample and design the transition in the existing
+issuer before adding it. Do not discover availability by attempting every group
+and swallowing refusals, or relabel an old parent as a newly compiled product.
+
 Required joined evidence includes an unused authenticated but unpermitted
 Original reference; selected historical G-old beside same-interface G-new;
 the same payload under distinct binding scopes; actual multiple World stages;
