@@ -10512,6 +10512,15 @@ impl WorldProgramSegment {
         self.continuation.native_prefix.as_ref()
     }
     pub(crate) fn native_prefix_artifacts(&self) -> Result<ArtifactView, CompileError> {
+        if !Arc::ptr_eq(
+            &self.inputs.groups.operation,
+            self.continuation.request.operation(),
+        ) || !Arc::ptr_eq(
+            self.originals.operation(),
+            self.continuation.request.operation(),
+        ) {
+            return Err(failure("World native prefix has another accounting owner"));
+        }
         match self.native_prefix() {
             Some(prior) => self.artifacts().with_prior_world_target(
                 prior.target_native_inputs(),
@@ -10765,6 +10774,7 @@ pub(crate) struct WorldStageSourceAdmission {
 #[cfg(test)]
 pub(crate) fn assert_world_repeated_source_refusals(
     program: &crate::compiler_world::CheckedWorldCellProgram,
+    prior: &crate::artifact_inventory::CertifiedTargetNativeInputs,
 ) {
     use sha2::Digest;
 
@@ -10800,6 +10810,61 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 WorldProgramContinuation::begin(program),
             )
             .expect("actual first stage admission");
+        if matches!(observation, Observation::Unchanged) {
+            let stage = segment.artifacts();
+            let combined = stage
+                .with_prior_world_target(prior, &validation.inventory)
+                .expect("actual stage and prior target compose");
+            assert_eq!(
+                stage.capture_graph_selection().namespace,
+                combined.capture_graph_selection().namespace,
+                "native prefix composition preserves the stage compiler namespace"
+            );
+            let baseline = CertifiedNativeGroupBaseline::WorldPrefix {
+                stage: &segment.inputs.groups,
+                prior: prior.certified_groups(),
+            };
+            certify_artifact_view_groups(&combined, None, Some(baseline), &mut validation)
+                .expect("both actual issued baselines retain their exact links");
+            assert!(
+                certify_artifact_view_groups(stage, None, Some(baseline), &mut validation).is_err(),
+                "a stage cannot drop its actual previous target"
+            );
+            let groups = prior.certified_groups();
+            let mut changed = CertifiedArtifactGroupBindings {
+                view: groups.view.clone(),
+                groups: Arc::clone(&groups.groups),
+                bindings: groups.bindings.clone(),
+                imports: groups.imports.clone(),
+            };
+            let (binding, links) = changed
+                .imports
+                .iter_mut()
+                .find(|(_, links)| !links.is_empty())
+                .expect("actual mixed target has a selected native import");
+            let binding = *binding;
+            *links = Arc::from([]);
+            assert!(changed.bindings.contains_key(&binding));
+            let error = certify_artifact_view_groups(
+                &combined,
+                None,
+                Some(CertifiedNativeGroupBaseline::WorldPrefix {
+                    stage: &segment.inputs.groups,
+                    prior: &changed,
+                }),
+                &mut validation,
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("changed an issued native import destination"));
+            let mut foreign = PackageInterfaceValidation::default();
+            assert!(
+                certify_artifact_view_groups(&combined, None, Some(baseline), &mut foreign)
+                    .is_err(),
+                "another accounting owner cannot consume the World baseline"
+            );
+        }
         let output = IssuedOriginalOutput::from_segment_originals(&segment.originals).unwrap();
         segment
             .admit_program_support(program, &output, &stage_produced)
