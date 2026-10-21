@@ -4101,6 +4101,251 @@ impl ArtifactInventory {
         })
     }
 
+    /// Classify the transition before issuing any new binding. A collision uses
+    /// general admission; invalid facts remain errors rather than fallback.
+    fn prepare_value_interface_append(
+        &self,
+        source: &CompilerSourceSupport,
+        entries: Vec<Arc<ArtifactEntry>>,
+    ) -> Result<ValueInterfaceAdmission, CompileError> {
+        let parent = source.artifacts();
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("value interface belongs to another inventory"));
+        }
+        let mut incoming = BTreeMap::new();
+        for entry in &entries {
+            if !matches!(
+                &entry.payload,
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+            ) {
+                return Err(failure(
+                    "value extension requires a certified value interface",
+                ));
+            }
+            if incoming
+                .insert(entry.descriptor.id, Arc::clone(entry))
+                .is_some_and(|previous| previous != *entry)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::MetadataConflict {
+                        artifact: entry.descriptor.id,
+                    },
+                ));
+            }
+        }
+        let issued = CompilerInputProjection::from_issued_entries(&entries)?;
+        let projection = source.projection().merge(&issued)?;
+        let mut reason = None;
+        let mut appended = BTreeMap::new();
+        let mut repeated = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        for (id, entry) in &incoming {
+            if let Some(previous) = parent.lease.payloads.get(id) {
+                // Requirements are not part of the value payload ID. Repeated
+                // bytes cannot replace a previously issued dependency row.
+                let merged = ArtifactEntry::merge_catalog_input_custody(previous, entry)?;
+                if source
+                    .projection()
+                    .snapshot_roles()
+                    .get(&entry.descriptor.owner)
+                    .is_some_and(|role| role.interface() == *id)
+                {
+                    if let Some(binding) = parent.lease.selection.namespace.get(id) {
+                        targets.insert(
+                            entry.descriptor.owner.clone(),
+                            ValueInterfaceTarget::Selected(*binding),
+                        );
+                        repeated.insert(*id, merged);
+                        continue;
+                    }
+                }
+                reason.get_or_insert(ValueInterfaceGeneralAdmission::UnselectedRepeat(*id));
+            } else if parent.lease.has_acquired_owner(&entry.descriptor.owner) {
+                // Hidden canonical/native children can lack compiler roles.
+                // A projection-only freshness check cannot exclude them.
+                reason.get_or_insert_with(|| {
+                    ValueInterfaceGeneralAdmission::RetainedOwner(entry.descriptor.owner.clone())
+                });
+            } else {
+                appended.insert(*id, Arc::clone(entry));
+                targets.insert(
+                    entry.descriptor.owner.clone(),
+                    ValueInterfaceTarget::Appended(*id),
+                );
+            }
+        }
+        if let Some(reason) = reason {
+            return Ok(ValueInterfaceAdmission::General {
+                projection,
+                entries,
+                reason,
+            });
+        }
+        let mut dependencies = BTreeMap::new();
+        for (id, entry) in &incoming {
+            let mut row = BTreeSet::new();
+            let requirements = entry
+                .requirements
+                .iter()
+                .chain(entry.interface_seals.keys())
+                .collect::<BTreeSet<_>>();
+            for required in requirements {
+                let target = match targets.get(required) {
+                    Some(target) => *target,
+                    None => {
+                        let binding = source
+                            .projection()
+                            .snapshot_roles()
+                            .get(required)
+                            .and_then(|role| {
+                                parent.lease.selection.namespace.get(&role.interface())
+                            })
+                            .copied();
+                        let Some(binding) = binding else {
+                            // A closed support may still require namespace
+                            // finalization. Its existing checked path selects
+                            // that binding; this append never guesses one.
+                            if source.projection().snapshot_roles().contains_key(required) {
+                                return Ok(ValueInterfaceAdmission::General {
+                                    projection,
+                                    entries,
+                                    reason: ValueInterfaceGeneralAdmission::MissingNamespaceBinding(
+                                        source.projection().snapshot_roles()[required].interface(),
+                                    ),
+                                });
+                            }
+                            return Err(admission_failure(
+                                ArtifactInventoryFailure::MissingDependency {
+                                    artifact: *id,
+                                    dependent: entry.descriptor.owner.clone(),
+                                    required: required.clone(),
+                                    dependency: ArtifactDependency::Interface,
+                                },
+                            ));
+                        };
+                        ValueInterfaceTarget::Selected(binding)
+                    }
+                };
+                let target_entry = match target {
+                    ValueInterfaceTarget::Selected(binding) => {
+                        &parent.lease.payloads[&binding.artifact]
+                    }
+                    ValueInterfaceTarget::Appended(id) => &incoming[&id],
+                };
+                entry.validate_interface_seal(required, target_entry)?;
+                if entry.requirements.contains(required) {
+                    row.insert(target);
+                }
+            }
+            if appended.contains_key(id) {
+                dependencies.insert(*id, row);
+            } else {
+                let ValueInterfaceTarget::Selected(binding) = targets[&entry.descriptor.owner]
+                else {
+                    unreachable!("repeated value has its selected binding")
+                };
+                let expected = row
+                    .iter()
+                    .map(|target| match target {
+                        ValueInterfaceTarget::Selected(target) => Some((
+                            InventoryNodeKey::Artifact(*target),
+                            ArtifactDependency::Interface,
+                        )),
+                        ValueInterfaceTarget::Appended(_) => None,
+                    })
+                    .collect::<Option<BTreeSet<_>>>();
+                let state = self.0.lock().expect("inventory lock");
+                let actual = state
+                    .outgoing(InventoryNodeKey::Artifact(binding))
+                    .map(|(target, edge)| (target, edge.clone()))
+                    .collect::<BTreeSet<_>>();
+                drop(state);
+                if expected.as_ref() != Some(&actual) {
+                    return Ok(ValueInterfaceAdmission::General {
+                        projection,
+                        entries,
+                        reason: ValueInterfaceGeneralAdmission::DifferentRequirementBindings(*id),
+                    });
+                }
+            }
+        }
+        Ok(ValueInterfaceAdmission::Append(
+            CheckedValueInterfaceAppend {
+                parent: parent.clone(),
+                projection,
+                entries: appended,
+                repeated,
+                dependencies,
+            },
+        ))
+    }
+
+    /// The compiler-role owner supplies the exact namespace before adding
+    /// authenticated interface facts. Historical parents remain independent custody.
+    fn admit_projected_with_native_requirements(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        requirements: &[NativeOriginalRequirement],
+    ) -> Result<ArtifactView, CompileError> {
+        let offered = projection
+            .roles()
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        if let Some(requirement) = requirements
+            .iter()
+            .find(|fact| !offered.contains(&fact.original))
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: requirement.original,
+                },
+            ));
+        }
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            NativeArtifactDemand::ScopeInterfaces,
+            ArtifactRootIntent::Projected(projection, requirements),
+        )
+        .map(|admission| admission.artifacts)
+    }
+    /// Accept exact availability support without importing the issuer's roots.
+    /// An offer may supply groups for a projected dependency while its own
+    /// original remains outside the compiler namespace.
+    fn admit_projected_with_native_offers(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        contributions: &compiler_projection::NativeNamespaceContributions,
+        catalog: Option<&NativeDependencyCatalog<'_>>,
+    ) -> Result<ArtifactView, CompileError> {
+        let offers = contributions.offers();
+        let offered = projection
+            .roles()
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        for offer in offers {
+            if !offered.contains(&offer.original()) && !offer.offers_groups_for(&offered) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: offer.original(),
+                    },
+                ));
+            }
+        }
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            NativeArtifactDemand::ScopeInterfaces,
+            ArtifactRootIntent::Offered(projection, offers, catalog),
+        )
+        .map(|admission| admission.artifacts)
+    }
     pub(crate) fn issue_current_cohort_availability(
         &self,
         physical: &ArtifactView,
