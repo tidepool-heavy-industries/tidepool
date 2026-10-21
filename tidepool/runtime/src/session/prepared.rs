@@ -1054,6 +1054,10 @@ impl NativeImageBundle {
         let target = CompiledProgram::prepare_target_code(
             compiled.prepared(),
             &target_literals,
+            // Activation preview retains its source-only preparation contract.
+            // External package literals require the completed package recipe;
+            // this route cannot supply their storage or installation authority.
+            &BTreeMap::new(),
             &literals,
             registry,
         )
