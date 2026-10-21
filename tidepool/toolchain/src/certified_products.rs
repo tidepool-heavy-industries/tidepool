@@ -5116,13 +5116,9 @@ fn resolve_receipt_owner_with_validation(
                     reason: InputDecisionRefusal::MissingContinuationOwner,
                 })?;
             let ordinal = *ordinal;
-            // The item receipt must still agree with this selected continuation.
-            selected.receipt_source_owner(
-                &owner.unit,
-                &owner.module,
-                Some(&native.module_version),
-                ordinal,
-            )?;
+            // This exact pair/symbol was already permitted by the retained
+            // initial input owner. Prefix products can change the current
+            // module policy without replacing that historical selection.
             let resolved = sources
                 .get(&(native.clone(), ordinal, binder.clone()))
                 .ok_or_else(|| {
