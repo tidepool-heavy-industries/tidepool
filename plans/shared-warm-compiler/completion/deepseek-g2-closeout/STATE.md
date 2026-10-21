@@ -9,7 +9,7 @@ Update this file with actual transitions; an assignment is not a running worker.
 | Item | Exact state / disposition |
 |---|---|
 | Campaign checkout | `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020` |
-| Campaign branch | `g2-closeout/deepseek-20261021`, currently `a06a161a29` before the next consolidation |
+| Campaign branch | `g2-closeout/deepseek-20261021`, cleanup checkpoint `827d4f9fc4`; P1/P3 remain separate review-ready tips |
 | Reviewed implementation at pack start | `0ea5b8e2a9168752c05bcba9cd927635d9004b5a`, clean before the work-pack documentation commit |
 | Structural prerequisite | `402528b8322615ab635adb8fca1cfc719a684523`, branch `g2/structural-package-original`; reviewed and merged into the campaign by `0cfb964739` |
 | Structural base | `aa4c04c9ade3e6e42e85a365881d313b139a5a95` |
@@ -82,8 +82,8 @@ The user-approved aesthetic/boundary review produced these bounded corrections:
 - Logging now inspects at most 32 field entries, reports fixed-width
   `fields_truncated:true`, and declares an 814604-byte event ceiling including
   ellipses and JSON escapes. `structuredLogging` executed 1/1 (build
-  `4168c450-bd31-4193-987b-762c71c98d4f`); this campaign patch is awaiting Q1's
-  independent review and commit.
+  `4168c450-bd31-4193-987b-762c71c98d4f`). Campaign commit `827d4f9fc4` is
+  pushed; Q1's independent review remains requested.
 - P1 totalized canonical HOME-link resolution and added a missing-index refusal
   control. Tip `64e3551412` is pushed to `github`; the focused HOME-root test
   executed 1/1 (build `16ea143e-65b2-4caa-a6e3-cb9ca0edad2e`).
@@ -114,14 +114,14 @@ assignments are made; do not prefill fictitious agent IDs or active status.
 
 | Role | Owner/session | Checkout, base, tip | State | Next dependency/action | Evidence / review |
 |---|---|---|---|---|---|
-| S | `/root` | Campaign checkout above; `a06a161a29` | implementing | Clean up review findings, integrate P/W/N/H/Q, then qualify | Worker evidence index and current ledger below |
+| S | `/root` | Campaign checkout above; `827d4f9fc4` | implementing | Integrate P/W/N/H/Q, then qualify | Worker evidence index and current ledger below |
 | P | app-server threads `01a1603f-72ec-...` and `01a16066-4c36-7862-97be-bb4b35fe1b86` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p-20261021`; `g2-deepseek/p-20261021`; contract `f2026b45b4`, P1 merge `420fdf7ebb` | implementing | Integrate P1/P2/P3, repair HOME demand-role coverage, and run the joined package cohort | `CONTRACTS.md` §1a; P package plan |
 | P1 | app-server threads `01a16048-2994-...` and `01a16066-5a7a-7082-942d-85c9678a43d6` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p1-20261021`; `g2-deepseek/p1-20261021`; tip `64e3551412` | review-ready | Integrate into P and run the joined producer/decoder/install cohort | Projection failures propagate; canonical-index refusal test 1/1 |
 | P2 | app-server thread `01a1604b-8e26-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p2-20261021`; `g2-deepseek/p2-20261021`; tip `83ac54b3aa` | review-ready | Exact occurrence decoder, ordinal HOME keys, inherited terminal resolution; H demand blocker under investigation | 10 focused executed checks pass |
 | P3 | app-server thread `01a1604b-a892-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p3-20261021`; `g2-deepseek/p3-20261021`; tip `527e53cd04` | review-ready | Integrate into P and run the full occurrence/refusal/recovery cohort | Historical fixtures tracked and mapped; exact same-seal control 1/1 |
 | W | app-server thread `01a1603f-7dc4-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-w-20261021`; `g2-deepseek/w-20261021`; tip `d2b6899f71` | integrated | Join notebook histories | R approved; 5 focused executed checks pass |
 | N | `/root/deepseek_n` | `/srv/swarm/checkouts/tidepool-deepseek-g2-n-20261021`; `g2-deepseek/n-20261021`; tip `9f77dd17ab` | blocked-on-specific-contract | Typed unchanged/checked/incomplete progress is implemented; joined P HOME-slot publication remains | N publication evidence plus W integration |
-| Q1 | app-server thread `01a1603f-862d-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q1-20261021`; `g2-deepseek/q1-20261021`; tip `a5167d5115` | review-ready | Independently review the campaign bound patch before its commit | Original Q1 receipt; replacement bound and worst-case test execute 1/1 |
+| Q1 | app-server thread `01a1603f-862d-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q1-20261021`; `g2-deepseek/q1-20261021`; tip `a5167d5115` | review-ready | Independently review campaign commit `827d4f9fc4` | Original Q1 receipt; replacement bound and worst-case test execute 1/1 |
 | Q2 | `/root/deepseek_q2` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q2-20261021`; `g2-deepseek/q2-20261021`; tip `769ef0ed40` | integrated | Joined qualification remains | Owner/kind census property controls pass |
 | Q3 | app-server thread `01a1603f-8d20-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q3-20261021`; `g2-deepseek/q3-20261021`; tip `393d6e5d8c` | integrated | Joined qualification remains | Independent enumeration plus disabled-trace control |
 | Q4 | app-server thread `01a1603f-90b4-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q4-20261021`; `g2-deepseek/q4-20261021`; tip `9809de64c4` | integrated | Joined defining-Name replay remains | 1 focused executed check |
