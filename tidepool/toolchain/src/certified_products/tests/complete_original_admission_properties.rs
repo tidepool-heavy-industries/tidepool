@@ -5,20 +5,11 @@ use crate::artifact_inventory::{
     ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactView, NativeArtifactDemand,
     NativeRequirementRoot,
 };
-use crate::recovery_artifacts::CertifiedRecoveryProduct;
 use proptest::prelude::*;
 use proptest::test_runner::{contextualize_config, Config, FileFailurePersistence, TestRunner};
 use std::cell::Cell;
 
 const ORDINALS: [u32; 3] = [3, 11, 29];
-
-fn source(product: &CertifiedRecoveryProduct, ordinal: u32) -> PendingImportOwner {
-    PendingImportOwner::Source {
-        owner: product.owner().clone(),
-        original_ordinal: ordinal,
-        binder: testing::identity(&product.owner().module, &format!("entry_{ordinal}")),
-    }
-}
 
 fn groups(view: &ArtifactView) -> BTreeSet<(String, u32)> {
     let entries = view.entries();
@@ -91,7 +82,17 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
             "AdmissionAuthored",
             ORDINALS[..count]
                 .iter()
-                .map(|ordinal| (*ordinal, vec![source(&dependency, *ordinal)]))
+                .map(|ordinal| {
+                    let export = source_target_observations(&[(&dependency, *ordinal)]).remove(0);
+                    (
+                        *ordinal,
+                        vec![PendingImportOwner::Source {
+                            owner: dependency.owner().clone(),
+                            original_ordinal: *ordinal,
+                            binder: export.identity,
+                        }],
+                    )
+                })
                 .collect(),
             7,
             &BTreeMap::new(),
@@ -112,26 +113,44 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     let authored_id = entries[0].descriptor.id;
     let dependency_id = entries[1].descriptor.id;
     let inventory = ArtifactInventory::default();
-    let available = inventory
-        .admit_shared_with_demand(
+    let mut validation = PackageInterfaceValidation::default();
+    let selection =
+        CertifiedSourceSelection::from_projected_originals(&products, &validation.inventory)
+            .unwrap();
+    let fixed = inventory
+        .bind_segment(
             &inventory.empty_view(),
             entries.clone(),
-            NativeArtifactDemand::ScopeInterfaces,
+            &selection,
+            &mut validation,
         )
         .unwrap();
-    let mut imports = vec![source(&authored, 3)];
+    let mut sources = vec![(&authored, 3)];
     if explicit_dependency {
-        imports.push(source(&dependency, 11));
+        sources.push((&dependency, 11));
     }
+    let observations = source_target_observations(&sources);
+    let prepared = prepared_target_fixture(&observations);
+    let observed =
+        AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory).unwrap();
+    let issued = inventory.metrics().issued_scope_nodes;
     let staged = inventory
-        .admit_shared_with_demand(
-            &available,
-            entries.clone(),
-            NativeArtifactDemand::CertifiedTargetImports(&imports),
+        .select_native_target(
+            fixed.physical_inputs().issued_artifacts(),
+            fixed.source_selection(),
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut validation,
         )
-        .unwrap();
-    // Remove availability roots before the history. Dependency group 3 remains
-    // executable only because authored group 3 reaches it.
+        .unwrap()
+        .artifacts()
+        .clone();
+    assert_eq!(inventory.metrics().issued_scope_nodes, issued);
+    // Restrict the compiler namespace before the history. Dependency group 3
+    // remains executable only because authored group 3 reaches it.
     let mut partial_roots = vec![authored_id];
     if explicit_dependency {
         partial_roots.push(dependency_id);
@@ -148,11 +167,6 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     assert_eq!(groups(&partial), expected_partial);
     assert!(partial.select_admission_roots(vec![authored_id]).is_err());
     assert!(partial.select_admission_roots(vec![dependency_id]).is_err());
-    let selection = CertifiedSourceSelection::from_projected_originals(
-        &products,
-        &InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
     let partial_graph = partial.capture_graph_selection();
     let expected_groups = ORDINALS[..count]
         .iter()
@@ -219,7 +233,7 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     drop(promoted);
     drop(closure);
     drop(partial);
-    drop(available);
+    drop(fixed);
     let mut recovery_inventories = Vec::new();
     for operation in tail {
         match operation {
