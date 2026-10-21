@@ -15893,7 +15893,9 @@ pub(crate) mod tests {
         );
         let closed = CompilerSourceSupport::close_complete_output(&issued).unwrap();
         let published = closed.certify_original_closure(&publication).unwrap();
-        let canonical = row.canonical;
+        let canonical = ArtifactEntry::canonical_artifact_id(
+            publication.products()[0].module_interface().unwrap(),
+        );
         let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = published
             .checked_native_input_decision(fresh_id, canonical, row.original_owner())
             .unwrap()
@@ -15923,7 +15925,19 @@ pub(crate) mod tests {
             .issued_artifacts()
             .selected_native_groups()
             .is_empty());
-        let carried = CertifiedSourceSelection::from_compiler_inputs(&issued, &operation).unwrap();
+        let carried_context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&published)
+            .unwrap();
+        let carried_directory = tempfile::tempdir().unwrap();
+        let carried_request = ExactCompileContext::new(Arc::new(carried_context))
+            .prepare_compilation(carried_directory.path(), b"original-binding-test")
+            .unwrap();
+        let carried = CertifiedSourceSelection::from_compiler_inputs(
+            carried_request.compiler_inputs(),
+            &operation,
+        )
+        .unwrap();
         assert!(carried
             .produced_authored_original_publication(
                 issued.physical_cohort().unwrap(),
@@ -16003,7 +16017,9 @@ pub(crate) mod tests {
         let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = empty_support
             .checked_native_input_decision(
                 empty_id,
-                empty_row.canonical,
+                ArtifactEntry::canonical_artifact_id(
+                    empty_publication.products()[0].module_interface().unwrap(),
+                ),
                 empty_row.original_owner(),
             )
             .unwrap()
