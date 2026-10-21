@@ -3584,41 +3584,6 @@ pub struct ResolvedNativeSourceProduct<'a> {
     binding: crate::artifact_inventory::NativeGroupBinding,
     physical_current: bool,
     imports: &'a Arc<[certified_products::SelectedNativeImport]>,
-    artifacts: &'a crate::artifact_inventory::ArtifactView,
-}
-
-/// Owned custody of one selected row and its exact ordered links. The acquired
-/// inventory remains held when the output that lent this row is released.
-#[derive(Clone)]
-pub struct OwnedNativeSourceProduct {
-    group: certified_products::PendingCertifiedGroup,
-    binding: crate::artifact_inventory::NativeGroupBinding,
-    imports: Arc<[certified_products::SelectedNativeImport]>,
-    _artifacts: crate::artifact_inventory::ArtifactView,
-}
-
-impl OwnedNativeSourceProduct {
-    pub fn matches_group(&self, group: &certified_products::PendingCertifiedGroup) -> bool {
-        self.group.same_issuance(group)
-    }
-    pub fn group(&self) -> &certified_products::PendingCertifiedGroup {
-        &self.group
-    }
-    pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
-        self.binding
-    }
-    pub fn imports(&self) -> &[certified_products::SelectedNativeImport] {
-        &self.imports
-    }
-}
-
-impl std::fmt::Debug for OwnedNativeSourceProduct {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OwnedNativeSourceProduct")
-            .field("binding", &self.binding)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
@@ -3631,15 +3596,6 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
     }
     pub fn imports(&self) -> &'a [certified_products::SelectedNativeImport] {
         self.imports
-    }
-
-    pub fn to_owned(&self) -> OwnedNativeSourceProduct {
-        OwnedNativeSourceProduct {
-            group: self.group.clone(),
-            binding: self.binding,
-            imports: Arc::clone(self.imports),
-            _artifacts: self.artifacts.clone(),
-        }
     }
 
     pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
@@ -3706,7 +3662,6 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
                 binding,
                 physical_current,
                 imports,
-                artifacts: resolved.artifacts(),
             });
         }
         Ok(Self {
