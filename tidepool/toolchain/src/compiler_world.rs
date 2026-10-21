@@ -767,6 +767,8 @@ pub enum WorldObservationProfile {
 
 /// Source-independent declarations issued by the actor's common source producer.
 /// Native request types retain their original checked-signature representation.
+/// Static imports are specifications without the leading `import`; the compiler
+/// renders that keyword separately from the World's complete lexical import lines.
 #[derive(Clone, Debug)]
 pub struct WorldObservationScaffold {
     profile: WorldObservationProfile,

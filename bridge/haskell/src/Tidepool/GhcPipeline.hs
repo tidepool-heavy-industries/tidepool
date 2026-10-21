@@ -2733,7 +2733,8 @@ prepareWorldObservationStage universe baseEnv timing
       declarationImports = case worldLexicalDeclaration lexical of
         Nothing -> []
         Just declaration -> ["import " ++ exactModule (worldDeclarationInterface declaration)]
-      imports = worldObservationImports scaffold ++ worldLexicalImportLines lexical ++ declarationImports
+      imports = map ("import " ++) (worldObservationImports scaffold)
+        ++ worldLexicalImportLines lexical ++ declarationImports
   createDirectoryIfMissing True directory
   protected <- either fail pure (replaceTemplateModuleHeader
     ("module " ++ owner ++ " where\n" ++ unlines imports) (worldObservationFragment scaffold))
