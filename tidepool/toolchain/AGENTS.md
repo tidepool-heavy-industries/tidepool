@@ -89,6 +89,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   interface/native edges and executable group demand, and validates them against
   the certified payloads before restoring compiler roles. A completed source-compilation instance
   proof remains transaction-owned rather than reconstructed from durable bytes.
+- Compiler Worlds support empty and TYPE-only contexts as well as published
+  source and notebook declarations. Import lines carry syntax; published sources
+  retain lexical proof through `with_published_source_originals`, while notebook
+  facades retain their actual Joined or Recovered owner. Keep these owners when
+  composing World inputs instead of reconstructing them from import text.
 - Canonical and Original sidecar obligations retain the same immutable selected
   package-interface tokens even when no package code is demanded. Recovery
   requires exact owner/seal references and byte custody, including TYPE-only

@@ -1568,9 +1568,14 @@ fn checked_candidate_reservations(
 }
 
 impl ModuleCandidateOffer {
-    /// Capture one published primary selection and its separate binding rows.
-    /// The runtime's existing publication token supplies these together; this
-    /// constructor never activates historical value support as source roots.
+    /// Capture a selected compiler context, checked bindings, source bytes and
+    /// import syntax. Empty and TYPE-only contexts are valid.
+    ///
+    /// Compose published sources with
+    /// [`ExactDeclarationContext::with_published_source_originals`](crate::declaration_context::ExactDeclarationContext::with_published_source_originals)
+    /// before capture so their lexical proof stays with the selected roles.
+    /// Notebook declarations also retain their issued Joined or Recovered facade
+    /// in `lexical`; import text alone cannot supply either proof.
     pub fn compiler_world_inputs(
         primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         bindings: crate::compiler_world::CompilerWorldBindings,
@@ -9135,7 +9140,7 @@ mod module_product_tests {
                         initial.clone(),
                         CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                         sources,
-                        crate::compiler_world::CompilerWorldLexicalSurface::from_publication_import_lines(
+                        crate::compiler_world::CompilerWorldLexicalSurface::from_import_lines(
                             if mixed {
                                 vec!["import qualified StageInputG".into()]
                             } else {
@@ -9578,7 +9583,7 @@ mod module_product_tests {
                             None,
                             CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                             sources,
-                            CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None)?,
+                            CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
                         )?,
                         &endpoint,
                     )?;

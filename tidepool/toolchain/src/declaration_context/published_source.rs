@@ -615,6 +615,8 @@ impl ExactDeclarationContext {
 
     /// Compose the exact issuer-owned public graph and native closure. Identical
     /// selections are idempotent; a conflicting original or policy refuses.
+    /// Carry this context into compiler World construction to preserve the
+    /// publication's lexical proof alongside its selected compiler roles.
     pub fn with_published_source_originals(
         mut self,
         selection: &PublishedSourceOriginalSelection,

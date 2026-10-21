@@ -185,7 +185,7 @@ fn open_empty_world() -> Result<
         None,
         CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
         sources,
-        CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None)?,
+        CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
     )?;
     let world = crate::compiler_world::open_world(inputs, &endpoint)?;
     Ok((endpoint, world, source))

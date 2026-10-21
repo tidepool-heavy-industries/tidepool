@@ -880,8 +880,8 @@ impl WorldObservationScaffold {
     }
 }
 
-/// Source syntax selected by the runtime's captured publication. Runtime grants
-/// remain in the admission that owns this description.
+/// Ordered import syntax with separately issued declaration and observation facts.
+/// Source selection and runtime grants remain with their owning admissions.
 #[derive(Clone, Debug)]
 pub struct CompilerWorldLexicalSurface {
     import_lines: Arc<[String]>,
@@ -898,9 +898,11 @@ impl CompilerWorldLexicalSurface {
             .map_or(&[], |scaffold| scaffold.type_contexts())
     }
 
-    /// Complete Haskell import statements rendered by the publication owner.
+    /// Complete Haskell import statements used to render compiler source.
+    /// This checks statement framing and size; the compiler parses the syntax.
+    /// Source publication requires its selected context's lexical proof.
     /// Raw template specifications must be rendered before this boundary.
-    pub fn from_publication_import_lines(
+    pub fn from_import_lines(
         import_lines: Vec<String>,
         declaration: Option<WorldDeclarationSelection>,
     ) -> Result<Self, CompileError> {
@@ -1589,7 +1591,7 @@ impl crate::checked_cell::CellProgram {
             promotion_qualifier_invocations = advance.promotion_qualifier_invocations,
             changed_primary_owners = advance.changed_owners.len(),
             "World declaration support admitted");
-        let lexical = CompilerWorldLexicalSurface::from_publication_import_lines(
+        let lexical = CompilerWorldLexicalSurface::from_import_lines(
             import_lines,
             Some(WorldDeclarationSelection::Joined(joined.clone())),
         )?
@@ -1786,7 +1788,7 @@ impl CompilerWorld {
             .restoration
             .primary_compiler_inputs
             .with_declaration_projection(joined, context)?;
-        let lexical = CompilerWorldLexicalSurface::from_publication_import_lines(
+        let lexical = CompilerWorldLexicalSurface::from_import_lines(
             import_lines,
             Some(WorldDeclarationSelection::Joined(joined.clone())),
         )?
@@ -3196,7 +3198,7 @@ pub(crate) fn world_context_fixture(
         &mut materializer,
         &mut remaining,
     )?;
-    let lexical = CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None)?
+    let lexical = CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?
         .materialize(context, &mut materializer)?;
     let mut acquisition = rows
         .arenas
@@ -7141,7 +7143,7 @@ mod answer_tests {
             None,
             CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
-            CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None).unwrap(),
+            CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert_eq!(cold.primary_context.snapshot().producer_sha256(), [0; 32]);
@@ -7164,7 +7166,7 @@ mod answer_tests {
             Some(bound),
             CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
-            CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None).unwrap(),
+            CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -7183,7 +7185,7 @@ mod answer_tests {
             )),
             CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             sources,
-            CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None).unwrap(),
+            CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert!(wrong
@@ -7507,14 +7509,13 @@ mod identity_tests {
             )
         })
         .unwrap();
-        let lexical =
-            crate::compiler_world::CompilerWorldLexicalSurface::from_publication_import_lines(
-                Vec::new(),
-                Some(crate::compiler_world::WorldDeclarationSelection::Recovered(
-                    Arc::new(recovered),
-                )),
-            )
-            .unwrap();
+        let lexical = crate::compiler_world::CompilerWorldLexicalSurface::from_import_lines(
+            Vec::new(),
+            Some(crate::compiler_world::WorldDeclarationSelection::Recovered(
+                Arc::new(recovered),
+            )),
+        )
+        .unwrap();
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         lexical.materialize(primary, &mut materializer).unwrap();
@@ -7533,7 +7534,7 @@ mod identity_tests {
         let root = |imports: &[&str]| {
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
-            CompilerWorldLexicalSurface::from_publication_import_lines(
+            CompilerWorldLexicalSurface::from_import_lines(
                 imports.iter().map(|spec| (*spec).to_owned()).collect(),
                 None,
             )
@@ -7563,7 +7564,7 @@ mod identity_tests {
             "qualified Data.List as L",
             "imported Data.List",
         ] {
-            assert!(CompilerWorldLexicalSurface::from_publication_import_lines(
+            assert!(CompilerWorldLexicalSurface::from_import_lines(
                 vec![raw_spec.to_owned()],
                 None,
             )
@@ -7577,7 +7578,7 @@ mod identity_tests {
         let root = |observation: Option<Arc<WorldObservationScaffold>>| {
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
-            CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None)
+            CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)
                 .unwrap()
                 .with_observation(observation)
                 .unwrap()

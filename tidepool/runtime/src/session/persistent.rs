@@ -1756,7 +1756,7 @@ impl PersistentSession {
                 }
                 None
             };
-        Ok(CompilerWorldLexicalSurface::from_publication_import_lines(
+        Ok(CompilerWorldLexicalSurface::from_import_lines(
             self.lib().workbench_imports_in(scope).source_lines(),
             declaration,
         )?)
