@@ -268,6 +268,7 @@ enum NativeOutputOwner<'a> {
 
 struct FiniteNativeOutput {
     root: PathBuf,
+    issuing_root: PathBuf,
     producer: [u8; 32],
     profile: [u8; 32],
     operation: Arc<InventoryOperation>,
@@ -282,6 +283,13 @@ impl<'a> CapturedNativeOutput<'a> {
     }
 
     pub(crate) fn directory(&self) -> &Path {
+        match &self.owner {
+            NativeOutputOwner::World(program) => program.directory().path(),
+            NativeOutputOwner::Finite(output) => &output.issuing_root,
+        }
+    }
+
+    pub(crate) fn physical_directory(&self) -> &Path {
         match &self.owner {
             NativeOutputOwner::World(program) => program.directory().path(),
             NativeOutputOwner::Finite(output) => &output.root,
@@ -340,6 +348,18 @@ pub(super) struct CompletedNativeOutputBundle<P> {
 }
 
 impl<P> CompletedNativeOutputBundle<P> {
+    pub(super) fn record_captured_members(
+        &self,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        for (relative, bytes) in &self.output.files {
+            validation
+                .record_captured_bytes(&self.output.root.join(relative), bytes)
+                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn native_output(&self) -> CapturedNativeOutput<'_> {
         CapturedNativeOutput {
             owner: NativeOutputOwner::Finite(&self.output),
@@ -367,7 +387,49 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
             "native output requires an admitted package service profile".into(),
         )
     })?;
+    capture_native_bundle(
+        bundle,
+        root,
+        deployment.producer_identity,
+        *association.profile_id(),
+        root,
+    )
+}
+
+/// Reopening uses the entry owner's checked manifest and inventory. It does not
+/// manufacture a compiler transaction or a live package-service association.
+pub(super) fn capture_retained(
+    entry: &super::production_entry::VerifiedEntryOutput<'_>,
+    operation: Arc<InventoryOperation>,
+) -> Result<CompletedNativeOutputBundle<OriginalOutput>, CompileError> {
+    let layout = InvocationOutputLayout::original(&["__prepared"])?;
+    let bundle = layout.read(entry.root(), operation)?;
+    capture_native_bundle(
+        bundle,
+        entry.root(),
+        entry.producer(),
+        entry.profile(),
+        entry.issuing_root(),
+    )
+}
+
+fn capture_native_bundle<P: NativeOutputPurpose>(
+    bundle: InvocationOutputBundle<P>,
+    root: &Path,
+    producer: [u8; 32],
+    profile: [u8; 32],
+    issuing_root: &Path,
+) -> Result<CompletedNativeOutputBundle<P>, CompileError> {
     let root = std::fs::canonicalize(root)?;
+    if !issuing_root.is_absolute()
+        || issuing_root
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::RootDir))
+    {
+        return Err(CompileError::ExtractFailed(
+            "invalid native issuing output root".into(),
+        ));
+    }
     let receipt_bytes =
         super::CompilerSidecar::CertifiedProducts.read(&root, bundle.operation())?;
     if receipt_bytes.is_empty() {
@@ -381,11 +443,14 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
         bundle.operation(),
     )
     .map_err(compiler_evidence_failure)?;
-    let mut files = BTreeMap::new();
+    let mut files = BTreeMap::from([(
+        PathBuf::from("certified-products.cbor"),
+        receipt_bytes.into(),
+    )]);
     for path in receipt
         .package_products
         .iter()
-        .map(|product| root.join(&product.relative_path))
+        .map(|product| issuing_root.join(&product.relative_path))
         .chain(
             receipt
                 .packages
@@ -393,7 +458,7 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
                 .map(|witness| witness.selected_path.clone()),
         )
     {
-        let relative = path.strip_prefix(&root).map_err(|_| {
+        let relative = path.strip_prefix(issuing_root).map_err(|_| {
             CompileError::ExtractFailed("native package member is outside completed output".into())
         })?;
         if relative.as_os_str().is_empty()
@@ -408,7 +473,15 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
         if files.contains_key(relative) {
             continue;
         }
-        if std::fs::canonicalize(&path)? != path {
+        let path = root.join(relative);
+        let canonical = std::fs::canonicalize(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CompileError::MissingOutput(path.clone())
+            } else {
+                CompileError::Io(error)
+            }
+        })?;
+        if canonical != path {
             return Err(CompileError::ExtractFailed(
                 "native package member aliases another path".into(),
             ));
@@ -427,11 +500,12 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
     }
     let output = FiniteNativeOutput {
         root,
+        issuing_root: issuing_root.to_path_buf(),
         producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-            &deployment.producer_identity,
+            &producer,
         )
         .sha256(),
-        profile: *association.profile_id(),
+        profile,
         operation: Arc::clone(bundle.operation()),
         files,
     };

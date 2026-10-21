@@ -3075,6 +3075,7 @@ impl SelectedModuleCandidateOffer {
                 Some((typed_segments, item_index, admission_digest)),
                 Some(source_segment),
                 Some(cursor),
+                None,
                 validation,
             )?
             .ok_or_else(|| {
@@ -3237,6 +3238,7 @@ impl SelectedModuleCandidateOffer {
             Some(&authored),
             OriginalOutputPublication::Transaction,
             produced_types,
+            None,
             None,
             None,
             None,
@@ -3880,6 +3882,7 @@ fn seal_turn_outputs_inner(
         None,
         None,
         None,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -3911,6 +3914,10 @@ fn seal_turn_outputs_with_validation(
     )>,
     source_segment: Option<&crate::declaration_context::ExactProgramSegmentAdmission>,
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
+    native_output: Option<(
+        &invocation_output::CapturedNativeOutput<'_>,
+        &certified_products::CertifiedReceipt,
+    )>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -3928,7 +3935,11 @@ fn seal_turn_outputs_with_validation(
             )
         })
         .transpose()?;
-    let receipt_bytes = CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?;
+    let receipt_bytes = if native_output.is_some() {
+        Vec::new()
+    } else {
+        CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?
+    };
     let (ordinary_products, ordinary_evidence_bytes) = if source_segment.is_none() {
         let product_bytes =
             CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
@@ -4009,7 +4020,7 @@ fn seal_turn_outputs_with_validation(
         || !fresh_products.products().is_empty()
         || !prepared.globals().is_empty()
         || evidence.is_some_and(|evidence| has_ready_home_module(evidence));
-    if receipt_bytes.is_empty() {
+    if native_output.is_none() && receipt_bytes.is_empty() {
         if needs_certificate {
             return Err(CompileError::ExtractFailed(
                 "turn required product certificate unavailable".into(),
@@ -4018,14 +4029,17 @@ fn seal_turn_outputs_with_validation(
         return Ok(None);
     }
     let ordinary_receipt = if source_segment.is_none() {
-        Some(
-            certified_products::decode_receipt_with_validation(
-                &receipt_bytes,
-                output_dir,
-                validation,
-            )
-            .map_err(compiler_evidence_failure)?,
-        )
+        Some(match native_output {
+            Some((_, receipt)) => std::borrow::Cow::Borrowed(receipt),
+            None => std::borrow::Cow::Owned(
+                certified_products::decode_receipt_with_validation(
+                    &receipt_bytes,
+                    output_dir,
+                    validation,
+                )
+                .map_err(compiler_evidence_failure)?,
+            ),
+        })
     } else {
         None
     };
@@ -5557,6 +5571,18 @@ fn compile_invocation_inner(
             }
             let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
+            let portable = matches!(
+                &policy,
+                CompilationPolicy::BuildAction {
+                    export: BuildActionExport::PreparedFixture { .. },
+                    ..
+                }
+            );
+            if !portable && deployment.package_source_association().is_none() {
+                return Err(CompileAttemptError::Deployment(
+                    crate::toolchain::DeploymentAdmissionError::PackageSourceRequired,
+                ));
+            }
             match &policy {
                 CompilationPolicy::BuildAction { .. } => {
                     cmd.build_products_dir(output_owner.path().join("build-products"));
@@ -5818,8 +5844,9 @@ fn compile_invocation_inner(
     }
     if let CompilationOutputOwner::Original(preparation) = output_owner {
         let original_layout = invocation_output::InvocationOutputLayout::original(inv.targets)?;
-        let extracted = extract_and_read(
+        let extracted = invocation_output::extract_native(
             run,
+            &deployment,
             preparation.raw(),
             &original_layout,
             &mut on_stage,
@@ -5831,7 +5858,7 @@ fn compile_invocation_inner(
         );
         // Candidate admission misses are handled before source execution by the
         // worker. A completed request is never replayed because of its response.
-        let bundle = extracted.map_err(|error| match &policy {
+        let native = extracted.map_err(|error| match &policy {
             CompilationPolicy::BuildAction {
                 export: BuildActionExport::PreparedFixture { .. },
                 ..
@@ -5839,6 +5866,7 @@ fn compile_invocation_inner(
             CompilationPolicy::BuildAction { .. } => error,
             _ => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
         })?;
+        let bundle = &native.bundle;
         let admitted = (|| {
             if let CompilationPolicy::BuildAction { source_path, .. } = &policy {
                 let evidence =
@@ -5865,7 +5893,7 @@ fn compile_invocation_inner(
                 },
                 selected_session_values,
             };
-            preparation.admit(&input_path, inv.source, &bundle, &offer)
+            preparation.admit(&input_path, inv.source, &native, &offer)
         })()
         .map_err(|error| match &policy {
             CompilationPolicy::BuildAction { .. } => error,
@@ -5904,8 +5932,9 @@ fn compile_invocation_inner(
         invocation_timing.finish(true);
         return Ok(CompilationOutput::Original(original));
     }
-    let extracted = extract_and_read(
+    let extracted = invocation_output::extract_native(
         run,
+        &deployment,
         output_owner.path(),
         &layout,
         &mut on_stage,
@@ -5917,7 +5946,7 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let bundle = extracted.map_err(|error| match &policy {
+    let native = extracted.map_err(|error| match &policy {
         CompilationPolicy::BuildAction {
             export: BuildActionExport::PreparedFixture { .. },
             ..
@@ -5925,6 +5954,8 @@ fn compile_invocation_inner(
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
+    let bundle = &native.bundle;
+    let native_output = native.native_output();
     let meta_bytes = bundle.metadata();
     let raw = bundle.targets();
     let product_bytes = bundle.products();
@@ -5990,62 +6021,8 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
-        let receipt_bytes =
-            CompilerSidecar::CertifiedProducts.read(output_owner.path(), &validation.inventory)?;
-        if receipt_bytes.is_empty() {
-            if inventory_export.is_some() {
-                return Err(CompileError::ExtractFailed(
-                    "catalog inventory product certificate unavailable".into(),
-                ));
-            }
-            if exact_request.is_some() {
-                return Err(CompileError::ExtractFailed(
-                    "exact compile product certificate unavailable".into(),
-                ));
-            }
-            if candidate_set
-                .as_ref()
-                .is_some_and(|set| !set.by_owner.is_empty())
-            {
-                return Err(CompileError::ExtractFailed(
-                    "candidate product certificate unavailable".into(),
-                ));
-            }
-            let requirements = crate::prepared_artifact::production_requirements()
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-            let fresh_products = inventory_operation
-                .parse_module_products(&product_bytes, &requirements)
-                .map_err(|error| compiler_evidence_failure(error.into()))?;
-            if !fresh_products.is_empty() {
-                return Err(CompileError::ExtractFailed(
-                    "fresh module product certificate unavailable".into(),
-                ));
-            }
-            if evidence_facts.is_some_and(has_ready_home_module) {
-                return Err(CompileError::ExtractFailed(
-                    "ready module product certificate unavailable".into(),
-                ));
-            }
-            let artifacts = assemble_with_products(
-                &meta_bytes,
-                &raw,
-                fresh_products,
-                Vec::new(),
-                evidence_facts,
-                None,
-                None,
-                &mut *on_stage,
-            )?;
-            ensure_no_uncertified_globals(&artifacts)?;
-            return Ok(artifacts);
-        }
+        let receipt = &native.receipt;
         invocation_timing.advance("product_decode_and_freshness");
-        let receipt = certified_products::decode_receipt_with_operation(
-            &receipt_bytes,
-            Some(output_owner.path()),
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
             &package_bundle_bytes,
