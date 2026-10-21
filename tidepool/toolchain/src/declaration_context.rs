@@ -26930,7 +26930,154 @@ mod tests {
         ])]);
         write_receipt(&receipt, &value);
         assert!(matches!(request.validate_receipt(&receipt, None, &context),
-            Err(CompileError::ExtractFailed(detail)) if detail.contains("leaves selected lexical graph")));
+            Err(CompileError::ExactImportWitness(failure))
+                if failure.source == identity("fixture", "Consumer")
+                    && failure.import == identity("fixture", "Unadmitted")
+                    && failure.qualifier == crate::cache::ImportQualifier::Unqualified
+                    && !failure.boot
+                    && failure.selected.is_none()
+                    && failure.reason == ExactImportWitnessRefusal::OutsideSelectedGraph));
+    }
+
+    #[test]
+    fn exact_import_refusals_preserve_observed_identity_and_order() {
+        use crate::cache::ImportQualifier;
+        use crate::failclass::{CompileFailureCause, FailureClass, Phase};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (context, _) = metadata_fixture();
+        let request = program_request(directory.path(), context.clone());
+        let before_context = context.semantic_sha256();
+        let before_graph = request
+            .compiler_inputs()
+            .artifacts()
+            .capture_graph_selection();
+        for (name, qualifier, boot, duplicate, reason, selected) in [
+            (
+                "Unadmitted",
+                "other:foreign",
+                true,
+                false,
+                ExactImportWitnessRefusal::BootImport,
+                false,
+            ),
+            (
+                "Unadmitted",
+                "other:foreign",
+                false,
+                false,
+                ExactImportWitnessRefusal::OutsideSelectedGraph,
+                false,
+            ),
+            (
+                "Alpha",
+                "other:foreign",
+                false,
+                false,
+                ExactImportWitnessRefusal::QualifierMismatch,
+                true,
+            ),
+            (
+                "Alpha",
+                "none",
+                false,
+                true,
+                ExactImportWitnessRefusal::DuplicateImport,
+                true,
+            ),
+        ] {
+            let receipt =
+                import_receipt_owner(directory.path(), &request, "fixture", name, qualifier, boot);
+            if duplicate {
+                let mut value = read_receipt(&receipt);
+                let imports = value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+                    .as_array_mut()
+                    .unwrap()[3]
+                    .as_array_mut()
+                    .unwrap();
+                imports.push(imports[0].clone());
+                write_receipt(&receipt, &value);
+            }
+            let error = request
+                .validate_receipt(&receipt, None, &context)
+                .err()
+                .expect("the observed import must refuse at the exact lexical gate");
+            let CompileError::ExactImportWitness(failure) = &error else {
+                panic!("unexpected import refusal: {error:?}");
+            };
+            assert_eq!(failure.source, identity("fixture", "Consumer"));
+            assert_eq!(failure.import, identity("fixture", name));
+            assert_eq!(
+                failure.qualifier,
+                if qualifier == "none" {
+                    ImportQualifier::Unqualified
+                } else {
+                    ImportQualifier::OtherUnit("foreign".into())
+                }
+            );
+            assert_eq!(failure.boot, boot);
+            assert_eq!(
+                failure.selected,
+                selected.then(|| identity("fixture", "Alpha"))
+            );
+            assert_eq!(failure.reason, reason);
+            assert_eq!(error.to_string(), format!(
+                "extractor contract failure: exact declaration context: exact import witness leaves selected lexical graph: source fixture:Consumer, import fixture:{name}, qualifier {qualifier}, boot {boot}, selected {selected}"
+            ));
+            let source = std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<ExactImportWitnessFailure>()
+                .unwrap();
+            assert!(std::ptr::eq(source, failure.as_ref()));
+            let envelope = crate::classify_compile(&error);
+            assert_eq!(envelope.class, FailureClass::VersionSkew);
+            assert_eq!(envelope.phase, Phase::Compile);
+            assert_eq!(envelope.cause, Some(CompileFailureCause::ExtractorContract));
+            let nested = CompileError::CompilerEvidence(Box::new(
+                crate::certified_products::CertificationError::OriginalClosure(Box::new(error)),
+            ));
+            let inner = std::error::Error::source(
+                std::error::Error::source(std::error::Error::source(&nested).unwrap()).unwrap(),
+            )
+            .unwrap()
+            .downcast_ref::<ExactImportWitnessFailure>()
+            .unwrap();
+            assert_eq!(inner.reason, reason);
+            let nested_envelope = crate::classify_compile(&nested);
+            assert_eq!(nested_envelope.class, FailureClass::VersionSkew);
+            assert_eq!(nested_envelope.phase, Phase::Compile);
+            assert_eq!(
+                nested_envelope.cause,
+                Some(CompileFailureCause::CompilerEvidence {
+                    failure: crate::failclass::CompilerEvidenceFailure::Contract,
+                })
+            );
+            assert_eq!(context.semantic_sha256(), before_context);
+            assert_eq!(
+                request
+                    .compiler_inputs()
+                    .artifacts()
+                    .capture_graph_selection(),
+                before_graph
+            );
+        }
+        let accepted = import_receipt_owner(
+            directory.path(),
+            &request,
+            "fixture",
+            "Alpha",
+            "none",
+            false,
+        );
+        request.validate_receipt(&accepted, None, &context).unwrap();
+        assert_eq!(context.semantic_sha256(), before_context);
+        assert_eq!(
+            request
+                .compiler_inputs()
+                .artifacts()
+                .capture_graph_selection(),
+            before_graph
+        );
     }
 
     #[test]
@@ -32448,8 +32595,13 @@ mod tests {
             .validate_receipt(&ordinary_receipt, None, &context)
             .err()
             .expect("ordinary input lacks protected original permission");
-        assert!(matches!(later_error, CompileError::ExtractFailed(detail)
-            if detail.contains("exact import witness leaves selected lexical graph: source fixture:Consumer")));
+        assert!(
+            matches!(later_error, CompileError::ExactImportWitness(failure)
+            if failure.source == identity("fixture", "Consumer")
+                && failure.import == identity("main", &owner.module_name())
+                && failure.selected.is_none()
+                && failure.reason == ExactImportWitnessRefusal::OutsideSelectedGraph)
+        );
         let mut wrong_context = (*context).clone();
         {
             let updated = [0; 32];
@@ -32615,8 +32767,13 @@ mod tests {
             .validate_receipt(&receipt, None, &context)
             .err()
             .expect("helper cannot borrow the protected target edge");
-        assert!(matches!(helper_error, CompileError::ExtractFailed(detail)
-            if detail.contains("exact import witness leaves selected lexical graph: source fixture:Helper")));
+        assert!(
+            matches!(helper_error, CompileError::ExactImportWitness(failure)
+            if failure.source == identity("fixture", "Helper")
+                && failure.import == identity("main", &owner.module_name())
+                && failure.selected.is_none()
+                && failure.reason == ExactImportWitnessRefusal::OutsideSelectedGraph)
+        );
     }
 
     #[test]

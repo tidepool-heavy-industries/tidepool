@@ -16458,9 +16458,13 @@ pub(crate) mod tests {
                 &BTreeMap::new(),
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch(
-                "source outside compiler selection"
-            ))
+            Err(CertificationError::SourceOutsideCompilerSelection {
+                owner,
+                requested_version,
+                original_ordinal: Some(3),
+            }) if owner.unit == original.owner().unit
+                && owner.module == original.owner().module
+                && requested_version == original.owner().module_version
         ));
 
         let other = recovered_witness_fixtures(&[fixture_finalized_product(
@@ -20638,10 +20642,22 @@ pub(crate) mod tests {
                     assert!(matches!(
                         &outcome,
                         Err(crate::CompileError::CompilerEvidence(error))
-                            if matches!(error.as_ref(), CertificationError::Mismatch(
-                                "source outside compiler selection"
-                            ))
+                            if matches!(error.as_ref(), CertificationError::SourceOutsideCompilerSelection {
+                                owner, requested_version, original_ordinal: None,
+                            } if owner == &entry.descriptor.owner
+                                && requested_version == &product.owner().module_version)
                     ));
+                    let error = outcome.as_ref().unwrap_err();
+                    let envelope = crate::classify_compile(error);
+                    assert_eq!(envelope.class, crate::FailureClass::VersionSkew);
+                    assert_eq!(envelope.phase, crate::Phase::Compile);
+                    assert_eq!(
+                        envelope.cause,
+                        Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                            failure: crate::failclass::CompilerEvidenceFailure::Contract,
+                        })
+                    );
+                    assert_eq!(error.to_string(), "compiler evidence rejected: compiler product certificate disagrees with source outside compiler selection");
                 } else if mode == "issued" && ordinal == 9001 {
                     assert!(matches!(
                         &outcome,
@@ -23232,9 +23248,11 @@ pub(crate) mod tests {
             assert!(matches!(
                 &missing_error,
                 crate::CompileError::CompilerEvidence(error)
-                    if matches!(error.as_ref(), CertificationError::Mismatch(
-                        "source outside compiler selection"
-                    ))
+                    if matches!(error.as_ref(), CertificationError::SourceOutsideCompilerSelection {
+                        owner, requested_version, original_ordinal: None,
+                    } if owner.unit == dependency.owner().unit
+                        && owner.module == dependency.owner().module
+                        && requested_version == &dependency.owner().module_version)
             ), "the absent dependency must refuse before physical group completion: {missing_error:?}");
         }
     }

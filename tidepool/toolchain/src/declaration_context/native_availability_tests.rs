@@ -3023,17 +3023,27 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
                     "InterfaceOnly custody cannot issue a Source root choice: {result:?}"
                 );
             } else {
-                let expected = match case {
-                    "unversioned" => "unversioned source lacks compiler selection",
-                    "wrong-version" => "source outside compiler selection",
-                    "wrong-binder" => "target Source exact native membership",
-                    _ => unreachable!(),
-                };
-                assert!(
-                    matches!(result, Err(CompileError::CompilerEvidence(error))
-                        if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(actual) if *actual == expected)),
-                    "{case} must refuse at its owning boundary"
-                );
+                if case == "wrong-version" {
+                    assert!(
+                        matches!(&result, Err(CompileError::CompilerEvidence(error))
+                        if matches!(error.as_ref(), crate::certified_products::CertificationError::SourceOutsideCompilerSelection {
+                            owner, requested_version, original_ordinal: None,
+                        } if owner == &entry.descriptor.owner
+                            && requested_version == &tidepool_repr::execution_schema::ModuleVersion([255; 32]))),
+                        "wrong version must retain the requested identity: {result:?}"
+                    );
+                } else {
+                    let expected = match case {
+                        "unversioned" => "unversioned source lacks compiler selection",
+                        "wrong-binder" => "target Source exact native membership",
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        matches!(result, Err(CompileError::CompilerEvidence(error))
+                            if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(actual) if *actual == expected)),
+                        "{case} must refuse at its owning boundary"
+                    );
+                }
             }
         }
     }
@@ -7223,9 +7233,11 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         );
         assert!(
             matches!(&denied, Err(CompileError::CompilerEvidence(error))
-            if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(
-                "source outside compiler selection"
-            ))),
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::SourceOutsideCompilerSelection {
+                owner, requested_version, original_ordinal: None,
+            } if owner.unit == unrelated.owner().unit
+                && owner.module == unrelated.owner().module
+                && requested_version == &unrelated.owner().module_version)),
             "unoffered dependency custody cannot manufacture a Source owner; actual={denied:?}"
         );
     }

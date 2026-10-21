@@ -539,6 +539,8 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .extend_issued_compiler_support(&initial_support)
         .unwrap();
 
+    let selected_native_context = Arc::new(context.clone());
+
     // The exact request exposes canonical interfaces while withholding native
     // originals from the compiler input.
     let projection = context.compiler_input_projection().interface_only();
@@ -651,6 +653,76 @@ fn check_retained_core_promotion_history(item_count: usize) {
         targets: BTreeMap::new(),
         packages: BTreeMap::new(),
     };
+    {
+        let denied_directory = root.path().join("selected-native-refusal");
+        std::fs::create_dir(&denied_directory).unwrap();
+        let denied_request = selected_native_context
+            .prepare_compilation(&denied_directory.join("inputs"), &producer)
+            .unwrap();
+        let before_graph = denied_request
+            .compiler_inputs()
+            .artifacts()
+            .capture_graph_selection();
+        let before_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
+        let (denied_source, denied_text) =
+            crate::declaration_context::generated_source_admission_fixture(
+                &denied_directory,
+                &denied_request,
+            );
+        let denied_evidence = denied_source.evidence_bytes();
+        let denied_exact = denied_request.product_admission(&denied_source);
+        let error = certify_products(
+            None,
+            &promoted_packet,
+            &promoted,
+            &crate::artifacts::SourceEvidenceAdmission::from_exact(
+                denied_exact
+                    .source()
+                    .match_product(
+                        denied_exact.physical_request().unwrap(),
+                        &denied_directory.join("Consumer.hs"),
+                        &denied_text,
+                        denied_evidence,
+                        promoted.operation(),
+                    )
+                    .unwrap(),
+            ),
+            root.path(),
+            &producer,
+            &include,
+            None,
+        )
+        .err()
+        .expect("retained Core cannot replace an exact selected native owner");
+        assert!(
+            matches!(&error, CertificationError::RetainedCoreReplacesNativeOwner { owner }
+            if owner == initial_a.owner())
+        );
+        assert_eq!(
+            HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get),
+            before_issues
+        );
+        assert_eq!(
+            denied_request
+                .compiler_inputs()
+                .artifacts()
+                .capture_graph_selection(),
+            before_graph
+        );
+        let error = crate::CompileError::CompilerEvidence(Box::new(error));
+        assert_eq!(error.to_string(), "compiler evidence rejected: compiler product certificate disagrees with retained core replaces native owner");
+        let envelope = crate::classify_compile(&error);
+        assert_eq!(envelope.class, crate::FailureClass::VersionSkew);
+        assert_eq!(envelope.phase, crate::Phase::Compile);
+        assert_eq!(
+            envelope.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::Contract,
+            })
+        );
+    }
+    drop(selected_native_context);
+
     let mut failed = promoted_packet.clone();
     let duplicate_group = failed.modules[0].groups[0].clone();
     failed.modules[0].groups.push(duplicate_group);
