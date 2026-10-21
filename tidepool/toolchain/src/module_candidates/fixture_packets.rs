@@ -215,13 +215,12 @@ fn admit_fixture_scope(
     let mut context = empty_fixture_scope(producer_sha);
     // Admit the complete interface closure before selecting any native
     // owner. Type-only dependencies cannot be inferred as packages.
-    let view = certified_product_artifact_view(
-        producer_sha,
-        &certified.recovery_products,
-        &certified.module_interfaces,
-        None,
-    )
-    .unwrap();
+    let view = certified
+        .original_inputs
+        .as_ref()
+        .expect("fixture products passed physical cohort issuance")
+        .issued_artifacts()
+        .clone();
     let support = crate::declaration_context::recover_fixture_compiler_support(
         certified
             .source_selection
@@ -312,23 +311,12 @@ fn admit_fixture_scope(
             crate::certified_products::validate_original_module_interface(product, canonical)
                 .expect("native custody must match its certified canonical module");
         }
-        let physical = crate::declaration_context::certified_product_artifact_view_with_validation(
-            producer_sha,
-            &certified.recovery_products,
-            &certified.module_interfaces,
-            &certified.value_interfaces,
-            None,
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-        )
-        .unwrap();
-        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &certified.source_selection,
-            &physical,
-        )
-        .unwrap();
+        let output = certified
+            .original_inputs
+            .as_ref()
+            .expect("fixture native products passed physical cohort issuance");
         let closed =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)
                 .unwrap();
         let requested = native_owners.iter().cloned().collect::<BTreeSet<_>>();
         let selected = closed.source_support(&requested).unwrap();
@@ -616,7 +604,7 @@ fn source_boot_candidate_packet_producer() {
         )
         .expect("actual consumed source and resolution evidence");
         let evidence = source_admission.completed();
-        let certified = certify_products(
+        let mut certified = certify_products(
             None,
             &receipt,
             &parsed,
@@ -627,6 +615,15 @@ fn source_boot_candidate_packet_producer() {
             None,
         )
         .unwrap();
+        crate::declaration_context::issue_certified_product_native_availability(
+            producer_sha,
+            &mut certified,
+            None,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                std::sync::Arc::clone(&operation),
+            ),
+        )
+        .expect("actual captured products require physical cohort issuance");
         if !evidence.cache_safe || !evidence.selection_complete {
             assert!(
                 certified
@@ -661,13 +658,11 @@ fn source_boot_candidate_packet_producer() {
                     std::slice::from_ref(target),
                     "published target must be the authenticated completed source owner"
                 );
-                let view = certified_product_artifact_view(
-                    producer_sha,
-                    &certified.recovery_products,
-                    &certified.module_interfaces,
-                    None,
-                )
-                .unwrap();
+                let view = certified
+                    .original_inputs
+                    .as_ref()
+                    .expect("published fixture products passed physical cohort issuance")
+                    .issued_artifacts();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(target),
                     &fixture_source_imports(&certified),
