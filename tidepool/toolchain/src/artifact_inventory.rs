@@ -11265,7 +11265,7 @@ mod tests {
         let chosen = inputs.artifacts();
         let inventory = chosen.inventory();
         assert!(chosen.selected_native_groups().is_empty());
-        let mut fixed = inventory
+        let fixed = inventory
             .bind_segment(
                 chosen,
                 vec![native.clone()],
@@ -11274,16 +11274,28 @@ mod tests {
             )
             .unwrap();
         assert!(!fixed.view.namespace().contains_key(&id));
-        let imports = [issued_source(&native, 7)];
-        let result = inventory
-            .admit_bound_target(
-                &mut fixed,
-                &inventory.empty_view(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
-                &selection,
+
+        let result = {
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
             )
-            .map(|admitted| admitted.artifacts);
+            .unwrap();
+            inventory.select_native_target(
+                fixed.physical_inputs().issued_artifacts(),
+                fixed.source_selection(),
+                observed,
+                None,
+                Some(&inventory.empty_view()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+        }
+        .map(|admitted| admitted.artifacts().clone());
         if competing {
             assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == id)));
@@ -11306,7 +11318,7 @@ mod tests {
 
     // Observation data only: native authority is issued at each call site by
     // AuthenticatedTargetImports::issue and the production target selector.
-    fn source_target_data(
+    pub(super) fn source_target_data(
         exports: &[(&ArtifactEntry, u32)],
     ) -> (
         Arc<tidepool_repr::execution_schema::PreparedProgram>,
@@ -11333,7 +11345,7 @@ mod tests {
         source_target_data_for_symbols(&symbols)
     }
 
-    fn source_target_data_for_symbols(
+    pub(super) fn source_target_data_for_symbols(
         exports: &[(
             &ArtifactEntry,
             u32,
@@ -11421,7 +11433,18 @@ mod tests {
                 NativeArtifactDemand::AllGroups,
             )
             .unwrap();
-        let selection = bound_selection_for_entries(&physical, &[native.clone(), unrelated]);
+        let selection =
+            bound_selection_for_entries(&physical, &[native.clone(), unrelated.clone()]);
+        let fixed = inventory
+            .bind_segment(
+                &physical,
+                vec![native.clone(), unrelated],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+        let physical = fixed.physical_inputs().issued_artifacts();
+        let selection = fixed.source_selection();
         assert_eq!(physical.selected_native_groups().len(), 3);
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let (prepared, accepted) = source_target_data(&[(&native, 7)]);
@@ -11604,6 +11627,16 @@ mod tests {
             )
             .unwrap();
         let selection = bound_selection_for_entries(&physical, &[native.clone()]);
+        let fixed = inventory
+            .bind_segment(
+                &physical,
+                vec![native.clone()],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+        let physical = fixed.physical_inputs().issued_artifacts();
+        let selection = fixed.source_selection();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let before = inventory.metrics().issued_scope_nodes;
         let mut selected_values = Vec::new();
@@ -11795,15 +11828,6 @@ mod tests {
         selection
             .with_new_product_dependencies(&prefix.metadata_snapshot(), &[requirement])
             .unwrap();
-        let mut fixed = inventory
-            .bind_segment(
-                &prefix,
-                vec![native.clone(), child.clone()],
-                &selection,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
-        let imports = [issued_source(&native, 7)];
         let expected = selected
             .capture_graph_selection()
             .native_groups
@@ -11811,25 +11835,34 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let before = inventory.metrics().issued_scope_nodes;
         for _ in 0..repetitions {
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
             let target = inventory
-                .admit_bound_target(
-                    &mut fixed,
+                .select_native_target(
                     &prefix,
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
                     &selection,
+                    observed,
+                    None,
+                    Some(&prefix),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
                 .unwrap();
             assert!(target
-                .artifacts
+                .artifacts()
                 .lease
                 .admission_roots
                 .iter()
                 .all(|node| !matches!(node, InventoryNodeKey::Group(_))));
             assert_eq!(
                 target
-                    .clone()
-                    .bind_target(None, (&imports).to_vec())
                     .resolve()
                     .map(|resolved| resolved.groups().clone())
                     .unwrap(),
@@ -12299,7 +12332,7 @@ mod tests {
                 (inputs, selection)
             };
             let inventory = inputs.artifacts().inventory();
-            let mut fixed = inventory
+            let fixed = inventory
                 .bind_segment(
                     inputs.artifacts(),
                     vec![],
@@ -12307,16 +12340,29 @@ mod tests {
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-            let imports = [issued_source(&native, 7)];
-            let result = inventory
-                .admit_bound_target(
-                    &mut fixed,
-                    &inventory.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &selection,
+
+            let result = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
-                .map(|admitted| admitted.artifacts);
+                .unwrap();
+                inventory.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&inventory.empty_view()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .map(|admitted| admitted.artifacts().clone());
             let demanded =
                 result.expect("implicit and explicit demand consume the carried exact choice");
             assert_eq!(demanded.selected_native_groups(), expected_keys);
@@ -12411,10 +12457,11 @@ mod tests {
                 .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
                 .unwrap();
             let selected_receipt =
-                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
+                    .unwrap();
             let owner = inputs.artifacts().inventory();
-            let imports = [issued_source(&native, 7)];
-            let mut fixed = owner
+
+            let fixed = owner
                 .bind_segment(
                     inputs.artifacts(),
                     vec![],
@@ -12422,15 +12469,28 @@ mod tests {
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-            let admitted = owner
-                .admit_bound_target(
-                    &mut fixed,
-                    &owner.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &selected_receipt,
+            let admitted = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
                 .unwrap();
+                owner.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&owner.empty_view()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .unwrap();
             assert_eq!(
                 admitted.artifacts().capture_graph_selection().native_groups,
                 expected
@@ -12451,8 +12511,10 @@ mod tests {
                 .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
                 .unwrap();
             let receipt =
-                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
-            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
+                    .unwrap();
+            let canonical =
+                ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
             let InputNativeDecision::IssuedChoices(choices) = inputs
                 .compiler_source_support()
                 .checked_native_input_decision(key.artifact, canonical, product.owner())
@@ -12474,7 +12536,7 @@ mod tests {
                 assert!(choices.is_empty());
             }
             let owner = inputs.artifacts().inventory();
-            let mut fixed = owner
+            let fixed = owner
                 .bind_segment(
                     inputs.artifacts(),
                     vec![],
@@ -12483,15 +12545,28 @@ mod tests {
                 )
                 .unwrap();
             let before = fixed.view.capture_graph_selection();
-            let denied = owner
-                .admit_bound_target(
-                    &mut fixed,
-                    &owner.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &receipt,
+            let denied = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
-                .unwrap_err();
+                .unwrap();
+                owner.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&owner.empty_view()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .unwrap_err();
             let CompileError::ArtifactInventory(error) = denied else {
                 panic!("expected typed native root refusal");
             };
@@ -12573,8 +12648,8 @@ mod tests {
             let output = issued;
             let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
             let closure = selection
-                    .selected_original_closure(output.issued_artifacts())
-                    .unwrap();
+                .selected_original_closure(output.issued_artifacts())
+                .unwrap();
             let selected = completed.certify_original_closure(&closure).unwrap();
             let groups = selected.artifacts().capture_graph_selection().native_groups;
             assert_eq!(groups.len(), 1);
@@ -12637,7 +12712,7 @@ mod tests {
                 )
                 .unwrap();
             let inventory = inputs.artifacts().inventory();
-            let mut fixed = inventory
+            let fixed = inventory
                 .bind_segment(
                     inputs.artifacts(),
                     vec![],
@@ -12645,20 +12720,32 @@ mod tests {
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-            let imports = [
-                issued_source(&roots[0].0, 7),
-                issued_source(&roots[1].0, 11),
-            ];
-            let target = inventory
-                .admit_bound_target(
-                    &mut fixed,
-                    &inventory.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &selection,
+
+            let target = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) =
+                    source_target_data(&[(&roots[0].0, 7), (&roots[1].0, 11)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
-                .unwrap()
-                .artifacts;
+                .unwrap();
+                inventory.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&inventory.empty_view()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .unwrap()
+            .artifacts()
+            .clone();
             assert_eq!(
                 target
                     .capture_graph_selection()
@@ -12676,7 +12763,6 @@ mod tests {
             }
         }
     }
-
 
     fn assert_bound_segment_exact_carrier(complete: bool) {
         {
@@ -12734,7 +12820,7 @@ mod tests {
             selection
                 .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                 .unwrap();
-            let mut fixed = inventory
+            let fixed = inventory
                 .bind_segment(
                     &chosen,
                     vec![native.clone()],
@@ -12743,19 +12829,32 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(fixed.view.namespace()[&id], selected_carrier);
-            let imports = [issued_source(&native, 7)];
-            let demanded = inventory
-                .admit_bound_target(
-                    &mut fixed,
-                    &inventory.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &selection,
+
+            let demanded = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
-                .map(|admitted| admitted.artifacts)
-                .unwrap_or_else(|error| {
-                    panic!("complete={complete}: exact carrier demand refused: {error:?}")
-                });
+                .unwrap();
+                inventory.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&inventory.empty_view()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .map(|admitted| admitted.artifacts().clone())
+            .unwrap_or_else(|error| {
+                panic!("complete={complete}: exact carrier demand refused: {error:?}")
+            });
             let state = inventory.0.lock().unwrap();
             let index =
                 NativeSelectionIndex::build(&state, &demanded.read_projection(&state).nodes);
@@ -14092,7 +14191,7 @@ mod tests {
             physical.namespace()[&cold.descriptor.id]
         );
         let selected = bound_selection_for_entries(&physical, &physical_entries);
-        let mut fixed = inventory
+        let fixed = inventory
             .bind_segment(
                 &physical,
                 physical_entries,
@@ -14100,17 +14199,29 @@ mod tests {
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let imports = vec![issued_source(&cold, 0)];
-        let admitted = inventory
-            .admit_bound_target(
-                &mut fixed,
-                &cursor,
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
-                &selected,
+
+        let admitted = {
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&cold, 0)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
             )
-            .map(|admitted| admitted.artifacts)
             .unwrap();
+            inventory.select_native_target(
+                fixed.physical_inputs().issued_artifacts(),
+                fixed.source_selection(),
+                observed,
+                None,
+                Some(&cursor),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+        }
+        .map(|admitted| admitted.artifacts().clone())
+        .unwrap();
         let uncached = ArtifactView {
             lease: Arc::clone(&admitted.lease),
             reads: Arc::new(ViewReadCache::default()),
@@ -16112,8 +16223,8 @@ mod tests {
                     inventory.0.lock().unwrap().selection_plans.len(),
                     scopes_before
                 );
-                let imports = [issued_source(&root, 12)];
-                let mut fixed = inventory
+
+                let fixed = inventory
                     .bind_segment(
                         &admitted,
                         vec![Arc::new(root.clone())],
@@ -16121,16 +16232,30 @@ mod tests {
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                     )
                     .unwrap();
-                let closed = inventory
-                    .admit_bound_target(
-                        &mut fixed,
-                        &inventory.empty_view(),
-                        NativeArtifactDemand::CertifiedTargetImports(&imports),
-                        vec![],
-                        &receipt,
+                let closed = {
+                    let mut validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::default();
+                    let (prepared, accepted) = source_target_data(&[(&root, 12)]);
+                    let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &accepted,
+                        &validation.inventory,
                     )
-                    .unwrap()
-                    .artifacts;
+                    .unwrap();
+                    inventory.select_native_target(
+                        fixed.physical_inputs().issued_artifacts(),
+                        fixed.source_selection(),
+                        observed,
+                        None,
+                        Some(&inventory.empty_view()),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    )
+                }
+                .unwrap()
+                .artifacts()
+                .clone();
                 assert_new_target(&closed);
                 assert_eq!(
                     closed.namespace().contains_key(&child.descriptor.id),
@@ -16162,7 +16287,7 @@ mod tests {
                     )
                 }
                 .unwrap();
-                let mut fixed = cold
+                let fixed = cold
                     .bind_segment(
                         &readmitted,
                         vec![Arc::new(root.clone())],
@@ -16170,16 +16295,30 @@ mod tests {
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                     )
                     .unwrap();
-                let repeated = cold
-                    .admit_bound_target(
-                        &mut fixed,
-                        &cold.empty_view(),
-                        NativeArtifactDemand::CertifiedTargetImports(&imports),
-                        vec![],
-                        &receipt,
+                let repeated = {
+                    let mut validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::default();
+                    let (prepared, accepted) = source_target_data(&[(&root, 12)]);
+                    let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &accepted,
+                        &validation.inventory,
                     )
-                    .unwrap()
-                    .artifacts;
+                    .unwrap();
+                    cold.select_native_target(
+                        fixed.physical_inputs().issued_artifacts(),
+                        fixed.source_selection(),
+                        observed,
+                        None,
+                        Some(&cold.empty_view()),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    )
+                }
+                .unwrap()
+                .artifacts()
+                .clone();
                 assert_new_target(&repeated);
             }
         }
@@ -16188,8 +16327,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let projection = ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
-        let mut facts = NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
+        let projection =
+            ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
+        let mut facts =
+            NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
         let alternate_entries = vec![
             Arc::new(root.clone()),
             Arc::new(child.clone()),
@@ -16218,7 +16359,8 @@ mod tests {
         .unwrap();
         let alternate = CompilerSourceSupport::close_complete_output(&alternate_output).unwrap();
         facts.extend(
-            NativeOriginalRequirement::for_projection(&projection, alternate.artifacts(), &[]).unwrap(),
+            NativeOriginalRequirement::for_projection(&projection, alternate.artifacts(), &[])
+                .unwrap(),
         );
         let joined = types
             .retain_custody(issuer)
@@ -16226,7 +16368,8 @@ mod tests {
             .retain_custody(alternate.artifacts())
             .unwrap();
         let joined = joined.artifacts();
-        let preserved = NativeOriginalRequirement::for_projection(&projection, joined, &facts).unwrap();
+        let preserved =
+            NativeOriginalRequirement::for_projection(&projection, joined, &facts).unwrap();
         assert_eq!(preserved.len(), 2);
         let mut root_choices = BTreeSet::new();
         for fact in &preserved {
@@ -17532,7 +17675,7 @@ mod tests {
             .unwrap();
         let receipt = bound_selection_for_entries(&available, &entries);
         let issuers = originals.each_ref().map(|original| {
-            let mut fixed = inventory
+            let fixed = inventory
                 .bind_segment(
                     &available,
                     entries.clone(),
@@ -17540,16 +17683,29 @@ mod tests {
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-            inventory
-                .admit_bound_target(
-                    &mut fixed,
-                    &inventory.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(original, 7)]),
-                    vec![],
-                    &receipt,
+            {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(original, 7)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
-                .map(|admitted| admitted.artifacts)
-                .unwrap()
+                .unwrap();
+                inventory.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&inventory.empty_view()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .map(|admitted| admitted.artifacts().clone())
+            .unwrap()
         });
         let selected_requirements: [NativeOriginalRequirement; 2] = std::array::from_fn(|index| {
             let original = originals[index].descriptor.id;
@@ -18329,7 +18485,7 @@ mod tests {
                 certified
                     .with_new_product_dependencies(&recovered.metadata_snapshot(), &requirements)
                     .unwrap();
-                let mut bound = recovered_inventory
+                let bound = recovered_inventory
                     .bind_segment(
                         &recovered,
                         vec![],
@@ -18337,35 +18493,48 @@ mod tests {
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                     )
                     .unwrap();
-                let imports = originals
-                    .each_ref()
-                    .map(|original| issued_source(original, 7));
-                let target = recovered_inventory
-                    .admit_bound_target(
-                        &mut bound,
-                        &recovered,
-                        NativeArtifactDemand::CertifiedTargetImports(&imports),
-                        vec![],
-                        &certified,
+
+                let target = {
+                    let mut validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::default();
+                    let (prepared, accepted) =
+                        source_target_data(&[(&originals[0], 7), (&originals[1], 7)]);
+                    let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &accepted,
+                        &validation.inventory,
                     )
-                    .map(|admitted| admitted.artifacts)
                     .unwrap();
+                    recovered_inventory.select_native_target(
+                        bound.physical_inputs().issued_artifacts(),
+                        bound.source_selection(),
+                        observed,
+                        None,
+                        Some(&recovered),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    )
+                }
+                .map(|admitted| admitted.artifacts().clone())
+                .unwrap();
                 check_original_namespace("bound_target", &target);
                 model.check(&target).unwrap_or_else(|error| {
                     panic!("stage=bound_target, helper_groups={count}, reverse={reverse}: {error}")
                 });
-                let helper_imports = [issued_source(&helper, 7)];
+
                 let before_bound_graph = recovered.capture_graph_selection();
                 let before_bound_nodes = recovered_inventory.node_count();
-                assert!(matches!(recovered_inventory.admit_bound_target(
-                    &mut bound, &recovered,
-                    NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
-                    vec![], &certified,
-                ).map(|admitted| admitted.artifacts), Err(CompileError::ArtifactInventory(error))
-                    if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
-                        original: helper.descriptor.id,
-                        original_ordinal: 7,
-                    })));
+                assert!(matches!({
+                let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&helper, 7)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
+                recovered_inventory.select_native_target(bound.physical_inputs().issued_artifacts(), bound.source_selection(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
+                }.map(|admitted| admitted.artifacts().clone()), Err(CompileError::ArtifactInventory(error))
+                                   if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
+                                       original: helper.descriptor.id,
+                                       original_ordinal: 7,
+                                   })));
                 assert_eq!(recovered_inventory.node_count(), before_bound_nodes);
                 assert_eq!(recovered.capture_graph_selection(), before_bound_graph);
 
@@ -18409,7 +18578,7 @@ mod tests {
                         &helper_requirements,
                     )
                     .unwrap();
-                let mut chosen_bound = chosen
+                let chosen_bound = chosen
                     .inventory()
                     .bind_segment(
                         &chosen,
@@ -18418,17 +18587,29 @@ mod tests {
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                     )
                     .unwrap();
-                let direct = chosen
-                    .inventory()
-                    .admit_bound_target(
-                        &mut chosen_bound,
-                        &chosen,
-                        NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
-                        vec![],
-                        &chosen_certified,
+                let direct = {
+                    let mut validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::default();
+                    let (prepared, accepted) = source_target_data(&[(&helper, 7)]);
+                    let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &accepted,
+                        &validation.inventory,
                     )
-                    .map(|admitted| admitted.artifacts)
                     .unwrap();
+                    chosen.inventory().select_native_target(
+                        chosen_bound.physical_inputs().issued_artifacts(),
+                        chosen_bound.source_selection(),
+                        observed,
+                        None,
+                        Some(&chosen),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    )
+                }
+                .map(|admitted| admitted.artifacts().clone())
+                .unwrap();
                 check_original_namespace("explicit_helper_target", &direct);
                 model.check(&direct).unwrap_or_else(|error| {
                     panic!("stage=explicit_helper_target, helper_groups={count}, reverse={reverse}: {error}")
@@ -19288,7 +19469,7 @@ mod tests {
                 )
                 .unwrap();
             let selection = bound_selection_for_entries(&available, &entries);
-            let mut fixed = issuer
+            let fixed = issuer
                 .bind_segment(
                     &available,
                     entries,
@@ -19303,19 +19484,30 @@ mod tests {
                 &[0][..]
             };
             for &ordinal in initial {
-                cursor = issuer
-                    .admit_bound_target(
-                        &mut fixed,
-                        &cursor,
-                        NativeArtifactDemand::CertifiedTargetImports(&[issued_source(
-                            &inspection,
-                            ordinal,
-                        )]),
-                        vec![],
-                        &selection,
+                cursor = {
+                    let mut validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::default();
+                    let (prepared, accepted) = source_target_data(&[(&inspection, ordinal)]);
+                    let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &accepted,
+                        &validation.inventory,
                     )
-                    .unwrap()
-                    .artifacts;
+                    .unwrap();
+                    issuer.select_native_target(
+                        fixed.physical_inputs().issued_artifacts(),
+                        fixed.source_selection(),
+                        observed,
+                        None,
+                        Some(&cursor),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    )
+                }
+                .unwrap()
+                .artifacts()
+                .clone();
             }
             let joined = available.merge_fixture_selections(&cursor).unwrap();
             let selected = {
@@ -19416,19 +19608,30 @@ mod tests {
                 assert!(projected.binding_dependencies().contains(exact_edge));
             }
             assert!(!projected.namespace().contains_key(&wire.descriptor.id));
-            let demanded = issuer
-                .admit_bound_target(
-                    &mut fixed,
-                    &projected,
-                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(
-                        &inspection,
-                        118,
-                    )]),
-                    vec![],
-                    &selection,
+            let demanded = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&inspection, 118)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
                 )
-                .unwrap()
-                .artifacts;
+                .unwrap();
+                issuer.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.source_selection(),
+                    observed,
+                    None,
+                    Some(&projected),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .unwrap()
+            .artifacts()
+            .clone();
             let edges = demanded.binding_dependencies();
             let demanded_edge = edges.iter().find(|(source, target, label)| {
                 matches!(source, ArtifactBindingNode::Group(group)
@@ -19648,26 +19851,27 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(observed, expected);
-            let mut bound = inventory
-                .bind_segment(
-                    view,
-                    vec![],
-                    &certified,
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                )
-                .unwrap();
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
             let selected = inventory
-                .admit_bound_target(
-                    &mut bound,
+                .select_native_target(
                     view,
-                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&native, 7)]),
-                    vec![],
                     &certified,
+                    observed,
+                    None,
+                    Some(view),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
                 .unwrap();
             let actual = selected
-                .clone()
-                .bind_target(None, vec![issued_source(&native, 7)])
                 .resolve()
                 .map(|resolved| resolved.groups().clone())
                 .unwrap();
