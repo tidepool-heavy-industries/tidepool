@@ -126,16 +126,19 @@ pub(crate) async fn assert_confirmed_publication_notifies_once(
         control: None,
     };
     assert_eq!(owner.observe(outcome), Observation::Accepted);
+    lifecycle.assert_publication_notification_attempts(1);
     lifecycle.stop_owner_for_test().await;
     // A new send to this same, confirmed-stopped recipient refuses. The
     // original observation must retain its accepted transfer without replay.
     let mut fresh = GenerationRetirementPublicationOwner::Pending {
-        lifecycle,
+        lifecycle: lifecycle.clone(),
         control: None,
     };
     assert_eq!(fresh.observe(outcome), Observation::Refused);
+    lifecycle.assert_publication_notification_attempts(2);
     assert_eq!(owner.observe(outcome), Observation::Accepted);
     assert_eq!(owner.observe(outcome), Observation::Accepted);
+    lifecycle.assert_publication_notification_attempts(2);
 }
 
 /// The canonical reservation owns one affine core and its transient driver.
