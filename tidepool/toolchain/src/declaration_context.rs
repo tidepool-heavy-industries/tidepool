@@ -29668,6 +29668,13 @@ mod tests {
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
         let view = view_support.artifacts();
+        // The value's direct import keeps its selected Original implementation;
+        // only unrelated retained dependencies may fall back to interface-only.
+        let retained_roles = view_support.projection().snapshot_roles();
+        assert!(retained_roles[&identity("fixture", "InstanceOwner")]
+            .original()
+            .is_some());
+        assert!(retained_roles[&owner].original().is_some());
         assert!(lexical
             .iter()
             .all(|node| node.owner != identity("fixture", "Hidden")));
