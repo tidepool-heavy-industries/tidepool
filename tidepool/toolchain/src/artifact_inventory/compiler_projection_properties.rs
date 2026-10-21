@@ -812,7 +812,8 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 })
                 .collect::<BTreeSet<_>>();
             assert_eq!(expected.len(), expected_keys.len());
-            assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
+            let initial_bindings = selected_bindings(inputs.artifacts());
+            assert!(expected.is_subset(&initial_bindings));
             let inventory = inputs.artifacts().inventory();
             assert!(
                 crate::declaration_context::OriginalCompilerInputs::from_issued_support(
@@ -841,12 +842,12 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                     &BTreeMap::new(),
                     &mut validation,
                 )
-                .unwrap()
-                .artifacts()
-                .clone();
-            assert_eq!(selected_bindings(&target), expected);
+                .unwrap();
+            assert_eq!(selected_bindings(target.artifacts()), initial_bindings);
+            assert_eq!(target.resolve().unwrap().groups(), &expected);
             assert_eq!(
                 target
+                    .artifacts()
                     .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
                         artifact: catalog.original(0, version).descriptor.id,
                         original_ordinal: 11,

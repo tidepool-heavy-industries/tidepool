@@ -700,10 +700,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
                     artifact: entry.descriptor.id, original_ordinal: 0,
                 })).collect::<BTreeSet<_>>();
-                let actual_target = target.artifacts().selected_native_groups();
-                let carried_and_target = context.artifact_view().selected_native_groups()
-                    .union(&actual_target).copied().collect::<BTreeSet<_>>();
-                prop_assert_eq!(carried_and_target, expected);
+                let actual_retained = target.artifacts().selected_native_groups();
                 let expected_target = outputs.keys().map(|ordinal| NativeGroupKey {
                     artifact: root.descriptor.id, original_ordinal: *ordinal,
                 }).chain(outputs.keys().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
@@ -711,7 +708,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
                     artifact: entry.descriptor.id, original_ordinal: 0,
                 })).collect::<BTreeSet<_>>();
-                prop_assert_eq!(actual_target, expected_target.clone());
+                let expected_retained = initial_groups.union(&expected_target)
+                    .copied().collect::<BTreeSet<_>>();
+                prop_assert_eq!(&expected_retained, &expected);
+                prop_assert_eq!(actual_retained, expected_retained);
                 prop_assert_eq!(groups.iter().map(|group| NativeGroupKey {
                     artifact: group.binding.artifact(), original_ordinal: group.original_ordinal,
                 }).collect::<BTreeSet<_>>(), expected_target);
