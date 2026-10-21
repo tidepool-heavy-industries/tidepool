@@ -22251,37 +22251,55 @@ pub(crate) mod tests {
             ),
             [7; 32],
         );
-        // The certificate remains closed and canonical, but claims another
-        // native ordinal. Physical acquisition cannot decide this relation.
-        let mut witness = decode_home_witness(second.certification_bytes()).unwrap();
-        witness.groups[0].0 = 12;
-        let second = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-            second.owner().clone(),
-            second.interface_bytes().to_vec(),
-            second.product_bytes().to_vec(),
-            second.package_imports_bytes().to_vec(),
-            encode_home_witness(&witness).unwrap(),
-        )
-        .with_module_interface(second.module_interface().unwrap().clone())
-        .unwrap();
+        let mut fixture_validation = PackageInterfaceValidation::default();
+        let originals = [first, second].map(|original| {
+            finalize_original_for_inventory(original, &mut fixture_validation).unwrap()
+        });
         let root = tempfile::tempdir().unwrap();
         let references = crate::recovery_artifacts::materialize_certified_products(
             root.path(),
             [7; 32],
-            &[first.clone(), second],
+            &originals,
         )
         .unwrap();
-        let acquire = |index| {
-            crate::recovery_artifacts::verify_materialized_ref(root.path(), &references[index])
-                .unwrap()
+        let acquire = |reference: &crate::recovery_artifacts::RecoveryArtifactRef| {
+            crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).unwrap()
         };
-        let valid_first = certify_recovery_products_with_validation(
-            vec![acquire(0)],
+        let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
+        let baseline = certify_recovery_products_with_validation(
+            references.iter().map(acquire).collect(),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        assert_eq!(valid_first[0].product.owner(), first.owner());
-        let acquired = vec![acquire(0), acquire(1)];
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get) - before,
+            originals.len()
+        );
+        assert_eq!(baseline.len(), originals.len());
+        for ((original, recovered), ordinal) in originals.iter().zip(&baseline).zip([7, 11]) {
+            assert_eq!(recovered.product.owner(), original.owner());
+            assert_eq!(
+                recovered.product.original_native().unwrap().groups[0]
+                    .group()
+                    .original_ordinal(),
+                ordinal
+            );
+        }
+
+        // Tamper with stored input after valid publication. The changed HOME
+        // remains canonical but disagrees with the unchanged TPMOD group.
+        let bytes = std::fs::read(root.path().join(&references[1].certification_path)).unwrap();
+        let mut witness = decode_home_witness(&bytes).unwrap();
+        assert_eq!(witness.groups[0].0, 11);
+        witness.groups[0].0 = 12;
+        let bytes = encode_home_witness(&witness).unwrap();
+        let mut tampered = references[1].clone();
+        tampered.certification_sha256 = sha(&bytes);
+        tampered.certification_path = PathBuf::from("artifacts")
+            .join(format!("{}.owners", hex(&tampered.certification_sha256)));
+        std::fs::write(root.path().join(&tampered.certification_path), bytes).unwrap();
+
+        let acquired = vec![acquire(&references[0]), acquire(&tampered)];
         let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
         assert!(matches!(
             certify_recovery_products_with_validation(
@@ -22296,12 +22314,19 @@ pub(crate) mod tests {
             HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
             before
         );
-        let first_after_refusal = certify_recovery_products_with_validation(
-            vec![acquire(0)],
+        let after_refusal = certify_recovery_products_with_validation(
+            references.iter().map(acquire).collect(),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        assert_eq!(first_after_refusal[0].product.owner(), first.owner());
+        assert_eq!(after_refusal.len(), baseline.len());
+        for (recovered, prior) in after_refusal.iter().zip(&baseline) {
+            assert!(recovered.product.same_durable_artifact(&prior.product));
+            assert_eq!(
+                recovered.product.original_native().unwrap().groups,
+                prior.product.original_native().unwrap().groups
+            );
+        }
     }
 
     #[test]
