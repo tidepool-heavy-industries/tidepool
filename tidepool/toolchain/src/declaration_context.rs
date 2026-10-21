@@ -7778,7 +7778,7 @@ impl ProgramSourceSupport {
         let mut retained =
             previous.map_or_else(imbl::OrdMap::new, |value| value.imports.as_ref().clone());
         for (owner, requirements) in imports {
-            let row = ProgramSourceSupportRow {
+            let mut row = ProgramSourceSupportRow {
                 imports: requirements,
                 produced: physical.produced_source(&owner)?,
             };
@@ -7786,7 +7786,14 @@ impl ProgramSourceSupport {
                 let entry = incoming.implementation_entry(&owner).ok_or_else(|| {
                     failure("produced program source lacks its compiler support entry")
                 })?;
-                if !row.matches_entry(entry) {
+                if matches!(&entry.payload, ArtifactPayload::Canonical(interface)
+                    if interface.source_imports().is_some()
+                        && entry.descriptor.id == produced.row().canonical)
+                {
+                    // Canonical SOURCE support retains its imports without
+                    // selecting the separately available physical Original.
+                    row.produced = None;
+                } else if !row.matches_entry(entry) {
                     return Err(failure(&format!(
                         "produced program source changed its physical entry; owner={owner:?}; incoming={:?}; incoming_kind={:?}; physical={:?}; physical_canonical={:?}",
                         entry.descriptor.id,
