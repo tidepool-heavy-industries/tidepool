@@ -9708,7 +9708,9 @@ fn compare_catalog_original_binding<'a>(
                     .group(current.group.original_ordinal())
                     .is_none_or(|issued| {
                         issued.group() != current.group.as_ref()
-                            || issued.imports() != current.imports.as_ref()
+                            || issued.source_imports(native).map_or(true, |imports| {
+                                imports.as_slice() != current.imports.as_ref()
+                            })
                     })
         })
     {
@@ -26086,22 +26088,30 @@ None,
             .iter()
             .find(|group| group.group.original_ordinal() == 7)
             .unwrap();
-        assert!(historical_group.imports.iter().any(|import| matches!(
-            import,
-            PendingImportOwner::Source { owner, .. } if owner == prior_module_product.owner()
-        )));
+        assert!(historical_group
+            .source_imports(native)
+            .unwrap()
+            .iter()
+            .any(|import| matches!(
+                import,
+                PendingImportOwner::Source { owner, .. } if owner == prior_module_product.owner()
+            )));
         let prior_native = prior_module_product.original_native().unwrap();
         assert!(prior_native.groups.iter().any(|group| {
             group.group.original_ordinal() == 7
                 && group.group.binders().iter().any(|binder| {
                     binder.occurrence == "ancestor_7" && binder.module == prior_module.module_name()
                 })
-                && group.imports.iter().any(|import| {
-                    matches!(
-                        import,
-                        PendingImportOwner::Source { owner, .. } if owner == &historical_child
-                    )
-                })
+                && group
+                    .source_imports(prior_native)
+                    .unwrap()
+                    .iter()
+                    .any(|import| {
+                        matches!(
+                            import,
+                            PendingImportOwner::Source { owner, .. } if owner == &historical_child
+                        )
+                    })
         }));
 
         let custody = prior

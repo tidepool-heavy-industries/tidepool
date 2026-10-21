@@ -80,7 +80,7 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
             })
             .unwrap();
         assert!(std::ptr::eq(actual.group(), expected.group()));
-        assert!(std::ptr::eq(actual.imports(), expected.imports()));
+        assert_eq!(actual.imports(), expected.source_imports(product.original_native().unwrap()).unwrap());
     }
     let repeated =
         crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
