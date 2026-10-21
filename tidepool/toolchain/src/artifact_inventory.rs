@@ -9112,17 +9112,13 @@ impl ArtifactView {
                 continue;
             }
             let lease = chosen.contribution().offer().custody_lease();
-            if !Arc::ptr_eq(&initial.lease.inventory.0, &lease.inventory.0) {
-                return Err(failure(
-                    "World stage contribution belongs to another inventory",
-                ));
-            }
             let custody = Self::from_custody(Arc::clone(lease));
             let demanded = custody.select_acquired_compiler_bindings(
                 &BTreeMap::new(),
                 std::iter::once(chosen.binding()),
                 stage.operation(),
             )?;
+            acquired.validate_issued_merge(&demanded)?;
             acquired = acquired.merge_validated_namespace(&demanded, BTreeMap::new())?;
         }
         // Require every certified stage row in those exact closures, then keep
