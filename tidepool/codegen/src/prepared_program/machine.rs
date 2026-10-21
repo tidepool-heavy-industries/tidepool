@@ -1601,10 +1601,8 @@ impl<'code> PreparedMachine<'code> {
     // --- residency: pins, quiescence, major collection, retirement --------
 
     /// Hold `program` live until [`Self::unpin`], whatever reaches it. This
-    /// is the host's facility: closing the install-to-first-binding gap is
-    /// its responsibility once it calls this, not something the runtime
-    /// does on a caller's behalf today -- no runtime caller pins yet, so
-    /// that integration is still pending. A test pins what it means to keep.
+    /// closes the host's install-to-first-binding gap. Native-instance handles
+    /// independently retain their defining program for their own lifetime.
     pub fn pin(&mut self, program: ProgramId) -> Result<(), ExecutionError> {
         if !self.programs.contains_key(&program) {
             return Err(ExecutionError::UnknownProgram(program));
@@ -1682,7 +1680,8 @@ impl<'code> PreparedMachine<'code> {
     /// Mark the live programs and retire the rest.
     ///
     /// A program is live when the mark reaches it from a handle, a parked
-    /// frame (its evidence owner and runner included), a pin, or a live
+    /// frame (its evidence owner and runner included), a native-instance
+    /// handle's defining program, a pin, or a live
     /// program's root block: through a live object whose header is a
     /// descriptor the program owns, or a reference into its static image
     /// (lifetime contract decision 1). The mark is non-moving and forces
@@ -1832,6 +1831,9 @@ impl<'code> PreparedMachine<'code> {
         };
         for id in &self.pins {
             mark_program(*id, &mut live, &mut program_work);
+        }
+        for id in self.handles.native_instance_programs() {
+            mark_program(id, &mut live, &mut program_work);
         }
         for site in self.handles.site_dependencies() {
             mark_program(site.owner(), &mut live, &mut program_work);

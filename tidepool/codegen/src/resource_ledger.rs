@@ -148,6 +148,14 @@ pub(crate) struct HandleEntry {
     pub(crate) realm: RealmId,
     pub(crate) rep: RuntimeRep,
     pub(crate) sites: SiteDependencies,
+    custody: HandleCustody,
+}
+
+/// A selected native export retains its original mutable environment even
+/// when its value updates to an object owned by another program.
+enum HandleCustody {
+    Value,
+    NativeInstance(ProgramId),
 }
 
 /// The one machine-local owner for opaque rooted-value identities.
@@ -188,6 +196,7 @@ impl RootHandleLedger {
                 realm,
                 rep,
                 sites,
+                custody: HandleCustody::Value,
             },
         );
         debug_assert!(replaced.is_none(), "fresh value handle must not collide");
@@ -420,6 +429,28 @@ impl ResourceLedger {
                         .flat_map(|root| root.sites.iter().copied()),
                 )
             }))
+    }
+
+    /// Attach defining-instance custody only when publishing a machine-issued
+    /// native lease. Ordinary value retention does not inherit this custody.
+    pub(crate) fn retain_native_instance(&mut self, handle: ValueHandle, program: ProgramId) {
+        let entry = self
+            .handles
+            .handles
+            .get_mut(&handle.0)
+            .expect("owned native root");
+        debug_assert!(matches!(entry.custody, HandleCustody::Value));
+        entry.custody = HandleCustody::NativeInstance(program);
+    }
+
+    pub(crate) fn native_instance_programs(&self) -> impl Iterator<Item = ProgramId> + '_ {
+        self.handles
+            .handles
+            .values()
+            .filter_map(|entry| match entry.custody {
+                HandleCustody::Value => None,
+                HandleCustody::NativeInstance(program) => Some(program),
+            })
     }
 
     pub(crate) fn handle(&self, handle: ValueHandle) -> Option<&HandleEntry> {

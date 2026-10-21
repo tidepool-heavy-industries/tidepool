@@ -1397,6 +1397,240 @@ mod tests {
         assert_eq!(machine.residency().programs, 0);
     }
 
+    #[test]
+    fn native_caf_custody_keeps_original_environment_after_foreign_update() {
+        use super::super::{
+            BatchImport, BatchLeaseRequest, BatchProgram, DemandedPackageImage,
+            NativeArtifactBinding, NativeExportRequest, PreparedCallOptions, PreparedResult,
+        };
+        use crate::suspension::RealmId;
+        use std::collections::BTreeMap;
+        use tidepool_repr::execution_schema::{
+            CheckedLayout, ConstructorDecl, ConstructorId, GlobalDecl, GlobalId, Group,
+            HeapBinding, HeapRhs, ResultContract, RuntimeRep, SignatureId, TopBinding,
+            UpdatePolicy, ValueId, ValueRef,
+        };
+        let registry = ImageRegistry::new();
+        let foreign = testing::identity("Foreign", "unit");
+        let mut provider = testing::wire_program();
+        provider.constructors.push(ConstructorDecl {
+            identity: testing::constructor_identity(foreign.clone(), foreign.clone()),
+            host_id: tidepool_repr::DataConId(19_501),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        provider.bindings[0] = Group::NonRecursive(TopBinding {
+            identity: foreign.clone(),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        });
+        provider.expressions.nodes.clear();
+        let provider = Arc::new(
+            CompiledProgram::compile_prepared_definitions(&testing::prepare(provider).unwrap())
+                .unwrap(),
+        );
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.globals.push(GlobalDecl {
+            identity: foreign,
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        wire.expressions
+            .nodes
+            .push(wire.expressions.nodes[0].clone());
+        for (index, name) in ["entry", "sibling"].into_iter().enumerate() {
+            let top = Group::NonRecursive(TopBinding {
+                identity: testing::identity("Fixture", name),
+                binding: HeapBinding {
+                    id: ValueId(index as u32),
+                    rhs: HeapRhs::Thunk {
+                        signature: SignatureId(0),
+                        update: UpdatePolicy::Memoize,
+                        captures: vec![],
+                        body: index,
+                    },
+                },
+            });
+            if index == 0 {
+                wire.bindings[0] = top;
+            } else {
+                wire.bindings.push(top);
+            }
+        }
+        let package = Arc::new(
+            DemandedPackageImage::prepare(
+                package_code(wire, 3),
+                &[None],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &registry,
+            )
+            .unwrap(),
+        );
+        let consumer = |name| {
+            let mut wire = testing::wire_program();
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+            wire.globals.push(GlobalDecl {
+                identity: testing::identity("Fixture", name),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
+                required_evaluated: false,
+                required_generation: None,
+            });
+            wire.expressions.nodes[0] = ExprFrame::Enter {
+                callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+                signature: SignatureId(0),
+            };
+            Arc::new(
+                CompiledProgram::compile_prepared_definitions(&testing::prepare(wire).unwrap())
+                    .unwrap(),
+            )
+        };
+        let tree = crate::scope::ScopeTree::new();
+        let table = crate::binding_table::BindingTable::new();
+        let domain = table
+            .native_domain_selection_in(&tree, crate::scope::ScopeId::ROOT)
+            .unwrap()
+            .current();
+        let key = NativeArtifactBinding {
+            artifact: [1; 32],
+            selection: [2; 32],
+        };
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let receipt = machine
+            .install_shared_batch_with_leases(
+                vec![
+                    BatchProgram {
+                        image: consumer("entry"),
+                        imports: vec![BatchImport::Source {
+                            group: 1,
+                            binding: ValueId(0),
+                        }],
+                    },
+                    BatchProgram {
+                        image: Arc::clone(package.image()),
+                        imports: vec![BatchImport::Source {
+                            group: 2,
+                            binding: ValueId(0),
+                        }],
+                    },
+                    BatchProgram {
+                        image: provider,
+                        imports: vec![],
+                    },
+                ],
+                vec![BatchLeaseRequest::for_package(
+                    1,
+                    Arc::clone(&package),
+                    key,
+                    domain,
+                    ValueId(0),
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let anchor = &receipt.leases[0];
+        let package_program = anchor.instance().program();
+        let run = |machine: &mut PreparedMachine<'_>, program| {
+            let result = machine
+                .run_entry_retained(
+                    program,
+                    ValueId(0),
+                    &[],
+                    PreparedCallOptions {
+                        observation_budget: 0,
+                        collect_before_observation: true,
+                    },
+                    RealmId::ROOT,
+                )
+                .unwrap();
+            let [PreparedResult::Managed(handle)] = result.values.as_slice() else {
+                panic!("actual foreign constructor result")
+            };
+            *handle
+        };
+        let returned = run(&mut machine, receipt.programs[0]);
+        assert!(machine.handle_is_evaluated(anchor.handle()).unwrap());
+        let generic = machine
+            .retain_handle_value(anchor.handle(), RealmId::ROOT)
+            .unwrap();
+        assert!(machine.release(returned));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(
+            !retired.programs.contains(&package_program),
+            "selected native instance retains its original environment after CAF update"
+        );
+        assert_eq!(
+            machine.handle_current_pointer(generic),
+            machine.handle_current_pointer(anchor.handle())
+        );
+        let sibling = machine
+            .retain_native_sibling(
+                anchor,
+                NativeExportRequest::for_package(Arc::clone(&package), key, domain, ValueId(1))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(sibling.lease().instance(), anchor.instance());
+        let sibling_consumer = machine
+            .install_shared_batch(vec![BatchProgram {
+                image: consumer("sibling"),
+                imports: vec![BatchImport::Existing {
+                    handle: sibling.lease().handle(),
+                    entry_signature: sibling.lease().entry_signature().cloned(),
+                }],
+            }])
+            .unwrap()[0];
+        let returned = run(&mut machine, sibling_consumer);
+        assert!(machine.release(returned));
+        assert!(machine.release(anchor.handle()));
+        assert!(machine
+            .handle_is_evaluated(sibling.lease().handle())
+            .unwrap());
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(
+            !retired.programs.contains(&package_program),
+            "the updated sibling owns defining-instance custody too"
+        );
+        assert!(machine.release(sibling.lease().handle()));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(
+            retired.programs.contains(&package_program),
+            "generic value custody does not retain the original native environment"
+        );
+        assert!(machine.handle_is_evaluated(generic).unwrap());
+        assert_eq!(
+            machine.residency().programs,
+            1,
+            "only the actual foreign constructor's program remains"
+        );
+        assert!(machine.release(generic));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+
     fn program() -> LinkedProgram {
         program_returning(42)
     }

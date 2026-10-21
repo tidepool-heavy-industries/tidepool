@@ -358,6 +358,8 @@ impl PreparedMachine<'_> {
         }
         let domain = request.domain;
         let handle = self.retain_top(anchor.instance().program(), request.binding)?;
+        self.handles
+            .retain_native_instance(handle.raw, anchor.instance().program());
         let lease = request.into_lease(anchor.instance(), handle);
         Ok(super::super::NativeInstanceAttachment::from_anchor(
             domain,
@@ -402,6 +404,8 @@ impl PreparedMachine<'_> {
         let entry_signature = image.top_exports[&value].entry_signature.clone();
         self.handle_is_evaluated(anchor.handle())?;
         let handle = self.retain_top(anchor.instance().program(), value)?;
+        self.handles
+            .retain_native_instance(handle.raw, anchor.instance().program());
         Ok(SourceInstanceLease::new(
             anchor.instance(),
             anchor.binding(),
@@ -874,6 +878,8 @@ impl PreparedMachine<'_> {
             .zip(handles)
             .map(|(request, handle)| {
                 let domain = request.export.domain;
+                self.handles
+                    .retain_native_instance(handle.raw, ids[request.group]);
                 let lease = request
                     .export
                     .into_lease(GroupInstanceId::from(ids[request.group]), handle);
