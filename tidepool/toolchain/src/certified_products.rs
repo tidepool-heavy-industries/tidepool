@@ -25720,6 +25720,10 @@ pub(crate) mod tests {
         let view = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
+        let expected_bindings = view
+            .original_group_bindings(&InventoryOperation::new(Default::default()))
+            .unwrap();
+        assert_eq!(expected_bindings.len(), 1);
         let metadata = view.metadata_snapshot();
         let available = metadata
             .artifacts
@@ -25810,6 +25814,7 @@ pub(crate) mod tests {
                 .rows;
             assert_eq!(selected.len(), 1);
             let (binding, group) = selected.first_key_value().unwrap();
+            assert_eq!(*binding, expected_bindings[0]);
             assert_eq!(binding.binding.artifact(), entry.descriptor.id);
             assert_eq!(binding.original_ordinal, 7);
             assert_eq!(group.product().imports(), &[expected_import.clone()]);
