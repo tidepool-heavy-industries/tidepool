@@ -15847,6 +15847,175 @@ pub(crate) mod tests {
             .native_group_ordinals
             .contains(&3));
         assert_eq!(source.artifacts().capture_graph_selection(), before);
+        let produced_owner = issued
+            .issued_artifacts()
+            .observed_payload(&fresh_id)
+            .unwrap()
+            .descriptor
+            .owner
+            .clone();
+        let publication = fresh_selection
+            .produced_authored_original_publication(
+                issued.physical_cohort().unwrap(),
+                &produced_owner,
+            )
+            .unwrap();
+        let receipt = fresh_selection
+            .produced_source_receipt(&produced_owner, issued.issued_artifacts())
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            publication.produced_availability().unwrap(),
+            &receipt
+        ));
+        let expected_roots = [2, 4, 5]
+            .into_iter()
+            .map(|ordinal| {
+                crate::artifact_inventory::ArtifactBindingNode::Group(
+                    receipt
+                        .groups(NativeGroupKey {
+                            artifact: fresh_id,
+                            original_ordinal: ordinal,
+                        })
+                        .next()
+                        .unwrap(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            publication
+                .native_closure()
+                .capture_graph_selection()
+                .roots
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            expected_roots
+        );
+        let closed = CompilerSourceSupport::close_complete_output(&issued).unwrap();
+        let published = closed.certify_original_closure(&publication).unwrap();
+        let canonical = row.canonical;
+        let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = published
+            .checked_native_input_decision(fresh_id, canonical, row.original_owner())
+            .unwrap()
+        else {
+            panic!("publication records its exact future input choices")
+        };
+        assert_eq!(
+            choices.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([2, 4, 5])
+        );
+        for (&ordinal, &binding) in choices {
+            assert_eq!(
+                receipt
+                    .groups(NativeGroupKey {
+                        artifact: fresh_id,
+                        original_ordinal: ordinal
+                    })
+                    .collect::<Vec<_>>(),
+                vec![binding]
+            );
+        }
+        assert!(published
+            .native_offers()
+            .iter()
+            .any(|offer| offer.same_issuance(receipt.own_offer())));
+        assert!(issued
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        let carried = CertifiedSourceSelection::from_compiler_inputs(&issued, &operation).unwrap();
+        assert!(carried
+            .produced_authored_original_publication(
+                issued.physical_cohort().unwrap(),
+                &produced_owner,
+            )
+            .is_err());
+        assert!(fresh_selection
+            .produced_authored_original_publication(
+                output.physical_cohort().unwrap(),
+                &produced_owner,
+            )
+            .is_err());
+
+        let empty_product = fixture_finalized_product(
+            full_native_fixture(
+                "EmptyPublished",
+                vec![(
+                    17,
+                    vec![PendingImportOwner::Source {
+                        owner: product.owner().clone(),
+                        original_ordinal: 11,
+                        binder: testing::identity("BoundOriginal", "entry_11"),
+                    }],
+                )],
+                9,
+            ),
+            producer,
+        );
+        let empty_entry =
+            Arc::new(ArtifactEntry::original(producer, empty_product.clone()).unwrap());
+        let empty_id = empty_entry.descriptor.id;
+        let empty_owner = empty_entry.descriptor.owner.clone();
+        let mut empty_selection = selection.clone();
+        empty_selection
+            .admit_current(
+                empty_product.owner(),
+                ProductOrigin::Fresh,
+                empty_product.module_interface().unwrap(),
+                &operation,
+            )
+            .unwrap();
+        empty_selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[empty_product]).unwrap(),
+            )
+            .unwrap();
+        let empty_output = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut empty_selection,
+            source.artifacts(),
+            vec![empty_entry],
+            &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
+        )
+        .unwrap();
+        let empty_publication = empty_selection
+            .produced_authored_original_publication(
+                empty_output.physical_cohort().unwrap(),
+                &empty_owner,
+            )
+            .unwrap();
+        assert!(empty_publication
+            .native_closure()
+            .selected_native_groups()
+            .is_empty());
+        assert!(empty_publication.products()[0]
+            .original_native()
+            .unwrap()
+            .group(17)
+            .is_some());
+        let empty_support = CompilerSourceSupport::close_complete_output(&empty_output)
+            .unwrap()
+            .certify_original_closure(&empty_publication)
+            .unwrap();
+        let empty_row = empty_output
+            .native_availability()
+            .issued_row(empty_id)
+            .unwrap();
+        let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = empty_support
+            .checked_native_input_decision(
+                empty_id,
+                empty_row.canonical,
+                empty_row.original_owner(),
+            )
+            .unwrap()
+        else {
+            panic!("empty publication records an explicit empty choice")
+        };
+        assert!(choices.is_empty());
+        assert!(!empty_support
+            .native_availability()
+            .issued_row(empty_id)
+            .unwrap()
+            .permits(17));
         let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
         for (reference, ordinal) in references.into_iter().zip([7, 11]) {
             let result = resolve_receipt_owner_with_validation(

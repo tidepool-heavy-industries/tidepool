@@ -3247,8 +3247,11 @@ impl IssuedNativeOffer {
                 .insert(ArtifactBindingNode::Artifact(carrier), ());
             Arc::new(snapshot)
         };
-        let retained = physical.retain_issued_offer_custody(std::iter::once(self.clone()))?;
-        retained.select_issued(
+        // Passive physical views retain offer owners without selecting their
+        // groups. Reopen only this offer's actual checked custody, not a union
+        // of available graphs in the physical namespace.
+        let custody = ArtifactView::from_custody(Arc::clone(&self.0.custody.lease));
+        custody.select_issued(
             vec![self.0.original, self.0.interface],
             &ExactArtifactSelection::from_snapshot(snapshot),
         )
