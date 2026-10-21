@@ -13600,7 +13600,7 @@ pub(crate) mod tests {
             let actual = native.group(ordinal);
             assert_eq!(actual.is_some(), expected.is_some());
             if let (Some(actual), Some(expected)) = (actual, expected) {
-                assert!(std::ptr::eq(actual, expected));
+                assert!(std::ptr::eq(actual, expected.as_ref()));
                 assert!(Arc::ptr_eq(&actual.group, &expected.group));
                 assert!(Arc::ptr_eq(&actual.imports, &expected.imports));
             }
@@ -13657,7 +13657,7 @@ pub(crate) mod tests {
                 .iter()
                 .find(|group| group.group.original_ordinal() == *ordinal)
                 .unwrap();
-            assert!(std::ptr::eq(actual, expected));
+            assert!(std::ptr::eq(actual, expected.as_ref()));
         }
         if !raw.iter().any(|(ordinal, _, _)| *ordinal == query) {
             assert!(native.group(query).is_none());
@@ -13689,7 +13689,7 @@ pub(crate) mod tests {
             )),
         ));
         let mut wrong_owner = native.groups.to_vec();
-        wrong_owner[0].owner.module_version = ModuleVersion([8; 32]);
+        Arc::make_mut(&mut wrong_owner[0]).owner.module_version = ModuleVersion([8; 32]);
         assert!(matches!(
             retain_authenticated_original_native(original.clone(), wrong_owner, witness()),
             Err(CertificationError::Mismatch(
@@ -14119,7 +14119,7 @@ pub(crate) mod tests {
             broad.selected_native_groups(),
             selected.selected_native_groups()
         );
-        assert_eq!(rows[0].0, *binding);
+        assert_eq!(rows.first_key_value().unwrap().0, binding);
     }
 
     #[test]
@@ -14419,6 +14419,39 @@ pub(crate) mod tests {
         else {
             unreachable!()
         };
+        let source_selection =
+            CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
+                .unwrap();
+        assert_eq!(
+            source_selection
+                .receipt_source_member(
+                    &owner.unit,
+                    &owner.module,
+                    Some(&product.owner().module_version)
+                )
+                .unwrap(),
+            product.owner()
+        );
+        assert_eq!(
+            source_selection
+                .receipt_source_owner(
+                    &owner.unit,
+                    &owner.module,
+                    Some(&product.owner().module_version),
+                    7
+                )
+                .unwrap(),
+            product.owner()
+        );
+        assert!(matches!(
+            source_selection.receipt_source_owner(
+                &owner.unit,
+                &owner.module,
+                Some(&product.owner().module_version),
+                11
+            ),
+            Err(CertificationError::OriginalAvailability(_))
+        ));
         let acquisition = request.compiler_inputs().shared_compiler_source_support();
         let references = [7, 11].map(|ordinal| ReceiptImportOwner::OriginalBinding {
             unit: owner.unit.clone(),
