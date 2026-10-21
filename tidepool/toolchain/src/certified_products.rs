@@ -7195,35 +7195,91 @@ fn verify_home_witness(bytes: &[u8], owner: &CachedHomeOwner) -> CertResult<Home
     verify_home_witness_with_validation(bytes, owner, &mut PackageInterfaceValidation::default())
 }
 
+enum HomePackageAuthentication<'a> {
+    FreshObservation,
+    HeldCustody(&'a PackageInterfaceCustody),
+}
+
+fn authenticate_home_witness(
+    witness: &HomeCertification,
+    owner: &CachedHomeOwner,
+    packages: HomePackageAuthentication<'_>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+    if &witness.owner != owner {
+        return Err(CertificationError::Mismatch("home certification owner"));
+    }
+    #[cfg(test)]
+    {
+        validation.home_witness_validations += 1;
+    }
+    match packages {
+        HomePackageAuthentication::FreshObservation => {
+            for package in witness.packages.values() {
+                verify_package_interface(validation, package)?;
+            }
+            Ok(())
+        }
+        HomePackageAuthentication::HeldCustody(custody) => {
+            custody.bind_witnesses(&witness.packages, validation)
+        }
+    }
+}
+
 fn verify_home_witness_with_validation(
     bytes: &[u8],
     owner: &CachedHomeOwner,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<HomeCertification> {
-    #[cfg(test)]
-    {
-        validation.home_witness_validations += 1;
-    }
     let witness = decode_home_witness_with_operation(bytes, &validation.inventory)?;
-    if &witness.owner != owner {
-        return Err(CertificationError::Mismatch("home certification owner"));
-    }
-    for package in witness.packages.values() {
-        verify_package_interface(validation, package)?;
-    }
+    authenticate_home_witness(
+        &witness,
+        owner,
+        HomePackageAuthentication::FreshObservation,
+        validation,
+    )?;
+    Ok(witness)
+}
+
+fn verify_home_witness_with_custody(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    custody: &PackageInterfaceCustody,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<HomeCertification> {
+    let witness = decode_home_witness_with_operation(bytes, &validation.inventory)?;
+    authenticate_home_witness(
+        &witness,
+        owner,
+        HomePackageAuthentication::HeldCustody(custody),
+        validation,
+    )?;
     Ok(witness)
 }
 
 pub(crate) fn home_package_interface_seals(
-    bytes: &[u8], owner: &CachedHomeOwner, validation: &mut PackageInterfaceValidation,
-) -> CertResult<BTreeMap<(String,String), [u8;32]>> {
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
     let witness = decode_home_witness_with_operation(bytes, &validation.inventory)?;
     if &witness.owner != owner {
         return Err(CertificationError::Mismatch("home certification owner"));
     }
-    validation.inventory.reserve::<((String,String),[u8;32])>(witness.packages.len())?;
-    for key in witness.packages.keys() { validation.inventory.charge(key.0.len().saturating_add(key.1.len()))?; }
-    Ok(witness.packages.into_iter().map(|(key,witness)| (key,witness.sha256)).collect())
+    validation
+        .inventory
+        .reserve::<((String, String), [u8; 32])>(witness.packages.len())?;
+    for key in witness.packages.keys() {
+        validation
+            .inventory
+            .charge(key.0.len().saturating_add(key.1.len()))?;
+    }
+    Ok(witness
+        .packages
+        .into_iter()
+        .map(|(key, witness)| (key, witness.sha256))
+        .collect())
 }
 
 #[cfg(test)]
@@ -7245,6 +7301,66 @@ pub(crate) fn bind_home_execution_source(
     encode_home_witness(&witness)
 }
 
+/// Structurally checked bytes and their exact decoded witness. Package seals
+/// describe restoration obligations; they do not authenticate package bytes.
+#[derive(Debug)]
+pub(crate) struct ParsedHomeCertification {
+    bytes: Vec<u8>,
+    witness: HomeCertification,
+}
+
+impl ParsedHomeCertification {
+    pub(crate) fn parse(
+        bytes: Vec<u8>,
+        owner: &CachedHomeOwner,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Self> {
+        let witness = decode_home_witness_with_operation(&bytes, &validation.inventory)?;
+        if &witness.owner != owner {
+            return Err(CertificationError::Mismatch("home certification owner"));
+        }
+        Ok(Self { bytes, witness })
+    }
+
+    pub(crate) fn package_interface_seals(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<BTreeMap<(String, String), [u8; 32]>> {
+        validation
+            .inventory
+            .reserve::<((String, String), [u8; 32])>(self.witness.packages.len())?;
+        for key in self.witness.packages.keys() {
+            validation
+                .inventory
+                .charge(key.0.len().saturating_add(key.1.len()))?;
+        }
+        Ok(self
+            .witness
+            .packages
+            .iter()
+            .map(|(key, witness)| (key.clone(), witness.sha256))
+            .collect())
+    }
+
+    pub(crate) fn authenticate_with_custody(
+        self,
+        owner: &CachedHomeOwner,
+        custody: &PackageInterfaceCustody,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<VerifiedHomeCertification> {
+        authenticate_home_witness(
+            &self.witness,
+            owner,
+            HomePackageAuthentication::HeldCustody(custody),
+            validation,
+        )?;
+        Ok(VerifiedHomeCertification {
+            bytes: self.bytes,
+            witness: self.witness,
+        })
+    }
+}
+
 /// The exact physical certificate and the decoded facts admitted from it.
 /// Fresh external package observations remain the consuming operation's work.
 #[derive(Debug)]
@@ -7255,13 +7371,13 @@ pub(crate) struct VerifiedHomeCertification {
 
 impl VerifiedHomeCertification {
     pub(crate) fn capture_with_custody(
-        bytes: Vec<u8>, owner: &CachedHomeOwner, custody: &PackageInterfaceCustody,
+        bytes: Vec<u8>,
+        owner: &CachedHomeOwner,
+        custody: &PackageInterfaceCustody,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Self> {
-        let witness = decode_home_witness_with_operation(&bytes, &validation.inventory)?;
-        if &witness.owner != owner { return Err(CertificationError::Mismatch("home certification owner")); }
-        custody.bind_witnesses(&witness.packages, validation)?;
-        Ok(Self { bytes, witness })
+        ParsedHomeCertification::parse(bytes, owner, validation)?
+            .authenticate_with_custody(owner, custody, validation)
     }
     pub(crate) fn capture(
         bytes: Vec<u8>,
@@ -7324,7 +7440,7 @@ pub(crate) fn candidate_execution_source_digest_with_validation(
     sidecar_custody: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Option<[u8; 32]>> {
-    let witness = VerifiedHomeCertification::capture_with_custody(bytes.to_vec(), owner, custody, validation)?.witness;
+    let witness = verify_home_witness_with_custody(bytes, owner, custody, validation)?;
     check_direct_package_agreement_with_custody(
         package_imports,
         owner,
@@ -8772,9 +8888,13 @@ pub(crate) fn certify_candidate_original_with_validation(
     {
         return Err(CertificationError::Mismatch("candidate original bytes"));
     }
-    let witness = VerifiedHomeCertification::capture_with_custody(
-        certification_bytes.clone(), &owner, &custody, validation,
-    )?.witness;
+    let (certification_bytes, witness) = VerifiedHomeCertification::capture_with_custody(
+        certification_bytes,
+        &owner,
+        &custody,
+        validation,
+    )?
+    .into_parts();
     if witness.execution_source_sha256 != execution_source.as_ref().map(|graph| graph.digest())
         || execution_source
             .as_ref()
@@ -22301,9 +22421,18 @@ pub(crate) mod tests {
             ).unwrap();
             let reference = &references[0];
             let acquired = crate::recovery_artifacts::verify_materialized_ref(root.path(), reference).unwrap();
+            std::fs::remove_file(&package).unwrap();
+            proptest::prop_assert!(crate::recovery_artifacts::verify_materialized_ref(
+                root.path(), reference,
+            ).is_ok(), "cold recovery owns package bytes independently of their selected origin");
+            proptest::prop_assert!(certify_inherited_products(
+                &[InheritedProductInput { artifact: &acquired }], &[],
+            ).is_ok(), "retained package tokens survive selected-origin removal");
+            assert_eq!(reference.package_interfaces.len(), 1);
             let paths = [root.path().join(&reference.certification_path),
                 root.path().join(&reference.interface_path), root.path().join(&reference.product_path),
-                root.path().join(&reference.package_imports_path), package];
+                root.path().join(&reference.package_imports_path),
+                root.path().join(&reference.package_interfaces[0].path)];
             let originals = paths.iter().map(|path| std::fs::read(path).unwrap()).collect::<Vec<_>>();
             let controls = [(0, 1), (4, 2), (4, 0), (0, 0)];
             for (index, operation) in controls.into_iter().chain(history) {
@@ -22324,18 +22453,17 @@ pub(crate) mod tests {
                 }
                 // Exact issued bytes and physical path kinds are the oracle;
                 // it does not reuse production's digests or decoded certificate.
-                let fresh_oracle = paths.iter().zip(&originals).enumerate().all(|(i, (path, bytes))| {
+                let fresh_oracle = paths.iter().zip(&originals).all(|(path, bytes)| {
                     std::fs::read(path).is_ok_and(|actual| &actual == bytes)
-                        && (i == 4 || std::fs::symlink_metadata(path)
-                            .is_ok_and(|metadata| !metadata.file_type().is_symlink()))
+                        && std::fs::symlink_metadata(path)
+                            .is_ok_and(|metadata| !metadata.file_type().is_symlink())
                 });
                 let fresh = crate::recovery_artifacts::verify_materialized_ref(root.path(), reference);
                 proptest::prop_assert_eq!(fresh.is_ok(), fresh_oracle, "operation={} file={}", operation, index);
-                let package_oracle = std::fs::read(&paths[4]).is_ok_and(|actual| actual == originals[4]);
                 let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
                 let retained = certify_inherited_products(&[InheritedProductInput { artifact: &acquired }], &[]);
-                proptest::prop_assert_eq!(retained.is_ok(), package_oracle,
-                    "retained observation operation={} file={}", operation, index);
+                proptest::prop_assert!(retained.is_ok(),
+                    "retained tokens survive storage mutation: operation={} file={}", operation, index);
                 proptest::prop_assert_eq!(HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get), before);
                 proptest::prop_assert_eq!(acquired.certification_bytes(), original.certification_bytes());
                 if let Ok(groups) = retained {
@@ -22389,11 +22517,16 @@ pub(crate) mod tests {
                 .unwrap(),
                 certification_bytes,
                 module_interface,
-                package_interfaces: fixture.original_native().unwrap().package_interfaces().clone(),
+                package_interfaces: fixture
+                    .original_native()
+                    .unwrap()
+                    .package_interfaces()
+                    .clone(),
                 execution_source: None,
             }
         };
         let decoded_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
+        let home_before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
         let carried = certify_candidate_original_with_validation(
             candidate(
                 fixture.owner().clone(),
@@ -22407,6 +22540,11 @@ pub(crate) mod tests {
             ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
             decoded_before
         );
+        assert_eq!(
+            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get) - home_before,
+            1
+        );
+        assert_eq!(carried.certification_bytes(), fixture.certification_bytes());
         assert!(carried.same_durable_artifact(&cold));
         assert_eq!(
             carried.original_native().unwrap().groups,

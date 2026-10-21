@@ -3276,19 +3276,47 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
     )?;
     let certification_path = resolve_owned(recovery_root, &reference.certification_path)
         .map_err(classify_certification_path_error)?;
-    let certification_bytes = read_checked(&certification_path,
-        &reference.certification_sha256, CERTIFICATION_LIMIT, validation)?;
-    let expected = crate::certified_products::home_package_interface_seals(
-        &certification_bytes, &owner, validation,
-    ).map_err(|error| recovery_validation_error(error,
-        RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())))?;
+    let certification_bytes = read_checked(
+        &certification_path,
+        &reference.certification_sha256,
+        CERTIFICATION_LIMIT,
+        validation,
+    )?;
+    let parsed = crate::certified_products::ParsedHomeCertification::parse(
+        certification_bytes,
+        &owner,
+        validation,
+    )
+    .map_err(|error| {
+        recovery_validation_error(
+            error,
+            RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+        )
+    })?;
+    let expected = parsed
+        .package_interface_seals(validation)
+        .map_err(|error| {
+            recovery_validation_error(
+                error,
+                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+            )
+        })?;
     let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
-        recovery_root, &reference.package_interfaces, &expected, validation,
-    ).map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?;
-    let certification = crate::certified_products::VerifiedHomeCertification::capture_with_custody(
-        certification_bytes, &owner, &package_interfaces, validation,
-    ).map_err(|error| recovery_validation_error(error,
-        RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())))?;
+        recovery_root,
+        &reference.package_interfaces,
+        &expected,
+        validation,
+    )
+    .map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?;
+    drop(expected);
+    let certification = parsed
+        .authenticate_with_custody(&owner, &package_interfaces, validation)
+        .map_err(|error| {
+            recovery_validation_error(
+                error,
+                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+            )
+        })?;
     if certification.module_certificate_digest()
         != reference
             .module_interface
