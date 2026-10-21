@@ -159,6 +159,8 @@ impl CertifiedPackageCodeInterface {
 pub struct CertifiedPackageCodeProduct {
     code: PackageGroupCode,
     bytes: Arc<[u8]>,
+    // Authenticated by the issuer before retaining these immutable bytes.
+    envelope_sha256: [u8; 32],
     product_sha256: [u8; 32],
     // Positional provenance for the same code.globals(), not a namespace map.
     import_interfaces: Arc<[[u8; 32]]>,
@@ -175,7 +177,7 @@ impl CertifiedPackageCodeProduct {
     ) -> Result<RecoveryPackageCodeRef, crate::recovery_artifacts::RecoveryArtifactError> {
         use crate::recovery_artifacts::materialize_copy_with_validation as write;
         std::fs::create_dir_all(root.join("package-code"))?;
-        let envelope_sha256 = sha(&self.bytes);
+        let envelope_sha256 = self.envelope_sha256;
         let envelope_path = envelope_path(&envelope_sha256);
         write(
             &root.join(&envelope_path),
@@ -318,6 +320,7 @@ impl CertifiedPackageCodeProduct {
         Ok(Arc::new(Self {
             code,
             bytes,
+            envelope_sha256: reference.envelope_sha256,
             product_sha256,
             import_interfaces: import_interfaces.into(),
             defining_interface,
@@ -448,6 +451,7 @@ impl CertifiedPackageCodeProduct {
         Ok(Arc::new(Self {
             code,
             bytes: Arc::clone(bytes),
+            envelope_sha256: output.sha256,
             product_sha256,
             import_interfaces: import_interfaces.into(),
             defining_interface,

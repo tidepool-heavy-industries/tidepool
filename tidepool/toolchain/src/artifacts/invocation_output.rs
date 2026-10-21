@@ -1148,6 +1148,66 @@ mod tests {
             !second_packages.is_empty(),
             "the dependent target must retain actual package code"
         );
+        // Exercise storage with an actual compiler-issued package owner.
+        let package_binding = first.completion().package_bindings().next().unwrap();
+        let product = package_binding.product();
+        for mode in [
+            crate::recovery_artifacts::MaterializationMode::Durable,
+            crate::recovery_artifacts::MaterializationMode::Scratch,
+        ] {
+            use crate::recovery_artifacts::{PackageInterfaceValidation, RecoveryArtifactError};
+            use sha2::{Digest, Sha256};
+
+            let storage = tempfile::tempdir().unwrap();
+            let reference = product
+                .materialize(
+                    storage.path(),
+                    mode,
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap();
+            let envelope_sha256: [u8; 32] = Sha256::digest(product.bytes()).into();
+            assert_eq!(reference.envelope_sha256, envelope_sha256);
+            assert_eq!(reference.product_sha256, *product.product_sha256());
+            let restored = certified_products::CertifiedPackageCodeProduct::restore(
+                storage.path(),
+                &reference,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let restored_storage = tempfile::tempdir().unwrap();
+            assert_eq!(
+                restored
+                    .materialize(
+                        restored_storage.path(),
+                        mode,
+                        &mut PackageInterfaceValidation::default(),
+                    )
+                    .unwrap(),
+                reference,
+                "restoration preserves both envelope and ordered-import product identity"
+            );
+            let envelope_path = storage.path().join(&reference.envelope_path);
+            let mut corrupt = product.bytes().to_vec();
+            corrupt[0] ^= 1;
+            std::fs::write(&envelope_path, corrupt).unwrap();
+            for held in [product, &restored] {
+                assert!(matches!(
+                    held.materialize(
+                        storage.path(), mode, &mut PackageInterfaceValidation::default(),
+                    ),
+                    Err(RecoveryArtifactError::DigestMismatch(path)) if path == envelope_path
+                ));
+            }
+            assert!(matches!(
+                certified_products::CertifiedPackageCodeProduct::restore(
+                    storage.path(), &reference, &mut PackageInterfaceValidation::default(),
+                ),
+                Err(certified_products::CertificationError::CapturedModulePayload(
+                    RecoveryArtifactError::DigestMismatch(path)
+                )) if path == envelope_path
+            ));
+        }
         let mut shared_products = 0;
         for (product, first_bindings) in &first_packages {
             if let Some(second_bindings) = second_packages.get(product) {
