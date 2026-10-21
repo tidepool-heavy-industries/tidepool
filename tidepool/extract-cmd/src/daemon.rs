@@ -406,7 +406,14 @@ fn compiler_trace_filter(
     raw_filter: Option<&str>,
     trace_profile: Option<&str>,
 ) -> tracing_subscriber::EnvFilter {
-    let mut filter = tracing_subscriber::EnvFilter::new("info,tidepool_extract_cmd=debug");
+    // The structured trace intentionally has its own stable defaults. The
+    // compiler_log target is enabled at trace so every declared Haskell
+    // severity stays in the retained trace by default, while the other
+    // extract_cmd targets remain at debug. This filter is not RUST_LOG: the
+    // directives below honor RUST_LOG only for the single raw-detail target.
+    let mut filter = tracing_subscriber::EnvFilter::new(
+        "info,tidepool_extract_cmd=debug,tidepool_extract_cmd::compiler_log=trace",
+    );
     // The structured trace intentionally has its own stable defaults. Honor
     // only the standard RUST_LOG directive for this one high-volume target so
     // a matched A/B can disable raw compiler detail without losing request,
@@ -3563,18 +3570,159 @@ fn is_structured_compiler_log(line: &str) -> bool {
     line.trim_start().starts_with("tidepool-log ")
 }
 
+/// The Haskell @tidepool-log@ severity carried on a worker diagnostic line.
+/// Only the level is decoded by the daemon; the full target/event/fields text
+/// is retained in the emitted @line@ field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompilerLogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl CompilerLogLevel {
+    /// Exhaustive mapping from the Haskell renderer's level spellings.
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "error" => Some(Self::Error),
+            "warn" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
+            _ => None,
+        }
+    }
+}
+
+/// Read the top-level @level@ string from a @tidepool-log@ JSON record. The
+/// renderer emits a fixed shape, but this walks the top-level object so a
+/// reordered line is still classified by its actual key. A malformed line
+/// yields @None@ and is retained as ordinary compiler detail, never a source
+/// error or a compile-success change.
+fn structured_log_level(line: &str) -> Option<CompilerLogLevel> {
+    let json = line
+        .trim_start()
+        .strip_prefix("tidepool-log ")?
+        .trim_start();
+    let bytes = json.as_bytes();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' | b'[' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'"' => {
+                let (text, next) = json_string_at(bytes, cursor)?;
+                cursor = next;
+                let mut colon = next;
+                while colon < bytes.len() && bytes[colon].is_ascii_whitespace() {
+                    colon += 1;
+                }
+                if depth == 1 && bytes.get(colon) == Some(&b':') && text == "level" {
+                    let mut value = colon + 1;
+                    while value < bytes.len() && bytes[value].is_ascii_whitespace() {
+                        value += 1;
+                    }
+                    if bytes.get(value) == Some(&b'"') {
+                        let (name, _) = json_string_at(bytes, value)?;
+                        return CompilerLogLevel::from_name(name);
+                    }
+                    return None;
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+/// Read the raw text of a JSON string whose opening quote is at @start@,
+/// returning the unescaped contents and the index past the closing quote.
+fn json_string_at(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
+    debug_assert_eq!(bytes.get(start), Some(&b'"'));
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => {
+                cursor += 1;
+                cursor = if bytes.get(cursor) == Some(&b'u') {
+                    cursor + 5 // 'u' plus four hex digits
+                } else {
+                    cursor + 1
+                };
+            }
+            b'"' => {
+                let text = std::str::from_utf8(&bytes[start + 1..cursor]).ok()?;
+                return Some((text, cursor + 1));
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn log_structured_compiler_line(run_id: &str, compile_request: &str, line: &str) {
+    match structured_log_level(line) {
+        Some(CompilerLogLevel::Error) => tracing::error!(
+            target: "tidepool_extract_cmd::compiler_log",
+            run_id,
+            %compile_request,
+            line,
+            "compiler trace"
+        ),
+        Some(CompilerLogLevel::Warn) => tracing::warn!(
+            target: "tidepool_extract_cmd::compiler_log",
+            run_id,
+            %compile_request,
+            line,
+            "compiler trace"
+        ),
+        Some(CompilerLogLevel::Info) => tracing::info!(
+            target: "tidepool_extract_cmd::compiler_log",
+            run_id,
+            %compile_request,
+            line,
+            "compiler trace"
+        ),
+        Some(CompilerLogLevel::Debug) => tracing::debug!(
+            target: "tidepool_extract_cmd::compiler_log",
+            run_id,
+            %compile_request,
+            line,
+            "compiler trace"
+        ),
+        Some(CompilerLogLevel::Trace) => tracing::trace!(
+            target: "tidepool_extract_cmd::compiler_log",
+            run_id,
+            %compile_request,
+            line,
+            "compiler trace"
+        ),
+        None => tracing::debug!(
+            target: "tidepool_extract_cmd::compiler_log",
+            run_id,
+            %compile_request,
+            line,
+            malformed = true,
+            "compiler trace (malformed)"
+        ),
+    }
+}
+
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     for line in String::from_utf8_lossy(stderr).lines() {
         let line = line.trim();
         if crate::diagnostics::is_machine_stderr_line(line) {
             if is_structured_compiler_log(line) {
-                tracing::debug!(
-                    target: "tidepool_extract_cmd::compiler_log",
-                    run_id,
-                    %compile_request,
-                    line,
-                    "compiler trace"
-                );
+                log_structured_compiler_line(run_id, compile_request, line);
             } else if is_raw_compiler_detail(line) {
                 tracing::debug!(
                     target: RAW_COMPILER_DETAIL_TARGET,
@@ -6705,6 +6853,72 @@ tidepool-target phase=desugar module=Execute\n",
                 reuse,
             ]
         );
+    }
+
+    #[test]
+    fn structured_compiler_logs_preserve_declared_severity_and_malformed_fallback() {
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber_with_trace_filter(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+            compiler_trace_filter(None, None),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_compile_timing(
+                "run-severity",
+                "request-severity",
+                b"tidepool-log {\"schema\":1,\"level\":\"error\",\"target\":\"t\",\"event\":\"e\",\"observed_ns\":1,\"fields\":{}}\n\
+tidepool-log {\"schema\":1,\"level\":\"warn\",\"target\":\"t\",\"event\":\"e\",\"observed_ns\":2,\"fields\":{}}\n\
+tidepool-log {\"schema\":1,\"level\":\"info\",\"target\":\"t\",\"event\":\"e\",\"observed_ns\":3,\"fields\":{}}\n\
+tidepool-log {\"schema\":1,\"level\":\"debug\",\"target\":\"t\",\"event\":\"e\",\"observed_ns\":4,\"fields\":{}}\n\
+tidepool-log {\"schema\":1,\"level\":\"trace\",\"target\":\"t\",\"event\":\"e\",\"observed_ns\":5,\"fields\":{}}\n\
+tidepool-log {\"schema\":1,\"level\":\"nope\",\"target\":\"t\",\"event\":\"e\",\"observed_ns\":6,\"fields\":{}}\n\
+tidepool-log {not json}\n",
+            );
+        });
+
+        let events: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let compiler: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event["fields"]["message"] == "compiler trace"
+                    || event["fields"]["message"] == "compiler trace (malformed)"
+            })
+            .collect();
+        assert_eq!(compiler.len(), 7);
+        let levels: Vec<_> = compiler
+            .iter()
+            .map(|event| event["level"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            levels,
+            ["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "DEBUG", "DEBUG"]
+        );
+        assert_eq!(compiler[5]["fields"]["malformed"], true);
+        assert_eq!(compiler[6]["fields"]["malformed"], true);
+        assert!(compiler[5]["fields"]["line"]
+            .as_str()
+            .unwrap()
+            .contains("\"level\":\"nope\""));
+        assert_eq!(compiler[6]["fields"]["line"], "tidepool-log {not json}");
+        // Malformed structured lines are measurements, never source errors:
+        // the diagnostic renderer keeps the real GHC diagnostic and drops them.
+        let rendered = String::from_utf8(
+            diagnostic_stderr(
+                b"tidepool-log {not json}\nOriginal.hs:1:1: error: real diagnostic\n",
+            )
+            .to_vec(),
+        )
+        .unwrap();
+        assert!(!rendered.contains("tidepool-log"));
+        assert!(rendered.contains("Original.hs:1:1: error: real diagnostic"));
     }
 
     #[test]
