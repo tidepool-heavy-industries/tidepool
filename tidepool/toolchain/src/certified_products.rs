@@ -4020,8 +4020,7 @@ impl CertifiedSourceSelection {
         else {
             return Err(CertificationError::Mismatch("target Source reference kind"));
         };
-        let owner =
-            self.receipt_source_owner(unit, module, module_version.as_ref(), *original_ordinal)?;
+        let owner = self.receipt_source_member(unit, module, module_version.as_ref())?;
         let entry = self
             .target_original(owner)?
             .ok_or(CertificationError::Mismatch(

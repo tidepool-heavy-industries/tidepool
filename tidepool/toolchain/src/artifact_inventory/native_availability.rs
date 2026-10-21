@@ -242,6 +242,20 @@ pub(super) fn select_target_group(
                 artifact: entry.descriptor.id,
                 original_ordinal: ordinal,
             };
+            if !selection.permits_native_group(key.artifact, product.owner(), ordinal) {
+                return Err(native_admission_failure(
+                    key,
+                    NativeAdmissionRefusal::InputPermissionDenied {
+                        body_present: entry.native_group_ordinals.contains(&ordinal),
+                        selected_original: physical
+                            .lease
+                            .selection
+                            .namespace
+                            .get(&key.artifact)
+                            .copied(),
+                    },
+                ));
+            }
             if let Some(current) = selection.current_product(key, &entry).map_err(evidence)? {
                 let (binding, offer) = completed_target_group(&current, physical)?;
                 (binding, offer, true)
