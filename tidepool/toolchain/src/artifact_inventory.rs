@@ -5016,6 +5016,79 @@ impl ArtifactInventory {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        if tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+        {
+            const ROW_LIMIT: usize = 32;
+            const EDGE_LIMIT: usize = 16;
+            let canonicals = || {
+                supplied
+                    .values()
+                    .filter(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)))
+            };
+            let total = canonicals().count();
+            for entry in canonicals().take(ROW_LIMIT) {
+                let id = entry.descriptor.id;
+                let Ok(node) = resolve_row(LogicalNodeKey::Artifact(id)) else {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        owner = ?entry.descriptor.owner, artifact = ?id,
+                        "canonical physical issuance observation has no resolved row");
+                    continue;
+                };
+                let previous = parent.lease.selection.namespace.get(&id).copied();
+                let previous_node = previous.map(InventoryNodeKey::Artifact);
+                let new_edges = bound.get(&node);
+                let new_total =
+                    new_edges.map_or_else(|| state.outgoing(node).count(), BTreeSet::len);
+                let old_total = previous_node.map(|old| state.outgoing(old).count());
+                // Equality always checks the complete qualified row. Only the
+                // rendered samples are truncated by the independent trace limit.
+                let full_edges_equal = previous_node.map(|old| {
+                    old_total == Some(new_total)
+                        && state.outgoing(old).all(|(target, edge)| {
+                            new_edges.map_or_else(
+                                || {
+                                    state.outgoing(node).any(|(new_target, new_edge)| {
+                                        target == new_target && edge == new_edge
+                                    })
+                                },
+                                |edges| edges.contains(&(target, edge.clone())),
+                            )
+                        })
+                });
+                let old_sample = previous_node.map(|old| {
+                    state
+                        .outgoing(old)
+                        .take(EDGE_LIMIT)
+                        .map(|(target, edge)| (target, edge.clone()))
+                        .collect::<Vec<_>>()
+                });
+                let new_sample = match new_edges {
+                    Some(edges) => edges.iter().take(EDGE_LIMIT).cloned().collect::<Vec<_>>(),
+                    None => state
+                        .outgoing(node)
+                        .take(EDGE_LIMIT)
+                        .map(|(target, edge)| (target, edge.clone()))
+                        .collect(),
+                };
+                let parent_owned = parent_nodes.iter().filter(|candidate| {
+                    matches!(candidate, InventoryNodeKey::Artifact(binding) if binding.artifact == id)
+                }).count();
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    owner = ?entry.descriptor.owner, artifact = ?id,
+                    parent_binding = ?previous,
+                    parent_binding_owned = ?previous_node.map(|old| parent_nodes.contains(&old)),
+                    parent_owned_canonical_bindings = parent_owned,
+                    bound = ?node, inherited = inherited.contains_key(&LogicalNodeKey::Artifact(id)),
+                    ?full_edges_equal, old_edges_total = ?old_total, new_edges_total = new_total,
+                    old_edges_omitted = ?old_total.map(|count| count.saturating_sub(EDGE_LIMIT)),
+                    new_edges_omitted = new_total.saturating_sub(EDGE_LIMIT),
+                    old_edges = ?old_sample, new_edges = ?new_sample,
+                    "canonical physical issuance binding observation");
+            }
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                total, emitted = total.min(ROW_LIMIT), omitted = total.saturating_sub(ROW_LIMIT),
+                complete = total <= ROW_LIMIT, "canonical physical issuance observation coverage");
+        }
         let namespace = selected
             .keys()
             .filter(|id| !matches!(selected[*id].payload, ArtifactPayload::PackageCode(_)))
