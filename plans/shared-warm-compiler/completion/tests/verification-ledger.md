@@ -134,9 +134,15 @@ The runtime finite frontier is still an executed failure. At
 records 1 failed history (exit 101, process/compiler cleanup confirmed): the first public
 B executes/displays 42 and publishes,
 exact package bindings/ordered children remain unchanged, but public selected
-package-root domains are empty. Transactional selection transfer remains under
-repair. Earlier target-membership and pre-installer failures are not the current
-frontier; success before this assertion does not turn the history into a pass.
+package-root domains are empty. The reviewed transactional selection repair
+`9e998a113e31f5c94b26d3142fad8ed002c231f0` advances past that observation, then
+fails while forcing the retained package root with `UnknownProgram(1520)`.
+Its [counted report](/srv/swarm/evidence/inanna/g2-history-tests-20261020/runs/9e998a113e/finite/da655f02a032183e95c87e77053c3ff53d731d57b3eec8b0b62a70bf13475a09.json)
+records executed 1, failed 1, exit 101 and confirmed process/compiler cleanup.
+The follow-up diagnostic observes a valid evaluated native handle whose defining
+program has retired. Native-instance handle custody is under repair; generic
+retained-value collection remains a separate contract. Earlier failures and
+successful intermediate observations do not qualify the history or bundle.
 
 ## Remaining route disposition
 

@@ -173,7 +173,7 @@ selection transfer and the full ordinary journey remain open.
 | Boundary | Remaining acceptance |
 |---|---|
 | Compiler boundary qualification | Matched target, carried TYPE, prefix, package and support/refusal controls pass at the ledger's exact checkpoints. The completed current-product shortcut also refuses an available Original use outside the actual stage, while the same producer can publish future permission. |
-| Runtime selection/publication | Scoped Ordinary effect/cutoff controls pass at their recorded revision. The finite journey reaches 42/display/publication but loses selected package-root domains despite unchanged exact package bindings; transactional selection transfer is under repair. This remains an executed failure, not a runtime milestone pass. |
+| Runtime selection/publication | Scoped Ordinary effect/cutoff controls pass at their recorded revision. The finite journey's transactional selection repair reaches a retained package root, then forcing it reports a collected defining program. Native-instance program custody is under repair; the history remains an executed failure. |
 | Native build and custody qualification | Native actions require `bind_owned` and declared compiler-service resources; portable actions remain direct. Qualify actual catalog production and the exact frozen bundle through [package qualification](../build/package/qualification.py). Retain exact-source limits on custody/recovery passes. |
 | Joined ordinary workflow | Execute finite source → installer → public World → repeated package-using cells, A retirement and new B execution with genuine captured-A refusal. Qualify discovery, private inputs, reload and caller loss before selected Persona startup and real DeepSeek smoke on one bundle. |
 
