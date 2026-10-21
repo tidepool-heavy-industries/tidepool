@@ -78,6 +78,34 @@ natural stopping points and explicitly notify the next owner.
 6. Leave a launch-ready candidate and exact remaining gates for morning review.
    A new live run is not required to finish this overnight handoff.
 
+## Bounded optional work
+
+These parcels do not expand G2 launch acceptance. Retain each source review,
+joined compile and executed evidence separately in the private continuation
+ledger; do not leave an accepted proposal orphaned behind a completed worker.
+
+- Diagnostic owns three typed admission failures with unchanged serialized
+  failure classification. Its promotion-boundary repairs precede this parcel.
+- Package owns failed-input retention in the two existing guaranteed resident
+  case roots. The existing runner owns successful cleanup; direct callers gain
+  no fallback root or new cleanup policy.
+- Common owns demanded row/FD selection preserving DAG precedence and exact file
+  leases. Metrics must state selected transport probes, including misses,
+  rather than claim a scan of all retained graph paths.
+- The unused sealing/convenience API deletion keeps the real validation-bearing
+  producers and their collision/sealing controls. No legacy target certifier or
+  test-only authority adapter remains.
+- World construction naming is documentation/API naming only. The completion
+  no-op optimization remains a proposal until its owner-local custody and
+  cancellation proof is reviewed. The observability audit warranted no change.
+
+The actual World TYPE-to-native promotion failure must be resolved through the
+physical issuer's exact predecessor canonical TYPE evidence, preserving its
+full qualified-edge reuse check and the generic prefix binding guard. Native
+availability and publication future choices do not authorize a current-stage
+Original use. A separate regression must exercise that ceiling through an
+actual checked stage owner.
+
 ## Escalation and resources
 
 Bounded implementation and fixture repairs may proceed with peer review. A new
