@@ -2896,7 +2896,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .any(|proof| proof.original == entry.descriptor.id));
     assert!(cloned.receipt_native_body_owners().next().is_none());
     assert!(cloned
-        .complete_native_entries(&inputs.artifacts())
+        .complete_native_entries(&inputs.artifacts(), &validation.inventory)
         .unwrap()
         .is_empty());
     assert!(!cloned.permits_native_group(ArtifactId([255; 32]), native.owner(), 9001));
@@ -9432,7 +9432,7 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
         )
         .map_err(compiler_evidence_failure)?;
         assert!(selection
-            .complete_native_entries(request.artifacts())
+            .complete_native_entries(request.artifacts(), &validation.inventory)
             .map_err(compiler_evidence_failure)?
             .is_empty());
         let continued = OriginalCompilerInputs::from_selection(&selection, request.artifacts())?;
@@ -10205,7 +10205,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     )
     .unwrap();
     let view = inputs.artifacts().clone();
-    assert!(selection.complete_native_entries(&view).unwrap().is_empty());
+    assert!(selection.complete_native_entries(&view, &operation).unwrap().is_empty());
     let entry = view
         .metadata_snapshot()
         .artifacts
@@ -10228,7 +10228,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
         )
         .unwrap();
     assert!(matches!(
-        raw_selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
+        raw_selection.complete_native_entries(&ArtifactInventory::default().empty_view(), &operation),
         Err(crate::certified_products::CertificationError::MissingRetainedCustody { artifact })
             if artifact == id
     ));
