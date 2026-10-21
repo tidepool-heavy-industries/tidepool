@@ -9075,6 +9075,82 @@ mod module_product_tests {
             settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionOrigin,
         };
+        let initial = if mixed {
+            let compiled = crate::artifacts::test_support::compile_invocation(
+                &CompileInvocation {
+                    source: include_str!("../tests/fixtures/world-native/StageInputG.hs"),
+                    targets: &["g"],
+                    include: &[],
+                    fallback_module_name: "StageInputG",
+                },
+                |_, _, _| {},
+            )
+            .expect("actual finite producer for the initial World Original");
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                compiled
+                    .source_selection
+                    .as_ref()
+                    .expect("actual finite source selection"),
+                &compiled.artifact_view,
+            )
+            .expect("carry the finite producer's issued availability");
+            let support =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .expect("actual initial compiler support");
+            let row = support
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner().module == "StageInputG")
+                .expect("finite producer retained its own Original availability");
+            let crate::artifact_inventory::ArtifactPayload::Original(product) =
+                &row.target_original(row.original_owner()).unwrap().payload
+            else {
+                unreachable!()
+            };
+            let native = product.original_native().unwrap();
+            let ordinal_for = |name: &str| {
+                native
+                    .inventory_facts()
+                    .native_group_ordinals
+                    .iter()
+                    .copied()
+                    .find(|ordinal| {
+                        certified_products::original_native_group_definitions(product, *ordinal)
+                            .unwrap()
+                            .bindings()
+                            .iter()
+                            .any(|group| match group {
+                                tidepool_repr::execution_schema::Group::NonRecursive(binding) => {
+                                    binding.identity.occurrence == name
+                                }
+                                tidepool_repr::execution_schema::Group::Recursive(bindings) => {
+                                    bindings
+                                        .iter()
+                                        .any(|binding| binding.identity.occurrence == name)
+                                }
+                            })
+                    })
+                    .expect("actual named Original group")
+            };
+            let used = ordinal_for("g");
+            let unused = ordinal_for("unusedSibling");
+            assert_ne!(
+                used, unused,
+                "unused sibling has independent physical membership"
+            );
+            assert!(
+                row.permits(used) && row.permits(unused),
+                "initial genuine availability includes the unused sibling"
+            );
+            Some(Arc::new(
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap(),
+            ))
+        } else {
+            None
+        };
         for cancel_after_end in [false, true] {
             let cancellation = CompilerTransactionCancellation::new();
             let mut observed_close = None;
@@ -9153,11 +9229,15 @@ mod module_product_tests {
                     )?);
                     let source = WorldSourceSelection::new(*sources.seal(), "native-world-source")?;
                     let inputs = ModuleCandidateOffer::compiler_world_inputs(
-                        None,
+                        initial.clone(),
                         CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                         sources,
                         crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
-                            Vec::new(),
+                            if mixed {
+                                vec!["qualified StageInputG".into()]
+                            } else {
+                                Vec::new()
+                            },
                             None,
                         )?,
                     )?;
@@ -9405,6 +9485,47 @@ mod module_product_tests {
                     certificate.product().owner().module,
                     "Tidepool.Session.Lib.G32"
                 );
+                let native = certificate.product().original_native().unwrap();
+                let references = native
+                    .inventory_facts()
+                    .native_group_ordinals
+                    .iter()
+                    .flat_map(|ordinal| {
+                        certified_products::original_native_group_imports(
+                            certificate.product(), *ordinal,
+                        )
+                        .unwrap()
+                    })
+                    .filter(|reference| matches!(reference,
+                        certified_products::ReceiptImportOwner::OriginalBinding { module, binder, .. }
+                        if module == "StageInputG" && binder.occurrence == "g"))
+                    .collect::<BTreeSet<_>>();
+                assert!(
+                    !references.is_empty(),
+                    "actual dormant declaration retains its exact Original import"
+                );
+                for stage in checked.stages() {
+                    let validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                            Arc::clone(&checked.validation().inventory),
+                        );
+                    let captured = checked
+                        .native_demand_completion()
+                        .checked_stage(&checked, stage, &validation)
+                        .unwrap();
+                    let uses = captured
+                        .selection()
+                        .into_iter()
+                        .flat_map(|selection| selection.batches())
+                        .flat_map(|batch| batch.original_uses())
+                        .filter(|reference| references.contains(reference))
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "actual dormant Original stage={} ordinals={:?} uses={uses:?}",
+                        stage.index(),
+                        stage.ordinals()
+                    );
+                }
                 assert!(program.items()[2].native().is_some());
                 assert!(program.items()[3].native().is_some());
                 assert!(program.items()[3]
