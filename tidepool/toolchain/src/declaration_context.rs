@@ -18040,10 +18040,17 @@ mod tests {
             .and_then(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
         let output = (|| -> Result<OriginalCompilerInputs, CompileError> {
-            let fixture_products: &[CertifiedRecoveryProduct] = products;
-            let entries = fixture_products
+            let mut validation = PackageInterfaceValidation::default();
+            let entries = products
                 .iter()
-                .map(|product| ArtifactEntry::original(producer, product.clone()).map(Arc::new))
+                .map(|product| {
+                    ArtifactEntry::original_with_validation(
+                        producer,
+                        product.clone(),
+                        &mut validation,
+                    )
+                    .map(Arc::new)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let inventory = ArtifactInventory::default();
             let artifacts = inventory.admit_shared_with_demand(
@@ -18052,14 +18059,19 @@ mod tests {
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )?;
             let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-            let selection =
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                &inventory.empty_view(),
+                entries,
+                &mut validation,
+            )
         })()
         .unwrap();
         let support =
