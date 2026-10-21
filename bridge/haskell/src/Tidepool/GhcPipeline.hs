@@ -5180,13 +5180,22 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
              , entry <- worldImportEntries imports
              , let iface = worldTypeEntryInterface entry
              , reference <- maybe [] pure (nativeReference (mi_module iface))]
-        referenceForName name = case Set.toAscList (Set.fromList
-            [reference | (owner,iface,reference) <- nativeOriginalInputs
-              , nameModule_maybe name == Just owner
-                || any (name `elem`) (map availNames (mi_exports iface))]) of
+        uniqueReference name references = case Set.toAscList (Set.fromList references) of
           [] -> pure Nothing
           [reference] -> pure (Just reference)
           _ -> throwIO (OriginalNativeNameConflict name)
+        referenceForName name = do
+          -- A reexport preserves the defining Name, but its module has a
+          -- different selected Original association. Keep the exact defining
+          -- association when present; facade membership cannot replace it.
+          defining <- uniqueReference name
+            [reference | (owner,_,reference) <- nativeOriginalInputs
+              , nameModule_maybe name == Just owner]
+          case defining of
+            Just _ -> pure defining
+            Nothing -> uniqueReference name
+              [reference | (_,iface,reference) <- nativeOriginalInputs
+                , any (name `elem`) (map availNames (mi_exports iface))]
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->

@@ -1537,8 +1537,10 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
     let rootA = work </> "producer"
         rootB = work </> "consumer"
-        names = ["CanonicalPartial", "CanonicalPartialConsumer"]
-        carriedLine = "import qualified CanonicalPartialConsumer"
+        definingNames = ["CanonicalPartial", "CanonicalPartialConsumer"]
+        facadeNames = ["CanonicalPartialFacade", "CanonicalPartialFacadeAgain"]
+        names = definingNames ++ facadeNames
+        carriedLine = "import qualified CanonicalPartialFacadeAgain"
         observation = unlines
           ["{-# LANGUAGE DataKinds, KindSignatures #-}","module WorldObservation where"
           ,"import Prelude","import qualified Data.Proxy","import Data.Kind (Type)"
@@ -1561,9 +1563,15 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
               ,TList (TList [TBytes cid,TBytes body]:blocks),TBytes cid]))
           _ -> fail "carried-import fixture lost the actual producer parcel"
     mapM_ (createDirectoryIfMissing True) [rootA,rootB]
-    forM_ names $ \name -> copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (rootA </> name ++ ".hs")
+    forM_ definingNames $ \name -> copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (rootA </> name ++ ".hs")
+    writeFile (rootA </> "CanonicalPartialFacade.hs") $ unlines
+      ["module CanonicalPartialFacade (module CanonicalPartialConsumer) where"
+      ,"import CanonicalPartialConsumer"]
+    writeFile (rootA </> "CanonicalPartialFacadeAgain.hs") $ unlines
+      ["module CanonicalPartialFacadeAgain (module CanonicalPartialFacade) where"
+      ,"import CanonicalPartialFacade"]
     original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing (rootA </> "CanonicalPartialConsumer.hs") [rootA] Nothing
+      Nothing (rootA </> "CanonicalPartialFacadeAgain.hs") [rootA] Nothing
     fixture <- capturePreparedFixture rootA original
     (scopePath,parcel) <- writeGenuineExecutionScopeWithContext names names rootA fixture
     scope <- readExactScope scopePath >>= either fail pure
@@ -1573,6 +1581,13 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
     (packetPath,_) <- writeWorldCellAdmissionPacket handles rootB producer profile carried
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
+    -- These are distinct admitted Originals that expose one defining Name.
+    -- Reexport membership must not compete with its defining association.
+    let references = [worldOriginalReferenceFor facts
+          (mkModule (stringToUnit "main") (mkModuleName name))
+          | name <- "CanonicalPartialConsumer" : facadeNames]
+    unless (all (/= Nothing) references && Set.size (Set.fromList references) == 3)
+      (fail "reexport fixture omitted distinct defining/facade Original associations")
     unless (all (\root -> all (\name -> not (Map.member (name ++ ".hs") (worldSourceFiles root))) names)
         (worldSourceRoots (worldInputsSources facts)))
       (fail "source-less World import fixture accidentally captured producer sources")
@@ -1582,7 +1597,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
         runScope (pure ()) $ \compiler -> do
           reference <- scopedEnsureWorld compiler (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath))
             >>= requireReady
-          (_,diagnostics) <- captureDiagnostics $ forM_ ["(1 :: Int)","CanonicalPartialConsumer.usePartial"] $ \expression -> do
+          (_,diagnostics) <- captureDiagnostics $ forM_ ["(1 :: Int)","CanonicalPartialFacadeAgain.usePartial"] $ \expression -> do
             let query = WorldQueryRequest (worldInputsIdentity facts) reference
                   (WorldScopedQuery (WorldObservationExpression (InspectionProvenance 1 "carried-import") expression))
                   (rootB </> "query.bin")
@@ -1597,14 +1612,14 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
             unless (sum (counterValues counter diagnostics) == 0)
               (fail ("TYPE-only carried import demanded Core: " ++ counter))
           completed <- compileDeclaration compiler facts reference rootB template "nominal" 121
-            "retainedCall local = CanonicalPartialConsumer.usePartial local"
+            "retainedCall local = CanonicalPartialFacadeAgain.usePartial local"
           completion <- maybe (fail "carried import lost its World completion") pure
             (completedCompilerWorldCompletion completed)
           let imports = worldCellExactImports (worldCompilerCompletionInputs completion)
               declared = [edges | (("main","Tidepool.Session.Lib.G121",False),edges) <- imports]
           case declared of
             [edges] | [(name,boot,unit) | (_,name,boot,unit) <- edges
-                , name `elem` names] == [("CanonicalPartialConsumer",False,"main")] -> pure ()
+                , name `elem` names] == [("CanonicalPartialFacadeAgain",False,"main")] -> pure ()
             _ -> fail "carried lexical import was lost or its TYPE dependency became a lexical edge"
           let prepared = completedCompilerResult completed
               bindings = pprOriginalBindings prepared
@@ -1629,13 +1644,13 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           authoredReference <- scopedEnsureWorld compiler
             (ExactInputsRequest (worldInputsIdentity authoredFacts) (CompleteExactInputs authoredPath)) >>= requireReady
           (refused,sourceDiagnostics) <- captureDiagnostics $ try $ compileDeclaration compiler authoredFacts authoredReference
-            authoredRoot template "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialConsumer.usePartial local")
+            authoredRoot template "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialFacadeAgain.usePartial local")
           case refused of
             Left failure
               | (case fromException failure of Just WorldCellUnsupported -> True; _ -> False)
                   || (case sourceFailureDiagnostics failure of Just _ -> True; _ -> False)
               , "Could not find module" `isInfixOf` sourceDiagnostics
-              , "CanonicalPartialConsumer" `isInfixOf` sourceDiagnostics -> pure ()
+              , "CanonicalPartialFacadeAgain" `isInfixOf` sourceDiagnostics -> pure ()
               | otherwise -> throwIO (failure :: SomeException)
             Right _ -> fail "newly authored import silently reused the source-less carried interface"
   where
