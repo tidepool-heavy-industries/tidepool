@@ -10958,7 +10958,10 @@ mod tests {
             .new_product_native_requirements()
             .next()
             .is_none());
-        assert!(matches!(chosen_request.compiler_inputs().physical_cohort(),
+        let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+            chosen_request.compiler_inputs().compiler_source_support(),
+        );
+        assert!(matches!(carried.physical_cohort(),
             Err(CompileError::ExtractFailed(message))
                 if message == "exact declaration context: target requires its actual physical output cohort"));
         // This target has no new outputs. Its real empty physical cohort consumes
@@ -18794,7 +18797,10 @@ mod tests {
             .prepare_compilation(request_directory.path(), producer)
             .unwrap();
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        assert!(matches!(request.compiler_inputs().physical_cohort(),
+        let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+            request.compiler_inputs().compiler_source_support(),
+        );
+        assert!(matches!(carried.physical_cohort(),
             Err(CompileError::ExtractFailed(message))
                 if message == "exact declaration context: target requires its actual physical output cohort"));
         let certified = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(

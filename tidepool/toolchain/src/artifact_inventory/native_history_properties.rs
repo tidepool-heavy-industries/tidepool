@@ -1942,8 +1942,11 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                     &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                 )
                 .unwrap();
+            let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                inputs.compiler_source_support(),
+            );
             assert!(
-                matches!(inputs.physical_cohort(), Err(CompileError::ExtractFailed(message))
+                matches!(carried.physical_cohort(), Err(CompileError::ExtractFailed(message))
                 if message == "exact declaration context: target requires its actual physical output cohort")
             );
             let receiving_inventory = inputs.artifacts().inventory();
