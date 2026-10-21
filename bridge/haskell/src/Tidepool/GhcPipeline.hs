@@ -9338,6 +9338,7 @@ data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
   , validatedOriginalEvidence :: DependencyEvidence
   , validatedOriginalExactImports :: Set.Set (DependencyQualifier,String,Bool)
+  , validatedOriginalSourceImports :: Map.Map (String,String) [(DependencyQualifier,String,Bool,Maybe String)]
   , validatedOriginalInputs :: Maybe HydratedExactInterfaces
   }
 
@@ -9437,7 +9438,7 @@ validateCanonicalSourceInputs worldOnly verifiedInputs proofs interfaces inputAr
       pure (ready,Just completed)
   let nativeEnv = native {hsc_mod_graph=mapMG (\summary -> summary
         {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}) graph}
-  exactImports <- fmap Set.unions $ forM (Set.toAscList selected) $ \key -> do
+  qualifiedImports <- forM (Set.toAscList selected) $ \key -> do
     proof <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key proofs)
     summary <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key summaries)
     node <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key modules)
@@ -9484,11 +9485,13 @@ validateCanonicalSourceInputs worldOnly verifiedInputs proofs interfaces inputAr
       UpToDateItem _ -> pure ()
       OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key
         (OriginalInterfaceRecompileRequired (ExecutionSourceInterfaceReason reason))))
-    pure (Set.fromList [(qualifier,name,boot)
+    pure (key,Set.toAscList (Set.fromList currentImports),Set.fromList [(qualifier,name,boot)
       | (qualifier,name,boot,Just unit) <- currentImports
       , Map.member (unit,name) exactLocations])
+  let exactImports = Set.unions [imports | (_,_,imports) <- qualifiedImports]
+      sourceImports = Map.fromList [(key,imports) | (key,imports,_) <- qualifiedImports]
   setSession env {hsc_targets=hsc_targets initial}
-  pure (ValidatedOriginalSources graph current exactImports hydratedInputs,selected)
+  pure (ValidatedOriginalSources graph current exactImports sourceImports hydratedInputs,selected)
 
 
 planExactExecutionLoad
