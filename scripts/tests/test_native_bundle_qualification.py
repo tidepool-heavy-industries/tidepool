@@ -3870,6 +3870,10 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertIn('compiler settlement unconfirmed', str(failure.exception.__cause__.exceptions[0]))
         evidence = args.output.with_name(args.output.name + '.invocation')
         self.assertEqual((evidence / 'stderr.log').read_bytes(), b'original native producer refusal\n')
+        outcome = json.loads((evidence / 'outcome.json').read_text())
+        self.assertEqual(outcome['schema'], 2)
+        self.assertEqual(outcome['invocation_exit_code'], 23)
+        self.assertIsNone(outcome['producer_exit_code'])
         self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
 
     def test_inspection_preserves_refusal_and_secondary_retention_failure_distinctly(self):
@@ -3893,7 +3897,8 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertIsInstance(failure.exception.__cause__.exceptions[0], ValueError)
         report = json.loads((evidence / 'outcome.json').read_text())
         self.assertEqual(report['producer_exit_code'], 9)
-        self.assertIn('returned non-zero exit status 9', report['producer_error'])
+        self.assertEqual(report['invocation_exit_code'], 9)
+        self.assertIn('returned non-zero exit status 9', report['invocation_error'])
         self.assertFalse(report['retention_recheck']['passed'])
         self.assertIn('declared action snapshot', report['retention_recheck']['error'])
         self.assertFalse(report['catalog_qualified'])

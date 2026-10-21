@@ -1655,12 +1655,17 @@ def catalog_compiler_settlement(compiler_root: Path, return_code: int | None) ->
         except (OSError, ValueError) as error:
             records[key + "_error"] = str(error)
     outcome, lifecycle = records.get("outcome", {}), records.get("lifecycle", {})
+    producer_exit_code = lifecycle.get("exit_code") if isinstance(lifecycle, dict) and lifecycle.get("schema") == 1 else None
+    if type(producer_exit_code) is not int or not 0 <= producer_exit_code <= 255:
+        producer_exit_code = None
     confirmed = (isinstance(outcome, dict) and outcome.get("schema") == 1
                  and outcome.get("cleanup") == {"status": "confirmed"}
                  and isinstance(lifecycle, dict) and lifecycle.get("schema") == 1
                  and lifecycle.get("cleanup_confirmed") is True
-                 and return_code is not None and lifecycle.get("exit_code") == return_code)
-    return {"status": "confirmed" if confirmed else "unconfirmed", **records}
+                 and return_code is not None and producer_exit_code is not None
+                 and producer_exit_code == return_code)
+    return {"status": "confirmed" if confirmed else "unconfirmed",
+            "producer_exit_code": producer_exit_code, **records}
 
 
 def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) -> Path:
@@ -1699,7 +1704,7 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
     return_code = None
     started = time.monotonic_ns()
     invocation = {
-        "schema": 1, "kind": "native-catalog-producer", "operation": operation.value,
+        "schema": 2, "kind": "native-catalog-producer", "operation": operation.value,
         "command": command, "declared_environment": declared_environment,
         "unset_environment": UNSET_ENVIRONMENT, "output_root": str(output),
         "retention_record": str(args.retention_record),
@@ -1739,9 +1744,10 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
             secondary.append(error)
         try:
             write_json(invocation_root / "outcome.json", {
-                    **invocation, "producer_exit_code": return_code,
+                    **invocation, "invocation_exit_code": return_code,
+                    "producer_exit_code": settlement["producer_exit_code"],
                     "timed_out": isinstance(primary, subprocess.TimeoutExpired),
-                    "producer_error": str(primary) if primary is not None else None,
+                    "invocation_error": str(primary) if primary is not None else None,
                     "retention_recheck": {"passed": retention_error is None,
                                           "error": str(retention_error) if retention_error is not None else None},
                     "compiler_settlement": settlement,

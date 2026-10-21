@@ -177,6 +177,9 @@ source evidence and product metadata are copied without rewriting.
 
 Every product action declares an additional `.invocation` evidence directory
 containing the exact launch, stdout, stderr and compiler retirement records.
+Invocation reports use schema 2: `invocation_exit_code` records the frontend's
+observed status; `producer_exit_code` comes only from the frontend's child
+lifecycle record and remains null when that outcome is unavailable.
 Producer success requires the frontend's confirmed lifecycle and retirement
 outcome before the qualifier can issue a build receipt. Failed or interrupted
 production retains its original error and separate cleanup uncertainty. Missing,
