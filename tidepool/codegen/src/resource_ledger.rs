@@ -147,24 +147,7 @@ pub(crate) struct HandleEntry {
     pub(crate) slot: OwnedRootCell,
     pub(crate) realm: RealmId,
     pub(crate) rep: RuntimeRep,
-    pub(crate) class: HandleClass,
     pub(crate) sites: SiteDependencies,
-}
-
-/// What a rooted handle is accounted as. Both classes share one handle
-/// namespace -- an import slot is published from either without knowing
-/// which -- but they are counted apart, so a value-handle leak cannot hide
-/// behind a machine's growing export set and a runaway export set cannot
-/// hide behind a turn's handles.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HandleClass {
-    /// A turn's own retained value: bound, delivered, parked or observed.
-    /// Released when its owner releases it, or when its resource scope closes.
-    Value,
-    /// An installed program's top, retained for the machine's lifetime so
-    /// later programs can import it instead of compiling their own copy.
-    /// Owned independently of resource-scope lifetimes and never taken by scope closure.
-    CodeExport,
 }
 
 /// The one machine-local owner for opaque rooted-value identities.
@@ -175,12 +158,6 @@ pub(crate) enum HandleClass {
 #[derive(Default)]
 pub(crate) struct RootHandleLedger {
     handles: HashMap<u64, HandleEntry>,
-    /// Live [`HandleClass::CodeExport`] entries in `handles`, maintained by
-    /// every insert and removal. A machine carries thousands of exports and
-    /// only a handful of value handles, and the counts are read on the
-    /// rooting receipt at every park and close; neither class is counted by
-    /// walking the map.
-    code_exports: usize,
 }
 
 impl RootHandleLedger {
@@ -191,14 +168,9 @@ impl RootHandleLedger {
         self.handles.try_reserve(additional)
     }
 
-    /// Live [`HandleClass::Value`] handles.
+    /// Live rooted value handles.
     pub(crate) fn len(&self) -> usize {
-        self.handles.len() - self.code_exports
-    }
-
-    /// Live [`HandleClass::CodeExport`] handles.
-    pub(crate) fn code_exports(&self) -> usize {
-        self.code_exports
+        self.handles.len()
     }
 
     pub(crate) fn insert(
@@ -206,7 +178,6 @@ impl RootHandleLedger {
         slot: OwnedRootCell,
         realm: RealmId,
         rep: RuntimeRep,
-        class: HandleClass,
         sites: SiteDependencies,
     ) -> ValueHandle {
         let handle = ValueHandle::fresh();
@@ -216,14 +187,10 @@ impl RootHandleLedger {
                 slot,
                 realm,
                 rep,
-                class,
                 sites,
             },
         );
         debug_assert!(replaced.is_none(), "fresh value handle must not collide");
-        if class == HandleClass::CodeExport {
-            self.code_exports += 1;
-        }
         handle
     }
 
@@ -232,11 +199,7 @@ impl RootHandleLedger {
     }
 
     pub(crate) fn take(&mut self, handle: ValueHandle) -> Option<HandleEntry> {
-        let entry = self.handles.remove(&handle.0)?;
-        if entry.class == HandleClass::CodeExport {
-            self.code_exports -= 1;
-        }
-        Some(entry)
+        self.handles.remove(&handle.0)
     }
 
     pub(crate) fn rehome(&mut self, handle: ValueHandle, realm: RealmId) -> bool {
@@ -252,17 +215,12 @@ impl RootHandleLedger {
         self.handles.values().map(|entry| entry.slot.physical())
     }
 
-    /// Every [`HandleClass::Value`] handle owned by `realm`. A code export
-    /// outlives every resource scope -- it is the machine's own root on installed
-    /// code, not a turn's lease -- so scope closure never takes one, and the
-    /// export count this removal path never touches stays correct.
+    /// Every live handle owned by `realm`.
     pub(crate) fn take_realm(&mut self, realm: RealmId) -> Vec<HandleEntry> {
         let ids: Vec<_> = self
             .handles
             .iter()
-            .filter_map(|(&id, entry)| {
-                (entry.realm == realm && entry.class == HandleClass::Value).then_some(id)
-            })
+            .filter_map(|(&id, entry)| (entry.realm == realm).then_some(id))
             .collect();
         ids.into_iter()
             .filter_map(|id| self.handles.remove(&id))
@@ -281,10 +239,6 @@ pub(crate) struct ClosedRealm {
 pub struct ResourceCounts {
     pub parked_continuations: usize,
     pub value_handles: usize,
-    /// Installed-program tops retained for later programs to import
-    /// ([`HandleClass::CodeExport`]). Counted apart from `value_handles` so
-    /// neither class can mask the other's growth.
-    pub code_exports: usize,
     pub cancellation_scopes: usize,
 }
 
@@ -352,7 +306,6 @@ impl ResourceLedger {
         ResourceCounts {
             parked_continuations: self.continuations.len(),
             value_handles: self.handles.len(),
-            code_exports: self.handles.code_exports(),
             cancellation_scopes: self.cancel_flags.len(),
         }
     }
@@ -451,8 +404,7 @@ impl ResourceLedger {
         rep: RuntimeRep,
         sites: SiteDependencies,
     ) -> ValueHandle {
-        self.handles
-            .insert(slot, realm, rep, HandleClass::Value, sites)
+        self.handles.insert(slot, realm, rep, sites)
     }
 
     pub(crate) fn site_dependencies(&self) -> impl Iterator<Item = SiteDependency> + '_ {
@@ -468,32 +420,6 @@ impl ResourceLedger {
                         .flat_map(|root| root.sites.iter().copied()),
                 )
             }))
-    }
-
-    /// [`Self::insert_handle`] for a machine-lifetime export root: same
-    /// handle namespace, counted as [`HandleClass::CodeExport`].
-    pub(crate) fn insert_export_handle(
-        &mut self,
-        slot: OwnedRootCell,
-        rep: RuntimeRep,
-    ) -> ValueHandle {
-        self.handles.insert(
-            slot,
-            RealmId::ROOT,
-            rep,
-            HandleClass::CodeExport,
-            SiteDependencies::new(),
-        )
-    }
-
-    pub(crate) fn insert_export_handle_with_sites(
-        &mut self,
-        slot: OwnedRootCell,
-        rep: RuntimeRep,
-        sites: SiteDependencies,
-    ) -> ValueHandle {
-        self.handles
-            .insert(slot, RealmId::ROOT, rep, HandleClass::CodeExport, sites)
     }
 
     pub(crate) fn handle(&self, handle: ValueHandle) -> Option<&HandleEntry> {
@@ -586,6 +512,41 @@ mod tests {
             ledger.handle(unlifted).map(|e| e.rep),
             Some(RuntimeRep::UnliftedRef)
         );
+    }
+
+    #[test]
+    fn scope_closure_releases_only_its_actual_registered_value_roots() {
+        let mut ledger = ResourceLedger::default();
+        let machine = std::rc::Rc::new(crate::machine_state::MachineState::new());
+        let first_scope = RealmId::fresh();
+        let second_scope = RealmId::fresh();
+        let first = ledger.insert_handle(
+            OwnedRootCell::new(&machine, std::ptr::null_mut()).unwrap(),
+            first_scope,
+            RuntimeRep::LiftedRef,
+        );
+        let second = ledger.insert_handle(
+            OwnedRootCell::new(&machine, std::ptr::null_mut()).unwrap(),
+            second_scope,
+            RuntimeRep::UnliftedRef,
+        );
+        assert_eq!(ledger.counts().value_handles, 2);
+        assert_eq!(machine.root_cells_live(), 2);
+        assert_eq!(machine.persistent_roots_count(), 2);
+        let closed = ledger.close_realm(first_scope);
+        assert_eq!(closed.handles.len(), 1);
+        assert_eq!(closed.handles[0].rep, RuntimeRep::LiftedRef);
+        assert!(ledger.handle(first).is_none());
+        assert!(ledger.handle(second).is_some());
+        assert_eq!(ledger.counts().value_handles, 1);
+        // The returned close owner still owns the physical registration.
+        assert_eq!(machine.root_cells_live(), 2);
+        drop(closed);
+        assert_eq!(machine.root_cells_live(), 1);
+        assert_eq!(machine.persistent_roots_count(), 1);
+        drop(ledger);
+        assert_eq!(machine.root_cells_live(), 0);
+        assert_eq!(machine.persistent_roots_count(), 0);
     }
 
     #[test]
