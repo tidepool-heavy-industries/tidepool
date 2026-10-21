@@ -9854,6 +9854,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_package_graph_does_not_retain_parent_home_selection() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(issued_native_groups(
+            "UnrelatedHome",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let payload = Arc::downgrade(&native);
+        let parent = inventory
+            .admit_shared(&inventory.empty_view(), vec![native])
+            .unwrap();
+        assert!(
+            parent
+                .capture_graph_selection()
+                .roots
+                .iter()
+                .any(|node| matches!(node, InventoryNodeKey::Group(_)))
+        );
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let issued =
+            IssuedPackageCodeGraph::issue(&parent, vec![], vec![], &[], &operation).unwrap();
+        let restored = IssuedPackageCodeGraph::from_issued(&parent, &[], &operation).unwrap();
+        for graph in [&issued, &restored] {
+            let selection = graph.artifacts().capture_graph_selection();
+            assert!(graph.roots().is_empty());
+            assert_eq!(graph.bindings().len(), 0);
+            assert!(selection.roots.is_empty());
+            assert!(selection.custody_roots.is_empty());
+            assert!(selection.namespace.is_empty());
+            assert!(selection.bindings.is_empty());
+            assert!(selection.native_groups.is_empty());
+            assert!(graph.artifacts().lease.payloads.is_empty());
+            assert!(graph.artifacts().lease.selection.scopes.is_empty());
+        }
+        drop(parent);
+        assert!(
+            payload.upgrade().is_none(),
+            "empty package demand must not retain the HOME payload owner"
+        );
+    }
+
+    #[test]
     fn materialization_projection_preserves_receiving_payload_custody() {
         let inventory = ArtifactInventory::default();
         let base_entry = entry("Base", &[]);
@@ -21980,8 +22024,9 @@ mod package_code {
         imports: Arc<[PackageCodeImport]>,
     }
 
-    /// One admitted package graph. Rows retain ordered slots; the inventory view
-    /// retains the same exact scope proofs and immutable payload acquisitions.
+    /// One admitted package closure with ordered import slots. Its view owns
+    /// only package payloads and custody roots, with complete immutable proof
+    /// ancestry; HOME execution roots and compiler roles stay with completion.
     #[derive(Debug)]
     pub(crate) struct IssuedPackageCodeGraph {
         artifacts: ArtifactView,
@@ -22400,21 +22445,21 @@ mod package_code {
                     )
                 })
                 .collect::<BTreeMap<_, _>>();
-            let entries = rows
-                .iter()
-                .map(|(binding, row)| {
-                    (
-                        binding.artifact,
-                        Arc::new(ArtifactEntry::package_code(Arc::clone(&row.product))),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
-            cold_validation::validate_selected_rows(&state, &entries, &bound)?;
+            for binding in rows.keys() {
+                if !payloads.contains_key(&binding.artifact) {
+                    let entry = acquired.lease.payloads.get(&binding.artifact)
+                        .ok_or_else(|| refusal(binding.artifact, PackageCodeRefusal::MissingProduct))?;
+                    operation
+                        .reserve::<(ArtifactId, Arc<ArtifactEntry>)>(1)
+                        .map_err(account)?;
+                    payloads.insert(binding.artifact, Arc::clone(entry));
+                }
+            }
+            cold_validation::validate_selected_rows(&state, &payloads, &bound)?;
             let prepared = scope_proof::prepare_install(&state, witness)?;
             validate_existing_rows(&state, &bound)?;
             scope_proof::install(&mut state, prepared);
             let roots = roots.iter().map(resolve).collect::<Result<Vec<_>, _>>()?;
-            let parents = vec![Arc::clone(&acquired.lease)];
             let custody = roots
                 .iter()
                 .copied()
@@ -22423,19 +22468,20 @@ mod package_code {
                 .into_iter()
                 .collect::<Vec<_>>();
             let selection =
-                selection_snapshot_for_lease(&state, &BTreeMap::new(), &[], &custody, &parents);
+                selection_snapshot_for_lease(&state, &BTreeMap::new(), &[], &custody, &[]);
             drop(state);
+            let introduced = payloads.keys().copied().collect();
             let lease = ViewLease::from_issued_draft(
                 ViewDraft {
                     roots: Vec::new(),
                     selection,
                     inventory,
-                    parents,
+                    parents: Vec::new(),
                     issuing_payloads: payloads,
                     materialization_parents: Vec::new(),
                     materialization: Mutex::new(BTreeMap::new()),
                 },
-                required,
+                introduced,
             );
             let artifacts = acquired.retain_materializations_preserving_custody(
                 ArtifactView::from_custody(lease),
@@ -22469,6 +22515,7 @@ mod package_code {
             let owned = &artifacts.read_projection(&state).nodes;
             let mut pending = roots.to_vec();
             let mut unvalidated = BTreeMap::new();
+            let mut payloads = BTreeMap::new();
             while let Some(binding) = pending.pop() {
                 crate::host_work::checkpoint()?;
                 operation.charge(1).map_err(account)?;
@@ -22489,6 +22536,12 @@ mod package_code {
                 let ArtifactPayload::PackageCode(product) = &entry.payload else {
                     return Err(refusal(binding.artifact, PackageCodeRefusal::WrongKind));
                 };
+                if !payloads.contains_key(&binding.artifact) {
+                    operation
+                        .reserve::<(ArtifactId, Arc<ArtifactEntry>)>(1)
+                        .map_err(account)?;
+                    payloads.insert(binding.artifact, Arc::clone(entry));
+                }
                 let expected = product.code().globals().len();
                 operation
                     .reserve::<Option<ArtifactBinding>>(expected)
@@ -22562,7 +22615,6 @@ mod package_code {
                     }),
                 );
             }
-            drop(state);
             let roots = roots.to_vec();
             let custody = roots
                 .iter()
@@ -22570,14 +22622,26 @@ mod package_code {
                 .map(InventoryNodeKey::Artifact)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
-                .collect();
-            let retained = inventory.retain(
-                Vec::new(),
-                custody,
-                vec![Arc::clone(&artifacts.lease)],
-                Vec::new(),
+                .collect::<Vec<_>>();
+            let selection =
+                selection_snapshot_for_lease(&state, &BTreeMap::new(), &[], &custody, &[]);
+            drop(state);
+            let introduced = payloads.keys().copied().collect();
+            let lease = ViewLease::from_issued_draft(
+                ViewDraft {
+                    roots: Vec::new(),
+                    selection,
+                    inventory: inventory.clone(),
+                    parents: Vec::new(),
+                    issuing_payloads: payloads,
+                    materialization_parents: Vec::new(),
+                    materialization: Mutex::new(BTreeMap::new()),
+                },
+                introduced,
             );
-            let artifacts = artifacts.retain_projected_materializations(retained)?;
+            let artifacts = artifacts.retain_materializations_preserving_custody(
+                ArtifactView::from_custody(lease),
+            )?;
             Ok(Arc::new(Self {
                 artifacts,
                 roots: roots.into(),
