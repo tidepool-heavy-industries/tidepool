@@ -1052,7 +1052,6 @@ pub fn prepare_world_cell_program(
                     Some(&segment.originals),
                     Some(entry),
                     None,
-                    None,
                     Some(cursor),
                     &mut validation,
                 )?;
@@ -4292,7 +4291,7 @@ fn seal_turn_outputs_with_validation(
                 output_dir,
                 &validation.inventory,
             );
-            let products = certified_products::certify_products_with_validation(
+            let mut products = certified_products::certify_products_with_validation(
                 offer.selected.as_deref(),
                 ordinary_receipt.as_ref().expect("ordinary receipt"),
                 fresh_products,
@@ -4309,6 +4308,15 @@ fn seal_turn_outputs_with_validation(
                 validation,
             )
             .map_err(compiler_evidence_failure)?;
+            crate::declaration_context::issue_certified_product_native_availability(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &offer.producer,
+                )
+                .sha256(),
+                &mut products,
+                request_admission.map(|request| request.compiler_inputs().artifacts()),
+                validation,
+            )?;
             timing::record_inventory_work(
                 "products.certify.after",
                 output_dir,
@@ -4388,7 +4396,6 @@ fn seal_turn_outputs_with_validation(
         &package_catalog,
         segment_originals,
         typed_entry,
-        request_admission.map(|request| request.compiler_inputs().artifacts()),
         request_admission.map(|request| request.certified_groups()),
         segment_cursor.take(),
         validation,
@@ -4606,7 +4613,6 @@ fn admit_native_target_products(
     package_catalog: &PackageInterfaceCatalog<'_>,
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
-    compiler_artifacts: Option<&crate::artifact_inventory::ArtifactView>,
     inherited_groups: Option<&crate::declaration_context::CertifiedArtifactGroupBindings>,
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
@@ -4658,16 +4664,24 @@ fn admit_native_target_products(
             )?
         }
         None => {
-            crate::declaration_context::certified_selected_product_artifact_view_with_validation(
-                producer,
-                &certified.recovery_products,
-                &certified.module_interfaces,
-                &certified.value_interfaces,
-                compiler_artifacts,
-                demand,
-                validation,
-                &certified.source_selection,
-            )?
+            let physical = certified
+                .original_inputs
+                .as_ref()
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "ordinary target lacks physical cohort issuance".into(),
+                    )
+                })?
+                .issued_artifacts();
+            physical
+                .inventory()
+                .admit_product_artifacts(
+                    physical,
+                    Vec::new(),
+                    demand,
+                    Some(&certified.source_selection),
+                )?
+                .into_target()?
         }
     };
     let artifact_view = admitted_target.artifacts();
