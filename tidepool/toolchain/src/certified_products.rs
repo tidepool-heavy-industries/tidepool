@@ -28406,11 +28406,16 @@ None,
                     _ => match &mut right.owner {
                         ReceiptImportOwner::Source { binder, .. }
                         | ReceiptImportOwner::Package { binder, .. }
-                        | ReceiptImportOwner::RetainedPackage { binder, .. }
-                        | ReceiptImportOwner::OriginalBinding { binder, .. } => binder.occurrence.push('x'),
+                        | ReceiptImportOwner::RetainedPackage { binder, .. } => binder.occurrence.push('x'),
+                        ReceiptImportOwner::OriginalBinding { original, .. } => original.selection.0[0] ^= 1,
                         ReceiptImportOwner::Retained { identity, .. } => identity.occurrence.push('x'),
                     },
                 }
+            }
+            // Original bindings carry the outer symbol; the decoder derives
+            // this binder rather than accepting an independent wire field.
+            if let ReceiptImportOwner::OriginalBinding { binder, .. } = &mut right.owner {
+                *binder = right.identity.clone();
             }
             let item = segment_item_receipt(&SegmentItemReceipt {
                 globals: vec![left.clone()], packages: BTreeMap::new(), package_products: vec![],
@@ -28418,6 +28423,8 @@ None,
             let operation = InventoryOperation::new(Default::default());
             let decoded = decode_segment_item_with_operation(&receipt_bytes(&item), &operation).unwrap();
             proptest::prop_assert_eq!(&decoded.globals, &vec![left.clone()]);
+            let decoded_right = accepted_global(&value_global(&right)).unwrap();
+            proptest::prop_assert_eq!(&decoded_right, &right);
             proptest::prop_assert!(decoded.packages.is_empty());
             let wire_equal = receipt_bytes(&value_global(&left)) == receipt_bytes(&value_global(&right));
             let mut unique = BTreeSet::new();
