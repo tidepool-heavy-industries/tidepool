@@ -438,7 +438,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         targets: BTreeMap::new(),
         packages: BTreeMap::new(),
     };
-    let initial = certify_products(
+    let mut initial = certify_products(
         None,
         &packet,
         &parsed,
@@ -473,21 +473,21 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert!(initial_a.original_native().unwrap().groups.iter().all(|g| {
         matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
-    let initial_view = crate::declaration_context::certified_product_artifact_view_with_validation(
+    assert!(initial.original_inputs.is_none());
+    let initial_output = crate::declaration_context::issue_certified_product_native_availability(
         canonical_producer,
-        &initial.recovery_products,
-        &initial.module_interfaces,
-        &initial.value_interfaces,
+        &mut initial,
         None,
-        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-        &mut PackageInterfaceValidation::default(),
+        &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
     )
     .unwrap();
-    let initial_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-        &initial.source_selection,
-        &initial_view,
-    )
-    .unwrap();
+    assert_eq!(
+        initial_output
+            .issued_artifacts()
+            .selected_native_groups()
+            .len(),
+        4
+    );
     let initial_support =
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&initial_output)
             .unwrap();
@@ -495,12 +495,12 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .unwrap()
         .extend_issued_compiler_support(&initial_support)
         .unwrap();
-    assert!(context.artifact_view().selected_native_groups().is_empty());
 
     // The exact request exposes canonical interfaces while withholding native
     // originals from the compiler input.
     let projection = context.compiler_input_projection().interface_only();
     context = context.recover_fixture_projection(projection).unwrap();
+    assert!(context.artifact_view().selected_native_groups().is_empty());
     let directory = root.path().join("promotion-0");
     std::fs::create_dir(&directory).unwrap();
     let input = directory.join("Target.hs");
@@ -781,7 +781,8 @@ fn check_retained_core_promotion_history(item_count: usize) {
             &inventory,
         )
         .unwrap();
-    let package_interfaces = capture_independent_package_interfaces(&shared_receipt, &mut validation).unwrap();
+    let package_interfaces =
+        capture_independent_package_interfaces(&shared_receipt, &mut validation).unwrap();
     let shared = CertifiedSegmentOriginals::issue(
         shared_raw,
         shared_receipt,
@@ -902,14 +903,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
             required_evaluated: false,
             required_generation: None,
         });
-        let target = testing::prepare(wire).unwrap();
+        let target = Arc::new(testing::prepare(wire).unwrap());
         let owner = (identity.unit.clone(), identity.module.clone());
         let witness = PackageInterfaceWitness {
             selected_path: path.clone(),
             sha256: sha(&payload),
         };
         let addition = || SegmentItemReceipt {
-                package_products: Vec::new(),
+            package_products: Vec::new(),
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
         };
@@ -919,20 +920,34 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert_eq!(packages.len(), 1);
         assert!(packages.contains_key(&owner));
         assert!(!shared.package_availability().contains_key(&owner));
-        certify_target_owners_with_validation(
-            &target,
-            &globals,
-            &[],
-            &selected.source_selection,
-            &packages,
-            &mut validation,
-        )
-        .unwrap();
+        let observed =
+            AuthenticatedTargetImports::issue(&target, &globals, &validation.inventory).unwrap();
+        let physical = shared.physical_inputs();
+        let admitted = physical
+            .issued_artifacts()
+            .inventory()
+            .select_native_target(
+                physical.physical_cohort().unwrap(),
+                &selected.source_selection,
+                observed,
+                None,
+                None,
+                &[],
+                &packages,
+                &mut validation,
+            )
+            .unwrap();
+        assert!(matches!(
+            admitted.imports(),
+            [PendingImportOwner::Package { binder, interface_digest, .. }]
+                if binder == &identity && *interface_digest == witness.sha256
+        ));
+        assert!(admitted.artifacts().selected_native_groups().is_empty());
         let (_, _, next_packages) = shared
             .select_item(
                 &mut cursor,
                 SegmentItemReceipt {
-                package_products: Vec::new(),
+                    package_products: Vec::new(),
                     globals: vec![],
                     packages: BTreeMap::new(),
                 },
