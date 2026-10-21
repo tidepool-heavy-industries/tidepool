@@ -493,7 +493,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     std::fs::write(&witness.selected_path, b"changed package interface").unwrap();
     assert!(matches!(
         PackageInterfaceValidation::default().verify(&witness.selected_path, &witness.sha256),
-        Err(crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_))
+        Err(crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(path))
+            if path == witness.selected_path
     ));
     assert_eq!(
         selected_package_closure(
@@ -509,8 +510,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     std::fs::remove_file(&witness.selected_path).unwrap();
     assert!(matches!(
         PackageInterfaceValidation::default().verify(&witness.selected_path, &witness.sha256),
-        Err(crate::recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. })
-            if error.kind() == std::io::ErrorKind::NotFound
+        Err(crate::recovery_artifacts::RecoveryArtifactError::Unavailable(path))
+            if path == witness.selected_path
     ));
     assert_eq!(
         selected_package_closure(
