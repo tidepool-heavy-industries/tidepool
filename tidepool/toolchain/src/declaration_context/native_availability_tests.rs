@@ -3222,10 +3222,10 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .expect("later target uses the same issuer's previously unselected body");
     assert_eq!(
         demanded.artifacts().selected_native_groups(),
-        vec![NativeGroupKey {
+        BTreeSet::from([NativeGroupKey {
             artifact: entry.descriptor.id,
             original_ordinal: 9001,
-        }],
+        }]),
         "explicit reusable role exposes only the target's selected ordinal"
     );
     let groups = demanded.resolve().unwrap().groups().clone();
