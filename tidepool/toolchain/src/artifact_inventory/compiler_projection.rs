@@ -1426,7 +1426,7 @@ impl SupportDraft {
     fn close(self) -> Result<CompilerSourceSupport, CompileError> {
         let SupportDraft {
             projection,
-            mut artifacts,
+            artifacts,
             native_fact_owner,
             native_offers,
             native_completions,
@@ -3825,6 +3825,9 @@ impl CompilerSourceSupport {
                     observed_original: Some(entry.descriptor.id),
                     observed_canonical: Some(admitted.interface.1.descriptor.id),
                     observed_kind: None,
+                    ..ArtifactIdentityMismatch::refused(
+                        ArtifactIdentityStage::RequestedIdentityDiffers,
+                    )
                 },
             ));
         }
@@ -3837,6 +3840,9 @@ impl CompilerSourceSupport {
                     observed_original: Some(entry.descriptor.id),
                     observed_canonical: Some(admitted.interface.1.descriptor.id),
                     observed_kind: Some(entry.payload.artifact_kind()),
+                    ..ArtifactIdentityMismatch::refused(
+                        ArtifactIdentityStage::NonOriginalPayload,
+                    )
                 },
             ));
         };
