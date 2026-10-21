@@ -1,7 +1,7 @@
 # G2: complete the native compiler/runtime join
 
 Accepted implementation contract, revised 2026-10-20 after joined architecture
-review at `784fd9fc1fec805793bc178cd4751062b0279838`. Controlling branch:
+review, consolidated at `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`. Controlling branch:
 `integration/compiler-query-warm-final`.
 
 This document owns the remaining G2 sequencing and boundary decisions. It
@@ -21,6 +21,96 @@ G2 cannot defer a known ordinary-workflow failure, uncertain-END execution,
 wrong historical links, accidental A-state reuse or caller-loss corruption of
 published B. Full force/fork/callback/process-recovery matrices and full M1–M3
 belong to G3. Unsupported G3 operations must refuse explicitly.
+
+## Current implementation: Plan B
+
+Complete these existing owners together; this section governs the current
+implementation split. The detailed invariants below remain constraints, not a
+request to rebuild completed infrastructure.
+
+### Ordered target admission
+
+The physical cohort issues native availability once. Authenticate the actual
+`Arc<PreparedProgram>` and its ordered globals, then select already-issued exact
+occurrences. Authentication checks full symbol identity, representation,
+structural signature, evaluatedness and generation. It grants no execution.
+
+Evolve `IssuedTargetNativeSelection` to carry ordered exact slots and an explicit
+entry occurrence. Derive roots from those slots. Current Source uses its own
+completed physical receipt after the actual current-stage gate; Original uses
+its exact chosen binding and inseparable acquisition/contribution. Preserve the
+current source offer's solved dependency causes and historical issued edges.
+Delete target-side group issuance, broad parent indexing, and logical
+`for_ordinary_target` / `with_certified_groups` / `resolve` rematches. Metadata
+custody, package preparation, image readiness and runtime source admission remain
+separate stages.
+
+### Nominal metadata and prior produced Source
+
+Hash and compare retained core using authenticated nominal imports. Do not
+resolve unused Original imports as executable demand merely to obtain identity.
+The private enum keeps full Source owners, exact Original interface/body pairs,
+Retained identities/generations and Package metadata exhaustive. Preserve the
+existing Haskell `original-binding` encoding, `retained-core-home-v1` and HOME6;
+no format fork or normalization back into Source. Sharing still checks the actual
+body, census and witness. Accidental old ArtifactId equality is not a contract.
+
+Enrich the existing `ProgramSourceSupport` owner row with the actual sealed
+stage's `Arc<CompletedNativeProductAvailability>`. Carry that same row into
+compiler inputs and facts. Later explicit Source demand selects its exact issued
+occurrence; it cannot promote mere metadata, initial-empty selection, or a
+Partial offer. `CertifiedSegmentOriginals::physical_inputs()` owns the physical
+cohort. The post-`select_item` compiler prefix is a different owner and cannot
+substitute for it.
+
+### Captured TYPE imports
+
+The Haskell World source-input owner holds a private demand-selected
+`WorldImportBasis`. Parsed imports and existing `ImportIntent` distinguish
+current authored source from carried generated imports. Hydrate the reached TYPE
+closure with existing ExactHydration before downsweep/rename, and authorize its
+actual lexical instance/family graph. The same interface owner supplies GHC
+Names and exact `WorldOriginalReference` pairs. HPT population alone is not the
+complete migration.
+
+Source-less carried roots require actual canonical SourceOriginal lexical
+adjacency. TYPE requirements are not automatically lexical edges. Preserve
+existing generated declaration/value authorities without broad HPT exemptions.
+No source resurrection, whole-inventory scan, native grant from TYPE or retained
+mutable HscEnv. Public-module queries retain their existing provenance contract;
+a broader query variant needs a demonstrated separate requirement.
+
+### Source-owned installation
+
+Reuse `NativeTurnAdmission::{Closed, Native, Portable}`. A closed restriction
+borrows the same `Arc<NativeInstantiationPlan>` and images, returning a typed
+refusal when open. It is not a second planner or optional fallback.
+
+Sealed Ordinary startup and `run_with_sites` carry their actual installing
+SourceTransaction through the existing scope. Checked execution requires actual
+CurrentNativeSources: remove the optional-owner-to-Unknown path. Historical and
+reused instances retain their ProgramFacts. Unsupported open Ordinary/prototype
+shapes refuse explicitly; preview retains its affine mounted-source check.
+A shared production resolve/install path is appropriate where it preserves those
+same owners and pre-allocation admission.
+
+### Qualification order
+
+1. Compile joined production and cfg(test) consumers. Run a genuine imported HOME
+   target through installation and an actual mixed World history first.
+2. Run finite source → installer I_B → public B → repeated cells, including real
+   retained functions, suspension and source custody. Pure Int proves no effect
+   source attribution. Keep same-issuance aliases separate from same-payload
+   distinct-binding target controls.
+3. Execute ordinary syntax/import/private-input/discovery/Ready/reload controls,
+   caller loss, cancellation, uncertain END and required historical cold/eviction
+   histories. END may run independently on a coherent common checkpoint.
+4. Produce the actual catalog, freeze one matched bundle and execute the four
+   named non-cold Persona subset. Verify selected spec, tools and rendered memory;
+   run a bounded real DeepSeek smoke, then launch fresh chat with durable memory
+   and authored files preserved. Do not call the subset the full cohort.
+5. G3 adds the remaining force/fork/callback transfer/worker-loss/full recovery
+   matrix, bundle-owned M1–M3, performance measurements and reconciled pushed main.
 
 ## 1. One native output contract
 
@@ -313,69 +403,19 @@ an actual staged publication, separately from unconfirmed body-result loss.
 
 ## Work ownership
 
-| Owner | Primary responsibility | Adjacent review |
-|---|---|---|
-| Root | Shared contracts, stage/completion scaffolding, joined review, consolidation, G2 | Wrong-owner paths; needless reconstruction; honest tests |
-| E / engine_completion | H demand callback/writer and selected package-interface custody | TYPE-only witnesses; finite/item writer parity; strict cutover |
-| common_native_output | Native physical output owner, finite/Turn layouts and required-owned build endpoint | Actual producer controls; primary-error retention; no raw sealing fallback |
-| N / native_offer_scope_repair | Completion transforms and required v7 snapshot restoration | Zero-name cells; cold reacquisition; stable inherited bindings |
-| Q / audit_native_selection | Package graph/binding issuer; canonical interface custody/storage/recovery | Interface-only and TYPE-only round trips; namespace separation; forbidden alternate issuers |
-| W / review_world_lifetime_architecture | Common codegen custody, exact domain keys, leases, attachments, BindingTable | Rollback/retirement; structural export contracts; stale cache APIs |
-| L / audit_reload_ownership | Closed recipe, runtime link/adoption, sealed-output consumers, fallback deletion | Atomic tips; captured-A refusal; caller-loss visibility |
-| T / audit_warm_lifecycle | Production histories, fixture repair and G2 qualification | Independent oracles; source/public scope distinction; counted execution |
-| X / compiler_demand_transport | Atomic World prefix carry and stage/prior-target composition | Both ordered-link checks; unchanged namespace; actual mixed histories |
-| original_reference_boundary | Coupled authenticated metadata and executable Original selection | Exact nominal references; foreign-owner refusals; latent HOME/recovery follow-up |
-| native_build_service | Declared native build service and retained action evidence | Portable isolation; settlement uncertainty; dependency fanout |
+The current [root plan](plan.md#ownership-and-integration) assigns the eight
+active lanes. Source workers retain isolated checkouts and exchange exact
+commits; root owns canonical integration. The target, nominal and prior-stage
+lanes join on one coherent feature before root acceptance. Runtime and Haskell
+repairs can proceed independently but must pass their joined consumers.
 
-N owns compiler_projection support transforms and HOME-slot completion
-associations. X owns World continuation and its artifact cursor; root owns the
-stage-input contract replacing broad receipt-demand reconstruction. The Original
-reference worker coordinates its prerequisite selection owner with that contract;
-latent HOME/recovery changes require a separately reviewed complete producer and
-consumer migration. Q owns artifact inventory, cold validation and
-declaration_context materialization/recovery sections, coordinating edits with N.
-W owns codegen demand/BindingTable/batch contracts; L owns runtime preparation,
-selection, snapshots and publication. E owns H CompilerRequest/CompilerProducts;
-X sends raw-worker guard requirements to E instead of overlapping those edits.
-Root freezes constructor signatures with owners before editing their hot files.
+Each owner preserves WIP, compiles affected production and cfg(test) targets,
+executes nonzero focused controls, and reports exact source, artifact, command,
+counts, outcome and logs. Source-ready and compilation-only are explicit states.
+Independent review checks refusal paths, obsolete alternate entry points and
+whether fixtures exercise production issuance. No invented test authority.
 
-Each owner preserves existing WIP, compiles production and cfg consumers early,
-executes focused nonzero cases, reports exact base/tip and evidence, and sends
-review-ready/blocker/settled events. Reuse warm checkouts under admitted resource
-limits. Independent branches are not joined acceptance.
-Bounded aesthetic improvements may proceed alongside this work after tracing
-their production consumers and reviewing effects on ownership, work, failure
-behavior and API simplicity. They do not substitute for the joined G2 history.
-
-## Integration sequence and decisive evidence
-
-1. Freeze shared owner/recipe/lease/successor signatures and integrate reviewed
-   existing prerequisites. Compile joined compiler and runtime consumers early.
-2. Run a real finite source → PreparedSourceEntry → installer I_B → public B
-   World → two ordinary B package-using cells history. It must carry the same
-   completion-bearing context. Assert exact package binding and B-cell CAF reuse;
-   I_B/public B are distinct physical instances unless actual transfer exists.
-   Then retire captured A and run another B cell. No synthetic HOME forwarding,
-   guessed ValueIds, second machine or raw compiled().code route.
-3. Extend the existing hosted ordinary demand history with bindings,
-   declarations, explicit/empty imports, expression/mixed cells, source-defined
-   types, retained functions/actions, later use and predecessor cache eviction.
-   Preserve immutable required custody while deleting only disposable outputs.
-4. Execute actual paired writer→reader→closed-linker behavior against GHC;
-   assert package bodies are absent from target definitions. Cover two callers,
-   siblings and historical R→G-old beside independently selected G-new.
-5. Execute discovery's five verbs and stale view refusal, used/unused/crossed/
-   retired private inputs and compile-before-effects. Exercise two-stage demand,
-   mixed known/fresh demand, progress without new roots and exact seal refusals.
-6. Default reload uses real staged frozen B despite draft C. Preserve captured-A
-   refusal separately. Inject caller loss only after observing actual typed
-   publication; B stays callable. Cancellation before/through publication keeps
-   truthful outcomes. Force may refuse without damaging later ordinary reload.
-7. Run affected compiler fixtures. Freeze one matched bundle and use existing
-   exact-test selection for the four non-cold persona-startup members; label it
-   a four-member subset, not the full seven-case cohort. Then real DeepSeek smoke
-   through those same frozen bytes. Offline HTTP controls are not live evidence.
-
-Record actual source/artifact, command, selected/executed counts, exit and log.
-Update the compiler work map against the joined source. Separate structural
-savings from measured latency; this wave closes the ordinary workflow first.
+Shared constructor changes require a concrete consumer and coordinating owners.
+Continue unblocked work; escalate a new semantic choice with its counterexample
+instead of adding a fallback. Root integrates reviewed slices without waiting
+for unrelated qualification, retaining honest checkpoint status.

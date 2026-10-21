@@ -229,27 +229,35 @@ impl ClosedInstantiationPlan {
         compiled: &super::super::turn::CompiledTurn,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
-        Self::prepare_code(&compiled.code(), registry)?
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)
+        Self::prepare_code(&compiled.code(), registry)
     }
 
     pub(in crate::session) fn prepare_code(
         code: &super::super::turn::TurnCode<'_>,
         registry: &ImageRegistry,
-    ) -> Result<Option<Self>, PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         let selection = code
             .certification()
             .and_then(|certification| certification.native_selection.as_ref())
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
         if has_retained_inputs(selection) {
-            return Ok(None);
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
-        let native = NativeInstantiationPlan::prepare_code(code, registry)?;
+        Self::restrict(Arc::new(NativeInstantiationPlan::prepare_code(
+            code, registry,
+        )?))
+    }
+
+    /// Restrict this exact prepared plan without rebuilding its imports or images.
+    pub(in crate::session) fn restrict(
+        native: Arc<NativeInstantiationPlan>,
+    ) -> Result<Self, PreparedRuntimeError> {
+        if has_retained_inputs(&native.selection) {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
         BatchProgram::validate_closed(&native.closed_batch()?)
             .map_err(PreparedRuntimeError::Install)?;
-        Ok(Some(Self {
-            native: Arc::new(native),
-        }))
+        Ok(Self { native })
     }
 
     fn target_definition(&self) -> ClosedNativeDefinition<'_> {
@@ -439,6 +447,14 @@ impl NativeInstantiationPlan {
                 .is_some_and(|selection| Arc::ptr_eq(selection, &self.selection))
     }
 
+    pub(in crate::session) fn has_request_sites(&self) -> bool {
+        !self.target_definitions.sites().is_empty()
+            || self
+                .programs
+                .iter()
+                .any(|program| !program.native.definitions().sites().is_empty())
+    }
+
     pub(in crate::session) fn target_image(&self) -> &Arc<CompiledProgram> {
         &self.target
     }
@@ -588,22 +604,6 @@ impl NativeInstantiationPlan {
     }
 }
 
-impl ClosedInstantiationPlan {
-    pub(in crate::session) fn target_constructors(
-        &self,
-    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> + Clone {
-        self.native.target.constructor_declarations()
-    }
-    pub(in crate::session) fn dependency_constructors(
-        &self,
-    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> {
-        self.native
-            .programs
-            .iter()
-            .flat_map(|program| program.native.image().constructor_declarations())
-    }
-}
-
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct NativeOccurrence {
     program: usize,
@@ -647,47 +647,18 @@ pub(in crate::session) struct NativeInstallationSources {
 impl NativeInstallationSources {
     pub(in crate::session) fn current(
         plan: &NativeInstantiationPlan,
-        current: Option<&super::super::turn::CurrentNativeSources<'_>>,
+        current: &super::super::turn::CurrentNativeSources<'_>,
     ) -> Self {
         Self {
-            target: current.map_or_else(
-                || {
-                    NativeSourceCustody::unknown(
-                        plan.target_definitions.sites().iter().map(|site| site.site),
-                    )
-                },
-                |current| current.target(),
-            ),
+            target: current.target(),
             programs: plan
                 .programs
                 .iter()
                 .map(|program| match &program.native {
-                    NativeCompiledProduct::Home { row, .. } => current.map_or_else(
-                        || {
-                            NativeSourceCustody::unknown(
-                                program
-                                    .native
-                                    .definitions()
-                                    .sites()
-                                    .iter()
-                                    .map(|site| site.site),
-                            )
-                        },
-                        |current| current.group(row),
-                    ),
-                    NativeCompiledProduct::Package { binding, .. } => current.map_or_else(
-                        || {
-                            NativeSourceCustody::unknown(
-                                program
-                                    .native
-                                    .definitions()
-                                    .sites()
-                                    .iter()
-                                    .map(|site| site.site),
-                            )
-                        },
-                        |current| current.package(ClosedPackageDefinition { binding }),
-                    ),
+                    NativeCompiledProduct::Home { row, .. } => current.group(row),
+                    NativeCompiledProduct::Package { binding, .. } => {
+                        current.package(ClosedPackageDefinition { binding })
+                    }
                 })
                 .collect(),
         }
@@ -842,18 +813,6 @@ impl NativeInstantiation {
 }
 
 impl PreparedEngine {
-    pub(in crate::session) fn install_closed_turn(
-        &mut self,
-        plan: &ClosedInstantiationPlan,
-        origin: &super::super::resident::CapturedSourceOrigin,
-        selection: &NativeDomainSelection,
-        bindings: &BindingTable,
-    ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        let sources = NativeInstallationSources::closed(plan, origin);
-        let instantiation = plan.native.instantiate(selection.clone())?;
-        self.install_native_turn(&instantiation, &sources, bindings, &BTreeMap::new())
-    }
-
     pub(in crate::session) fn install_native_turn(
         &mut self,
         instantiation: &NativeInstantiation,

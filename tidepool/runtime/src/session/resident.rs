@@ -181,6 +181,14 @@ impl CapturedSourceOrigin {
         source.admitted_original_source().map(Self)
     }
 
+    pub(super) fn admit_install(
+        &self,
+        transaction: &super::RuntimeSourceCompilerTransaction,
+        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<(), super::SourceAdmissionError> {
+        transaction.admit_original(&self.0, target)
+    }
+
     // A closed selection lends only definitions that its native batch is
     // about to instantiate freshly. Existing physical imports
     // retain their own ProgramFacts in the batch installer.
@@ -7588,7 +7596,7 @@ where
         authority: TurnInstallationAdmission<'_>,
         images: Option<&super::prepared::NativeImageBundle>,
     ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
-        match authority {
+        match &authority {
             TurnInstallationAdmission::Compilation => {
                 refuse_generic_activation_preview_install(code.certification())?;
             }
@@ -7607,7 +7615,31 @@ where
         self.state
             .admit_source_work_in(scope)
             .map_err(SessionError::SourceAdmission)?;
-        let resolved = if code.certification().is_some() {
+        let preview = match &authority {
+            TurnInstallationAdmission::Compilation => None,
+            TurnInstallationAdmission::ActivationPreviewFresh(admission) => Some(*admission),
+            TurnInstallationAdmission::ActivationPreviewSpent(spent) => Some(spent.admission()),
+        };
+        if let Some(admission) = preview {
+            self.state
+                .source_transaction
+                .as_ref()
+                .ok_or(super::SourceAdmissionError::MissingTransaction)
+                .and_then(|source| {
+                    source.admit_original(
+                        &admission.original_source(),
+                        Some(admission.source_lease()),
+                    )
+                })
+                .map_err(SessionError::SourceAdmission)?;
+        }
+        let resolved = if let Some(certification) = code.certification() {
+            if matches!(
+                certification.purpose(),
+                super::turn::TurnPurpose::Ordinary { original: None }
+            ) {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+            }
             let plan = match images {
                 Some(images) => images.native_plan(&code)?,
                 None => Arc::new(super::prepared::NativeInstantiationPlan::prepare_code(
@@ -7621,12 +7653,55 @@ where
                     .get(&input.id().raw())
                     .map(|owner| owner.source_custody())
             };
-            NativeTurnAdmission::Native(self.state.resolve_native_turn_in(
-                scope,
-                &code,
-                plan,
-                &retained_sources,
-            )?)
+            match certification.purpose() {
+                super::turn::TurnPurpose::Execution { .. } => NativeTurnAdmission::Native(
+                    self.state
+                        .resolve_native_turn_in(scope, &code, plan, &retained_sources)?,
+                ),
+                super::turn::TurnPurpose::Ordinary {
+                    original: Some(original),
+                } => {
+                    if !original.matches_bundle(
+                        code.prepared(),
+                        &certification.groups,
+                        &certification.target_owners,
+                        &certification.package_interfaces,
+                        code.table(),
+                        code.sites(),
+                    ) {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                    }
+                    let plan = Arc::new(super::prepared::ClosedInstantiationPlan::restrict(plan)?);
+                    let transaction = self
+                        .state
+                        .source_transaction
+                        .as_ref()
+                        .ok_or(super::SourceAdmissionError::MissingTransaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    let origin = CapturedSourceOrigin::capture(transaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    NativeTurnAdmission::Closed { plan, origin }
+                }
+                super::turn::TurnPurpose::ActivationPreview(_)
+                | super::turn::TurnPurpose::HostPrototype(_) => {
+                    if plan.has_request_sites() {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                    }
+                    let plan = Arc::new(super::prepared::ClosedInstantiationPlan::restrict(plan)?);
+                    let transaction = self
+                        .state
+                        .source_transaction
+                        .as_ref()
+                        .ok_or(super::SourceAdmissionError::MissingTransaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    let origin = CapturedSourceOrigin::capture(transaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    NativeTurnAdmission::Closed { plan, origin }
+                }
+                super::turn::TurnPurpose::Ordinary { original: None } => {
+                    unreachable!("unsealed ordinary refused before preparation")
+                }
+            }
         } else {
             if images.is_some() {
                 return Err(PreparedRuntimeError::MissingPreparedNativeImage.into());
@@ -8085,8 +8160,12 @@ where
             .map_err(SessionError::from)?;
         if let TurnImageAcquisition::Ready { bundle } = images {
             let held = bundle.native_plan(&code)?;
-            if !matches!(&resolved, NativeTurnAdmission::Native(resolved) if resolved.shares_plan(&held))
-            {
+            let shares_plan = match &resolved {
+                NativeTurnAdmission::Native(resolved) => resolved.shares_plan(&held),
+                NativeTurnAdmission::Closed { plan, .. } => Arc::ptr_eq(plan.native(), &held),
+                NativeTurnAdmission::Portable => false,
+            };
+            if !shares_plan {
                 return Err(PreparedRuntimeError::MissingPreparedNativeImage.into());
             }
         }
@@ -12827,20 +12906,25 @@ mod authored_publication_tests {
         use tidepool_testing::effect_surface::TestEffectSurface;
 
         tidepool_testing::eval_harness::require_extract();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
+        let preamble = crate::session::insert_preamble_imports(
+            effects.preamble(),
+            "Tidepool.Actors.Internal.Agent (installRequestReceiver)",
+        );
         let templates = vec![TurnTemplate {
             kind: TemplateSelector::Expr,
             source: assemble_expression_module(
-                effects.preamble(),
+                &preamble,
                 "__result",
                 effects.row(),
                 "{{TURN}}",
-                ExpressionLift::Pure,
+                ExpressionLift::Effectful,
             ),
         }];
         for startup in [true, false] {
             let root = tempfile::tempdir().unwrap();
             let mut includes = effects.include_paths().to_vec();
+            includes.push(tidepool_testing::eval_harness::actor_sources_path());
             includes.push(root.path().to_path_buf());
             let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             let TurnResult::Expr { compiled, .. } =
@@ -12849,7 +12933,7 @@ mod authored_publication_tests {
                         TurnRequest {
                             exact_context: None,
                             session_id: None,
-                            turn_text: "(42 :: Int)",
+                            turn_text: "installRequestReceiver >> pure (42 :: Int)",
                             templates: &templates,
                             include: &includes,
                             session_root: root.path(),
@@ -12881,10 +12965,14 @@ mod authored_publication_tests {
             let source = session.mint_notebook_scope_with_lease(None).unwrap();
             let scope = source.scope();
             session
-                .set_run_context(SessionRunContext {
-                    lexical_scope: scope,
-                    ..SessionRunContext::ROOT
-                })
+                .set_actor_execution(
+                    SessionRunContext {
+                        lexical_scope: scope,
+                        ..SessionRunContext::ROOT
+                    },
+                    EffectRunPolicy::SuspendAll,
+                    LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
                 .unwrap();
             // No CompiledTurn or borrowed code survives this transfer. The
             // admission and installed custody must retain its original inputs.
@@ -12898,8 +12986,44 @@ mod authored_publication_tests {
                 }
             })
             .unwrap();
-            let ResidentOutcome::Completed { result, .. } = outcome else {
-                panic!("the pure ordinary target must complete");
+            let ResidentOutcome::Suspended { hole, .. } = outcome else {
+                panic!("the ordinary target must reach its real AgentTools request");
+            };
+            let original = session.parked_original_source(&hole).unwrap();
+            assert!(Arc::ptr_eq(&original, source.original_source()));
+            let parked = session
+                .parked
+                .iter()
+                .find(|entry| entry.name == hole.cont_id())
+                .unwrap()
+                .id;
+            let site = session
+                .state
+                .require_prepared()
+                .unwrap()
+                .parked_site(parked)
+                .unwrap();
+            let callback = session
+                .capture_request_receiver_entry(&hole, i64::try_from(site).unwrap(), RealmId::ROOT)
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(
+                    &callback
+                        .custody
+                        .provenance
+                        .original_sources
+                        .require_unique(site)
+                        .unwrap(),
+                    source.original_source(),
+                ),
+                "the captured real receiver keeps the installing source"
+            );
+            drop(callback);
+            let completed = source_action(&mut session, &source, |session, settlement| {
+                session.resume_classified(hole, (), settlement).unwrap()
+            });
+            let ResidentOutcome::Completed { result, .. } = completed else {
+                panic!("the admitted real effect must resume to completion");
             };
             assert_eq!(result.to_json(), serde_json::json!(42));
             assert_eq!(session.run_context.lexical_scope, scope);
