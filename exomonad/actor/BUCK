@@ -40,6 +40,7 @@ rust_filegroup(
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
         "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
+        "src/fixtures/compiler-world-question.hs": "exomonad/actor/src/fixtures/compiler-world-question.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fixtures/world-declaration-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-captured-input.hs",
@@ -285,6 +286,7 @@ rust_filegroup(
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
         "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
+        "src/fixtures/compiler-world-question.hs": "exomonad/actor/src/fixtures/compiler-world-question.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fixtures/world-declaration-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-captured-input.hs",
@@ -1727,6 +1729,7 @@ filegroup(
         "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "src/fixtures/captured-spec-installer-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer.hs": "src/fixtures/captured-spec-installer.hs",
         "exomonad/actor/src/fixtures/compiler-world-info.hs": "src/fixtures/compiler-world-info.hs",
+        "exomonad/actor/src/fixtures/compiler-world-question.hs": "src/fixtures/compiler-world-question.hs",
         "exomonad/actor/src/fixtures/host-json-nested.hs": "src/fixtures/host-json-nested.hs",
         "exomonad/actor/src/fixtures/scope-live-result.hs": "src/fixtures/scope-live-result.hs",
         "exomonad/actor/src/fixtures/world-declaration-captured-input.hs": "src/fixtures/world-declaration-captured-input.hs",
@@ -1981,6 +1984,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f636f6d70696c65722d776f726c642d696e666f2e6873",
     src = "src/fixtures/compiler-world-info.hs",
     out = "compiler-world-info.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f636f6d70696c65722d776f726c642d7175657374696f6e2e6873",
+    src = "src/fixtures/compiler-world-question.hs",
+    out = "compiler-world-question.hs",
     visibility = ["PUBLIC"],
 )
 
