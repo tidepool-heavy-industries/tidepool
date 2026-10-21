@@ -11495,7 +11495,9 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 "another accounting owner cannot consume the World baseline"
             );
         }
-        let output = IssuedOriginalOutput::from_segment_originals(&segment.originals).unwrap();
+        // This helper checks source-receipt continuation with its own physical
+        // issuer. The prepared executable items own their advanced TYPE prefix.
+        let output = IssuedOriginalOutput::from_segment_physical(&segment.originals);
         segment
             .admit_program_support(program, &output, &stage_produced)
             .unwrap();
