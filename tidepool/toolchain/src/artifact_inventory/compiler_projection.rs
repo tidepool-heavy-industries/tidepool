@@ -2658,6 +2658,9 @@ impl CompilerSourceSupport {
         // Retain only matching returned owners as issuance candidates; the
         // physical issuer still checks the finalized artifact identity and
         // complete qualified edge row before reusing any binding.
+        let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
+        };
         let mut owners = Vec::new();
         for product in products.products() {
             crate::host_work::checkpoint()?;
@@ -2673,6 +2676,7 @@ impl CompilerSourceSupport {
                 continue;
             }
             charge(operation.charge(product.unit.len() + product.module.len()))?;
+            charge(operation.reserve::<ExactModuleIdentity>(1))?;
             let owner = ExactModuleIdentity {
                 unit: product.unit.clone(),
                 module: product.module.clone(),
@@ -2689,7 +2693,6 @@ impl CompilerSourceSupport {
             {
                 continue;
             }
-            charge(operation.reserve::<ExactModuleIdentity>(1))?;
             owners.push(owner);
         }
         if !owners.is_empty() {
