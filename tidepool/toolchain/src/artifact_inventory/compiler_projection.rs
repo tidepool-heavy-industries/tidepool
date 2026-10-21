@@ -490,6 +490,7 @@ impl Eq for NativeSelectionCompletions {}
 /// and unused captured package products do not become executable roots.
 pub(crate) fn complete_native_selection(
     sources: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
+    output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
     products: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
     inherited: &NativeSelectionCompletions,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
@@ -497,6 +498,18 @@ pub(crate) fn complete_native_selection(
     use crate::certified_products::SelectedNativeImport;
     use tidepool_repr::execution_schema::{DefinitionsView, GlobalDecl};
 
+    if !std::ptr::eq(output.operation().as_ref(), operation) {
+        return Err(failure("native completion belongs to another output operation"));
+    }
+    let check_product = |product: &crate::certified_products::CertifiedPackageCodeProduct| {
+        let owner = product.code().owner();
+        if &owner.compiler_sha256 != output.producer_sha256()
+            || &owner.profile_sha256 != output.profile_sha256()
+        {
+            return Err(failure("package completion differs from actual target compiler/profile"));
+        }
+        Ok(())
+    };
     let graphs = inherited
         .iter()
         .map(|old| Arc::clone(&old.packages))
@@ -615,13 +628,21 @@ pub(crate) fn complete_native_selection(
     let mut plans = Vec::new();
     let mut pending = package_roots.clone();
     let mut reached = BTreeSet::new();
+    let mut held_checked = BTreeSet::new();
     while let Some(target) = pending.pop() {
         crate::host_work::checkpoint()?;
         operation
             .charge(1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let super::PackageCodeTarget::Fresh(id) = target else {
-            continue;
+        let id = match target {
+            super::PackageCodeTarget::Fresh(id) => id,
+            super::PackageCodeTarget::Held(held) => {
+                if held_checked.insert(held.binding()) {
+                    check_product(held.product())?;
+                    pending.extend(held.imports().map(super::PackageCodeTarget::Held));
+                }
+                continue;
+            }
         };
         if !reached.insert(id) {
             continue;
@@ -635,6 +656,7 @@ pub(crate) fn complete_native_selection(
                     == id
             })
             .ok_or_else(|| failure("reached package product is absent from completed output"))?;
+        check_product(product)?;
         let imports = product
             .code()
             .globals()

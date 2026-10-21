@@ -684,13 +684,14 @@ impl CertifiedTargetNativeInputs {
     pub(crate) fn complete_native_selection(
         mut self,
         prepared: &tidepool_repr::execution_schema::PreparedProgram,
+        output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
         let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(self.resolve_sources()?, prepared)?;
         let completed = compiler_projection::complete_native_selection(
-            &sources, packages, inherited.native_completions(), operation,
+            &sources, output, packages, inherited.native_completions(), operation,
         )?;
         self.completed = Some(completed);
         Ok(self)
