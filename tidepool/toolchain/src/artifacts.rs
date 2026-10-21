@@ -9074,7 +9074,9 @@ mod module_product_tests {
                 for prior in &completed {
                     assert!(
                         item.compiler_context()
-                            .issued_native_completions()
+                            .compiler_source_support()
+                            .native_completions()
+                            .iter()
                             .any(|held| Arc::ptr_eq(held, prior)),
                         "every item context retains its actual completed target prefix"
                     );
