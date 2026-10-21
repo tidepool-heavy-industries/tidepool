@@ -2812,7 +2812,7 @@ pub(crate) struct CertifiedSourceSelection {
     private_native: crate::declaration_context::RequestNativeAvailability,
     private_advertised: crate::declaration_context::AdvertisedNativeOriginals,
     input_origin: CertifiedInputOrigin,
-    resolved_originals: Option<Arc<ResolvedOriginalBindings>>,
+    original_bindings: Option<OriginalBindingSelection>,
 }
 
 /// A physically bound product of this selection's completed compiler request.
@@ -3322,7 +3322,7 @@ impl CertifiedSourceSelection {
             private_native: Default::default(),
             private_advertised: Default::default(),
             input_origin: CertifiedInputOrigin::NewProducts,
-            resolved_originals: None,
+            original_bindings: None,
         }
     }
 
@@ -3383,11 +3383,18 @@ impl CertifiedSourceSelection {
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let metadata = &inputs.metadata;
+        if inputs.original_bindings().is_some_and(|bindings| {
+            !std::ptr::eq(bindings.authenticated.operation.as_ref(), operation)
+        }) {
+            return Err(CertificationError::Mismatch(
+                "Original selection belongs to another certification operation",
+            ));
+        }
         let mut selected =
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
         selected.input_origin =
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
-        selected.resolved_originals = inputs.resolved_originals().cloned();
+        selected.original_bindings = inputs.original_bindings().cloned();
         selected.private_native = inputs.private_native_availability();
         selected.private_advertised = inputs.advertised_native_originals();
         for role in inputs.projection().roles() {
@@ -4995,22 +5002,107 @@ impl ResolvedOriginalBindings {
     }
 }
 
-/// Resolve only one selected Original's authenticated symbol membership. The
-/// exact acquired pair is checked before body permission; custody and names
-/// cannot choose another Original or supply an absent permission.
-pub(crate) fn resolve_selected_original_binding(
-    source: &crate::artifact_inventory::CompilerSourceSupport,
-    owner: &crate::declaration_join::ExactModuleIdentity,
-    interface: crate::artifact_inventory::ArtifactBinding,
-    original: crate::artifact_inventory::ArtifactBinding,
-    binder: &SymbolIdentity,
-    operation: &InventoryOperation,
-) -> CertResult<(CachedHomeOwner, u32)> {
-    let (native, ordinal) = authenticate_original_binding_membership(
-        source, owner, interface, original, binder, operation,
-    )?;
-    require_original_permission(source, original, &native, ordinal)?;
-    Ok((native, ordinal))
+/// Metadata membership and executable choices belong to one exact acquisition.
+/// The resolved subset cannot widen the metadata owner or replace its issuer.
+#[derive(Clone, Debug)]
+pub(crate) struct OriginalBindingSelection {
+    authenticated: Arc<AuthenticatedOriginalBindings>,
+    resolved: Option<Arc<ResolvedOriginalBindings>>,
+}
+
+impl OriginalBindingSelection {
+    pub(crate) fn issue<'a>(
+        basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        operation: Arc<InventoryOperation>,
+        references: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+        resolved: Option<Arc<ResolvedOriginalBindings>>,
+    ) -> CertResult<Self> {
+        Self::from_authenticated(
+            AuthenticatedOriginalBindings::issue(basis, operation, references)?,
+            resolved,
+        )
+    }
+
+    fn from_authenticated(
+        authenticated: Arc<AuthenticatedOriginalBindings>,
+        resolved: Option<Arc<ResolvedOriginalBindings>>,
+    ) -> CertResult<Self> {
+        if let Some(resolved) = &resolved {
+            if !resolved.belongs_to(&authenticated.basis, &authenticated.operation) {
+                return Err(CertificationError::Mismatch(
+                    "Original execution belongs to another metadata acquisition",
+                ));
+            }
+            for reference in resolved.authenticated.references() {
+                authenticated.operation.charge(1)?;
+                if authenticated.get(reference) != resolved.get(reference) {
+                    return Err(CertificationError::Mismatch(
+                        "Original execution exceeds authenticated metadata",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            authenticated,
+            resolved,
+        })
+    }
+
+    pub(crate) fn from_resolved(resolved: Arc<ResolvedOriginalBindings>) -> Self {
+        Self {
+            authenticated: Arc::clone(resolved.authenticated()),
+            resolved: Some(resolved),
+        }
+    }
+
+    pub(crate) fn with_metadata<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+    ) -> CertResult<Self> {
+        let additional = AuthenticatedOriginalBindings::issue(
+            Arc::clone(&self.authenticated.basis),
+            Arc::clone(&self.authenticated.operation),
+            references,
+        )?;
+        Self::from_authenticated(
+            self.authenticated.merge(&additional)?,
+            self.resolved.clone(),
+        )
+    }
+
+    pub(crate) fn metadata(
+        &self,
+        reference: &ReceiptImportOwner,
+    ) -> Option<&(CachedHomeOwner, u32)> {
+        self.authenticated.get(reference)
+    }
+
+    pub(crate) fn belongs_to(
+        &self,
+        basis: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        operation: &Arc<InventoryOperation>,
+    ) -> bool {
+        self.authenticated.belongs_to(basis, operation)
+    }
+
+    pub(crate) fn acquisition(&self) -> &Arc<crate::artifact_inventory::CompilerSourceSupport> {
+        self.authenticated.acquisition()
+    }
+
+    pub(crate) fn executable(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> CertResult<Option<&(CachedHomeOwner, u32)>> {
+        if !std::ptr::eq(self.authenticated.operation.as_ref(), operation) {
+            return Err(CertificationError::Mismatch(
+                "Original execution belongs to another inventory operation",
+            ));
+        }
+        Ok(self
+            .metadata(reference)
+            .and_then(|_| self.resolved.as_ref()?.get(reference)))
+    }
 }
 
 fn require_original_permission(
@@ -5123,10 +5215,14 @@ fn resolve_receipt_owner_with_validation(
                 original,
                 binder: binder.clone(),
             };
-            let (native, ordinal) = selected
-                .resolved_originals
-                .as_ref()
-                .and_then(|resolved| resolved.get(&import))
+            let bindings = selected.original_bindings.as_ref().ok_or_else(|| {
+                CertificationError::InputDecision {
+                    owner: owner.clone(),
+                    reason: InputDecisionRefusal::MissingContinuationOwner,
+                }
+            })?;
+            let (native, ordinal) = bindings
+                .executable(&import, &validation.inventory)?
                 .ok_or_else(|| CertificationError::InputDecision {
                     owner: owner.clone(),
                     reason: InputDecisionRefusal::MissingContinuationOwner,
@@ -9638,7 +9734,20 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let compiler_inputs = exact.map(|admission| admission.compiler_inputs());
+    let compiler_inputs = exact
+        .map(|admission| {
+            admission.compiler_inputs().authenticate_original_bindings(
+                receipt
+                    .modules
+                    .iter()
+                    .flat_map(|module| &module.groups)
+                    .flat_map(|group| &group.globals)
+                    .chain(receipt.targets.values().flatten())
+                    .map(|global| &global.owner),
+                &validation.inventory,
+            )
+        })
+        .transpose()?;
     let projected_metadata = compiler_inputs.as_ref().map(|inputs| &inputs.metadata);
     let inherited_module_interfaces =
         projected_metadata
@@ -13808,17 +13917,30 @@ pub(crate) mod tests {
             vec![entry.clone(), other_entry.clone()],
         )
         .unwrap();
-        let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let completed = Arc::new(CompilerSourceSupport::close_complete_output(&output).unwrap());
         let owner = entry.descriptor.owner.clone();
         let primary = completed.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
         let original = primary.original().unwrap();
         let binder = testing::identity("BoundOriginal", "entry_7");
+        let resolve = |source: &Arc<CompilerSourceSupport>,
+                       owner: &crate::declaration_join::ExactModuleIdentity,
+                       interface,
+                       original,
+                       binder: &SymbolIdentity,
+                       operation: &Arc<InventoryOperation>| {
+            let reference = ReceiptImportOwner::OriginalBinding {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                interface,
+                original,
+                binder: binder.clone(),
+            };
+            ResolvedOriginalBindings::issue(Arc::clone(source), Arc::clone(operation), [&reference])
+                .map(|resolved| resolved.get(&reference).unwrap().clone())
+        };
         assert_eq!(
-            resolve_selected_original_binding(
-                &completed, &owner, interface, original, &binder, &operation
-            )
-            .unwrap(),
+            resolve(&completed, &owner, interface, original, &binder, &operation).unwrap(),
             (product.owner().clone(), 7)
         );
 
@@ -13838,7 +13960,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_ne!(original, alternate_pair);
         assert!(matches!(
-            resolve_selected_original_binding(
+            resolve(
                 &completed,
                 &owner,
                 interface,
@@ -13856,7 +13978,7 @@ pub(crate) mod tests {
             module: "Other".into(),
         };
         assert!(matches!(
-            resolve_selected_original_binding(
+            resolve(
                 &completed,
                 &foreign_owner,
                 interface,
@@ -13870,7 +13992,7 @@ pub(crate) mod tests {
             })
         ));
         assert!(matches!(
-            resolve_selected_original_binding(
+            resolve(
                 &completed,
                 &other_entry.descriptor.owner,
                 interface,
@@ -13884,21 +14006,18 @@ pub(crate) mod tests {
             })
         ));
         let missing = testing::identity("BoundOriginal", "absent");
-        assert!(
-            matches!(resolve_selected_original_binding(&completed, &owner, interface, original,
+        assert!(matches!(resolve(&completed, &owner, interface, original,
                 &missing, &operation), Err(CertificationError::OriginalMembership(reason))
                     if *reason == OriginalMembershipFailure::MissingSymbol { owner: product.owner().clone(), symbol: missing })
         );
-        let custody = completed.for_source_owners(&BTreeSet::new()).unwrap();
+        let custody = Arc::new(completed.for_source_owners(&BTreeSet::new()).unwrap());
         assert!(custody
             .artifacts()
             .metadata_snapshot()
             .artifacts
             .contains_key(&entry.descriptor.id));
         assert!(matches!(
-            resolve_selected_original_binding(
-                &custody, &owner, interface, original, &binder, &operation
-            ),
+            resolve(&custody, &owner, interface, original, &binder, &operation),
             Err(CertificationError::InputDecision {
                 reason: InputDecisionRefusal::RoleMismatch,
                 ..
@@ -13941,107 +14060,137 @@ pub(crate) mod tests {
         else {
             unreachable!()
         };
-        let mut selection =
-            CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
-                .unwrap();
+        let acquisition = request.compiler_inputs().shared_compiler_source_support();
+        let references = [7, 11].map(|ordinal| ReceiptImportOwner::OriginalBinding {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            interface,
+            original,
+            binder: testing::identity("BoundOriginal", &format!("entry_{ordinal}")),
+        });
+        let resolved = ResolvedOriginalBindings::issue(
+            Arc::clone(&acquisition),
+            Arc::clone(&operation),
+            [&references[0]],
+        )
+        .unwrap();
+        let bindings = OriginalBindingSelection::issue(
+            Arc::clone(&acquisition),
+            Arc::clone(&operation),
+            &references,
+            Some(Arc::clone(&resolved)),
+        )
+        .unwrap();
+        assert_eq!(
+            bindings.metadata(&references[1]),
+            Some(&(product.owner().clone(), 11))
+        );
+        assert!(bindings
+            .executable(&references[1], &operation)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            bindings.executable(&references[0], &operation).unwrap(),
+            Some(&(product.owner().clone(), 7))
+        );
+        let foreign_operation = Arc::new(InventoryOperation::new(Default::default()));
+        assert!(bindings
+            .executable(&references[0], &foreign_operation)
+            .is_err());
+        assert!(matches!(
+            ResolvedOriginalBindings::issue(
+                Arc::clone(&acquisition), Arc::clone(&operation), [&references[1]],
+            ),
+            Err(CertificationError::OriginalAvailability(reason))
+                if reason.owner == *product.owner() && reason.original_ordinal == 11
+        ));
+        assert!(OriginalBindingSelection::issue(
+            Arc::clone(&acquisition),
+            Arc::new(InventoryOperation::new(Default::default())),
+            &references,
+            Some(Arc::clone(&resolved)),
+        )
+        .is_err());
+        assert!(OriginalBindingSelection::issue(
+            Arc::new(acquisition.as_ref().clone()),
+            Arc::clone(&operation),
+            &references,
+            Some(Arc::clone(&resolved)),
+        )
+        .is_err());
+        assert!(OriginalBindingSelection::issue(
+            Arc::clone(&acquisition),
+            Arc::clone(&operation),
+            [&references[1]],
+            Some(Arc::clone(&resolved)),
+        )
+        .is_err());
+        let foreign_inputs = crate::declaration_context::ProductCompilerInputs::from_exact(
+            request.compiler_inputs(),
+        );
+        let foreign_bindings = OriginalBindingSelection::issue(
+            Arc::new(acquisition.as_ref().clone()),
+            Arc::clone(&operation),
+            &references,
+            None,
+        )
+        .unwrap();
+        assert!(foreign_inputs
+            .with_original_bindings(foreign_bindings, &operation)
+            .is_err());
+        let inputs = crate::declaration_context::ProductCompilerInputs::from_exact(
+            request.compiler_inputs(),
+        )
+        .with_original_bindings(bindings, &operation)
+        .unwrap()
+        .authenticate_original_bindings(&references, &operation)
+        .unwrap();
+        let selection =
+            CertifiedSourceSelection::from_product_compiler_inputs(&inputs, &operation).unwrap();
+        assert!(CertifiedSourceSelection::from_product_compiler_inputs(
+            &inputs,
+            &foreign_operation,
+        )
+        .is_err());
+        assert_eq!(
+            selection
+                .original_bindings
+                .as_ref()
+                .unwrap()
+                .metadata(&references[1]),
+            Some(&(product.owner().clone(), 11))
+        );
         let membership = request
             .compiler_inputs()
             .available_original_sources(std::slice::from_ref(product), &operation)
             .unwrap();
-        let mut validation = PackageInterfaceValidation::default();
         let sources = membership.overlay(&request.groups, &operation).unwrap();
-        for (ordinal, permitted) in [(7, true), (11, false)] {
-            let binder = testing::identity("BoundOriginal", &format!("entry_{ordinal}"));
-            let receipt = ReceiptImportOwner::OriginalBinding {
-                unit: owner.unit.clone(),
-                module: owner.module.clone(),
-                interface,
-                original,
-                binder: binder.clone(),
-            };
-            assert_eq!(
-                authenticate_original_binding_membership(
-                    source, &owner, interface, original, &binder, &operation,
-                )
-                .unwrap(),
-                (product.owner().clone(), ordinal),
-            );
-            let acquisition = request.compiler_inputs().shared_compiler_source_support();
-            let authenticated = AuthenticatedOriginalBindings::issue(
-                Arc::clone(&acquisition),
-                Arc::clone(&operation),
-                [&receipt],
-            )
-            .unwrap();
-            assert!(Arc::ptr_eq(authenticated.acquisition(), &acquisition));
-            assert_eq!(
-                authenticated.references().collect::<Vec<_>>(),
-                vec![&receipt]
-            );
-            assert_eq!(
-                authenticated.get(&receipt),
-                Some(&(product.owner().clone(), ordinal))
-            );
-            let another_operation = Arc::new(InventoryOperation::new(Default::default()));
-            let foreign_metadata = AuthenticatedOriginalBindings::issue(
-                Arc::clone(&acquisition),
-                another_operation,
-                [&receipt],
-            )
-            .unwrap();
-            assert!(authenticated.merge(&foreign_metadata).is_err());
-            let resolved = ResolvedOriginalBindings::issue(
-                Arc::clone(&acquisition),
-                Arc::clone(&operation),
-                [&receipt],
-            );
-            if !permitted {
-                assert!(
-                    matches!(resolved, Err(CertificationError::OriginalAvailability(reason))
-                        if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
-                );
-                continue;
-            }
-            let resolved = resolved.unwrap();
-            assert_eq!(
-                resolved.authenticated().references().collect::<Vec<_>>(),
-                vec![&receipt]
-            );
-            assert!(Arc::ptr_eq(
-                resolved.authenticated().acquisition(),
-                &acquisition
-            ));
-            assert!(resolved.belongs_to(
-                &request.compiler_inputs().shared_compiler_source_support(),
-                &operation
-            ));
-            let foreign_operation = Arc::new(InventoryOperation::new(Default::default()));
-            assert!(!resolved.belongs_to(
-                &request.compiler_inputs().shared_compiler_source_support(),
-                &foreign_operation
-            ));
-            selection.resolved_originals = Some(resolved);
+        let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
+        for (reference, ordinal) in references.into_iter().zip([7, 11]) {
             let result = resolve_receipt_owner_with_validation(
-                receipt,
+                reference,
                 &sources,
                 Some(&selection),
                 &BTreeMap::new(),
                 &mut validation,
             );
-            if permitted {
+            if ordinal == 7 {
                 assert_eq!(
                     result.unwrap(),
                     PendingImportOwner::Source {
                         owner: product.owner().clone(),
                         original_ordinal: ordinal,
-                        binder
+                        binder: testing::identity("BoundOriginal", "entry_7"),
                     }
                 );
             } else {
-                assert!(
-                    matches!(result, Err(CertificationError::OriginalAvailability(reason))
-                        if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
-                );
+                assert!(matches!(
+                    result,
+                    Err(CertificationError::InputDecision {
+                        reason: InputDecisionRefusal::MissingContinuationOwner,
+                        ..
+                    })
+                ));
             }
         }
     }

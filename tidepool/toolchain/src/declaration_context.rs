@@ -8203,7 +8203,7 @@ pub(crate) struct ProductCompilerInputs<'a> {
     pub(crate) metadata: &'a CompilerArtifactMetadata,
     native_selection: &'a NativeInputSelection,
     original_sources: &'a crate::certified_products::RetainedOriginalSources,
-    resolved_originals: Option<Arc<crate::certified_products::ResolvedOriginalBindings>>,
+    original_bindings: Option<crate::certified_products::OriginalBindingSelection>,
 }
 
 impl<'a> ProductCompilerInputs<'a> {
@@ -8213,7 +8213,7 @@ impl<'a> ProductCompilerInputs<'a> {
             metadata: &inputs.metadata,
             native_selection: &inputs.native_selection,
             original_sources: &inputs.original_sources,
-            resolved_originals: None,
+            original_bindings: None,
         }
     }
 
@@ -8232,14 +8232,59 @@ impl<'a> ProductCompilerInputs<'a> {
             metadata: inputs.demand.metadata(),
             native_selection: &inputs.native_selection,
             original_sources,
-            resolved_originals: groups.resolved_originals.clone(),
+            original_bindings: groups
+                .resolved_originals
+                .clone()
+                .map(crate::certified_products::OriginalBindingSelection::from_resolved),
         }
     }
 
-    pub(crate) fn resolved_originals(
+    pub(crate) fn original_bindings(
         &self,
-    ) -> Option<&Arc<crate::certified_products::ResolvedOriginalBindings>> {
-        self.resolved_originals.as_ref()
+    ) -> Option<&crate::certified_products::OriginalBindingSelection> {
+        self.original_bindings.as_ref()
+    }
+
+    pub(crate) fn with_original_bindings(
+        mut self,
+        bindings: crate::certified_products::OriginalBindingSelection,
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Self, crate::certified_products::CertificationError> {
+        let basis = self.original_bindings.as_ref().map_or(
+            &self.source_support,
+            crate::certified_products::OriginalBindingSelection::acquisition,
+        );
+        if !bindings.belongs_to(basis, operation) {
+            return Err(crate::certified_products::CertificationError::Mismatch(
+                "Original selection belongs to another product input acquisition",
+            ));
+        }
+        self.original_bindings = Some(bindings);
+        Ok(self)
+    }
+
+    pub(crate) fn authenticate_original_bindings<'b>(
+        self,
+        references: impl IntoIterator<Item = &'b crate::certified_products::ReceiptImportOwner>,
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Self, crate::certified_products::CertificationError> {
+        let bindings = match &self.original_bindings {
+            Some(bindings) => {
+                if !bindings.belongs_to(bindings.acquisition(), operation) {
+                    return Err(crate::certified_products::CertificationError::Mismatch(
+                        "Original metadata belongs to another product operation",
+                    ));
+                }
+                bindings.with_metadata(references)?
+            }
+            None => crate::certified_products::OriginalBindingSelection::issue(
+                Arc::clone(&self.source_support),
+                Arc::clone(operation),
+                references,
+                None,
+            )?,
+        };
+        self.with_original_bindings(bindings, operation)
     }
 
     pub(crate) fn compiler_source_support(
