@@ -137,7 +137,7 @@ fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coord
         "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
         "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
     ];
-    let invocation = |root: &Path, snapshot: &Path, code: u8| {
+    let owned_command = |root: &Path| {
         let mut command = Command::new(frontend);
         for name in inherited {
             command.env_remove(name);
@@ -148,7 +148,12 @@ fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coord
             .env("TIDEPOOL_GHC_LIBDIR", "unused-by-fixture")
             .env("TIDEPOOL_COMPILER_DEPLOYMENT", "owned-measurement-fixture")
             .arg("--owned-daemon-run")
-            .arg(root)
+            .arg(root);
+        command
+    };
+    let invocation = |root: &Path, snapshot: &Path, code: u8| {
+        let mut command = owned_command(root);
+        command
             .arg("--")
             .arg(&worker)
             .arg("--observe-owned-environment")
@@ -223,6 +228,35 @@ fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coord
         assert!(!Path::new(&fields["TIDEPOOL_EXTRACT_DAEMON_SOCKET"]).exists());
         assert_eq!(root.join("cache").exists(), code != 0);
     }
+    let interrupted_root = dir.path().join("interrupted-owner");
+    let interrupted = owned_command(&interrupted_root)
+        .arg("--")
+        .arg("/bin/sh")
+        .args([
+            "-c",
+            r#"kill "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID"; exit 37"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(!interrupted.status.success());
+    let interrupted_lifecycle: serde_json::Value =
+        serde_json::from_slice(&fs::read(interrupted_root.join("lifecycle.json")).unwrap())
+            .unwrap();
+    assert_eq!(interrupted_lifecycle["exit_code"], 37);
+    assert_eq!(interrupted_lifecycle["execution"]["status"], "exited");
+    assert_eq!(interrupted_lifecycle["cleanup_confirmed"], false);
+    let interrupted_outcome: serde_json::Value = serde_json::from_slice(
+        &fs::read(interrupted_root.join("owned-compiler-outcome.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(interrupted_outcome["cleanup"]["status"], "unconfirmed");
+    assert!(interrupted_root.join("cache").exists());
+    let diagnostic = String::from_utf8_lossy(&interrupted.stderr);
+    assert!(
+        diagnostic.contains("owned producer exited with exit status: 37"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("cleanup unconfirmed"), "{diagnostic}");
     for key in inherited {
         let root = dir.path().join(format!("refused-{key}"));
         let snapshot = dir.path().join(format!("refused-{key}.json"));
