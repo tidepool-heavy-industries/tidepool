@@ -6982,11 +6982,12 @@ impl ProgramSourceSupportState {
             if selected.contains(owner) {
                 continue;
             }
-            // New facts own their strings. Persistent path copies share those
-            // owners and charge fixed-size reference work like the other maps.
+            // Charge the new identity and its logical set-entry storage.
+            // imbl also copies B+tree path nodes; these internal allocations
+            // are outside this semantic charge. Keys share their string owner.
             operation
                 .reserve::<ExactModuleIdentity>(1)
-                .and_then(|_| operation.reserve::<Arc<ExactModuleIdentity>>(4))
+                .and_then(|_| operation.reserve::<Arc<ExactModuleIdentity>>(1))
                 .and_then(|_| operation.charge(owner.unit.len()))
                 .and_then(|_| operation.charge(owner.module.len()))
                 .map_err(|error| compiler_evidence_failure(error.into()))?;
@@ -27133,7 +27134,7 @@ mod tests {
             assert_eq!(
                 first_work - owners[0].unit.len() - owners[0].module.len(),
                 before_repeat - first_work - owners[1].unit.len() - owners[1].module.len(),
-                "new-fact work excludes the size of the already retained prefix"
+                "logical new-key charges do not revisit the retained prefix"
             );
             let exhausted = InventoryOperation::new(InventoryDecodeLimits {
                 max_work: first_work + 1,
