@@ -556,7 +556,10 @@ mod program_source_support_history {
                         .iter()
                         .map(|(owner, edges)| (
                             owner.clone(),
-                            edges.iter().cloned().collect::<Vec<_>>()
+                            ProgramSourceSupportRow {
+                                imports: edges.iter().cloned().collect::<Vec<_>>(),
+                                produced: None,
+                            }
                         ))
                         .collect()
                 );

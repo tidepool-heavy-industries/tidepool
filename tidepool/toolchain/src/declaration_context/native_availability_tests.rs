@@ -2,7 +2,11 @@ use super::*;
 use crate::certified_products::tests::{
     original_groups_fixture_with_interface, recovered_witness_fixtures,
 };
-use crate::certified_products::{fixture_finalized_product, fixture_module_core};
+use crate::certified_products::{
+    fixture_finalized_product, fixture_module_core, AcceptedGlobal, AuthenticatedTargetImports,
+    ReceiptImportOwner,
+};
+use tidepool_repr::execution_schema::{GlobalDecl, RuntimeRep};
 
 // Fixtures explicitly issue availability at their input boundary, before any
 // compiler request consumes or combines their custody.
