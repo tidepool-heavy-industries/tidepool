@@ -103,7 +103,8 @@ descriptors are refused by this reader. Completed preparation
 retains the exact initial run and helper revisions in its authenticated workspace
 inventory. Rebuild, refreeze and reprepare with this reader; it does not infer
 missing named-entry provenance or an original helper for older selections.
-Pointer version 2 and native catalog version 4 retain their existing contracts.
+Pointers use version 2. Native catalogs require version 5; version 4 and older
+require regeneration through the matching producer.
 Production entries use version 4. Preserve older frozen bundles with their own readers.
 Immediate preparation/start carries only issuer-owned immutable entry/images;
 each actor still installs fresh policy state. Durable reopening authenticates
@@ -171,8 +172,8 @@ frontend authenticates the matched service endpoint, acquires its package roots,
 and owns service shutdown, descendant reaping and root release. The action does
 not inject a loader directory or use an ambient compiler endpoint. It rechecks source
 retention after production and binds the complete product inventory, catalog
-SHA-256 and schema-4 source selection. The roles are ordered as stable effects,
-stdlib, actors and Jev, under one original root. Producer/worker identities,
+SHA-256 and the source selection carried by catalog schema 5. The roles are
+ordered as stable effects, stdlib, actors and Jev, under one original root. Producer/worker identities,
 source evidence and product metadata are copied without rewriting.
 
 Every product action declares an additional `.invocation` evidence directory

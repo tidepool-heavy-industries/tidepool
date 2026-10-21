@@ -980,7 +980,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             .find(|(_, group)| group.owner().module == "LateNativeRoot")
             .map(|(_, group)| *group)
             .unwrap();
-        assert_eq!(root.imports(), std::slice::from_ref(&import));
+        assert_eq!(root.product().imports(), std::slice::from_ref(&import));
         let bindings = root.group().definitions().bindings();
         let Group::Recursive(tops) = &bindings[0] else {
             panic!("fixture literal group")

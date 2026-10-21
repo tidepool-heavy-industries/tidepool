@@ -552,6 +552,7 @@ pub(crate) struct CanonicalFacts {
     certificate: Arc<[u8]>,
     core: Option<Arc<[u8]>>,
     origin: CanonicalOrigin,
+    package_interfaces: PackageInterfaceCustody,
 }
 
 impl PartialEq for CanonicalFacts {
@@ -704,6 +705,28 @@ impl CertifiedModuleInterface {
     pub(crate) fn package_imports_bytes(&self) -> &[u8] {
         &self.package_imports
     }
+    pub(crate) fn package_interfaces(&self) -> &PackageInterfaceCustody {
+        &self.package_interfaces
+    }
+    pub(crate) fn validate_package_interfaces(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), crate::recovery_artifacts::RecoveryArtifactError> {
+        let obligations = crate::recovery_artifacts::decode_package_import_obligations(
+            self.package_imports_bytes(),
+            self.unit(),
+            self.module(),
+            &self.interface_sha256(),
+            Path::new("owned-module.hi.packages"),
+            validation,
+        )?;
+        crate::recovery_artifacts::validate_package_imports_with_custody(
+            obligations,
+            self.package_interfaces(),
+            validation,
+        )?;
+        Ok(())
+    }
     pub(crate) fn certificate_bytes(&self) -> &[u8] {
         &self.certificate
     }
@@ -737,6 +760,7 @@ impl CertifiedModuleInterface {
             && interface.package_imports_sha256 == self.receipt.package_imports.sha256
             && reference.certificate_sha256 == sha(&self.certificate)
             && core_matches
+            && self.package_interfaces.matches_references(&reference.package_interfaces)
     }
 
     /// Materialization can retain Core without making it available through an
@@ -1024,6 +1048,7 @@ pub(super) fn issue_interfaces(
         crate::declaration_join::ExactModuleIdentity,
         Vec<CanonicalSourceImport>,
     >,
+    package_interfaces: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedModuleInterface>> {
     envelope.validate_structure()?;
@@ -1082,7 +1107,7 @@ pub(super) fn issue_interfaces(
             COMPILER_RECEIPT_BYTES_LIMIT as u64,
             validation,
         )?;
-        crate::recovery_artifacts::validate_package_imports_with_validation(
+        let obligations = crate::recovery_artifacts::decode_package_import_obligations(
             &package_imports,
             &module.unit,
             &module.module,
@@ -1090,7 +1115,19 @@ pub(super) fn issue_interfaces(
             Path::new("finalized-module.hi.packages"),
             validation,
         )
-        .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
+        .map_err(package_validation_error)?;
+        let selected_packages = package_interfaces.select(
+            &obligations
+                .interface_seals(validation)
+                .map_err(package_validation_error)?,
+            validation,
+        )?;
+        crate::recovery_artifacts::validate_package_imports_with_custody(
+            obligations,
+            &selected_packages,
+            validation,
+        )
+        .map_err(package_validation_error)?;
         let core = module
             .core
             .as_ref()
@@ -1165,6 +1202,7 @@ pub(super) fn issue_interfaces(
                 certificate: certificate.into(),
                 core: core.map(Into::into),
                 origin,
+                package_interfaces: selected_packages,
             }),
             input_custody: None,
         });
@@ -1180,6 +1218,7 @@ pub(super) fn recover_interface(
     interface: Vec<u8>,
     package_imports: Vec<u8>,
     core: Option<Vec<u8>>,
+    package_interfaces: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedModuleInterface> {
     if certificate.len() > CANONICAL_CERTIFICATE_LIMIT {
@@ -1249,7 +1288,7 @@ pub(super) fn recover_interface(
             "finalized certificate payload",
         ));
     }
-    crate::recovery_artifacts::validate_package_imports_with_validation(
+    let obligations = crate::recovery_artifacts::decode_package_import_obligations(
         &package_imports,
         &receipt.unit,
         &receipt.module,
@@ -1257,7 +1296,19 @@ pub(super) fn recover_interface(
         Path::new("finalized-module.hi.packages"),
         validation,
     )
-    .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
+    .map_err(package_validation_error)?;
+    let selected_packages = package_interfaces.select(
+        &obligations
+            .interface_seals(validation)
+            .map_err(package_validation_error)?,
+        validation,
+    )?;
+    crate::recovery_artifacts::validate_package_imports_with_custody(
+        obligations,
+        &selected_packages,
+        validation,
+    )
+    .map_err(package_validation_error)?;
     let canonical_envelope = FinalizationEnvelope {
         profile: FINALIZATION_ENVELOPE_PROFILE.into(),
         value_interfaces: BTreeMap::new(),
@@ -1289,9 +1340,18 @@ pub(super) fn recover_interface(
             certificate: certificate.into(),
             core: core.map(Into::into),
             origin,
+            package_interfaces: selected_packages,
         }),
         input_custody: None,
     })
+}
+
+#[cfg(test)]
+fn fixture_empty_package_interfaces() -> PackageInterfaceCustody {
+    PackageInterfaceCustody::restore(
+        Path::new("."), &[], &BTreeMap::new(),
+        &mut PackageInterfaceValidation::default(),
+    ).unwrap()
 }
 
 #[cfg(test)]
@@ -1350,6 +1410,7 @@ pub(super) fn fixture_interface(
         interface,
         package_imports,
         core,
+        &fixture_empty_package_interfaces(),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap()
@@ -1397,6 +1458,7 @@ pub(super) fn fixture_origin(
         interface.interface.to_vec(),
         interface.package_imports.to_vec(),
         interface.core.as_ref().map(|bytes| bytes.to_vec()),
+        interface.package_interfaces(),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap()
@@ -1760,6 +1822,7 @@ mod tests {
             &BTreeMap::new(),
             None,
             &exact,
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
@@ -1771,6 +1834,7 @@ mod tests {
             issued[0].interface_bytes().to_vec(),
             issued[0].package_imports_bytes().to_vec(),
             None,
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
@@ -1786,6 +1850,7 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 &exact,
+                &fixture_empty_package_interfaces(),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::Mismatch(
@@ -1803,6 +1868,7 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 &exact,
+                &fixture_empty_package_interfaces(),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::Mismatch(
@@ -1818,6 +1884,7 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 &exact,
+                &fixture_empty_package_interfaces(),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::Mismatch(
@@ -1835,6 +1902,7 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 &exact,
+                &fixture_empty_package_interfaces(),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::Receipt(
@@ -1851,6 +1919,7 @@ mod tests {
             issued[0].interface_bytes().to_vec(),
             issued[0].package_imports_bytes().to_vec(),
             None,
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default()
         )
         .is_err());
@@ -1878,6 +1947,7 @@ mod tests {
             source.interface_bytes().to_vec(),
             source.package_imports_bytes().to_vec(),
             None,
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
@@ -1894,6 +1964,7 @@ mod tests {
                 source.interface_bytes().to_vec(),
                 source.package_imports_bytes().to_vec(),
                 None,
+                &fixture_empty_package_interfaces(),
                 &mut PackageInterfaceValidation::default()
             )
             .is_err());
@@ -1912,6 +1983,7 @@ mod tests {
             source.interface_bytes().to_vec(),
             source.package_imports_bytes().to_vec(),
             None,
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default()
         )
         .is_err());
@@ -1926,6 +1998,7 @@ mod tests {
             module.interface_bytes().to_vec(),
             module.package_imports_bytes().to_vec(),
             Some(b"other-core".to_vec()),
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default()
         )
         .is_err());
@@ -1935,6 +2008,7 @@ mod tests {
             module.interface_bytes().to_vec(),
             module.package_imports_bytes().to_vec(),
             Some(b"tidy-core".to_vec()),
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default()
         )
         .is_err());
@@ -1956,6 +2030,7 @@ mod tests {
             module.interface_bytes().to_vec(),
             module.package_imports_bytes().to_vec(),
             Some(b"core".to_vec()),
+            &fixture_empty_package_interfaces(),
             &mut PackageInterfaceValidation::default()
         )
         .is_err());

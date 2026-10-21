@@ -271,12 +271,303 @@ pub(super) struct ResolvedNativeDependency {
 }
 
 impl ResolvedNativeDependency {
-    pub(super) fn key(&self) -> (ExactModuleIdentity, NativeGroupEdge) {
-        (self.required_owner.clone(), self.edge)
+    pub(super) fn target_key(&self) -> NativeGroupKey {
+        match &self.target {
+            NativeGroupTarget::ExactGroup(issued) | NativeGroupTarget::CurrentIssued(issued) => {
+                NativeGroupKey {
+                    artifact: issued.binding.binding.artifact(),
+                    original_ordinal: issued.binding.original_ordinal,
+                }
+            }
+            NativeGroupTarget::NewGroup(key) => *key,
+        }
     }
+
+    pub(super) fn planned_edge(
+        &self,
+        parent: NativeGroupKey,
+        child: &ArtifactEntry,
+    ) -> Result<(PlannedTarget, ArtifactDependency), CompileError> {
+        let target = self.target_key();
+        if self.edge.dependent_ordinal != parent.original_ordinal
+            || self.edge.required_ordinal != target.original_ordinal
+            || child.descriptor.id != target.artifact
+            || child.descriptor.owner != self.required_owner
+            || !child
+                .native_group_ordinals
+                .contains(&target.original_ordinal)
+        {
+            return Err(failure(
+                "carried native dependency differs from its physical obligation",
+            ));
+        }
+        Ok((
+            PlannedTarget::from(self.target.clone()),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: self.edge.dependent_ordinal,
+                required_ordinal: self.edge.required_ordinal,
+            },
+        ))
+    }
+
     pub(super) fn target(&self) -> &NativeGroupTarget {
         &self.target
     }
+}
+
+enum CohortNativeRequirement {
+    Local {
+        owner: ExactModuleIdentity,
+        edge: NativeGroupEdge,
+        child: NativeGroupKey,
+    },
+    External {
+        owner: ExactModuleIdentity,
+        edge: NativeGroupEdge,
+        support: crate::declaration_context::ChosenNativeGroupSupport,
+    },
+    Unavailable,
+}
+
+/// All nominal group obligations of one physical output cohort are classified
+/// once. Unavailable obligations remain explicit until local closure is removed.
+pub(super) struct ClassifiedNativeCohort {
+    operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    entries: Vec<Arc<ArtifactEntry>>,
+    requirements: BTreeMap<NativeGroupKey, Vec<CohortNativeRequirement>>,
+    available: BTreeSet<NativeGroupKey>,
+}
+
+impl ClassifiedNativeCohort {
+    pub(super) fn classify(
+        physical: &ArtifactView,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Self, CompileError> {
+        use crate::certified_products::{CurrentSourceDependency, ReceiptImportOwner};
+        let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
+        let entries = selection
+            .complete_native_entries(physical, operation)
+            .map_err(evidence)?;
+        let metadata = physical.metadata_snapshot();
+        let mut requirements = BTreeMap::new();
+        let mut reverse = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupKey>>::new();
+        let mut blocked = BTreeSet::new();
+        for entry in &entries {
+            for &ordinal in &entry.native_group_ordinals {
+                crate::host_work::checkpoint()?;
+                let key = NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: ordinal,
+                };
+                let current = selection
+                    .current_product(key, entry)
+                    .map_err(evidence)?
+                    .ok_or_else(|| {
+                        failure("cohort requirement lacks its actual current product")
+                    })?;
+                let imports = current.nominal_imports().map_err(evidence)?;
+                operation
+                    .reserve::<CohortNativeRequirement>(imports.len())
+                    .map_err(|error| evidence(error.into()))?;
+                let mut obligations = Vec::new();
+                for reference in imports {
+                    crate::host_work::checkpoint()?;
+                    operation
+                        .charge(1)
+                        .map_err(|error| evidence(error.into()))?;
+                    let (unit, module) = match reference {
+                        ReceiptImportOwner::Source { unit, module, .. }
+                        | ReceiptImportOwner::OriginalBinding { unit, module, .. } => {
+                            (unit, module)
+                        }
+                        _ => continue,
+                    };
+                    operation
+                        .charge(unit.len() + module.len())
+                        .map_err(|error| evidence(error.into()))?;
+                    let owner = ExactModuleIdentity {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                    };
+                    let requirement = match reference {
+                        ReceiptImportOwner::Source { .. } => match current
+                            .available_source_dependency(
+                                reference,
+                                &metadata.artifacts,
+                                operation,
+                            )? {
+                            CurrentSourceDependency::Local(child) => {
+                                let child = child.key();
+                                operation
+                                    .reserve::<(NativeGroupKey, [usize; 4])>(2)
+                                    .map_err(|error| evidence(error.into()))?;
+                                reverse.entry(child).or_default().insert(key);
+                                CohortNativeRequirement::Local {
+                                    owner,
+                                    edge: NativeGroupEdge {
+                                        dependent_ordinal: ordinal,
+                                        required_ordinal: child.original_ordinal,
+                                    },
+                                    child,
+                                }
+                            }
+                            CurrentSourceDependency::Issued(support) => {
+                                CohortNativeRequirement::External {
+                                    owner,
+                                    edge: NativeGroupEdge {
+                                        dependent_ordinal: ordinal,
+                                        required_ordinal: support.binding().original_ordinal,
+                                    },
+                                    support,
+                                }
+                            }
+                            CurrentSourceDependency::Unavailable => {
+                                CohortNativeRequirement::Unavailable
+                            }
+                        },
+                        ReceiptImportOwner::OriginalBinding { .. } => {
+                            match current.available_original_group(reference, operation)? {
+                                Some(support) => CohortNativeRequirement::External {
+                                    owner,
+                                    edge: NativeGroupEdge {
+                                        dependent_ordinal: ordinal,
+                                        required_ordinal: support.binding().original_ordinal,
+                                    },
+                                    support,
+                                },
+                                None => CohortNativeRequirement::Unavailable,
+                            }
+                        }
+                        _ => unreachable!("native nominal requirement classified above"),
+                    };
+                    if matches!(requirement, CohortNativeRequirement::Unavailable) {
+                        operation
+                            .reserve::<(NativeGroupKey, [usize; 4])>(1)
+                            .map_err(|error| evidence(error.into()))?;
+                        blocked.insert(key);
+                    }
+                    obligations.push(requirement);
+                }
+                operation
+                    .reserve::<(NativeGroupKey, Vec<CohortNativeRequirement>, [usize; 4])>(1)
+                    .map_err(|error| evidence(error.into()))?;
+                requirements.insert(key, obligations);
+            }
+        }
+        operation
+            .reserve::<NativeGroupKey>(blocked.len())
+            .map_err(|error| evidence(error.into()))?;
+        let mut pending = blocked.iter().copied().collect::<Vec<_>>();
+        while let Some(child) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            for &parent in reverse.get(&child).into_iter().flatten() {
+                operation
+                    .charge(1)
+                    .map_err(|error| evidence(error.into()))?;
+                if !blocked.contains(&parent) {
+                    operation
+                        .reserve::<NativeGroupKey>(2)
+                        .map_err(|error| evidence(error.into()))?;
+                    blocked.insert(parent);
+                    pending.push(parent);
+                }
+            }
+        }
+        operation
+            .reserve::<(NativeGroupKey, [usize; 4])>(requirements.len())
+            .map_err(|error| evidence(error.into()))?;
+        let available = requirements
+            .keys()
+            .filter(|key| !blocked.contains(key))
+            .copied()
+            .collect();
+        Ok(Self {
+            operation: Arc::clone(operation),
+            entries,
+            requirements,
+            available,
+        })
+    }
+
+    pub(super) fn available(&self) -> &BTreeSet<NativeGroupKey> {
+        &self.available
+    }
+    pub(super) fn entries(&self) -> &[Arc<ArtifactEntry>] {
+        &self.entries
+    }
+}
+
+pub(super) fn bind_classified_cohort(
+    state: &mut InventoryState,
+    parent: &ArtifactView,
+    entries: &impl ArtifactEntryMap<ArtifactId>,
+    cohort: &ClassifiedNativeCohort,
+) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
+    let mut acquisition = CertifiedNativeDemandAcquisition {
+        entries: BTreeMap::new(),
+        bindings: BTreeMap::new(),
+        offers: Vec::new(),
+    };
+    for &key in &cohort.available {
+        cohort
+            .operation
+            .reserve::<ResolvedNativeDependency>(cohort.requirements[&key].len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut dependencies = Vec::with_capacity(cohort.requirements[&key].len());
+        for requirement in &cohort.requirements[&key] {
+            crate::host_work::checkpoint()?;
+            let (required_owner, edge, target) = match requirement {
+                CohortNativeRequirement::Local { owner, edge, child } => {
+                    if !cohort.available.contains(child) {
+                        return Err(failure(
+                            "available cohort group retains unavailable local dependency",
+                        ));
+                    }
+                    (owner.clone(), *edge, NativeGroupTarget::NewGroup(*child))
+                }
+                CohortNativeRequirement::External {
+                    owner,
+                    edge,
+                    support,
+                } => {
+                    let binding = support.binding();
+                    let native = NativeSupportRef::checked(
+                        state,
+                        parent,
+                        binding,
+                        crate::certified_products::CertifiedNativeGroupSupport::Issued(
+                            support.contribution().offer(),
+                        ),
+                    )?;
+                    let issued = native.describe(binding)?;
+                    native.acquire(state, entries, &mut acquisition.entries, &issued)?;
+                    acquisition
+                        .offers
+                        .push(support.contribution().offer().clone());
+                    (
+                        owner.clone(),
+                        *edge,
+                        NativeGroupTarget::ExactGroup(Arc::new(issued)),
+                    )
+                }
+                CohortNativeRequirement::Unavailable => {
+                    return Err(failure(
+                        "available cohort group retains an unavailable obligation",
+                    ))
+                }
+            };
+            dependencies.push(ResolvedNativeDependency {
+                required_owner,
+                edge,
+                target,
+            });
+        }
+        acquisition
+            .bindings
+            .insert(key, VerifiedNativeBinding::NewCurrent { dependencies });
+    }
+    Ok(acquisition)
 }
 
 /// One exact labeled native dependency edge from a parent group.
@@ -889,6 +1180,30 @@ pub(super) fn issued_carrier_pair(
     support.carrier_pair(group, canonical)
 }
 
+pub(super) fn acquired_carrier_pair(
+    parent: &ArtifactView,
+    group: NativeGroupBinding,
+    canonical: ArtifactId,
+) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+    let state = parent.lease.inventory.0.lock().expect("inventory lock");
+    let owned = &parent.read_projection(&state).nodes;
+    if !owned.contains(&InventoryNodeKey::Group(group)) {
+        return Err(failure("native carrier query lacks exact acquired group"));
+    }
+    let support = NativeSupportRef {
+        snapshot: &parent.lease.selection,
+        payloads: &parent.lease.payloads,
+        offer: None,
+    };
+    let pair = support.carrier_pair(group, canonical)?;
+    if !owned.contains(&InventoryNodeKey::Artifact(pair.0))
+        || !owned.contains(&InventoryNodeKey::Artifact(pair.1))
+    {
+        return Err(failure("native carrier pair is outside acquired custody"));
+    }
+    Ok(pair)
+}
+
 pub(super) fn bind_certified_input_demand(
     state: &mut InventoryState,
     parent: &ArtifactView,
@@ -978,6 +1293,9 @@ pub(super) fn bind_certified_input_demand(
                             },
                         )
                     })?;
+                crate::declaration_context::validate_current_stage_native_inputs(
+                    &current, entries,
+                )?;
                 let Some(chosen) = verified_current_product(&current)? else {
                     let dependencies = current_product_dependencies(
                         state,
@@ -1433,6 +1751,28 @@ thread_local! {
 }
 
 impl NativeOfferContribution {
+    pub(crate) fn group_carrier_pair(
+        &self,
+        group: NativeGroupBinding,
+        canonical: ArtifactId,
+    ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+        if !self.contains_group(group) {
+            return Err(failure("native carrier query exceeds its contribution"));
+        }
+        let support = NativeSupportRef {
+            snapshot: &self.offer.0.custody.lease.selection,
+            payloads: &self.offer.0.custody.lease.payloads,
+            offer: Some(&self.offer),
+        };
+        let pair = support.carrier_pair(group, canonical)?;
+        if !self.reachable.contains(&InventoryNodeKey::Artifact(pair.0))
+            || !self.reachable.contains(&InventoryNodeKey::Artifact(pair.1))
+        {
+            return Err(failure("native carrier pair exceeds its contribution"));
+        }
+        Ok(pair)
+    }
+
     #[cfg(test)]
     pub(crate) fn take_group_binding_scope_visits() -> usize {
         GROUP_BINDING_SCOPE_VISITS.with(|work| work.replace(0))
@@ -1832,13 +2172,96 @@ impl ValidatedFreshNativeAvailability {
 }
 
 impl CheckedNativeAvailability {
+    pub(super) fn validate_current_cohort(
+        self,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
+        let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
+        let operation = Arc::clone(&validation.inventory);
+        operation
+            .reserve::<NativeOfferContribution>(self.offers.len())
+            .map_err(|error| evidence(error.into()))?;
+        let mut contributions = Vec::with_capacity(self.offers.len());
+        let mut available = BTreeMap::new();
+        for offer in &self.offers {
+            crate::host_work::checkpoint()?;
+            let contribution = offer
+                .contribution_for(&BTreeSet::from([offer.original()]))?
+                .ok_or_else(|| failure("cohort offer lost its own contribution"))?;
+            for id in contribution.originals() {
+                let entry = self
+                    .entries
+                    .get(id)
+                    .ok_or_else(|| failure("cohort proof lost an exact original payload"))?;
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return Err(failure("cohort native proof has non-original payload"));
+                };
+                if !available.contains_key(id) {
+                    operation
+                        .reserve::<(
+                            ArtifactId,
+                            &crate::recovery_artifacts::CertifiedRecoveryProduct,
+                            [usize; 4],
+                        )>(1)
+                        .map_err(|error| evidence(error.into()))?;
+                    product
+                        .original_native()
+                        .ok_or_else(|| failure("cohort native proof lacks authenticated witness"))?
+                        .validate_package_interfaces(validation)
+                        .map_err(evidence)?;
+                    available.insert(*id, product);
+                }
+            }
+            contributions.push(contribution);
+        }
+        let mut inventory = crate::certified_products::OriginalValidationInventory::selected(
+            &available, &operation,
+        )
+        .map_err(evidence)?;
+        for contribution in &contributions {
+            inventory
+                .validate_selected_scope(
+                    crate::certified_products::SelectedOriginalGroupScope::Contribution(
+                        contribution,
+                    ),
+                    validation,
+                )
+                .map_err(evidence)?;
+        }
+        Ok(ValidatedFreshNativeAvailability {
+            roots: self.roots,
+            offers: self.offers,
+        })
+    }
+
     pub(super) fn from_complete_custody(
         admitted: IssuedArtifactCustody,
         originals: &[ArtifactId],
     ) -> Result<Self, CompileError> {
         let entries = admitted.entries.clone();
+        let offers = IssuedNativeOffer::issue_custody(admitted, originals)?;
+        if offers
+            .iter()
+            .any(|offer| matches!(offer.0.body, NativeOfferBody::Partial(_)))
+        {
+            return Err(failure(
+                "complete availability lacks its issued group census",
+            ));
+        }
         Ok(Self {
-            offers: IssuedNativeOffer::issue_complete_custody(admitted, originals)?,
+            offers,
+            entries,
+            roots: originals.iter().copied().collect(),
+        })
+    }
+
+    pub(super) fn from_cohort_custody(
+        admitted: IssuedArtifactCustody,
+        originals: &[ArtifactId],
+    ) -> Result<Self, CompileError> {
+        let entries = admitted.entries.clone();
+        Ok(Self {
+            offers: IssuedNativeOffer::issue_custody(admitted, originals)?,
             entries,
             roots: originals.iter().copied().collect(),
         })
@@ -2012,12 +2435,14 @@ impl IssuedNativeOffer {
 
     /// Complete availability is issued directly by the checked scope solver.
     /// A complete census in bytes alone cannot enter this constructor.
-    fn issue_complete_custody(
+    fn issue_custody(
         admitted: IssuedArtifactCustody,
         originals: &[ArtifactId],
     ) -> Result<Vec<Self>, CompileError> {
         let source_receipt = admitted.source_receipt;
+        let supplied = admitted.supplied;
         let source = admitted.lease;
+        let issuing_view = ArtifactView::from_custody(Arc::clone(&source));
         let mut offers = Vec::new();
         let state = source.inventory.0.lock().expect("inventory lock");
         // Index the solver-issued roots once. The carrier is part of the key:
@@ -2052,10 +2477,10 @@ impl IssuedNativeOffer {
             }
         }
         for &original in originals {
-            let entry = source
-                .payloads
-                .get(&original)
-                .ok_or_else(|| failure("complete availability lacks original custody"))?;
+            let outcome = supplied.get(&original).ok_or_else(|| {
+                failure("native availability lacks its supplied artifact outcome")
+            })?;
+            let entry = &outcome.entry;
             let ArtifactPayload::Original(product) = &entry.payload else {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
@@ -2066,15 +2491,27 @@ impl IssuedNativeOffer {
                     .module_interface()
                     .ok_or_else(|| failure("complete availability lacks canonical interface"))?,
             );
-            let carrier = *source
-                .selection
-                .namespace
-                .get(&original)
-                .ok_or_else(|| failure("complete availability lacks exact original carrier"))?;
-            let canonical =
-                *source.selection.namespace.get(&interface).ok_or_else(|| {
-                    failure("complete availability lacks exact canonical carrier")
-                })?;
+            let carrier = outcome.binding;
+            let mut canonical = state
+                .outgoing(ArtifactBindingNode::Artifact(carrier))
+                .filter_map(|(node, edge)| match node {
+                    ArtifactBindingNode::Artifact(binding)
+                        if binding.artifact == interface
+                            && *edge == ArtifactDependency::Interface =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                });
+            let selected_canonical = canonical
+                .next()
+                .ok_or_else(|| failure("native availability lacks its supplied canonical edge"))?;
+            if canonical.next().is_some() {
+                return Err(failure(
+                    "native availability has competing supplied canonical edges",
+                ));
+            }
+            let canonical = selected_canonical;
             if ambiguous_roots.contains(&(original, carrier)) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
@@ -2083,13 +2520,16 @@ impl IssuedNativeOffer {
             let roots = issued_roots
                 .remove(&(original, carrier))
                 .unwrap_or_default();
-            if !entry
+            let complete = entry
                 .native_group_ordinals
                 .iter()
-                .all(|ordinal| roots.contains_key(ordinal))
+                .all(|ordinal| roots.contains_key(ordinal));
+            if roots
+                .keys()
+                .any(|ordinal| !entry.native_group_ordinals.contains(ordinal))
             {
                 return Err(failure(
-                    "complete availability lacks its issued group census",
+                    "native availability exceeds its supplied group census",
                 ));
             }
             let selected_roots = if roots.is_empty() {
@@ -2101,16 +2541,24 @@ impl IssuedNativeOffer {
                     .map(ArtifactBindingNode::Group)
                     .collect()
             };
+            let executable_nodes = admitted_closure(&state, selected_roots.iter().copied())
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let owned = &issuing_view.read_projection(&state).nodes;
+            let nodes =
+                issuing_view.native_payload_custody_nodes(&state, owned, &executable_nodes)?;
+            let metadata = nodes
+                .difference(&executable_nodes)
+                .copied()
+                .collect::<Vec<_>>();
+            let nodes = nodes.into_iter().collect::<imbl::OrdSet<_>>();
             let selected = selection_snapshot_for_lease(
                 &state,
                 &BTreeMap::from([(original, carrier), (interface, canonical)]),
                 &selected_roots,
-                &[],
+                &metadata,
                 &[],
             );
-            // This pass is the acquisition-time complete closure validation;
-            // demand consumers retain the proof and query exact rows by key.
-            let nodes = admitted_closure(&state, selected_roots.iter().copied());
             let groups = nodes
                 .iter()
                 .filter_map(|node| match node {
@@ -2119,7 +2567,9 @@ impl IssuedNativeOffer {
                 })
                 .collect();
             let mut custody_selection = (*selected).clone();
-            custody_selection.custody_roots = custody_selection.roots.clone();
+            for (root, ()) in &custody_selection.roots {
+                custody_selection.custody_roots.insert(*root, ());
+            }
             custody_selection.roots.clear();
             custody_selection.namespace.clear();
             let mut payloads = Default::default();
@@ -2143,6 +2593,11 @@ impl IssuedNativeOffer {
             });
             let body = if roots.is_empty() {
                 NativeOfferBody::Empty
+            } else if !complete {
+                NativeOfferBody::Partial(NativeOriginalRequirement {
+                    original,
+                    selection: ExactArtifactSelection::from_snapshot(selected),
+                })
             } else {
                 NativeOfferBody::Full {
                     proof: NativeOriginalRequirement {
@@ -3042,6 +3497,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &physical,
             entries,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap()
         .issued_artifacts()
@@ -3147,6 +3603,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &physical,
             entries,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap()
         .issued_artifacts()
@@ -3519,6 +3976,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &artifacts,
             entries.clone(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
@@ -3967,7 +4425,12 @@ mod normalized_dependency_tests {
             Some(canonical_id)
         );
         let mut fixed = inventory
-            .bind_segment(&receiving, vec![], &selection)
+            .bind_segment(
+                &receiving,
+                vec![],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         assert!(!fixed.view.namespace().contains_key(&hidden_id));
         assert_ne!(
@@ -4051,6 +4514,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &artifacts,
             vec![entry.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         assert!(completed

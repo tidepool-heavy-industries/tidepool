@@ -3217,7 +3217,7 @@ class CatalogSourceTests(unittest.TestCase):
         bundle = self.root / 'bundle'
         shared = bundle / 'share/exomonad'
         catalog = shared / 'catalog/catalog.json'
-        qualification.write_json(catalog, {'schema': 4, 'source_selection': self.selection(original),
+        qualification.write_json(catalog, {'schema': 5, 'source_selection': self.selection(original),
                                           'producer_identity': [3] * 32, 'consumed_worker_identity': [4] * 32,
                                           'modules': []})
         shutil.copy2(record, catalog.parent / 'source-retention.json')
@@ -3632,6 +3632,35 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 qualification.verify_native_catalog(bundle, tools)
 
+    def test_catalog_schema_five_refuses_legacy_four_with_matching_envelopes(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        bundle, contract, catalog = self.catalog_fixture(original, tools, record)
+        current = json.loads(catalog.read_text())
+        self.assertEqual(current['schema'], 5)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'):
+            self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
+            qualification.write_json(catalog, {**current, 'schema': 4})
+            products = qualification.native_catalog_products(catalog.parent)
+            selected = {**contract['native_catalog'],
+                        'catalog_sha256': qualification.sha256(catalog),
+                        'product_inventory_sha256': qualification.digest_inventory(products)}
+            receipt_path = catalog.parent / qualification.NATIVE_CATALOG_BUILD
+            receipt = json.loads(receipt_path.read_text())
+            receipt.update(selected, product_inventory=products)
+            qualification.write_json(receipt_path, receipt)
+            contract['native_catalog'] = selected
+            qualification.write_json(bundle / 'share/exomonad/native-build-contract.json', contract)
+            with self.assertRaisesRegex(ValueError, 'expected 5, observed 4'):
+                qualification.verify_native_catalog(bundle, tools)
+        for altered in ({key: value for key, value in current.items() if key != 'schema'},
+                        {**current, 'schema': None}, {**current, 'schema': '5'}, {**current, 'schema': 5.0}):
+            with self.subTest(schema=altered.get('schema', 'missing')):
+                qualification.write_json(catalog, altered)
+                with self.assertRaisesRegex(ValueError, 'unsupported native catalog schema'):
+                    qualification.native_catalog_selection(catalog, original)
+        qualification.write_json(catalog, current)
+        self.assertEqual(qualification.native_catalog_selection(catalog, original), self.selection(original))
+
     def test_catalog_refuses_wrong_source_digest_even_when_bundle_envelopes_match(self):
         original, tools, record, pin, nar = self.retained_fixture()
         bundle, contract, catalog = self.catalog_fixture(original, tools, record)
@@ -3670,6 +3699,23 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(len(execute.call_args_list), 1)
             self.assertIn('--verify-path', execute.call_args_list[0].args[0])
 
+    def test_native_action_refuses_legacy_catalog_before_publishing_build_evidence(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'legacy-catalog-products')
+        def execute(command, **kwargs):
+            if '--verify-path' not in command:
+                self.complete_compiler(command)
+                qualification.write_json(args.output / 'catalog.json',
+                                         {'schema': 4, 'source_selection': self.selection(original)})
+            return subprocess.CompletedProcess(command, 0)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+            with self.assertRaisesRegex(ValueError, 'expected 5, observed 4') as failure:
+                qualification.build_native_catalog(args)
+        self.assertIn(str(args.output / 'catalog.json'), str(failure.exception))
+        self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+        outcome = json.loads((args.output.with_name(args.output.name + '.invocation') / 'outcome.json').read_text())
+        self.assertTrue(outcome['completed'], 'producer completion is separate from catalog qualification')
+
     def test_native_action_uses_original_probe_and_explicit_compiler_then_rechecks(self):
         original, tools, record, pin, nar = self.retained_fixture()
         output = self.root / 'native-products'
@@ -3694,7 +3740,7 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertNotIn('TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH', env)
             for key in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT'):
                 self.assertNotIn(key, env)
-            qualification.write_json(output / 'catalog.json', {'schema': 4, 'source_selection': self.selection(original)})
+            qualification.write_json(output / 'catalog.json', {'schema': 5, 'source_selection': self.selection(original)})
             return subprocess.CompletedProcess(command, 0)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute), \
              patch.dict(os.environ, {'TIDEPOOL_COMPILER_MODULES': '/ambient/catalog',
@@ -3848,7 +3894,7 @@ class CatalogSourceTests(unittest.TestCase):
                             qualification.write_json(root / 'lifecycle.json',
                                 {'schema': 1, 'cleanup_confirmed': True, 'exit_code': None})
                     qualification.write_json(args.output / 'catalog.json',
-                        {'schema': 4, 'source_selection': self.selection(original)})
+                        {'schema': 5, 'source_selection': self.selection(original)})
                     return subprocess.CompletedProcess(command, 0)
                 with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
                     with self.assertRaisesRegex(ValueError, 'compiler settlement unconfirmed|producer outcome unavailable or inconsistent'):

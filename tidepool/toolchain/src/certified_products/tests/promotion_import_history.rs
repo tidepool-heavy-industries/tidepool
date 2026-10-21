@@ -296,7 +296,7 @@ fn expected_promoted_versions(
 
 fn native_import_facts(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
-) -> Vec<Vec<PendingImportOwner>> {
+) -> Vec<Vec<ReceiptImportOwner>> {
     product
         .original_native()
         .unwrap()
@@ -471,7 +471,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert_eq!(initial_a.original_native().unwrap().groups.len(), 2);
     assert_eq!(initial_b.original_native().unwrap().groups.len(), 2);
     assert!(initial_a.original_native().unwrap().groups.iter().all(|g| {
-        matches!(&g.imports[..], [PendingImportOwner::Source { owner, original_ordinal, binder: imported }] if owner == initial_b.owner() && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
+        matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
     let initial_view = crate::declaration_context::certified_product_artifact_view_with_validation(
         canonical_producer,
@@ -703,7 +703,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert_eq!(current_a.owner().module_version, expected_versions[A]);
     assert_eq!(current_b.owner().module_version, expected_versions[B]);
     assert!(current_a.original_native().unwrap().groups.iter().all(|g| {
-        matches!(&g.imports[..], [PendingImportOwner::Source { owner, original_ordinal, binder: imported }] if owner == current_b.owner() && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
+        matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &current_b.owner().unit && module == &current_b.owner().module && module_version.as_ref() == Some(&current_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
 
     let inventory_decodes_before = MODULE_PRODUCT_INVENTORY_DECODES.with(std::cell::Cell::get);
@@ -781,6 +781,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             &inventory,
         )
         .unwrap();
+    let package_interfaces = capture_independent_package_interfaces(&shared_receipt, &mut validation).unwrap();
     let shared = CertifiedSegmentOriginals::issue(
         shared_raw,
         shared_receipt,
@@ -792,6 +793,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
         &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
+        &package_interfaces,
         &mut validation,
     )
     .unwrap();
@@ -920,7 +922,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         certify_target_owners_with_validation(
             &target,
             &globals,
-            &selected.groups,
+            &[],
             &selected.source_selection,
             &packages,
             &mut validation,
@@ -1360,7 +1362,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             assert_ne!(current_b.owner(), &first_b_owner);
         }
         assert!(current_a.original_native().unwrap().groups.iter().all(|g| {
-            matches!(&g.imports[..], [PendingImportOwner::Source { owner, original_ordinal, binder: imported }] if owner == current_b.owner() && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
+            matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &current_b.owner().unit && module == &current_b.owner().module && module_version.as_ref() == Some(&current_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
         }));
         if let Some(previous) = historical_a_imports.get(current_a.owner()) {
             assert_eq!(previous, &native_import_facts(current_a));
@@ -1497,7 +1499,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         );
         for group in product.original_native().unwrap().groups.iter() {
             assert!(matches!(
-                &group.imports[..],
+                &group.source_imports(product.original_native().unwrap()).unwrap()[..],
                 [PendingImportOwner::Source { owner, original_ordinal, binder: imported }]
                     if owner.module == B
                         && retained_owners.contains(owner)
@@ -1522,6 +1524,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .find(|product| product.owner() == initial_a.owner())
         .unwrap();
     assert!(retained_initial_a.original_native().unwrap().groups.iter().all(|group| {
-        matches!(&group.imports[..], [PendingImportOwner::Source { owner, .. }] if owner == initial_b.owner())
+        matches!(&group.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, .. }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version))
     }));
 }

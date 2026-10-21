@@ -13,7 +13,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
 import System.IO (stderr)
-import Control.Monad ((>=>), forM, forM_, unless, void)
+import Control.Monad ((>=>), forM, forM_, unless, void, when)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import qualified Data.ByteString.Lazy as BL
@@ -660,6 +660,9 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
               _ -> fail "native writer emitted a malformed selected package witness"
             unless (wantsCode || any (\(_,name,_,_,_) -> name == "GHC.Types") witnesses)
               (fail "native package fixture lost its TYPE-only GHC.Types witness")
+            when wantsCode $ forM_ ["Data.List","Prelude"] $ \direct ->
+              unless (any (\(_,name,_,_,_) -> name == direct) witnesses)
+                (fail "native output omitted a canonical sidecar package interface")
             unless (Set.fromList captured == Set.fromList
                 [Text.unpack seal ++ ".hi" | (_,_,_,seal,_) <- witnesses])
               (fail "native package interfaces were duplicated or omitted from the witness table")
@@ -671,7 +674,8 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                     token = Map.singleton owner (sourceCopy,body)
                 BS.writeFile sourceCopy (artifactBytes body)
                 removeFile sourceCopy
-                retained <- captureSelectedPackageWitnesses (work </> "retained-package-check") token (selected ++ selected)
+                retained <- captureSelectedPackageWitnesses (work </> "retained-package-check") token
+                  (selected ++ [(unit,name,work </> "same-captured-interface.hi",seal)])
                   >>= either fail pure
                 unless (Map.size (fst retained) == 1 && length (snd retained) == 1)
                   (fail "selected package token was not shared across duplicate references")

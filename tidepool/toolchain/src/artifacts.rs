@@ -1052,7 +1052,6 @@ pub fn prepare_world_cell_program(
                     Some(&segment.originals),
                     Some(entry),
                     None,
-                    None,
                     Some(cursor),
                     &mut validation,
                 )?;
@@ -3009,6 +3008,9 @@ impl SelectedModuleCandidateOffer {
             &receipt.modules,
             &source_admission.exact().source().evidence(),
         )?;
+        let package_interfaces = certified_products::capture_independent_package_interfaces(
+            &receipt, validation,
+        ).map_err(compiler_evidence_failure)?;
         let originals = certified_products::CertifiedSegmentOriginals::issue(
             parsed,
             receipt,
@@ -3020,6 +3022,7 @@ impl SelectedModuleCandidateOffer {
             self.selected.as_deref(),
             &self.selected_session_values,
             Some(produced),
+            &package_interfaces,
             validation,
         )
         .map_err(compiler_evidence_failure)?;
@@ -4187,8 +4190,13 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    let captured_package_interfaces = native_output
+        .map(|(output, receipt)| certified_products::PackageInterfaceCustody::from_native_output(output, receipt, validation)
+            .map_err(compiler_evidence_failure))
+        .transpose()?;
     let package_products = native_output
-        .map(|(output, receipt)| certify_native_package_products(output, receipt, validation))
+        .map(|(output, receipt)| certify_native_package_products(output, receipt,
+            captured_package_interfaces.as_ref().expect("captured native output custody"), validation))
         .transpose()?
         .unwrap_or_default();
     let valid =
@@ -4238,12 +4246,22 @@ fn seal_turn_outputs_with_validation(
             (products, Some(globals), Some(packages))
         }
         None => {
+            let independent_package_interfaces;
+            let package_interfaces = match &captured_package_interfaces {
+                Some(interfaces) => interfaces,
+                None => {
+                    independent_package_interfaces = certified_products::capture_independent_package_interfaces(
+                        ordinary_receipt.as_ref().expect("ordinary receipt"), validation,
+                    ).map_err(compiler_evidence_failure)?;
+                    &independent_package_interfaces
+                }
+            };
             timing::record_inventory_work(
                 "products.certify.before",
                 output_dir,
                 &validation.inventory,
             );
-            let products = certified_products::certify_products_with_validation(
+            let mut products = certified_products::certify_products_with_validation(
                 offer.selected.as_deref(),
                 ordinary_receipt.as_ref().expect("ordinary receipt"),
                 fresh_products,
@@ -4256,9 +4274,19 @@ fn seal_turn_outputs_with_validation(
                 authored,
                 &offer.selected_session_values,
                 produced_types,
+                package_interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)?;
+            crate::declaration_context::issue_certified_product_native_availability(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &offer.producer,
+                )
+                .sha256(),
+                &mut products,
+                request_admission.map(|request| request.compiler_inputs().artifacts()),
+                validation,
+            )?;
             timing::record_inventory_work(
                 "products.certify.after",
                 output_dir,
@@ -4338,7 +4366,6 @@ fn seal_turn_outputs_with_validation(
         &package_catalog,
         segment_originals,
         typed_entry,
-        request_admission.map(|request| request.compiler_inputs().artifacts()),
         request_admission.map(|request| request.certified_groups()),
         segment_cursor.take(),
         validation,
@@ -4509,6 +4536,7 @@ fn seal_turn_outputs_with_validation(
 fn certify_native_package_products(
     output: &invocation_output::CapturedNativeOutput<'_>,
     receipt: &certified_products::CertifiedReceipt,
+    interfaces: &certified_products::PackageInterfaceCustody,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Vec<Arc<certified_products::CertifiedPackageCodeProduct>>, CompileError> {
     output.validate_interfaces(receipt, validation)?;
@@ -4527,6 +4555,7 @@ fn certify_native_package_products(
                 Path::new(""),
                 product,
                 receipt,
+                interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)
@@ -4554,7 +4583,6 @@ fn admit_native_target_products(
     package_catalog: &PackageInterfaceCatalog<'_>,
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
-    compiler_artifacts: Option<&crate::artifact_inventory::ArtifactView>,
     inherited_groups: Option<&crate::declaration_context::CertifiedArtifactGroupBindings>,
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
@@ -4571,17 +4599,12 @@ fn admit_native_target_products(
     // Shared original membership already authenticates every current group.
     // The per-item lookup needs only that immutable index; execution selection
     // is still admitted below from the checked entry and exact target imports.
-    let selected_membership = if segment_originals.is_some() {
-        &[][..]
-    } else {
-        certified.groups.as_ref()
-    };
     let imports =
         certified_products::certify_target_available_owners_from_membership_with_validation(
             prepared,
             accepted,
             &original_sources,
-            selected_membership,
+            &[],
             &certified.source_selection,
             package_catalog,
             validation,
@@ -4611,16 +4634,24 @@ fn admit_native_target_products(
             )?
         }
         None => {
-            crate::declaration_context::certified_selected_product_artifact_view_with_validation(
-                producer,
-                &certified.recovery_products,
-                &certified.module_interfaces,
-                &certified.value_interfaces,
-                compiler_artifacts,
-                demand,
-                validation,
-                &certified.source_selection,
-            )?
+            let physical = certified
+                .original_inputs
+                .as_ref()
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "ordinary target lacks physical cohort issuance".into(),
+                    )
+                })?
+                .issued_artifacts();
+            physical
+                .inventory()
+                .admit_product_artifacts(
+                    physical,
+                    Vec::new(),
+                    demand,
+                    Some(&certified.source_selection),
+                )?
+                .into_target()?
         }
     };
     let artifact_view = admitted_target.artifacts();
@@ -4760,12 +4791,6 @@ impl PackageInterfaceCatalog<'_> {
         {
             let (unit, module, digest) = match import {
                 certified_products::PendingImportOwner::Package {
-                    unit,
-                    module,
-                    interface_digest,
-                    ..
-                }
-                | certified_products::PendingImportOwner::RetainedPackage {
                     unit,
                     module,
                     interface_digest,
@@ -4966,7 +4991,7 @@ pub(crate) fn compile_authored_products(
 
 /// Build an explicitly selected immutable source cohort at its final deployment
 /// path. The declared probe and ordered targets run under build-action isolation;
-/// only authenticated originals are exported. Schema 4 retains original source
+/// only authenticated originals are exported. Schema 5 retains original source
 /// paths while allowing the complete product container to move unchanged.
 pub fn build_deployment_module_package(
     source_path: &Path,
@@ -6286,8 +6311,11 @@ fn compile_invocation_inner(
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
         let receipt = &native.receipt;
+        let captured_package_interfaces = certified_products::PackageInterfaceCustody::from_native_output(
+            &native_output, receipt, &mut validation,
+        ).map_err(compiler_evidence_failure)?;
         let package_products =
-            certify_native_package_products(&native_output, receipt, &mut validation)?;
+            certify_native_package_products(&native_output, receipt, &captured_package_interfaces, &mut validation)?;
         invocation_timing.advance("product_decode_and_freshness");
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
@@ -6302,7 +6330,7 @@ fn compile_invocation_inner(
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
         invocation_timing.advance("product_certification");
-        let certified = if let Some(valid) = valid_evidence {
+        let mut certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
                 &receipt,
@@ -6314,6 +6342,7 @@ fn compile_invocation_inner(
                 authored,
                 &selected_session_values,
                 None,
+                &captured_package_interfaces,
                 &mut validation,
             )
             .map_err(compiler_evidence_failure)?;
@@ -6408,6 +6437,19 @@ fn compile_invocation_inner(
                 "target product receipt count".into(),
             ));
         }
+        let compiler_inputs = exact_request
+            .as_ref()
+            .map(|request| request.compiler_inputs());
+        let physical_inputs =
+            crate::declaration_context::issue_certified_product_native_availability(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &producer,
+                )
+                .sha256(),
+                &mut certified,
+                compiler_inputs.as_ref().map(|input| input.artifacts()),
+                &mut validation,
+            )?;
         let target_admission_start = Instant::now();
         invocation_timing.advance("target_admission");
         let package_catalog =
@@ -6423,7 +6465,7 @@ fn compile_invocation_inner(
                         target.prepared.prepared(),
                         accepted,
                         &certified.recovery_products,
-                        &certified.groups,
+                        &[],
                         &certified.source_selection,
                         &package_catalog,
                         &mut validation,
@@ -6432,25 +6474,18 @@ fn compile_invocation_inner(
                 );
             }
         }
-        let compiler_inputs = exact_request
-            .as_ref()
-            .map(|request| request.compiler_inputs());
-        let admitted_targets =
-            crate::declaration_context::certified_selected_product_artifact_view_with_validation(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &producer,
-                )
-                .sha256(),
-                &certified.recovery_products,
-                &certified.module_interfaces,
-                &certified.value_interfaces,
-                compiler_inputs.as_ref().map(|input| input.artifacts()),
+        let physical = physical_inputs.issued_artifacts();
+        let admitted_targets = physical
+            .inventory()
+            .admit_product_artifacts(
+                physical,
+                Vec::new(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                     &target_imports,
                 ),
-                &mut validation,
-                &certified.source_selection,
-            )?;
+                Some(&certified.source_selection),
+            )?
+            .into_target()?;
         artifacts.artifact_view = admitted_targets.artifacts().clone();
         let selected_groups = Arc::new(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
@@ -9004,6 +9039,82 @@ mod module_product_tests {
             settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionOrigin,
         };
+        let initial = if mixed {
+            let compiled = crate::artifacts::test_support::compile_invocation(
+                &CompileInvocation {
+                    source: include_str!("../tests/fixtures/world-native/StageInputG.hs"),
+                    targets: &["g"],
+                    include: &[],
+                    fallback_module_name: "StageInputG",
+                },
+                |_, _, _| {},
+            )
+            .expect("actual finite producer for the initial World Original");
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                compiled
+                    .source_selection
+                    .as_ref()
+                    .expect("actual finite source selection"),
+                &compiled.artifact_view,
+            )
+            .expect("carry the finite producer's issued availability");
+            let support =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .expect("actual initial compiler support");
+            let row = support
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner().module == "StageInputG")
+                .expect("finite producer retained its own Original availability");
+            let crate::artifact_inventory::ArtifactPayload::Original(product) =
+                &row.target_original(row.original_owner()).unwrap().payload
+            else {
+                unreachable!()
+            };
+            let native = product.original_native().unwrap();
+            let ordinal_for = |name: &str| {
+                native
+                    .inventory_facts()
+                    .native_group_ordinals
+                    .iter()
+                    .copied()
+                    .find(|ordinal| {
+                        certified_products::original_native_group_definitions(product, *ordinal)
+                            .unwrap()
+                            .bindings()
+                            .iter()
+                            .any(|group| match group {
+                                tidepool_repr::execution_schema::Group::NonRecursive(binding) => {
+                                    binding.identity.occurrence == name
+                                }
+                                tidepool_repr::execution_schema::Group::Recursive(bindings) => {
+                                    bindings
+                                        .iter()
+                                        .any(|binding| binding.identity.occurrence == name)
+                                }
+                            })
+                    })
+                    .expect("actual named Original group")
+            };
+            let used = ordinal_for("g");
+            let unused = ordinal_for("unusedSibling");
+            assert_ne!(
+                used, unused,
+                "unused sibling has independent physical membership"
+            );
+            assert!(
+                row.permits(used) && row.permits(unused),
+                "initial genuine availability includes the unused sibling"
+            );
+            Some(Arc::new(
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap(),
+            ))
+        } else {
+            None
+        };
         for cancel_after_end in [false, true] {
             let cancellation = CompilerTransactionCancellation::new();
             let mut observed_close = None;
@@ -9082,11 +9193,15 @@ mod module_product_tests {
                     )?);
                     let source = WorldSourceSelection::new(*sources.seal(), "native-world-source")?;
                     let inputs = ModuleCandidateOffer::compiler_world_inputs(
-                        None,
+                        initial.clone(),
                         CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                         sources,
                         crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
-                            Vec::new(),
+                            if mixed {
+                                vec!["import qualified StageInputG".into()]
+                            } else {
+                                Vec::new()
+                            },
                             None,
                         )?,
                     )?;
@@ -9219,6 +9334,7 @@ mod module_product_tests {
                 .action
                 .expect("actual World native preparation");
             if mixed && !cancel_after_end {
+                crate::compiler_world::native_demand::assert_captured_stage_input_refusals(&checked);
                 crate::declaration_context::assert_world_repeated_source_refusals(
                     &checked,
                     prepared.outputs[&4]
@@ -9333,6 +9449,47 @@ mod module_product_tests {
                     certificate.product().owner().module,
                     "Tidepool.Session.Lib.G32"
                 );
+                let native = certificate.product().original_native().unwrap();
+                let references = native
+                    .inventory_facts()
+                    .native_group_ordinals
+                    .iter()
+                    .flat_map(|ordinal| {
+                        certified_products::original_native_group_imports(
+                            certificate.product(), *ordinal,
+                        )
+                        .unwrap()
+                    })
+                    .filter(|reference| matches!(reference,
+                        certified_products::ReceiptImportOwner::OriginalBinding { module, binder, .. }
+                        if module == "StageInputG" && binder.occurrence == "g"))
+                    .collect::<BTreeSet<_>>();
+                assert!(
+                    !references.is_empty(),
+                    "actual dormant declaration retains its exact Original import"
+                );
+                for stage in checked.stages() {
+                    let validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                            Arc::clone(&checked.validation().inventory),
+                        );
+                    let captured = checked
+                        .native_demand_completion()
+                        .checked_stage(&checked, stage, &validation)
+                        .unwrap();
+                    let uses = captured
+                        .selection()
+                        .into_iter()
+                        .flat_map(|selection| selection.batches())
+                        .flat_map(|batch| batch.original_uses())
+                        .filter(|reference| references.contains(reference))
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "actual dormant Original stage={} ordinals={:?} uses={uses:?}",
+                        stage.index(),
+                        stage.ordinals()
+                    );
+                }
                 assert!(program.items()[2].native().is_some());
                 assert!(program.items()[3].native().is_some());
                 assert!(program.items()[3]
@@ -12471,7 +12628,6 @@ mod source_proof_pairing_tests {
                 assert!(requirements.group_ordinals.contains(dependent_ordinal));
                 assert!(requirements.group_ordinals.contains(required_ordinal));
             }
-            assert!(requirements.retained_packages.is_empty());
             let inventory = crate::artifact_inventory::ArtifactInventory::default();
             let artifacts = inventory
                 .admit_shared_with_demand(

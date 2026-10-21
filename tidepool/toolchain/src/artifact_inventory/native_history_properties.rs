@@ -1613,7 +1613,6 @@ fn run_history_observed(
                             step
                         );
                         prop_assert_eq!(result.bindings, catalog.bindings_for(&requested));
-                        prop_assert!(result.packages.is_empty());
                         coverage.custody_only_reads +=
                             usize::from(!requested.is_subset(&view.demand));
                         coverage.reads += 1;
@@ -1796,6 +1795,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 &mut selection,
                 &base,
                 Vec::new(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap()
             .issued_artifacts()
@@ -1963,7 +1963,12 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 .unwrap();
             let receiving_inventory = inputs.artifacts().inventory();
             let mut fixed = receiving_inventory
-                .bind_segment(inputs.artifacts(), Vec::new(), &continuation)
+                .bind_segment(
+                    inputs.artifacts(),
+                    Vec::new(),
+                    &continuation,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let target = receiving_inventory.admit_bound_target(
                 &mut fixed,
@@ -2446,7 +2451,7 @@ fn retained_body_enters_demand_only_after_explicit_selection() {
             original_ordinal: body.original_ordinal,
         }])
         .unwrap();
-    assert!(available.bindings.is_empty() && available.packages.is_empty());
+    assert!(available.bindings.is_empty());
     assert_eq!(
         projected.selected_native_groups(),
         catalog.selection(&expected),
@@ -2524,7 +2529,6 @@ fn check_cold_native_projection(
         }])
         .unwrap();
     prop_assert_eq!(requirements.bindings, catalog.bindings_for(&root_groups(0)));
-    prop_assert!(requirements.packages.is_empty());
     prop_assert_eq!(
         groups,
         catalog.selection(&catalog.group_closure(&root_groups(0)))

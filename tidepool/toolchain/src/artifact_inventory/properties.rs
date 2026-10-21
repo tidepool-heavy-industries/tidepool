@@ -1069,7 +1069,6 @@ proptest! {
         }
         let requirements = captured.native_requirements_from_roots(&native_roots).unwrap();
         prop_assert_eq!(&requirements.bindings, &expected);
-        prop_assert!(requirements.packages.is_empty());
         prop_assert_eq!(captured.native_binding_requirements_from_roots(&native_roots).unwrap(), expected);
         prop_assert!(captured.native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(ArtifactId([255; 32]))]).is_err());
         drop(captured);
@@ -1483,7 +1482,6 @@ proptest! {
             actual.bindings.iter().cloned().collect::<BTreeSet<_>>(),
             expected_bindings
         );
-        prop_assert!(actual.packages.is_empty());
         prop_assert!(!expected_groups.is_empty());
         prop_assert!(!expected_groups.contains(&(0, 11)), "the unselected later group on the root became a demand");
 

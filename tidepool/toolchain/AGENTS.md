@@ -89,6 +89,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   interface/native edges and executable group demand, and validates them against
   the certified payloads before restoring compiler roles. A completed source-compilation instance
   proof remains transaction-owned rather than reconstructed from durable bytes.
+- Canonical and Original sidecar obligations retain the same immutable selected
+  package-interface tokens even when no package code is demanded. Recovery
+  requires exact owner/seal references and byte custody, including TYPE-only
+  interfaces. Sealed package-selection origins and receiving copy paths are
+  separate facts: equal bytes never rebind current compiler or source authority.
 - Package-code artifacts retain immutable envelopes and their captured defining
   and ordered import interfaces as custody. They grant no compiler role, HOME
   original, source authority or executable readiness. Restore their explicit
@@ -128,7 +133,7 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
 - `build_deployment_module_package` shares build-action isolation and exports
   authenticated module records through the existing catalog owner. A declared
   probe and ordered targets select the cohort; deployment export never grants
-  runtime candidate publication. Schema 4 keeps original source paths and
+  runtime candidate publication. Schema 5 keeps original source paths and
   proofs unchanged; product references resolve under the opened catalog's
   canonical parent. Source retention remains the qualification owner's job.
 - Runtime retained entries may borrow only the admitted deployment catalog.

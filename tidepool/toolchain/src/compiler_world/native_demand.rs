@@ -22,6 +22,47 @@ pub(crate) struct WorldNativeDemandStage {
     selected_groups: Arc<DemandCertifiedGroups>,
 }
 
+/// Initial native permission for one actually emitted stage. The complete
+/// request retains each resolved demand owner; the advancing source prefix is
+/// deliberately not a replacement acquisition for these historical choices.
+#[derive(Clone)]
+pub(crate) struct CheckedWorldStageNativeInputs {
+    request: Arc<WorldNativeDemandCompletion>,
+    stage: Arc<CheckedWorldCellStage>,
+    offset: u64,
+}
+
+impl std::fmt::Debug for CheckedWorldStageNativeInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CheckedWorldStageNativeInputs")
+            .field("stage", &self.stage.index())
+            .field("first_ordinal", &self.offset)
+            .field("has_initial_selection", &self.selection().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CheckedWorldStageNativeInputs {
+    pub(crate) fn initial_inputs(&self) -> &Arc<RequestCompilerInputs> {
+        self.request.initial_inputs()
+    }
+
+    pub(crate) fn operation(&self) -> &Arc<tidepool_repr::execution_schema::InventoryOperation> {
+        self.request.operation()
+    }
+
+    pub(crate) fn stage(&self) -> &Arc<CheckedWorldCellStage> {
+        &self.stage
+    }
+
+    pub(crate) fn selection(&self) -> Option<&WorldNativeDemandStage> {
+        // Absence is known empty only because checked_stage proved that this
+        // exact stage was emitted by the same completed request.
+        self.request.stages.get(&self.offset)
+    }
+}
+
 impl WorldNativeDemandStage {
     pub(crate) fn batches(&self) -> &[Arc<ResolvedNativeDemand>] {
         &self.batches
@@ -45,8 +86,54 @@ impl WorldNativeDemandCompletion {
         &self.inputs
     }
 
-    pub(crate) fn stage(&self, stage: u64) -> Option<&WorldNativeDemandStage> {
-        self.stages.get(&stage)
+    pub(crate) fn checked_stage(
+        self: &Arc<Self>,
+        program: &CheckedWorldCellProgram,
+        stage: &Arc<CheckedWorldCellStage>,
+        validation: &crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<CheckedWorldStageNativeInputs, CompileError> {
+        crate::host_work::checkpoint()?;
+        if !Arc::ptr_eq(self, program.native_demand_completion())
+            || !Arc::ptr_eq(&self.reservation, program.reservation())
+            || !Arc::ptr_eq(&self.operation, &program.validation().inventory)
+            || !Arc::ptr_eq(&self.operation, &validation.inventory)
+        {
+            return Err(source_failure(
+                "World stage native inputs belong to another request",
+            ));
+        }
+        // index is the emitted-stage vector position. The first lexical
+        // ordinal is the independently checked key used by native exchange.
+        if program
+            .stages()
+            .get(stage.index())
+            .is_none_or(|emitted| !Arc::ptr_eq(emitted, stage))
+        {
+            return Err(source_failure(
+                "World stage native inputs lack an emitted stage",
+            ));
+        }
+        let first = *stage
+            .ordinals()
+            .first()
+            .ok_or_else(|| source_failure("World stage native inputs have no ordinal"))?;
+        if first >= self.reservation.slots().len()
+            || program
+                .stages()
+                .binary_search_by_key(&first, |emitted| emitted.ordinals()[0])
+                != Ok(stage.index())
+        {
+            return Err(source_failure(
+                "World stage native inputs have another ordinal",
+            ));
+        }
+        let offset = u64::try_from(first)
+            .map_err(|_| source_failure("World native stage ordinal is out of range"))?;
+        Ok(CheckedWorldStageNativeInputs {
+            request: Arc::clone(self),
+            stage: Arc::clone(stage),
+            offset,
+        })
     }
 
     pub(super) fn require_emitted_stages(
@@ -68,6 +155,59 @@ impl WorldNativeDemandCompletion {
         }
         Ok(())
     }
+}
+
+/// Exercise the issuer with an actual completed compiler program. Altered
+/// observations only test refusal; they never return accepted stage authority.
+#[cfg(test)]
+pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellProgram) {
+    let request = program.native_demand_completion();
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+        Arc::clone(&program.validation().inventory),
+    );
+    for stage in program.stages() {
+        let selected = request
+            .checked_stage(program, stage, &validation)
+            .expect("actual emitted stage retains its initial native inputs");
+        assert!(Arc::ptr_eq(selected.stage(), stage));
+        assert!(Arc::ptr_eq(
+            selected.initial_inputs(),
+            request.initial_inputs()
+        ));
+        assert!(Arc::ptr_eq(selected.operation(), request.operation()));
+        let recorded = request.stages.get(&selected.offset);
+        assert_eq!(selected.selection().is_some(), recorded.is_some());
+        if let Some(selection) = selected.selection() {
+            assert!(std::ptr::eq(selection, recorded.unwrap()));
+            for batch in selection.batches() {
+                assert!(batch.belongs_to(request.initial_inputs()));
+            }
+        }
+
+        // Equal observations cannot issue another emitted-stage identity.
+        let unknown = Arc::new(stage.as_ref().clone());
+        assert!(request
+            .checked_stage(program, &unknown, &validation)
+            .is_err());
+        let foreign_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        assert!(request
+            .checked_stage(program, stage, &foreign_validation)
+            .is_err());
+        assert!(
+            request.checked_stage(program, stage, &validation).is_ok(),
+            "refusal preserves the actual stage owner"
+        );
+    }
+    let (foreign, refusal) = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
+        .expect("same reservation has a distinct initial request acquisition")
+        .finish();
+    assert!(refusal.is_none());
+    assert!(foreign
+        .checked_stage(program, &program.stages()[0], &validation)
+        .is_err());
+    assert!(request
+        .checked_stage(program, &program.stages()[0], &validation)
+        .is_ok());
 }
 
 pub(super) struct WorldNativeDemandResolver<'a> {
