@@ -1726,3 +1726,94 @@ fn production_main_reports_once_after_direct_and_framed_completion() {
         }
     }
 }
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "actual direct CLI compiles explicit portable source with the declared GHC worker"
+)]
+fn direct_cli_explicit_portable_compiles_real_source_closure() {
+    let frontend = compiler_inputs::require_compiler_executables();
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("PortableMain.hs");
+    fs::write(
+        scratch.path().join("PortableSupport.hs"),
+        "module PortableSupport where\nanswer :: Int\nanswer = 41\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "module PortableMain where\nimport PortableSupport\nresult :: Int\nresult = answer\n",
+    )
+    .unwrap();
+    let products = scratch.path().join("portable");
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&frontend));
+    command
+        .input(&source)
+        .include(scratch.path())
+        .output_dir(&products)
+        .target("result")
+        .portable_output();
+    let argv = command.worker_argv();
+    let worker = compiler_inputs::required_executable(
+        "TIDEPOOL_EXTRACT_WORKER",
+        std::env::var_os("TIDEPOOL_EXTRACT_WORKER"),
+    )
+    .unwrap();
+    let probe = Command::new(&worker)
+        .arg("--print-worker-request-flag")
+        .output()
+        .unwrap();
+    assert!(probe.status.success());
+    assert_eq!(
+        std::str::from_utf8(&probe.stdout).unwrap().trim(),
+        argv[0].to_str().unwrap(),
+        "actual worker probe differs from the production request encoder"
+    );
+    for (flag, payload, rejection) in [
+        (
+            OsString::from("--worker-request-v28"),
+            argv[1].clone(),
+            "worker requires exactly one versioned request",
+        ),
+        (
+            argv[0].clone(),
+            {
+                let mut payload = argv[1].to_str().unwrap().to_owned();
+                payload.replace_range(..16, "5450524551303238"); // TPREQ028
+                payload.into()
+            },
+            "worker request: unsupported magic or version",
+        ),
+    ] {
+        let rejected = Command::new(&worker)
+            .args([flag, payload])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success(), "retired request was accepted");
+        let diagnostics = [rejected.stdout, rejected.stderr].concat();
+        assert!(
+            String::from_utf8_lossy(&diagnostics).contains(rejection),
+            "{}",
+            String::from_utf8_lossy(&diagnostics)
+        );
+        assert!(!products.exists(), "retired request performed source work");
+    }
+    let output = Command::new(&frontend)
+        .args(argv)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outcome"], "success");
+    for artifact in ["result.prepared.cbor", "meta.cbor"] {
+        assert!(fs::metadata(products.join(artifact)).unwrap().len() > 0);
+    }
+    assert!(!products.join("module-products.cbor").exists());
+}
