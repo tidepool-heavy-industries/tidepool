@@ -10205,7 +10205,7 @@ mod module_product_tests {
             std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
             "this admission control requires --compiler-mode owned-resident"
         );
-        let root = tempfile::tempdir().unwrap();
+        let root = test_support::compiler_input_directory().unwrap();
         let authored = root.path().join("sources");
         std::fs::create_dir(&authored).unwrap();
         let source = authored.join("Input.hs");
@@ -10241,6 +10241,68 @@ mod module_product_tests {
         assert_eq!(extract_spawn_count(), before + 1);
         assert!(output.join("raw/certified-products.cbor").is_file());
         assert!(!root.path().join("entry.preparing").exists());
+
+        let _restore = RestoreEnvironment(vec![(
+            "TIDEPOOL_KEEP_TEST_LOGS",
+            std::env::var_os("TIDEPOOL_KEEP_TEST_LOGS"),
+        )]);
+        std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
+        let invalid_root = root.path().join("invalid-sources");
+        std::fs::create_dir(&invalid_root).unwrap();
+        let invalid_source = invalid_root.join("Broken.hs");
+        let invalid_bytes = b"module Broken where\n__prepared = (\n";
+        std::fs::write(&invalid_source, invalid_bytes).unwrap();
+        let invalid_sources =
+            FrozenEntrySources::capture(&[invalid_root], &invalid_source).unwrap();
+        let failed_output = root.path().join("invalid-entry");
+        let failed = with_compiler_transaction_for_workload(
+            CompileWorkload::Foreground,
+            |_| {},
+            || {
+                prepare_frozen_production_entry(
+                    &invalid_sources,
+                    root.path(),
+                    &failed_output,
+                    &mut |_| {},
+                )
+            },
+        );
+        assert!(matches!(failed.action, Err(CompileError::WorkerFailure(_))));
+        assert_eq!(failed.close, CompilerTransactionClose::Clean);
+        let failed_raw = root.path().join("invalid-entry.preparing/raw");
+        assert!(!failed_output.exists());
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(failed_raw.join("compiler-status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["success"], false);
+
+        let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let cancelled = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                prepare_frozen_production_entry(
+                    &sources,
+                    root.path(),
+                    &root.path().join("cancelled-entry"),
+                    &mut |_| {},
+                )
+            },
+        );
+        assert!(matches!(cancelled.action, Err(CompileError::Io(error))
+            if error.kind() == std::io::ErrorKind::Interrupted));
+        assert_eq!(cancelled.close, CompilerTransactionClose::NotStarted);
+        assert!(!root.path().join("cancelled-entry.preparing").exists());
+        let retained = root.path().to_owned();
+        drop(root);
+        assert_eq!(std::fs::read(invalid_source).unwrap(), invalid_bytes);
+        assert!(failed_raw.join("compiler.stderr").is_file());
+        assert!(failed_raw.join("compiler.stdout").is_file());
+        assert!(failed_raw.join("compiler-request.bin").is_file());
+        assert!(retained.join("inputs.json").is_file());
+        assert!(output.join("raw/certified-products.cbor").is_file());
     }
 
     #[test]
@@ -12444,8 +12506,8 @@ mod source_proof_pairing_tests {
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn source_selected_receipt_pairs_prior_program_support_with_actual_original_proof() {
-        let directory = tempfile::tempdir().unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let directory = test_support::compiler_input_directory().unwrap();
+        {
             let root = directory.path();
             let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
             let original = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
@@ -12553,14 +12615,6 @@ mod source_proof_pairing_tests {
             crate::declaration_context::assert_source_selected_receipt_pairing(
                 root, module, original, support, request, endpoint, offer,
             );
-        }));
-        if let Err(panic) = result {
-            let retained = directory.keep();
-            eprintln!(
-                "source-proof pairing inputs retained at {}",
-                retained.display()
-            );
-            std::panic::resume_unwind(panic);
         }
     }
 }
@@ -12569,6 +12623,43 @@ mod source_proof_pairing_tests {
 pub(crate) mod test_support {
     use super::*;
     use tidepool_extract_cmd::CompilerTransactionClose;
+
+    /// These callers declare an owned-resident compiler, so the isolated runner
+    /// owns the input tree through case settlement, independently of automatic
+    /// compiler capture. Local drop, unwind and cancellation cannot erase it.
+    /// Only the runner disposes successful evidence after confirmed cleanup.
+    pub(crate) fn compiler_input_directory() -> std::io::Result<TempDir> {
+        let root = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                std::io::Error::other("compiler inputs require runner artifact custody")
+            })?;
+        if !root.is_absolute() || !std::fs::symlink_metadata(&root)?.is_dir() {
+            return Err(std::io::Error::other(
+                "compiler input artifact root must be an existing absolute directory",
+            ));
+        }
+        let inputs = root.join("compiler-inputs");
+        std::fs::create_dir_all(&inputs)?;
+        let mut directory = TempDir::new_in(inputs)?;
+        directory.disable_cleanup(true);
+        std::fs::write(
+            directory.path().join("inputs.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "kind": "compiler-test-inputs", "authority": false,
+                "original_directory": directory.path(), "case_artifact_root": root,
+                "cleanup_owner": "isolated-libtest-case",
+            }))
+            .map_err(std::io::Error::other)?,
+        )?;
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "compiler inputs owned by case artifact root: {}",
+            directory.path().display()
+        );
+        Ok(directory)
+    }
 
     // The operation owns this observation outside the induced unwind boundary.
     // These tests expect settled compilers; uncertainty is inspected as a failure.

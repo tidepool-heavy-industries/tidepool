@@ -411,3 +411,7 @@ settles. Diagnostics neither authorize imports nor relocate certificates.
 Only the runner removes successful case evidence, after process/service cleanup
 and any hosted/owned-compiler cleanup reports are confirmed. Failure, timeout,
 interruption and unknown cleanup retain the case directory and its report.
+Owned-resident tests that create compiler input trees use
+`artifacts::test_support::compiler_input_directory`: the runner owns those source
+and entry parents from construction, including when automatic transaction
+capture is disabled. A local temporary ancestor must not erase retained entries.
