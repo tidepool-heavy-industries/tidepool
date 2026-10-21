@@ -785,6 +785,210 @@ async fn cancelled_staged_reload_preserves_a_for_a_later_default_reload() {
     frozen_source_reload_history(FrozenReloadControl::CancelBeforePublication).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn staged_reload_retains_confirmed_b_when_the_caller_reply_is_lost() {
+    use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation};
+
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
+    let captured = Arc::new(ReloadGate::default());
+    let stages = Arc::new(ReloadGate::default());
+    let transform = {
+        let captured = captured.clone();
+        let stages = stages.clone();
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: stages.clone(),
+                observe_gate: None,
+                captured_gate: Some(captured.clone()),
+            }) as exomonad_actor::ActorSourceLayerResolver
+        })
+    };
+    let host = HostedTestRuntime::start_configured_with_source_layers(
+        &settings,
+        &provider,
+        |config| {
+            configure_workshop(
+                config,
+                judgments.clone(),
+                Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+            );
+        },
+        transform,
+    )
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let _release = ReleaseReloadGate(captured.clone());
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            host.input("Keep the published workshop when its caller disappears.")
+                .await
+                .unwrap();
+            let round = host
+                .while_host_running(next_hosted_script_round(&mut requests, &mut pending, &root))
+                .await
+                .unwrap();
+            let round = authored_cell(
+                host,
+                &mut requests,
+                &mut pending,
+                &root,
+                round,
+                "bind-a",
+                include_str!("fixtures/coherent_reload_bind_a.hs"),
+            )
+            .await;
+            let installation = host
+                .context
+                .observer
+                .installation(host.context.actor.identity())
+                .await;
+            let policy = installation.policy.clone();
+            let issued_a = policy.snapshot_for_request().unwrap();
+            let durable_a = selected_root_generation(host).await;
+            let authored = host.context.config.workspace.join(".exomonad");
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_b.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                authored.join("prompts/agent.md"),
+                include_str!("fixtures/coherent_reload_prompt_b.md"),
+            )
+            .unwrap();
+            let (invocation, completion) =
+                super::test_campaign::original_tool_call(OriginalOperation {
+                    origin: ConversationOrigin::External {
+                        thread_id: "reload-caller-loss".into(),
+                    },
+                    request_id: "staged-b".into(),
+                    call_id: "publish-b".into(),
+                });
+            captured.arm();
+            let mut caller = policy.dispatch_boxed(ToolInvocation {
+                context: Some(invocation.clone()),
+                name: "apply_draft".into(),
+                arguments: ToolArguments::Structured(serde_json::json!({})),
+            });
+            host.while_host_running(async {
+                tokio::select! {
+                    result = &mut caller => match result {
+                        Ok(_) => panic!("reload caller returned before its actual source capture"),
+                        Err(error) => panic!("reload caller refused before capture: {error}"),
+                    },
+                    _ = captured.entered.notified() => {},
+                }
+            })
+            .await
+            .unwrap();
+            let retained = policy.retained_operation(invocation).unwrap();
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_c.hs"),
+            )
+            .unwrap();
+            std::fs::write(authored.join("prompts/agent.md"), "Unpublished draft C.\n").unwrap();
+            captured.release();
+            // The actor owns admitted execution. Leave the real caller suspended
+            // on its reply channel while the independent retained owner settles.
+            let terminal = host
+                .while_host_running(tokio::time::timeout(
+                    super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                    async {
+                        loop {
+                            match retained.terminal() {
+                                exomonad_actor::HostedOperationTerminal::Pending => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                }
+                                terminal => break terminal,
+                            }
+                        }
+                    },
+                ))
+                .await
+                .unwrap()
+                .expect("the actual staged reload reaches its terminal");
+            let exomonad_actor::HostedOperationTerminal::Settled(
+                exomonad_actor::WorkbenchCancellationOutcome::PublicationSettled {
+                    reply: Ok(receipt),
+                    ..
+                },
+            ) = terminal
+            else {
+                panic!("caller loss needs confirmed publication, observed {terminal:?}");
+            };
+            let native = serde_json::to_value(&receipt).unwrap();
+            assert_reload_tool(&native, "ReloadRetirement");
+            assert_reload_disposition(
+                &native,
+                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+            );
+            let contents = &native["items"][0]["value"]["Right"]["contents"];
+            assert_eq!(contents["reloadRetirementState"]["tag"], "ReloadBPublished");
+            assert_eq!(
+                contents["reloadOperationalSettlement"]["tag"],
+                "ReloadOperationalSettled"
+            );
+            let confirmed_b = policy.snapshot_for_request().unwrap();
+            assert_ne!(
+                confirmed_b.request_generation(),
+                issued_a.request_generation()
+            );
+            assert!(confirmed_b
+                .request_instructions()
+                .unwrap()
+                .contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
+            assert!(!confirmed_b
+                .request_instructions()
+                .unwrap()
+                .contains("Unpublished draft C."));
+            let durable_b = selected_root_generation(host).await;
+            assert_ne!(durable_b, durable_a);
+            // Only now close the unpolled caller receiver. This is distinct from
+            // losing a worker's body result before owner confirmation.
+            drop(caller);
+            assert_eq!(
+                serde_json::to_value(retained.reply().unwrap().unwrap()).unwrap(),
+                native
+            );
+            policy.complete_boxed(completion.clone()).await.unwrap();
+            policy.complete_boxed(completion).await.unwrap();
+            assert_eq!(
+                policy.snapshot_for_request().unwrap().request_generation(),
+                confirmed_b.request_generation()
+            );
+            let missing_a =
+                super::tests::dispatch_haskell_script(policy.as_ref(), "display aOnly").await;
+            assert_eq!(missing_a["status"], "rejected", "{missing_a}");
+            let used = super::tests::dispatch_haskell_script(
+                policy.as_ref(),
+                include_str!("fixtures/coherent_reload_frozen_b.hs"),
+            )
+            .await;
+            assert_use_b_with_constituents(host, &used);
+            assert_eq!(selected_root_generation(host).await, durable_b);
+            assert_eq!(
+                serde_json::to_value(retained.reply().unwrap().unwrap()).unwrap(),
+                native
+            );
+            assert_eq!(
+                stages.staged.load(Ordering::SeqCst),
+                1,
+                "caller loss and repeated acknowledgement cannot replay source preparation"
+            );
+            assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
+            round.finish();
+        })
+    })
+    .await;
+}
+
 #[derive(Clone, Copy)]
 enum FrozenReloadControl {
     Publish,

@@ -109,6 +109,35 @@ impl GenerationRetirementPublicationOwner {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn assert_confirmed_publication_notifies_once(
+    outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+) {
+    use preparation::PublicationNotificationObservation as Observation;
+    let Ok(ActorGenerationCommit::Published { generation, .. }) = outcome else {
+        panic!("notification control requires the actual confirmed publisher result");
+    };
+    let lifecycle =
+        crate::LifecycleHandle::start(generation.context().actor, crate::RetainedActorExit::new())
+            .await
+            .unwrap();
+    let mut owner = GenerationRetirementPublicationOwner::Pending {
+        lifecycle: lifecycle.clone(),
+        control: None,
+    };
+    assert_eq!(owner.observe(outcome), Observation::Accepted);
+    lifecycle.stop_owner_for_test().await;
+    // A new send to this same, confirmed-stopped recipient refuses. The
+    // original observation must retain its accepted transfer without replay.
+    let mut fresh = GenerationRetirementPublicationOwner::Pending {
+        lifecycle,
+        control: None,
+    };
+    assert_eq!(fresh.observe(outcome), Observation::Refused);
+    assert_eq!(owner.observe(outcome), Observation::Accepted);
+    assert_eq!(owner.observe(outcome), Observation::Accepted);
+}
+
 /// The canonical reservation owns one affine core and its transient driver.
 /// Native owner loss moves the core unchanged before disposing the driver.
 pub(super) struct GenerationRetirementRecord {

@@ -1423,6 +1423,9 @@ def facade_test_cases(binary):
         ("facade_reload_cancellation_test", [
             "actor_host::coherent_reload_acceptance_tests::cancelled_staged_reload_preserves_a_for_a_later_default_reload",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_caller_loss_test", [
+            "actor_host::coherent_reload_acceptance_tests::staged_reload_retains_confirmed_b_when_the_caller_reply_is_lost",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_reload_force_refusal_test", [
             "actor_host::coherent_reload_acceptance_tests::unsupported_force_preserves_the_original_generation_for_a_later_default_reload",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
