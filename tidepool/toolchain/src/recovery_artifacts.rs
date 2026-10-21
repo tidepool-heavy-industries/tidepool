@@ -34,6 +34,7 @@ pub struct RecoveryArtifactRef {
     pub certification_path: PathBuf,
     pub certification_sha256: [u8; 32],
     pub product_path: PathBuf,
+    pub package_interfaces: Vec<crate::certified_products::RecoveryPackageInterfaceRef>,
     pub module_interface: Option<RecoveryModuleInterfaceRef>,
     /// Legacy originals retain native/interface authority without GHC execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,6 +49,7 @@ pub struct RecoveryModuleInterfaceRef {
     pub certificate_path: PathBuf,
     pub certificate_sha256: [u8; 32],
     pub core: Option<RecoveryCoreRef>,
+    pub package_interfaces: Vec<crate::certified_products::RecoveryPackageInterfaceRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -700,9 +702,16 @@ pub struct VerifiedRecoveryArtifact {
     product_bytes: Vec<u8>,
     module_interface: crate::certified_products::CertifiedModuleInterface,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    package_interfaces: crate::certified_products::PackageInterfaceCustody,
 }
 
 impl VerifiedRecoveryArtifact {
+    pub(crate) fn module_interface(&self) -> &crate::certified_products::CertifiedModuleInterface {
+        &self.module_interface
+    }
+    pub(crate) fn package_interfaces(&self) -> &crate::certified_products::PackageInterfaceCustody {
+        &self.package_interfaces
+    }
     pub fn interface_path(&self) -> &Path {
         &self.interface_path
     }
@@ -1360,6 +1369,49 @@ impl PackageInterfaceValidation {
         Ok(())
     }
 
+    pub(crate) fn capture_owned_package_interface(
+        &mut self,
+        path: &Path,
+        expected: &[u8; 32],
+    ) -> Result<Arc<[u8]>, RecoveryArtifactError> {
+        if let Some(captured) = self.captured.get(path) {
+            if captured.sha256 != *expected {
+                return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+            }
+            return Ok(Arc::clone(&captured._bytes));
+        }
+        let bytes: Arc<[u8]> = read_checked(path, expected, PACKAGE_INTERFACE_LIMIT, self)?.into();
+        self.verify_captured(path, path, expected, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// Retain an already-issued immutable interface under its sealed logical
+    /// import name. The token owns the bytes; no ambient path is consulted.
+    pub(crate) fn register_package_interface(
+        &mut self,
+        logical_path: &Path,
+        interface: &crate::certified_products::CertifiedPackageInterface,
+    ) -> Result<(), RecoveryArtifactError> {
+        if !logical_path.is_absolute() {
+            return Err(RecoveryArtifactError::InvalidPackageImports(logical_path.to_path_buf()));
+        }
+        if let Some(previous) = self.captured.get(logical_path) {
+            if previous.sha256 != *interface.sha256()
+                || previous._bytes.as_ref() != interface.bytes().as_ref() {
+                return Err(RecoveryArtifactError::DigestMismatch(logical_path.to_path_buf()));
+            }
+            return Ok(());
+        }
+        self.inventory.reserve::<CapturedPackageInterface>(1).map_err(accounting_charge_error)?;
+        self.inventory.charge(logical_path.as_os_str().as_encoded_bytes().len())
+            .map_err(accounting_charge_error)?;
+        self.captured.insert(logical_path.to_path_buf(), CapturedPackageInterface {
+            _bytes: Arc::clone(interface.bytes()),
+            sha256: *interface.sha256(),
+        });
+        Ok(())
+    }
+
     fn verify_bytes(
         &mut self,
         path: &Path,
@@ -1721,6 +1773,69 @@ pub(crate) fn validate_package_import_evidence_with_validation(
     sidecar_path: &Path,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ValidatedPackageImports, RecoveryArtifactError> {
+    let obligations = decode_package_import_obligations(
+        bytes, unit, module, skinny_iface_sha256, sidecar_path, validation,
+    )?;
+    for (path, seal) in obligations.roots.values() {
+        validation.verify(path, seal)?;
+    }
+    Ok(obligations.into_validated())
+}
+
+/// Structurally checked exact import obligations. Byte custody is validated
+/// separately by the current filesystem observer or immutable capture owner.
+pub(crate) struct PackageImportObligations {
+    roots: BTreeMap<(String, String), (PathBuf, [u8; 32])>,
+    compiler_provided: Vec<CompilerProvidedImport>,
+}
+
+impl PackageImportObligations {
+    pub(crate) fn interface_seals(
+        &self,
+        validation: &PackageInterfaceValidation,
+    ) -> Result<BTreeMap<(String, String), [u8; 32]>, RecoveryArtifactError> {
+        let mut seals = BTreeMap::new();
+        for (owner, (_, seal)) in &self.roots {
+            validation.inventory.reserve::<((String, String), [u8; 32])>(1)
+                .map_err(accounting_charge_error)?;
+            validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()))
+                .map_err(accounting_charge_error)?;
+            seals.insert(owner.clone(), *seal);
+        }
+        Ok(seals)
+    }
+
+    fn into_validated(self) -> ValidatedPackageImports {
+        ValidatedPackageImports {
+            roots: self.roots.into_iter().map(|(owner, (path, seal))|
+                (owner, (path, hex(&seal)))).collect(),
+            compiler_provided: self.compiler_provided,
+        }
+    }
+}
+
+pub(crate) fn validate_package_imports_with_custody(
+    obligations: PackageImportObligations,
+    custody: &crate::certified_products::PackageInterfaceCustody,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<ValidatedPackageImports, RecoveryArtifactError> {
+    for (owner, (path, seal)) in &obligations.roots {
+        let interface = custody.get(owner)
+            .filter(|interface| interface.sha256() == seal)
+            .ok_or_else(|| RecoveryArtifactError::InvalidPackageImports(path.clone()))?;
+        validation.register_package_interface(path, interface)?;
+    }
+    Ok(obligations.into_validated())
+}
+
+pub(crate) fn decode_package_import_obligations(
+    bytes: &[u8],
+    unit: &str,
+    module: &str,
+    skinny_iface_sha256: &[u8; 32],
+    sidecar_path: &Path,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<PackageImportObligations, RecoveryArtifactError> {
     use ciborium::value::Value;
 
     let invalid = || RecoveryArtifactError::InvalidPackageImports(sidecar_path.to_path_buf());
@@ -1804,15 +1919,6 @@ pub(crate) fn validate_package_import_evidence_with_validation(
         {
             return Err(invalid());
         }
-        if selected
-            .insert(
-                (package_unit.to_owned(), package_module.to_owned()),
-                (package_path.to_path_buf(), package_sha256.to_owned()),
-            )
-            .is_some()
-        {
-            return Err(invalid());
-        }
         let mut expected = [0; 32];
         for (index, pair) in package_sha256.as_bytes().chunks_exact(2).enumerate() {
             let digit = |byte: u8| {
@@ -1824,17 +1930,14 @@ pub(crate) fn validate_package_import_evidence_with_validation(
             };
             expected[index] = digit(pair[0]) * 16 + digit(pair[1]);
         }
-        validation
-            .verify(package_path, &expected)
-            .map_err(|error| {
-                if matches!(error, RecoveryArtifactError::InvalidPackageImports(_)) {
-                    invalid()
-                } else {
-                    error
-                }
-            })?;
+        if selected.insert(
+            (package_unit.to_owned(), package_module.to_owned()),
+            (package_path.to_path_buf(), expected),
+        ).is_some() {
+            return Err(invalid());
+        }
     }
-    Ok(ValidatedPackageImports {
+    Ok(PackageImportObligations {
         roots: selected,
         compiler_provided,
     })
@@ -2178,6 +2281,7 @@ fn admit_certified_interface<'a>(
             if interface.producer_sha256() != producer {
                 return Err(RecoveryArtifactError::InvalidReference);
             }
+            interface.validate_package_interfaces(validation)?;
             (
                 interface.unit(),
                 interface.module(),
@@ -2427,6 +2531,7 @@ impl<'a> ValidatedModuleInterface<'a> {
         interface: &'a crate::certified_products::CertifiedModuleInterface,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<Self, RecoveryArtifactError> {
+        interface.validate_package_interfaces(validation)?;
         let bytes = ValidatedInterfaceBytes::admit(
             interface.producer_sha256(),
             interface.unit(),
@@ -2494,6 +2599,12 @@ impl<'a> ValidatedModuleInterface<'a> {
             certificate_path,
             certificate_sha256,
             core,
+            package_interfaces: interface
+                .package_interfaces()
+                .materialize(root, mode, validation)
+                .map_err(|error| {
+                    recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+                })?,
         })
     }
 }
@@ -2577,7 +2688,7 @@ pub(crate) fn recover_module_interface(
         PACKAGE_IMPORTS_LIMIT,
         validation,
     )?;
-    validate_package_imports_with_validation(
+    let obligations = decode_package_import_obligations(
         &package_imports_bytes,
         &anchor.unit,
         &anchor.module,
@@ -2585,6 +2696,16 @@ pub(crate) fn recover_module_interface(
         &root.join(&anchor.package_imports_path),
         validation,
     )?;
+    let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
+        root,
+        &reference.package_interfaces,
+        &obligations.interface_seals(validation)?,
+        validation,
+    )
+    .map_err(|error| {
+        recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+    })?;
+    validate_package_imports_with_custody(obligations, &package_interfaces, validation)?;
     let certificate = capture_module_payload(
         root,
         &reference.certificate_path,
@@ -2613,6 +2734,7 @@ pub(crate) fn recover_module_interface(
         interface_bytes,
         package_imports_bytes,
         core,
+        &package_interfaces,
         validation,
     )
     .map_err(|error| {
@@ -2771,6 +2893,12 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
             }
             let interface_path = home_interface_path(owner);
             let package_imports_path = package_sidecar_path(&interface_path);
+            product.module_interface().ok_or(RecoveryArtifactError::InvalidReference)?
+                .validate_package_interfaces(validation)?;
+            product.original_native().ok_or(RecoveryArtifactError::InvalidReference)?
+                .validate_package_interfaces(validation)
+                .map_err(|error| recovery_validation_error(error,
+                    RecoveryArtifactError::InvalidPackageImports(package_imports_path.clone())))?;
             if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
                 return Err(RecoveryArtifactError::InvalidPackageImports(
                     package_imports_path,
@@ -2960,6 +3088,10 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
                 certification_path,
                 certification_sha256,
                 product_path,
+                package_interfaces: product.original_native()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?
+                    .package_interfaces().materialize(recovery_root, mode, validation)
+                    .map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?,
                 module_interface: Some(interface.materialize(recovery_root, validation, mode)?),
                 execution_source,
             });
@@ -3144,12 +3276,47 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
     )?;
     let certification_path = resolve_owned(recovery_root, &reference.certification_path)
         .map_err(classify_certification_path_error)?;
-    let certification = read_certification(
+    let certification_bytes = read_checked(
         &certification_path,
-        Some(&reference.certification_sha256),
-        &owner,
+        &reference.certification_sha256,
+        CERTIFICATION_LIMIT,
         validation,
     )?;
+    let parsed = crate::certified_products::ParsedHomeCertification::parse(
+        certification_bytes,
+        &owner,
+        validation,
+    )
+    .map_err(|error| {
+        recovery_validation_error(
+            error,
+            RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+        )
+    })?;
+    let expected = parsed
+        .package_interface_seals(validation)
+        .map_err(|error| {
+            recovery_validation_error(
+                error,
+                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+            )
+        })?;
+    let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
+        recovery_root,
+        &reference.package_interfaces,
+        &expected,
+        validation,
+    )
+    .map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?;
+    drop(expected);
+    let certification = parsed
+        .authenticate_with_custody(&owner, &package_interfaces, validation)
+        .map_err(|error| {
+            recovery_validation_error(
+                error,
+                RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()),
+            )
+        })?;
     if certification.module_certificate_digest()
         != reference
             .module_interface
@@ -3219,6 +3386,7 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
         certification,
         product_bytes,
         execution_source,
+        package_interfaces,
     })
 }
 
@@ -4840,6 +5008,59 @@ mod tests {
         .unwrap();
         fs::write(certification_sidecar_path(interface), &bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn canonical_recovery_requires_exact_package_interface_references() {
+        let root = tempfile::tempdir().unwrap();
+        let interface_bytes = b"canonical-only".to_vec();
+        let digest = Sha256::digest(&interface_bytes).into();
+        let interface = crate::certified_products::fixture_interface_bytes(
+            [1; 32],
+            "home",
+            "CanonicalOnly",
+            interface_bytes,
+            package_witness("home", "CanonicalOnly", &digest, vec![]),
+        );
+        let reference = materialize_module_interface(
+            root.path(),
+            &interface,
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Durable,
+        )
+        .unwrap();
+        assert!(reference.package_interfaces.is_empty());
+        assert!(interface.matches_recovery_reference(&reference));
+        let restored = recover_module_interface(
+            root.path(),
+            &reference,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(restored, interface);
+
+        let mut old = serde_json::to_value(&reference).unwrap();
+        old.as_object_mut().unwrap().remove("package_interfaces");
+        assert!(serde_json::from_value::<RecoveryModuleInterfaceRef>(old).is_err());
+
+        let mut unrelated = reference;
+        unrelated
+            .package_interfaces
+            .push(crate::certified_products::RecoveryPackageInterfaceRef {
+                unit: "foreign".into(),
+                module: "Unrelated".into(),
+                path: PathBuf::from("package-code/unrelated.hi"),
+                sha256: [9; 32],
+            });
+        assert!(!interface.matches_recovery_reference(&unrelated));
+        assert!(matches!(
+            recover_module_interface(
+                root.path(),
+                &unrelated,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
     }
 
     #[test]

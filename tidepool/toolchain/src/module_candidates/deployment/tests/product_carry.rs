@@ -1175,6 +1175,7 @@ fn identical_native_and_same_batch_admissions_preserve_catalog_custody() {
                             product: candidate.product(Arc::clone(record.product())),
                             certification_bytes: record.original_certification.clone(),
                             module_interface: interface,
+                            package_interfaces: record.package_interfaces.as_ref().unwrap().clone(),
                             execution_source: record.execution_source.clone(),
                         },
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),

@@ -2,7 +2,7 @@
 
 Status: implementation resumed after architectural review on 2026-10-20.
 Controlling branch: `integration/compiler-query-warm-final`.
-Reviewed root source: `e78e1152c1847f72b7442e02c2e05b5c48d90a73`.
+Reviewed root source: `784fd9fc1fec805793bc178cd4751062b0279838`.
 Current implementation contract: [g2-completion.md](g2-completion.md).
 It owns this wave's work split, constructor boundaries, sequencing and acceptance.
 [ownership-completion.md](ownership-completion.md) and
@@ -25,23 +25,24 @@ certifier, evaluator, journals, and test infrastructure. Delete replaced routes.
 
 ## Current evidence and disposition
 
-The reviewed checkpoint is clean; release qualification remains incomplete.
+The reviewed checkpoint is clean; G2 and release qualification remain incomplete.
 
-- Production startup exposed repeated 31–33 second World acquisitions. The
-  retained packet has 5,204 reachable blocks; broad native proofs dominate its
-  bytes. Both the mixed 4096 count and shared optional byte allowance prevent
-  expected retention. Narrow compiler demand before tuning its limits.
-- Engine experiment `e192545d66` advances SOURCE native preparation/checking but
-  then loses the certified Name association needed for CacheEntry recovery.
-  It is a reusable experiment, not a passing candidate.
-- Lifecycle `1a497cdf8e` compiled joined consumers; four of eight focused controls
-  passed. Three positive fixtures omit the producer-issued source selection;
-  the delivery-loss oracle needs the actual terminal value before attribution.
-- Public reload is blocked earlier by startup's canonical interface mismatch.
-  Owner-specific diagnostics must establish its cause. Force/cold recovery and
-  exact frozen-bundle M1–M3 remain unqualified.
-- Mixed native binding ambiguity remains separately unresolved. Source acceptance
-  of broader custody is not proof that this runtime failure is fixed.
+- Package-interface custody, parsed HOME ownership and schema-5 catalog controls
+  have a reviewed joined candidate at `c75b761909`; its four HOME/interop controls
+  and 34 Python controls passed. It diverges from canonical: integrate its reviewed
+  changes without losing later CLI, runtime and retained-descriptor repairs.
+- New cohort availability must be issued once, independently of actual stage
+  demand. Current normalization still re-solves and assumes Full. Nominal exact
+  references, stage gates and cold custody must join before World acceptance.
+- Closed native installation is implemented. Captured values, host mounts and
+  Ready renderers must use the same immutable plan and per-install binding owner;
+  their older code-export route remains a required deletion.
+- Publication ownership is implemented. Unknown-source reporting still invents
+  evidence, and confirmed-publication caller loss needs a real hosted control.
+- Native test modes and declared service resources have diverged. Repair the
+  generator/runner boundary, then qualify the actual schema-5 catalog and bundle.
+- Keyed completion collection and the stronger historical-link/cold controls
+  remain reviewed source candidates awaiting joined compilation and execution.
 
 Earlier leaf counts qualify only their exact code and boundary. Preserve the
 historical failure ledger and useful test contracts; do not delete cases merely
@@ -51,13 +52,16 @@ because their old setup used a removed API.
 
 | Area | Current owner | Result |
 | --- | --- | --- |
-| Native producer | engine_completion | Common native output/provenance and active demand callback |
-| Native selection | native_offer_scope_repair | Held initial/prefix composition and completion-bearing successors |
-| Artifact storage | audit_native_selection | Exact package bindings, kinds and recovery |
+| Native producer | engine_completion / home_certificate_flow | Custody/Home integration, warm joined compilation and actual catalog |
+| Native selection | original_reference_boundary / stage_input_design | Once-only issuance, exact choices, nominal custody and stage execution |
+| Artifact storage | audit_native_selection | Finish reviewed keyed completion collection |
 | Codegen custody | review_world_lifetime_architecture | Exact HOME/package instance keys, leases and attachments |
-| Runtime join | audit_reload_ownership | Closed recipe, atomic adoption and deletion of global package exports |
-| Lifecycle qualification | audit_warm_lifecycle | Real production histories and joined G2 evidence |
-| Transport completion | compiler_demand_transport | Single-shot refusal and joined exchange controls |
+| Runtime join | compiler_demand_transport | Common open/closed recipe, host/Ready callers and fallback deletion |
+| Lifecycle qualification | audit_reload_ownership | Truthful reporting and real default-reload/caller-loss controls |
+| Wire cutover | common_native_output | Delete cache-only variants with their owning runtime/compiler consumers |
+| Joined histories | closed_recipe_pairing / package_envelope_identity | Ordinary/discovery/END and exact historical parent-only recovery |
+| Build/test resources | native_build_service | Mode/resource coupling and isolated owned-service catalog gate |
+| Map | compiler_map_concision | Source and measured work against the actual joined checkpoint |
 | Integration | root | Shared contracts, independent review, early joined tests, map and release evidence |
 
 Reuse existing isolated warm checkouts. Children report proposal, blocker,
@@ -115,7 +119,8 @@ speedup are separate claims. Final delivery includes reconciled pushed main.
 
 ## Resource and handoff rules
 
-At reset: scratch 121 GiB free with 100 GiB floor; available RAM 103 GiB.
+At implementation resumption: scratch 172 GiB free with 100 GiB floor;
+available RAM 105 GiB and build.slice approximately 32 GiB, no pressure.
 Use measured output growth and existing warm outputs, not simultaneous cold
 expansion. Follow admitted pinned local-only commands and current server policy.
 Preserve evidence/WIP; no broad GC. Stop only owned idle daemons deliberately.

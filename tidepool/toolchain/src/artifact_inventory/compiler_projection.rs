@@ -899,18 +899,22 @@ impl CompletedNativeSelection {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeSelectionCompletions {
-    owners: imbl::Vector<Arc<IssuedNativeSelectionCompletion>>,
+    owners: imbl::OrdMap<[u8; 32], Arc<IssuedNativeSelectionCompletion>>,
     recorded: imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>>,
+    // Shared scalar row facts index conflicts without revisiting prior owners.
+    rows: imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
 }
 impl NativeSelectionCompletions {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<IssuedNativeSelectionCompletion>> {
-        self.owners.iter()
+        self.owners.values()
     }
     fn one(completion: Arc<IssuedNativeSelectionCompletion>) -> Self {
         let recorded = imbl::OrdMap::unit(completion.identity, Arc::clone(&completion.recorded));
+        let rows = completion.recorded.rows.clone();
         Self {
-            owners: imbl::Vector::unit(completion),
+            owners: imbl::OrdMap::unit(completion.identity, completion),
             recorded,
+            rows,
         }
     }
     pub(crate) fn recorded_facts(
@@ -922,46 +926,63 @@ impl NativeSelectionCompletions {
         self.owners.is_empty()
     }
     pub(crate) fn append(&self, incoming: &Self) -> Result<Self, CompileError> {
+        if self.owners.ptr_eq(&incoming.owners) {
+            if !incoming.is_empty() {
+                crate::host_work::checkpoint()?;
+            }
+            return Ok(self.clone());
+        }
         let mut retained = self.clone();
         for completion in incoming.iter() {
             crate::host_work::checkpoint()?;
-            if retained
-                .iter()
-                .any(|prior| Arc::ptr_eq(prior, completion) || prior == completion)
-            {
+            if let Some(prior) = retained.owners.get(&completion.identity) {
+                if prior.recorded != completion.recorded {
+                    return Err(failure("native completion fact commitment collision"));
+                }
+                if !Arc::ptr_eq(prior, completion) && prior != completion {
+                    return Err(failure(
+                        "native completion commitment has inconsistent owners",
+                    ));
+                }
                 continue;
             }
-            for prior in retained.iter() {
-                for (binding, row) in &completion.rows {
-                    if prior.rows.get(binding).is_some_and(|old| old != row) {
-                        return Err(failure("native completion changed an exact HOME slot"));
-                    }
-                }
-            }
-            if retained
-                .recorded
-                .get(&completion.identity)
-                .is_some_and(|prior| prior != &completion.recorded)
-            {
-                return Err(failure("native completion fact commitment collision"));
-            }
+            retained.rows =
+                append_native_completion_rows(&retained.rows, &completion.recorded.rows)?;
             retained
                 .recorded
                 .insert(completion.identity, Arc::clone(&completion.recorded));
-            retained.owners.push_back(Arc::clone(completion));
+            retained
+                .owners
+                .insert(completion.identity, Arc::clone(completion));
         }
         Ok(retained)
     }
 }
 impl PartialEq for NativeSelectionCompletions {
     fn eq(&self, other: &Self) -> bool {
-        self.owners.len() == other.owners.len()
-            && self
-                .iter()
-                .all(|left| other.iter().any(|right| left == right))
+        self.recorded == other.recorded && self.owners == other.owners
     }
 }
 impl Eq for NativeSelectionCompletions {}
+
+fn append_native_completion_rows(
+    retained: &imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
+    incoming: &imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
+) -> Result<imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>, CompileError> {
+    let mut rows = retained.clone();
+    for (binding, row) in incoming {
+        match rows.get(binding) {
+            Some(prior) if prior != row => {
+                return Err(failure("native completion changed an exact HOME slot"));
+            }
+            Some(_) => {}
+            None => {
+                rows.insert(*binding, Arc::clone(row));
+            }
+        }
+    }
+    Ok(rows)
+}
 
 /// Complete only this acquired target closure. Available unused HOME groups
 /// and unused captured package products do not become executable roots.
@@ -5490,6 +5511,189 @@ impl CompilerInputProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl IssuedNativeSelectionCompletion {
+        /// Inspect actual issued owners; poisoned copies below enter only
+        /// collection refusal checks and never an inventory or compiler input.
+        pub(crate) fn assert_collection_history(owners: &[Arc<Self>]) {
+            fn slow_append(
+                retained: &[Arc<IssuedNativeSelectionCompletion>],
+                incoming: &[Arc<IssuedNativeSelectionCompletion>],
+            ) -> Result<Vec<Arc<IssuedNativeSelectionCompletion>>, CompileError> {
+                let mut result = retained.to_vec();
+                for completion in incoming {
+                    if result.iter().any(|prior| prior == completion) {
+                        continue;
+                    }
+                    for prior in &result {
+                        for (binding, row) in &completion.rows {
+                            if prior.rows.get(binding).is_some_and(|old| old != row) {
+                                return Err(failure("slow exact HOME conflict"));
+                            }
+                        }
+                    }
+                    if result.iter().any(|prior| {
+                        prior.identity == completion.identity && prior.recorded != completion.recorded
+                    }) {
+                        return Err(failure("slow commitment collision"));
+                    }
+                    result.push(Arc::clone(completion));
+                }
+                Ok(result)
+            }
+            assert!(
+                !owners.is_empty(),
+                "the production owner census is nonempty"
+            );
+            for reverse in [false, true] {
+                let mut order = owners.to_vec();
+                if reverse {
+                    order.reverse();
+                }
+                let mut indexed = NativeSelectionCompletions::default();
+                let mut reference = Vec::new();
+                for completion in &order {
+                    indexed = indexed
+                        .append(&NativeSelectionCompletions::one(Arc::clone(completion)))
+                        .unwrap();
+                    reference = slow_append(&reference, &[Arc::clone(completion)]).unwrap();
+                    assert_eq!(indexed.owners.len(), reference.len());
+                    assert!(
+                        reference
+                            .iter()
+                            .all(|owner| indexed.iter().any(|actual| actual == owner))
+                    );
+                    let repeated = indexed.append(&indexed).unwrap();
+                    assert!(repeated.owners.ptr_eq(&indexed.owners));
+                    assert!(repeated.rows.ptr_eq(&indexed.rows));
+                    assert_eq!(indexed, repeated);
+                }
+                let replay =
+                    order
+                        .iter()
+                        .rev()
+                        .fold(NativeSelectionCompletions::default(), |prior, owner| {
+                            prior
+                                .append(&NativeSelectionCompletions::one(Arc::clone(owner)))
+                                .unwrap()
+                        });
+                assert_eq!(indexed, replay);
+                assert_eq!(indexed.recorded, replay.recorded);
+            }
+            let actual = &owners[0];
+            let copy = || Self {
+                producer_sha256: actual.producer_sha256,
+                profile_sha256: actual.profile_sha256,
+                artifacts: actual.artifacts.clone(),
+                rows: actual.rows.clone(),
+                packages: Arc::clone(&actual.packages),
+                retained: Arc::clone(&actual.retained),
+                recorded: Arc::clone(&actual.recorded),
+                identity: actual.identity,
+            };
+            let original = NativeSelectionCompletions::one(Arc::clone(actual));
+            let mut collision = copy();
+            Arc::make_mut(&mut collision.recorded).profile_sha256[0] ^= 1;
+            assert!(
+                original
+                    .append(&NativeSelectionCompletions::one(Arc::new(collision)))
+                    .is_err()
+            );
+            let mut inconsistent = copy();
+            inconsistent.producer_sha256[0] ^= 1;
+            assert!(
+                original
+                    .append(&NativeSelectionCompletions::one(Arc::new(inconsistent)))
+                    .is_err()
+            );
+            assert!(Arc::ptr_eq(&original.owners[&actual.identity], actual));
+        }
+    }
+
+    #[test]
+    fn native_completion_row_index_preserves_exact_scopes_and_ordered_slots() {
+        use tidepool_repr::execution_schema::ValueId;
+        let binding = |scope| NativeGroupBinding {
+            binding: NativeGroupIssuer {
+                artifact: ArtifactId([31; 32]),
+                selection: ArtifactSelectionId([scope; 32]),
+            },
+            original_ordinal: 7,
+        };
+        let row = |values: &[u32]| {
+            Arc::new(NativeCompletionRowSnapshotFacts {
+                imports: values
+                    .iter()
+                    .map(|value| NativeCompletionImportSnapshotFacts::Source {
+                        binding: binding(1),
+                        value: ValueId(*value),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        };
+        // These are scalar facts only; no acquired completion is issued.
+        let first = imbl::OrdMap::unit(binding(1), row(&[1, 2]));
+        let second = imbl::OrdMap::unit(binding(2), row(&[2, 1]));
+        let both = append_native_completion_rows(&first, &second).unwrap();
+        assert_eq!(
+            both.len(),
+            2,
+            "equal payloads retain their distinct full scopes"
+        );
+        assert!(Arc::ptr_eq(&both[&binding(1)], &first[&binding(1)]));
+        assert!(Arc::ptr_eq(&both[&binding(2)], &second[&binding(2)]));
+        let conflicting = imbl::OrdMap::unit(binding(1), row(&[2, 1]));
+        assert!(append_native_completion_rows(&both, &conflicting).is_err());
+        assert_eq!(both[&binding(1)].imports, first[&binding(1)].imports);
+        assert_eq!(append_native_completion_rows(&both, &first).unwrap(), both);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn native_completion_row_index_matches_pairwise_history(
+            history in proptest::collection::vec(
+                proptest::collection::vec((0u8..4, 0u8..4, 0u8..4), 0..8), 0..12
+            )
+        ) {
+            use tidepool_repr::execution_schema::ValueId;
+            // Scalar data tests conflict indexing, never issued completion authority.
+            let mut prior: Vec<imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>> = Vec::new();
+            let mut indexed = imbl::OrdMap::new();
+            for entries in history {
+                let incoming = entries.into_iter().map(|(scope, ordinal, value)| {
+                    let binding = NativeGroupBinding {
+                        binding: NativeGroupIssuer {
+                            artifact: ArtifactId([31; 32]),
+                            selection: ArtifactSelectionId([scope; 32]),
+                        },
+                        original_ordinal: ordinal as u32,
+                    };
+                    (binding, Arc::new(NativeCompletionRowSnapshotFacts {
+                        imports: vec![NativeCompletionImportSnapshotFacts::Source {
+                            binding, value: ValueId(value as u32),
+                        }].into(),
+                    }))
+                }).collect::<imbl::OrdMap<_, _>>();
+                let conflict = prior.iter().any(|old| incoming.iter().any(|(key, row)| {
+                    old.get(key).is_some_and(|previous| previous != row)
+                }));
+                let actual = append_native_completion_rows(&indexed, &incoming);
+                proptest::prop_assert_eq!(actual.is_err(), conflict);
+                if let Ok(merged) = actual {
+                    prior.push(incoming);
+                    let recomputed = prior.iter().flat_map(|rows| rows.iter())
+                        .map(|(key, row)| (*key, Arc::clone(row)))
+                        .collect::<BTreeMap<_, _>>();
+                    proptest::prop_assert_eq!(merged.iter().collect::<Vec<_>>(), recomputed.iter().collect::<Vec<_>>());
+                    for (key, row) in &indexed {
+                        proptest::prop_assert!(Arc::ptr_eq(row, &merged[key]));
+                    }
+                    indexed = merged;
+                }
+            }
+        }
+    }
 
     #[test]
     fn native_completion_fact_wire_keeps_full_rows_and_rejects_noncanonical_keys() {

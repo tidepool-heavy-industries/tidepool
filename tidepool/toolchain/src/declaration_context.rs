@@ -11292,6 +11292,10 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         )
         .map_err(compiler_evidence_failure)?;
 
+        let package_interfaces = crate::certified_products::PackageInterfaceCustody::from_native_output(
+            &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(program),
+            &receipt, validation,
+        ).map_err(compiler_evidence_failure)?;
         validation
             .inventory
             .reserve::<Arc<crate::certified_products::CertifiedPackageCodeProduct>>(
@@ -11312,6 +11316,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                     relative_prefix,
                     output,
                     &receipt,
+                    &package_interfaces,
                     validation,
                 )
                 .map_err(compiler_evidence_failure)
@@ -11372,6 +11377,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             candidates,
             &selected_values,
             produced,
+            &package_interfaces,
             validation,
         )
         .map_err(compiler_evidence_failure)?;

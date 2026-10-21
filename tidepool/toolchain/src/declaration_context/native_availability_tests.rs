@@ -6207,6 +6207,7 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
             .unwrap(),
             certification_bytes: wrong.certification_bytes().to_vec(),
             module_interface: wrong.module_interface().unwrap().clone(),
+            package_interfaces: wrong.original_native().unwrap().package_interfaces().clone(),
             execution_source: None,
         },
         &mut PackageInterfaceValidation::default(),

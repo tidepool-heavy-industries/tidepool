@@ -1548,10 +1548,10 @@ def verify_registered_gc_roots(tools: Path, pins: list[dict],
 
 def native_catalog_selection(catalog: Path, original: Path) -> dict:
     value = json.loads(catalog.read_text())
-    selection = value.get("source_selection")
-    if value.get("schema") != 4:
-        raise ValueError("unsupported native catalog schema")
-    return native_source_selection(selection, original)
+    schema = value.get("schema") if isinstance(value, dict) else None
+    if type(schema) is not int or schema != 5:
+        raise ValueError(f"unsupported native catalog schema in {catalog}: expected 5, observed {schema!r}")
+    return native_source_selection(value.get("source_selection"), original)
 
 
 def native_source_selection(selection: dict, original: Path) -> dict:

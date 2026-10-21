@@ -228,7 +228,7 @@ Preparing those catalog records grants no runtime candidate publication.
 `--source-root` and `--output-root`. The build action supplies the configured
 frontend, worker, compiler deployment manifest and GHC libdir. The CLI removes
 inherited resident/cache selection and contains temporary files in its own
-scratch. Schema 4 records `source_selection` with the canonical retained snapshot,
+scratch. Schema 5 records `source_selection` with the canonical retained snapshot,
 ordered `StableEffects`, `Stdlib`, `Actors`, and `Jev` roles, and the complete
 Haskell source manifest including the probe. These roles resolve to `effects`,
 `lib`, `actors`, and `jev/core`; each directory must exist, without source aliases.
@@ -331,7 +331,7 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Context snapshots use version 5 and persist normalized native availability and
+Context snapshots use version 7 and persist normalized native availability and
 the input issuer's per-original decision domain alongside compact exact Group
 references. An explicitly empty decision differs from no issued choice; neither
 grants native availability or

@@ -24,6 +24,7 @@ pub(crate) mod publication_observer {
     pub(crate) enum Stage {
         BeforeOwner,
         BeforeInterface,
+        BeforePackageInterfaces,
         Completed,
         ProofEncoded {
             sha256: String,
@@ -98,7 +99,7 @@ const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
 const RECORD_DIR: &str = "module-candidates-v12";
 const RECORD_MAGIC: &[u8; 8] = b"TPCRE10\n";
-const RECORD_VERSION: u32 = 10;
+const RECORD_VERSION: u32 = 11;
 const HEADER_LIMIT: usize = 64 << 10;
 const PAYLOAD_LIMIT: usize = 128 << 20;
 // A measured 33,955,557-byte ordinary resident display graph fits within one
@@ -581,6 +582,7 @@ struct RecordData {
     #[serde(with = "opaque_bytes::packages")]
     original_certification: Vec<u8>,
     module_interface: Option<crate::recovery_artifacts::RecoveryModuleInterfaceRef>,
+    package_interfaces: Vec<crate::certified_products::RecoveryPackageInterfaceRef>,
     execution_source_sha256: Option<[u8; 32]>,
 }
 
@@ -593,6 +595,7 @@ struct Record {
     evidence: shared_evidence::SharedEvidence,
     module_interface_proof: Option<crate::certified_products::CertifiedModuleInterface>,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    package_interfaces: Option<crate::certified_products::PackageInterfaceCustody>,
 }
 
 /// A deployment record carries the product decoded by its owning loader.
@@ -1363,6 +1366,7 @@ fn eligible_records_with_report(
                 },
                 original_certification: Vec::new(),
                 module_interface: None,
+                package_interfaces: Vec::new(),
                 execution_source_sha256: None,
             },
             certified,
@@ -1377,6 +1381,19 @@ fn eligible_records_with_report(
         report(product, original_bytes, PublicationDisposition::Eligible);
     }
     products
+}
+
+fn materialize_optional_package_interfaces(
+    custody: &crate::certified_products::PackageInterfaceCustody,
+    root: &Path,
+    mode: crate::recovery_artifacts::MaterializationMode,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> std::io::Result<Option<Vec<crate::certified_products::RecoveryPackageInterfaceRef>>> {
+    match custody.materialize(root, mode, validation) {
+        Ok(references) => Ok(Some(references)),
+        Err(crate::certified_products::CertificationError::Interrupted(error)) => Err(error),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Persist each eligible ordinary source module in its own bounded record.
@@ -1455,6 +1472,24 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) -> std::io::Re
             report(None, PublicationDisposition::WriteRejected);
             continue;
         }
+        let Some(custody) = record.package_interfaces.as_ref() else {
+            report(None, PublicationDisposition::ProductOwnerRejected);
+            continue;
+        };
+        #[cfg(test)]
+        publication_observer::observe(publication_observer::Stage::BeforePackageInterfaces);
+        record.data.package_interfaces = match materialize_optional_package_interfaces(
+            custody,
+            &producer_dir,
+            crate::recovery_artifacts::MaterializationMode::Scratch,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )? {
+            Some(references) => references,
+            None => {
+                report(None, PublicationDisposition::WriteRejected);
+                continue;
+            }
+        };
         let bytes = match encode_record_checked(&record) {
             Ok(bytes) => bytes,
             Err(rejection) => {
@@ -1602,6 +1637,7 @@ fn graph_path(root: &Path, digest: &[u8; 32]) -> PathBuf {
 fn validate_original_execution(
     record: &Record,
     graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+    sidecar_custody: &crate::certified_products::PackageInterfaceCustody,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Option<OriginalCandidateExecution> {
     let owner = computed_owner(record);
@@ -1622,6 +1658,8 @@ fn validate_original_execution(
             &record.original_certification,
             &owner,
             &record.package_imports,
+            record.package_interfaces.as_ref()?,
+            sidecar_custody,
             validation,
         )
         .ok()?
@@ -2334,19 +2372,45 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             }
             continue;
         }
+        let canonical = match (&record.module_interface_proof, &record.module_interface) {
+            (Some(interface), _) => interface.clone(),
+            (None, Some(reference)) => match crate::recovery_artifacts::recover_module_interface(
+                &record_dir(endpoint_identity),
+                reference,
+                &mut package_validation,
+            ) {
+                Ok(interface) => interface,
+                Err(_) => {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::InvalidRecord,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+            },
+            (None, None) => continue,
+        };
         let iface_sha_array = match record.acquired_artifacts() {
             Some(_) => record.original_owner.skinny_iface_sha256,
             None => Sha256::digest(&record.interface).into(),
         };
-        let package_roots =
-            crate::recovery_artifacts::validate_package_import_evidence_with_validation(
-                &record.package_imports,
-                &record.unit,
-                &record.module,
-                &iface_sha_array,
-                Path::new("module-package-imports.cbor"),
-                &mut package_validation,
-            );
+        let package_roots = canonical
+            .validate_package_interfaces(&mut package_validation)
+            .and_then(|()| {
+                crate::recovery_artifacts::validate_package_import_evidence_with_validation(
+                    &record.package_imports,
+                    &record.unit,
+                    &record.module,
+                    &iface_sha_array,
+                    Path::new("module-package-imports.cbor"),
+                    &mut package_validation,
+                )
+            });
         let package_roots = match package_roots {
             Ok(roots) => roots,
             Err(error) => {
@@ -2538,8 +2602,13 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 graph
             };
             if record.acquired_artifacts().is_none()
-                && validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
-                    .is_none()
+                && validate_original_execution(
+                    &record,
+                    Arc::clone(&graph),
+                    canonical.package_interfaces(),
+                    &mut package_validation,
+                )
+                .is_none()
             {
                 if omit_or_refuse_candidate(
                     &origin,
@@ -2566,29 +2635,6 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             }
             continue;
         }
-        let canonical = match (&record.module_interface_proof, &record.module_interface) {
-            (Some(interface), _) => interface.clone(),
-            (None, Some(reference)) => match crate::recovery_artifacts::recover_module_interface(
-                &record_dir(endpoint_identity),
-                reference,
-                &mut package_validation,
-            ) {
-                Ok(interface) => interface,
-                Err(_) => {
-                    if omit_or_refuse_candidate(
-                        &origin,
-                        &mut selection_omissions,
-                        &record.unit,
-                        &record.module,
-                        CacheOfferOmission::InvalidRecord,
-                    ) {
-                        return None;
-                    }
-                    continue;
-                }
-            },
-            (None, None) => continue,
-        };
         let canonical = match record.acquired_artifacts() {
             Some(custody) => canonical.with_catalog_input_custody(Arc::clone(custody)),
             None => canonical,
@@ -2765,6 +2811,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                         product: record.record.product(product),
                         certification_bytes: record.record.certification_bytes(),
                         module_interface: record.canonical,
+                        package_interfaces: record.record.package_interfaces.as_ref()?.clone(),
                         execution_source: record.execution_source,
                     },
                     &mut package_validation,
@@ -3992,6 +4039,11 @@ pub(crate) mod tests {
                 validate_original_execution(
                     record,
                     graph,
+                    record
+                        .module_interface_proof
+                        .as_ref()
+                        .unwrap()
+                        .package_interfaces(),
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
             };
@@ -4108,6 +4160,7 @@ pub(crate) mod tests {
             evidence: evidence.clone(),
             module_interface_proof: None,
             execution_source: None,
+            package_interfaces: None,
             data: RecordData {
                 evidence: evidence
                     .reference()
@@ -4135,6 +4188,7 @@ pub(crate) mod tests {
                 },
                 original_certification: Vec::new(),
                 module_interface: None,
+                package_interfaces: Vec::new(),
                 execution_source_sha256: None,
             },
         };
@@ -4165,7 +4219,7 @@ pub(crate) mod tests {
         module_interface
     }
 
-    fn finalized_candidate_fixture(
+    pub(super) fn finalized_candidate_fixture(
         record: &Record,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let owner = computed_owner(record);
@@ -4178,13 +4232,18 @@ pub(crate) mod tests {
                 .unwrap(),
         )
         .with_source_sha256(parse_sha(&record.source_sha256).unwrap());
-        crate::certified_products::fixture_finalized_product(
+        let product = crate::certified_products::fixture_finalized_product(
             original,
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                 &record.endpoint,
             )
             .sha256(),
+        );
+        crate::certified_products::finalize_original_for_inventory(
+            product,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
+        .unwrap()
     }
 
     pub(super) fn candidate_fixture(root: &Path, module: &str) -> Record {
@@ -6051,6 +6110,11 @@ pub(crate) mod tests {
         .with_source_sha256(parse_sha(&record.source_sha256).unwrap())
         .with_module_interface(record.module_interface_proof.as_ref().unwrap().clone())
         .unwrap();
+        let certified = crate::certified_products::finalize_original_for_inventory(
+            certified,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let parsed = crate::certified_products::ParsedModuleProducts::decode(
             &record.products,
             &package_bundle(&record.unit, &record.module, &record.interface),
@@ -6075,6 +6139,93 @@ pub(crate) mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn optional_package_custody_publication_preserves_refusal_and_cancellation_policy() {
+        use crate::certified_products::{PackageInterfaceCustody, RecoveryPackageInterfaceRef};
+        use crate::recovery_artifacts::{MaterializationMode, PackageInterfaceValidation};
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+
+        // Representation-only custody enters through the strict production
+        // reference reader; it issues no compiler role or native product.
+        let source = tempfile::tempdir().unwrap();
+        let bytes = b"package interface custody";
+        let seal: [u8; 32] = Sha256::digest(bytes).into();
+        let relative = PathBuf::from("package-code").join(format!("{}.hi", hex(&seal)));
+        fs::create_dir_all(source.path().join("package-code")).unwrap();
+        fs::write(source.path().join(&relative), bytes).unwrap();
+        let owner = ("package".to_owned(), "Package.Module".to_owned());
+        let reference = RecoveryPackageInterfaceRef {
+            unit: owner.0.clone(),
+            module: owner.1.clone(),
+            path: relative.clone(),
+            sha256: seal,
+        };
+        let custody = PackageInterfaceCustody::restore(
+            source.path(),
+            &[reference],
+            &BTreeMap::from([(owner, seal)]),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(!custody.is_empty());
+        let target = tempfile::tempdir().unwrap();
+        fs::create_dir_all(target.path().join("package-code")).unwrap();
+        let destination = target.path().join(&relative);
+        fs::write(&destination, b"changed existing cache artifact").unwrap();
+        assert!(
+            materialize_optional_package_interfaces(
+                &custody,
+                target.path(),
+                MaterializationMode::Scratch,
+                &mut PackageInterfaceValidation::default()
+            )
+            .unwrap()
+            .is_none(),
+            "an optional cache write refusal cannot replace the completed compiler result"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"changed existing cache artifact"
+        );
+        let cancellation = CompilerTransactionCancellation::new();
+        let stop = cancellation.clone();
+        let result = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                stop.cancel();
+                materialize_optional_package_interfaces(
+                    &custody,
+                    target.path(),
+                    MaterializationMode::Scratch,
+                    &mut PackageInterfaceValidation::default(),
+                )
+            },
+        );
+        assert_eq!(
+            result.action.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+        fs::remove_file(destination).unwrap();
+        assert_eq!(
+            materialize_optional_package_interfaces(
+                &custody,
+                target.path(),
+                MaterializationMode::Scratch,
+                &mut PackageInterfaceValidation::default()
+            )
+            .unwrap()
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn publication_cancellation_refuses_interface_and_final_handoff_without_removing_written_records(
     ) {
         use publication_observer::Stage;
@@ -6082,7 +6233,11 @@ pub(crate) mod tests {
             with_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionClose,
         };
-        for stage in [Stage::BeforeInterface, Stage::Completed] {
+        for stage in [
+            Stage::BeforeInterface,
+            Stage::BeforePackageInterfaces,
+            Stage::Completed,
+        ] {
             let root = tempfile::tempdir().unwrap();
             let record = query_fixture_record(root.path(), "Library", 0);
             for entry in fs::read_dir(fixture_record_dir(root.path())).unwrap() {

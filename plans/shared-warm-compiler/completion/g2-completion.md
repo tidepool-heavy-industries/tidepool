@@ -1,7 +1,7 @@
 # G2: complete the native compiler/runtime join
 
-Accepted implementation contract, 2026-10-20, based on integration checkpoint
-`e78e1152c1847f72b7442e02c2e05b5c48d90a73`. Controlling branch:
+Accepted implementation contract, revised 2026-10-20 after joined architecture
+review at `784fd9fc1fec805793bc178cd4751062b0279838`. Controlling branch:
 `integration/compiler-query-warm-final`.
 
 This document owns the remaining G2 sequencing and boundary decisions. It
@@ -65,7 +65,39 @@ records, with the existing enclosing format cutover. Older missing-field records
 refuse; there is no ambient-file fallback. Share byte tokens and existing
 content-addressed writes rather than duplicating payloads for each Original.
 
-## 2. Compose issued stages; do not re-resolve initial evidence
+## 2. Issue cohort availability once; admit each stage separately
+
+Physical cohort admission owns new dependency-proof issuance. Move it out of
+`normalize_selection`; subsequent selection normalization carries completed rows
+and offers without re-solving the cohort or temporarily promoting namespace
+roles. Every new output receives an availability receipt, including Empty.
+
+Authenticate nominal requirements first. Resolve external terminals against the
+same initial acquisition's actual contributions and recorded choices, retaining
+the selected full binding and its contribution owner together. If no choice is
+recorded, require one genuine issuer. Zero permission is unavailable; a missing
+recorded choice, competing issuers, corrupt evidence or wrong acquisition is a
+typed failure, not a Partial result. Equal carrier pairs and ordinals do not
+identify a group issuer.
+
+Classify local edges and resolved external terminals once. Propagate unavailable
+dependencies to their local dependents; cycles with supported dependencies remain
+eligible. Issue the supported graph through the existing checked solver. Evolve
+the checked-custody offer issuer to preserve solved Source causes for Empty,
+Partial and Full, rather than using the generic unwitnessed offer constructor.
+Validate only advertised roots and their exact closures; physical body count is
+not executable availability. Transfer checked rows and own offers directly,
+without a temporary Original-role projection.
+
+Availability uses legitimate initial offers, not only current stage demand:
+unused `f = X.g` must remain callable later when its original acquisition permits
+it. Current-stage execution checks actual exact Original uses before reusing a
+Completed product, recursively through reached fresh Source groups. An inherited
+sealed parent follows its issued children without creating new direct stage
+roots. Prior Source metadata alone is not sealed executable selection; the
+compiler must still traverse a previously unused group when first demanded.
+Keep these capability paths distinct in private constructors, not a caller-owned
+boolean precheck.
 
 The initial external native selection remains bound to its original
 `RequestCompilerInputs` and `InventoryOperation`. Retain the complete
@@ -180,7 +212,26 @@ Prepared-source publication and capture derive from the actual held
 `Arc<SealedTurnProducts>`, including late completion, not merely its prior
 `SealedOriginalCompileInput`.
 
-## 4. One closed recipe and scoped instance custody
+## 4. One native recipe and scoped instance custody
+
+Generalize the existing immutable recipe to native imports that are either exact
+local HOME/package references or typed retained-value requirements. Keep one
+coupled product/image owner and ordered import contract. A closed recipe is a
+checked restriction of that same plan to no retained requirements, not another
+planner. Reusable plans never contain live handles, scopes or source leases.
+
+The per-install owner resolves retained slots against actual BindingEntry
+identity, generation, representation, signature and custody. A required signature
+is not evidence that a retained handle provides it. Preserve unsupported Address
+capture refusals. Extend NativeDomainSelection from the same BindingTable view
+with authored domain associations; choose dependency domains from that owner,
+not by assigning every import the current domain. Reused instances preserve their
+original environments and ProgramFacts.
+
+Move ordinary checked cells, captured values/functions and host mounts through
+this common installer. Explicit finite module production remains supported;
+ordinary checked private settlement already bypasses finite retraction and must
+not acquire a fallback to it.
 
 `PreparedSourceEntry::prepare` issues a reusable, immutable
 `ClosedInstantiationPlan`: exact HOME/package occurrences, held images and
@@ -228,6 +279,24 @@ constructing a package graph must not retain the entire parent selection.
 Finish matched TPCERT11, TPHOMEOWNERS6, request29 and exchange framing, plus
 required snapshot version cutovers. No silent defaults or legacy adapters.
 Preserve user source and memory; rebuild compiler products with real producers.
+
+Native tests select the actual owned service and its declared source profile.
+The existing macro/generator/runner must reject inconsistent mode/resource
+declarations. Mixed harnesses retain explicit Portable/direct cases and separate
+declared observation and service manifests; mode selects the exact manifest
+without fabricating or falling back from a supplied invalid service declaration.
+
+The frozen catalog gate starts a fresh bundle-owned compiler inside its isolated
+namespace. Admit only the exact standard Nix socket, an authored `store = daemon`
+configuration, the frozen bundle read-only and private evidence at its canonical
+host path. Preserve offline Nix and absence of checkout, Buck outputs, caches and
+ambient compiler endpoints. Existing epoch acquisition/retirement owns the roots;
+frozen retention is not an invented per-service receipt.
+
+Reload reporting retains unknown source as unknown and actual blockers only.
+Missing blocker observation must refuse, not become an empty successful census.
+Keep existing publication ownership; qualify confirmed B plus caller loss using
+an actual staged publication, separately from unconfirmed body-result loss.
 
 ## Work ownership
 
