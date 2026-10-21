@@ -1,7 +1,7 @@
 //! Scope-neutral native installation choices from one completed source output.
 
 use super::*;
-use tidepool_codegen::prepared_program::{DemandedPackageImage, LiteralOwner};
+use tidepool_codegen::prepared_program::{DemandedHomeImage, DemandedPackageImage, LiteralOwner};
 use tidepool_toolchain::artifact_inventory::{
     ArtifactBinding, CompletedNativeImport, CompletedNativeSelection, CompletedNativeSourceRow,
     CompletedNativeTargetImport, NativeGroupBinding, PackageCodeBinding,
@@ -35,7 +35,7 @@ impl ClosedProduct {
 }
 
 enum ClosedImage {
-    Home(DemandedImage),
+    Home(DemandedHomeImage),
     Package(Arc<DemandedPackageImage>),
 }
 
@@ -230,35 +230,13 @@ impl ClosedInstantiationPlan {
             .map_err(PreparedRuntimeError::Compile),
             ClosedProduct::Home(row) => {
                 let pending = row.product();
-                let imports = owners
-                    .iter()
-                    .map(|owner| match owner {
-                        Some(LiteralOwner::Source { version, binder }) => Ok(ImportOwner::Source {
-                            version: version.clone(),
-                            binder: binder.clone(),
-                        }),
-                        Some(LiteralOwner::Package {
-                            unit,
-                            module,
-                            binder,
-                            interface_digest,
-                        }) => Ok(ImportOwner::Package {
-                            unit: unit.clone(),
-                            module: module.clone(),
-                            binder: binder.clone(),
-                            interface_digest: *interface_digest,
-                        }),
-                        None => Err(PreparedRuntimeError::CertifiedTargetOwners),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let group = CertifiedGroup::admit(
+                let code = tidepool_repr::execution_schema::CertifiedGroupCode::admit(
                     pending.owner().clone(),
                     pending.group().clone(),
-                    imports,
                 )?;
-                DemandedImage::compile_source_with_literals(group, registry, &packages, &sources)
+                DemandedHomeImage::prepare(code, &owners, &packages, &sources, registry)
                     .map(ClosedImage::Home)
-                    .map_err(Into::into)
+                    .map_err(PreparedRuntimeError::Compile)
             }
         }
     }
@@ -432,7 +410,7 @@ impl PreparedEngine {
                 match (&program.product, &program.native) {
                     (ClosedProduct::Home(row), ClosedImage::Home(image)) => {
                         let binding = row.binding();
-                        BatchLeaseRequest::for_home(
+                        BatchLeaseRequest::for_home_code(
                             index,
                             image,
                             NativeHomeBinding {
