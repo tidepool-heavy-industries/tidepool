@@ -118,6 +118,57 @@ pub struct AcceptedGlobal {
     pub owner: ReceiptImportOwner,
 }
 
+/// Ordered observations of one actual prepared target. Authentication preserves
+/// nominal owners; selecting executable occurrences belongs to native admission.
+#[derive(Debug)]
+pub(crate) struct AuthenticatedTargetImports {
+    target: Arc<PreparedProgram>,
+    owners: Arc<[ReceiptImportOwner]>,
+}
+
+impl AuthenticatedTargetImports {
+    pub(crate) fn issue(
+        target: &Arc<PreparedProgram>,
+        accepted: &[AcceptedGlobal],
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        if target.globals().len() != accepted.len() {
+            return Err(CertificationError::Mismatch("target global count"));
+        }
+        operation.reserve::<ReceiptImportOwner>(accepted.len())?;
+        let owners = target
+            .globals()
+            .iter()
+            .zip(accepted)
+            .map(|(declaration, selected)| {
+                crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+                charge_symbol(operation, &selected.identity)?;
+                match &selected.owner {
+                    ReceiptImportOwner::Source { unit, module, .. }
+                    | ReceiptImportOwner::OriginalBinding { unit, module, .. }
+                    | ReceiptImportOwner::Package { unit, module, .. } => {
+                        operation.charge(unit.len().saturating_add(module.len()))?;
+                    }
+                    ReceiptImportOwner::Retained { .. } => {}
+                }
+                validate_global_witness(declaration, target.signatures(), selected)
+            })
+            .collect::<CertResult<Vec<_>>>()?;
+        Ok(Self {
+            target: Arc::clone(target),
+            owners: owners.into(),
+        })
+    }
+
+    pub(crate) fn target(&self) -> &Arc<PreparedProgram> {
+        &self.target
+    }
+
+    pub(crate) fn owners(&self) -> &[ReceiptImportOwner] {
+        &self.owners
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedGroup {
     pub original_ordinal: u32,
@@ -2884,6 +2935,32 @@ pub(crate) struct CurrentProductRef<'a> {
     ordinal: u32,
 }
 
+/// A current group's own issued proof. This borrow cannot represent a body
+/// awaiting physical issuance or an inherited input's broader availability.
+pub(crate) struct CompletedCurrentProductRef<'a> {
+    current: CurrentProductRef<'a>,
+    receipt: &'a crate::declaration_context::CompletedNativeProductAvailability,
+}
+
+impl<'a> CompletedCurrentProductRef<'a> {
+    pub(crate) fn current(&self) -> &CurrentProductRef<'a> {
+        &self.current
+    }
+
+    pub(crate) fn groups(
+        &self,
+    ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
+        self.receipt.groups(self.current.key())
+    }
+
+    pub(crate) fn support(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
+        self.receipt.support(self.current.key(), binding)
+    }
+}
+
 pub(crate) enum CurrentSourceDependency<'a> {
     Local(CurrentProductRef<'a>),
     Issued(crate::declaration_context::ChosenNativeGroupSupport),
@@ -2891,6 +2968,24 @@ pub(crate) enum CurrentSourceDependency<'a> {
 }
 
 impl<'a> CurrentProductRef<'a> {
+    pub(crate) fn completed_for_target(
+        &self,
+        entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
+            crate::artifact_inventory::ArtifactId,
+        >,
+    ) -> Result<CompletedCurrentProductRef<'a>, crate::CompileError> {
+        crate::declaration_context::validate_current_stage_native_inputs(self, entries)?;
+        let ReceiptNativeAvailability::Completed(receipt) = &self.native.availability else {
+            return Err(crate::CompileError::CompilerEvidence(Box::new(
+                CertificationError::Mismatch("target current product lacks physical completion"),
+            )));
+        };
+        Ok(CompletedCurrentProductRef {
+            current: *self,
+            receipt,
+        })
+    }
+
     pub(crate) fn available_original_group(
         &self,
         reference: &ReceiptImportOwner,
