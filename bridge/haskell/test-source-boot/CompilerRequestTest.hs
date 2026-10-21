@@ -661,8 +661,8 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
             captured <- listDirectory (work </> "package-interfaces")
             unless (not (null captured)) (fail "native writer omitted captured package interfaces")
             packageRows <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
-              Right (rest,TList [TString "TPCERT",TInt 11,TList
-                [TString "ordinary",_,_,TList rows,_,_,_,_,_]]) | BL.null rest -> pure rows
+              Right (rest,TList [TString "TPCERT",TInt 12,TList
+                [TString "ordinary",_,_,TList rows,_,_,_,_,_,_]]) | BL.null rest -> pure rows
               _ -> fail "native writer emitted a malformed package witness table"
             witnesses <- forM packageRows $ \row -> case row of
               TList [TString unit,TString name,TString path,TString seal] -> do
