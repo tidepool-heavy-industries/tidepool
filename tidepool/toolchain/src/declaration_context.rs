@@ -9321,8 +9321,16 @@ impl ExactCompilationRequest {
     /// The transported view owns product evidence: an advertised original
     /// replaces the compiler's canonical role for the same owner there.
     pub(crate) fn validate_artifacts(&self) -> Result<(), CompileError> {
-        self.context()
-            .validate_artifacts_from_metadata(&self.artifacts, &self.transport_metadata)
+        let rows = self
+            .materialization
+            .as_ref()
+            .map(|retained| retained.selected_rows(&self.transport_metadata))
+            .unwrap_or_default();
+        self.context().validate_artifacts_with_owned_rows(
+            &self.artifacts,
+            &self.transport_metadata,
+            &rows,
+        )
     }
 
     /// Original offers authenticated by this request's compiler namespace.
