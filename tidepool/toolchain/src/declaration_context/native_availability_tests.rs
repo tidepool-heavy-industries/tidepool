@@ -3216,6 +3216,15 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     }];
     let observed =
         AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
+    let mut expected_keys = acquired_physical
+        .physical_cohort()
+        .unwrap()
+        .artifacts()
+        .selected_native_groups();
+    expected_keys.insert(NativeGroupKey {
+        artifact: entry.descriptor.id,
+        original_ordinal: 9001,
+    });
     let demanded = acquisition_inputs
         .artifacts()
         .inventory()
@@ -3229,14 +3238,11 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             &BTreeMap::new(),
             &mut validation,
         )
-        .expect("later target uses the same issuer's previously unselected body");
+        .expect("later target uses the same issuer's requested body");
     assert_eq!(
         demanded.artifacts().selected_native_groups(),
-        BTreeSet::from([NativeGroupKey {
-            artifact: entry.descriptor.id,
-            original_ordinal: 9001,
-        }]),
-        "explicit reusable role exposes only the target's selected ordinal"
+        expected_keys,
+        "target preserves its actual inherited choices and selects ordinal 9001"
     );
     let groups = demanded.resolve().unwrap().groups().clone();
     let expected = offer
@@ -3244,10 +3250,13 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .unwrap()
         .into_keys()
         .filter(|group| {
-            group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 9001
+            expected_keys.contains(&NativeGroupKey {
+                artifact: group.binding.artifact(),
+                original_ordinal: group.original_ordinal,
+            })
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(expected.len(), 1);
+    assert_eq!(expected.len(), expected_keys.len());
     assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
     assert_eq!(context.as_ref(), &before);
 }
