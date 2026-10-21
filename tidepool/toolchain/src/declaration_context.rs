@@ -10831,15 +10831,14 @@ impl WorldProgramSegment {
             .identity()
             .original_owner()
             .ok_or_else(|| failure("executable World stage has no planned declaration"))?;
-        let view = self
-            .originals
-            .authored_artifacts()
-            .map_err(compiler_evidence_failure)?;
-        let selection = self.originals.source_selection();
-        let originals = selection
-            .selected_authored_original_closure(view, &owner.unit, &owner.module)
-            .map_err(compiler_evidence_failure)?;
         let output = IssuedOriginalOutput::from_segment_originals(&self.originals)?;
+        let originals = output
+            .source_selection()
+            .produced_authored_original_publication(
+                output.compiler_inputs().physical_cohort()?,
+                owner,
+            )
+            .map_err(compiler_evidence_failure)?;
         let certificate = crate::declaration_join::certify_world_stage_planned_declaration(
             program,
             stage,
