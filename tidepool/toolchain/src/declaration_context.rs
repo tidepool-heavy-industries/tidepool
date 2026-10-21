@@ -7453,12 +7453,16 @@ struct ProgramSourceSupport {
     imports: Arc<imbl::OrdMap<ExactModuleIdentity, ProgramSourceSupportRow>>,
 }
 
+/// Live same-program provenance; recovery constructs new support through its
+/// owning issuer and never reconstructs this continuation row.
 #[derive(Clone, Debug)]
 struct ProgramSourceSupportRow {
     imports: Vec<ExactModuleIdentity>,
     produced: Option<Arc<CompletedNativeProductAvailability>>,
 }
 
+// The completed Arc identifies this live physical issuance, including its exact
+// dependency graph. Equal import lists do not replace that issuing owner.
 impl PartialEq for ProgramSourceSupportRow {
     fn eq(&self, other: &Self) -> bool {
         self.imports == other.imports
@@ -11187,6 +11191,44 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 .admit_value_interface(produced.current_interface(*value).unwrap().clone())
                 .unwrap();
         }
+        if matches!(observation, Observation::Unchanged) {
+            let initial_inputs = segment.inputs.compiler_inputs();
+            let support = segment
+                .continuation
+                .program
+                .program_support
+                .as_ref()
+                .unwrap();
+            let carried =
+                ProgramSourceSupport::extend(Some(support), support.compiler_support.clone(), [])
+                    .unwrap();
+            let mut produced_rows = 0;
+            for (owner, row) in support.imports.iter() {
+                let Some(receipt) = &row.produced else {
+                    continue;
+                };
+                produced_rows += 1;
+                let physical = output.produced_source(owner).unwrap().unwrap();
+                assert!(Arc::ptr_eq(receipt, &physical));
+                let entry = support
+                    .compiler_support
+                    .implementation_entry(owner)
+                    .unwrap();
+                assert!(row.matches_entry(entry));
+                assert!(
+                    initial_inputs.produced_source(entry).unwrap().is_none(),
+                    "initial input availability cannot claim same-program production"
+                );
+                assert!(
+                    Arc::ptr_eq(carried.imports[owner].produced.as_ref().unwrap(), receipt,),
+                    "ordinary support extension preserves the exact completed issuer"
+                );
+            }
+            assert!(
+                produced_rows > 0,
+                "actual first stage owns produced Source proofs"
+            );
+        }
         let (continuation, first_source) = segment.finish();
         let mut next = decode_world_source_receipt(program, 1).unwrap();
         let repeated = next
@@ -11271,7 +11313,26 @@ pub(crate) fn assert_world_repeated_source_refusals(
             continuation,
         );
         match (observation, result) {
-            (Observation::Unchanged, Ok(_)) => {}
+            (Observation::Unchanged, Ok(next)) => {
+                let inputs = next.inputs.compiler_inputs();
+                let support = next.inputs.program_support.as_ref().unwrap();
+                let mut consumed_rows = 0;
+                for (owner, row) in support.imports.iter() {
+                    let Some(receipt) = &row.produced else {
+                        continue;
+                    };
+                    let entry = support.compiler_support.implementation_entry(owner).unwrap();
+                    if !inputs.projection().roles().iter().any(|role| {
+                        role.original() == Some(entry.descriptor.id)
+                    }) {
+                        continue;
+                    }
+                    consumed_rows += 1;
+                    assert!(Arc::ptr_eq(inputs.produced_source(entry).unwrap().unwrap(), receipt),
+                        "later Source use borrows the actual prior stage completion");
+                }
+                assert!(consumed_rows > 0, "next stage observes produced Source provenance");
+            }
             (Observation::ChangedSource | Observation::ChangedImport,
                 Err(CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
                     crate::certified_products::CertificationError::Mismatch("same-program source original changed")) => {}
