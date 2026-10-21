@@ -159,20 +159,26 @@ contract removes.
 - Add a required field `package_links` (the occurrence/linkage manifest) to the
   completed-product receipt and bump the receipt layout once, atomically:
   - Haskell encode `CertifiedProducts.hs:520-541` (`TPCERT`) bumps the header
-    version 11 -> 12. Only the `"ordinary"` variant gains the new payload
-    element (arity 9 -> 10). The `"segment-originals"` (segment-item) variant
-    moves to version 12 but retains its old payload arity (8): it carries no
-    `package_links` element.
-  - Rust decode `decode_receipt_value_in` (`certified_products.rs`, array
-    lengths 9/8 today) accepts version 12 only: `"ordinary"` arity 10,
-    `"segment-originals"` arity 8. It refuses version 11 and any other arity as
-    `Receipt("complete product output variant")`.
-- Reject any `"ordinary"` receipt lacking the manifest; the `"segment-originals"`
-  (segment-item) variant has no manifest slot and keeps its arity unchanged. Do
-  not reconstruct choices for backward compatibility. `TPPACKAGEGROUP1`/TPGRP
-  envelope bytes, the `tidepool.package-code-product.v1` product hash
-  (`package_code.rs:559,655,777`) and `ArtifactDescriptor::package_code`
-  (`artifact_inventory.rs:1974`) are unchanged.
+    version 11 -> 12. The `"ordinary"` variant gains the new payload element
+    (arity 9 -> 10) and the `"segment-originals"` variant also gains it
+    (arity 8 -> 9).
+  - The separate `"segment-item"` variant emitted by `certifyItemProducts`
+    (`CertifiedProducts.hs:610-646`) shares the TPCERT version 12 header but
+    retains its existing payload shape/arity `(tag, witnesses, additions, [])`;
+    it carries no `package_links` element.
+  - Rust decode accepts version 12 only: `decode_receipt_value_in`
+    (`certified_products.rs`) takes `"ordinary"` arity 10 and
+    `"segment-originals"` arity 9, while `decode_segment_item_with_operation`
+    keeps `"segment-item"` arity 4. Version 11 and any other arity are refused
+    (`Receipt("complete product output variant")` / `"segment item output
+    arity"`).
+- Reject any `"ordinary"` or `"segment-originals"` receipt lacking the manifest;
+  the `"segment-item"` variant has no manifest slot and keeps its arity
+  unchanged. Do not reconstruct choices for backward compatibility.
+  `TPPACKAGEGROUP1`/TPGRP envelope bytes, the
+  `tidepool.package-code-product.v1` product hash (`package_code.rs:559,655,777`)
+  and `ArtifactDescriptor::package_code` (`artifact_inventory.rs:1974`) are
+  unchanged.
 - Already-issued graphs whose persisted format is unchanged remain valid and
   are reborrowed through `from_issued` (`artifact_inventory.rs:23310`).
 
@@ -249,9 +255,9 @@ no digest and must never be resolved by search.
 
 ### Decoder checks (typed refusals at one boundary)
 
-Checks 1-5 apply to the `"ordinary"` variant's manifest; the
-`"segment-originals"` (segment-item) variant carries no manifest and skips them.
-Check 6 applies to both variants.
+Checks 1-5 apply to the `"ordinary"` and `"segment-originals"` manifests; the
+`"segment-item"` variant carries no manifest and skips them. Check 6 applies to
+all three variants.
 
 1. Manifest present at the new version; every `Link::Local.occurrence` is in
    `[0, occurrences.len())` and row ids are exactly `0..n-1` with no duplicates
