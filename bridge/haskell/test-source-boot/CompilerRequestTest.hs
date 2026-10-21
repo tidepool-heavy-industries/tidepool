@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -15,6 +15,7 @@ import System.Timeout (timeout)
 import System.IO (stderr)
 import Control.Monad ((>=>), forM, forM_, unless, void, when)
 import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import qualified Data.ByteString.Lazy as BL
 import Control.Monad.IO.Class (liftIO)
@@ -45,8 +46,22 @@ import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..)
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
-import Tidepool.CertifiedProducts (captureSelectedPackageWitnesses)
+import Tidepool.CertifiedProducts (captureSelectedPackageWitnesses, encodeReceiptIdentity)
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
+
+-- The Rust receipt consumer expects null/text, independently of the execution
+-- schema's tagged optional parent. The joined World test exercises the actual
+-- native-demand exchange; this control covers both receipt parent forms.
+nativeReceiptIdentityChecks :: IO ()
+nativeReceiptIdentityChecks = forM_ [Nothing, Just (Text.pack "Record")] $ \parent -> do
+  let symbol = SymbolIdentity (Text.pack "unit") (Text.pack "Module")
+        (Text.pack "value") (Text.pack "field") parent
+      expected = TList [TString (Text.pack "unit"), TString (Text.pack "Module")
+        , TString (Text.pack "value"), TString (Text.pack "field")
+        , maybe TNull TString parent]
+  case deserialiseFromBytes decodeTerm (BL.fromStrict (toStrictByteString (encodeReceiptIdentity symbol))) of
+    Right (remaining, actual) | BL.null remaining && actual == expected -> pure ()
+    other -> fail ("compiler receipt symbol grammar changed: " ++ show other)
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do

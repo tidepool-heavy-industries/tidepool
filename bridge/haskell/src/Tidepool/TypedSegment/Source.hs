@@ -4,7 +4,7 @@ module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource
-  , moduleInputOccurrences, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
+  , moduleInputOccurrences, moduleImportRequests, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
 
@@ -47,7 +47,9 @@ import GHC.Types.Name.Reader
   , plusGlobalRdrEnv, shadowNames, extendGlobalRdrEnv )
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc, getBufSpan, bufSpanStart, bufSpanEnd, bufPos)
 import GHC.Unit.Types (interactiveUnit, mkModule)
-import GHC.Unit.Module (mkModuleName)
+import GHC.Unit.Module (ModuleName, mkModuleName)
+import GHC.Types.PkgQual (RawPkgQual)
+import Language.Haskell.Syntax.ImpExp (IsBootInterface)
 import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
@@ -62,6 +64,14 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 -- the demand renamer can load any imported interface.
 data ParsedModuleDemand = ParsedModuleDemand
   CapturedGeneratedScaffoldSource DynFlags (Located (HsModule GhcPs))
+
+-- Import selection consumes the same parsed source as the demand renamer.
+-- Package qualifiers and SOURCE identity are preserved until the active
+-- World environment resolves them; rendering cannot create an import here.
+moduleImportRequests :: ParsedModuleDemand -> [(ModuleName, RawPkgQual, IsBootInterface)]
+moduleImportRequests (ParsedModuleDemand _ _ parsed) =
+  [(unLoc (ideclName declaration), ideclPkgQual declaration, ideclSource declaration)
+  | L _ declaration <- hsmodImports (unLoc parsed)]
 
 -- Typed segments add their actual plan's unique root check to the same parsed
 -- module fact. A module fact alone grants no typed-item or declaration authority.

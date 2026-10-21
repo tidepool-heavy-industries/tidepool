@@ -167,7 +167,9 @@ exactScopeChecksFor kind manifest = do
         [T.pack ("InventoryMissing" ++ show index) | index <- [1 .. 129 :: Int]]
   badCertificate "canonical module certificate differs"
     (TList (replace 3 differentSHA (replace 4 (TList manyHomes) certificateFields)))
-  badCertificate "canonical module requirements differ"
+  -- The requirement key set is part of the row's authenticated owner/payload
+  -- shape. Existing-key seal substitutions below reach closure validation.
+  badCertificate "canonical module certificate differs from exact owner or payload"
     (TList (replace 11 (TList manyRequirements) certificateFields))
   forM_ [TList [],TList (homes ++ homes)] $ \invalid ->
     badCertificate "invalid complete home unit inventory" (TList (replace 4 invalid certificateFields))
@@ -179,11 +181,11 @@ exactScopeChecksFor kind manifest = do
   forM_ [selfRequirement,foreignRequirement] $ \invalid ->
     badCertificate "invalid canonical module requirement inventory"
       (TList (replace 11 (TList [invalid]) certificateFields))
-  badCertificate "canonical module requirements differ"
+  badCertificate "canonical module certificate differs from exact owner or payload"
     (TList (replace 11 (TList [missingRequirement]) certificateFields))
   requirements <- values (certificateFields !! 11)
   first <- row 3 (head requirements)
-  badCertificate "canonical module requirements differ" (TList (replace 11 (TList []) certificateFields))
+  badCertificate "canonical module certificate differs from exact owner or payload" (TList (replace 11 (TList []) certificateFields))
   badCertificate "canonical module requirements differ" (TList (replace 11 (TList
     (TList (replace 2 differentSHA first) : tail requirements)) certificateFields))
   forM_ [(2,"canonical interface"),(5,"canonical package imports")] $ \(index,name) ->

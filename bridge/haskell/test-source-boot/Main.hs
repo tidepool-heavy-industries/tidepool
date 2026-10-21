@@ -3,11 +3,11 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
-import CompilerRequestTest (nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
+import CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import CompilerRequestTest (checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
-import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse)
+import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -20,7 +20,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "finite native output separates package products with captured interfaces" nativePackageOutputChecks
+  [ testCase "compiler receipt symbol parents use null or text" nativeReceiptIdentityChecks
+  , testCase "finite native output separates package products with captured interfaces" nativePackageOutputChecks
   , testCase "native output requires admitted provenance and portable stays explicit" nativeOutputProvenanceChecks
   , testCase "completed compiler request histories" completedRequestHistories
   , testCase "compiler service boot admission boundaries" compilerServiceBootBoundaries
@@ -44,6 +45,7 @@ tests = testGroup "source-boot"
   , testCase "World residency uses shared bytes across END and eviction" worldResidencyBoundaries
   , testCase "world cell admission parses one recipe" worldCellAdmissionParse
   , testCase "World interface-only canonical body survives source relocation and cold reuse" worldCanonicalOriginalReuse
+  , testCase "World carried imports keep exact types and global Names without source" worldCarriedImportTypes
   , testCase "bounded World rejection diagnostics" worldRejectionDiagnosticBoundaries
   , testCase "bounded artifact reads" boundedReadChecks
   , testCase "resident source summary continuation" sourceSummaryContinuation

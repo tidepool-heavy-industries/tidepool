@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -53,6 +53,8 @@ import GHC.Types.Unique.Map (mapUniqMap)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Var (varName)
+import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_details)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Driver.Session (importPaths)
@@ -87,6 +89,7 @@ import Tidepool.ExactScope
   , WorldObservationProfile(..), worldLexicalObservation, worldObservationProfile
   , worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
   , worldInputsSources, worldSourceDomainSha256
+  , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
@@ -97,19 +100,22 @@ import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
-  , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..)
+  , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..)
   , StructuredInspection(..), StructuredNameScope(..), StructuredNameNamespace(..), InspectionProvenance(..)
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
   , scopedEnsureWorld, scopedReadExactScope, scopedCompileWorldCell, scopedPrepareWorldCellStage, scopedValidateWorldCell
   , completedCompilerWorldStage, CompilerRecoveryCaches(..), withCompiledWorldStage
+  , completedCompilerResult, completedCompilerWorldCompletion, worldCompilerCompletionInputs
+  , worldCellExactImports, pprOriginalBindings, pprOriginalReferences
   , heldWorldCellStagePath, heldWorldCellStageTypedSource
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts, prTargetTcGblEnv
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment, captureSupportedPackageProfileWith)
 import Tidepool.ArtifactBytes
@@ -1519,6 +1525,142 @@ withCapturedWorldContext use = withTiming $ withScratch $ \work ->
     profile <- rawWorldHex rootedProfileIdentity
     use handles work producer profile contextParcel scopePath
 
+-- Real native input supplies the interface and nominal Original association.
+-- The lower compiler probe intentionally stops before certification; it tests
+-- TYPE/Name preservation, never executable readiness or exchange permissions.
+worldCarriedImportTypes :: IO ()
+worldCarriedImportTypes = withTiming $ withScratch $ \work ->
+  bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
+    let rootA = work </> "producer"
+        rootB = work </> "consumer"
+        names = ["CanonicalPartial", "CanonicalPartialConsumer"]
+        carriedLine = "import qualified CanonicalPartialConsumer"
+        observation = unlines
+          ["{-# LANGUAGE DataKinds, KindSignatures #-}","module WorldObservation where"
+          ,"import Prelude","import qualified Data.Proxy","import Data.Kind (Type)"
+          ,"import Control.Monad.Freer (Eff)"
+          ,"__tidepool_inspection_row :: Data.Proxy.Proxy ('[] :: [Type -> Type])"
+          ,"__tidepool_inspection_row = Data.Proxy.Proxy"]
+        template = unlines
+          ["{-# LANGUAGE DataKinds, FlexibleContexts #-}","{{CELL_PRAGMAS}}","module CellCheck where"
+          ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
+          ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
+          ,"__tidepoolInEffectRow = id","{{CELL_DECLS}}"
+          ,"__tidepool_cell_check :: Eff '[] ()"
+          ,"__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"]
+        lexical lines' parcel = case deserialiseFromBytes decodeTerm (BL.fromStrict parcel) of
+          Right (remaining,TList [context,primary,rows,durable,TList blocks,_]) | BL.null remaining -> do
+            let body = encode (TList [TString "TPCWLEX2",TList (map (TString . T.pack) lines'),TNull
+                  ,TList [TInt 0,TString (T.pack observation),TList [],TNull]])
+            cid <- worldFixtureCID body
+            pure (encode (TList [context,primary,rows,durable
+              ,TList (TList [TBytes cid,TBytes body]:blocks),TBytes cid]))
+          _ -> fail "carried-import fixture lost the actual producer parcel"
+    mapM_ (createDirectoryIfMissing True) [rootA,rootB]
+    forM_ names $ \name -> copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (rootA </> name ++ ".hs")
+    original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (rootA </> "CanonicalPartialConsumer.hs") [rootA] Nothing
+    fixture <- capturePreparedFixture rootA original
+    (scopePath,parcel) <- writeGenuineExecutionScopeWithContext names names rootA fixture
+    scope <- readExactScope scopePath >>= either fail pure
+    producer <- rawWorldHex (scopeProducerSha256 scope)
+    profile <- rawWorldHex rootedProfileIdentity
+    carried <- lexical [carriedLine] parcel
+    (packetPath,_) <- writeWorldCellAdmissionPacket handles rootB producer profile carried
+    owner <- newExactInputOwner
+    facts <- readWorldInputsWithOwner owner packetPath
+    unless (all (\root -> all (\name -> not (Map.member (name ++ ".hs") (worldSourceFiles root))) names)
+        (worldSourceRoots (worldInputsSources facts)))
+      (fail "source-less World import fixture accidentally captured producer sources")
+    rooted <- canonicalizePath rootB
+    withRootedCompilerEnvironment rooted $ withQuietStdout $
+      withResidentCompilerScopes [] $ \runScope -> do
+        runScope (pure ()) $ \compiler -> do
+          reference <- scopedEnsureWorld compiler (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath))
+            >>= requireReady
+          (_,diagnostics) <- captureDiagnostics $ forM_ ["(1 :: Int)","CanonicalPartialConsumer.usePartial"] $ \expression -> do
+            let query = WorldQueryRequest (worldInputsIdentity facts) reference
+                  (WorldScopedQuery (WorldObservationExpression (InspectionProvenance 1 "carried-import") expression))
+                  (rootB </> "query.bin")
+            args <- decodeWorldArgs [WorldQuery query]
+            answer <- (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldQuery
+            case deserialiseFromBytes decodeTerm (BL.fromStrict (BS.drop 12 answer)) of
+              Right (remaining,TList [_,_,_,_,TList [TString "answer",TBytes payload]])
+                | BL.null remaining,"Int" `BS.isInfixOf` payload -> pure ()
+              other -> fail ("source-less carried import did not typecheck: " ++ show other)
+          forM_ ["finalized_core_admitted_seeds","finalized_core_encoding_attempts"
+            ,"world.cell.canonical_body_acquisitions","world.cell.canonical_make_view_core_reads"] $ \counter ->
+            unless (sum (counterValues counter diagnostics) == 0)
+              (fail ("TYPE-only carried import demanded Core: " ++ counter))
+          completed <- compileDeclaration compiler facts reference rootB template "nominal" 121
+            "retainedCall local = CanonicalPartialConsumer.usePartial local"
+          completion <- maybe (fail "carried import lost its World completion") pure
+            (completedCompilerWorldCompletion completed)
+          let imports = worldCellExactImports (worldCompilerCompletionInputs completion)
+              declared = [edges | (("main","Tidepool.Session.Lib.G121",False),edges) <- imports]
+          case declared of
+            [edges] | [(name,boot,unit) | (_,name,boot,unit) <- edges
+                , name `elem` names] == [("CanonicalPartialConsumer",False,"main")] -> pure ()
+            _ -> fail "carried lexical import was lost or its TYPE dependency became a lexical edge"
+          let prepared = completedCompilerResult completed
+              bindings = pprOriginalBindings prepared
+              references = pprOriginalReferences prepared
+              selected = [(name,identity) | (name,identity) <- Map.toList bindings
+                , symbolModule identity == "CanonicalPartialConsumer",symbolOccurrence identity == "usePartial"]
+          case selected of
+            [(name,identity)] | fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "CanonicalPartialConsumer"
+              , Map.lookup identity references == (nameModule_maybe name >>= worldOriginalReferenceFor facts) -> pure ()
+            _ -> fail "finalized imported global lost its exact Name/Original reference"
+          unless (all ((/= "local") . occNameString . nameOccName) (Map.keys bindings))
+            (fail "nominal external-reference recorder retained a locally bound variable")
+        -- The same text is newly authored in this second World. It must not
+        -- borrow the carried import's source-less privilege.
+        authored <- lexical [] parcel
+        let authoredRoot = rootB </> "authored"
+        createDirectory authoredRoot
+        (authoredPath,_) <- writeWorldCellAdmissionPacket handles authoredRoot producer profile authored
+        authoredOwner <- newExactInputOwner
+        authoredFacts <- readWorldInputsWithOwner authoredOwner authoredPath
+        runScope (pure ()) $ \compiler -> do
+          authoredReference <- scopedEnsureWorld compiler
+            (ExactInputsRequest (worldInputsIdentity authoredFacts) (CompleteExactInputs authoredPath)) >>= requireReady
+          (refused,sourceDiagnostics) <- captureDiagnostics $ try $ compileDeclaration compiler authoredFacts authoredReference
+            authoredRoot template "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialConsumer.usePartial local")
+          case refused of
+            Left failure
+              | (case fromException failure of Just WorldCellUnsupported -> True; _ -> False)
+                  || (case sourceFailureDiagnostics failure of Just _ -> True; _ -> False)
+              , "Could not find module" `isInfixOf` sourceDiagnostics
+              , "CanonicalPartialConsumer" `isInfixOf` sourceDiagnostics -> pure ()
+              | otherwise -> throwIO (failure :: SomeException)
+            Right _ -> fail "newly authored import silently reused the source-less carried interface"
+  where
+    requireReady (ExactInputsReady _ reference _) = pure reference
+    requireReady other = fail ("carried-import fixture could not acquire its actual World: " ++ show other)
+    compileDeclaration compiler facts reference root template label generation source = do
+      let directory = root </> label
+          recipe = WorldCellRecipe source template []
+      createDirectory directory
+      planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts) reference recipe Nothing (directory </> "plan.cbor"))]
+      plan <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) runBoundWorldCellPlan
+      slots <- scopedRunGhc compiler $ do
+        environment <- getSession
+        parsed <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment) template source)
+          >>= either (liftIO . fail . show) pure
+        liftIO $ forM (zip [0..] (cellPlanItems parsed)) $ \(ordinal,item) ->
+          if sbKind (cellAnalysisVerdict item) == KDecl
+            then pure (ordinal,if cellAnalysisPrologueOnly item
+              then PlannedPrologue (generation+fromIntegral ordinal)
+              else PlannedDeclaration (generation+fromIntegral ordinal))
+            else fail "nominal TYPE probe unexpectedly contains an executable item"
+      let question = WorldCellPrepareRequest (worldInputsIdentity facts) reference recipe Nothing plan
+            (BS.replicate 32 23) generation slots directory (directory </> "prepared.cbor")
+      args <- decodeWorldArgs [WorldCellPrepare question]
+      (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $ \request -> do
+        admitted <- boundWorldCellPreparation request >>= either throwIO pure
+        _ <- scopedPrepareWorldCellStage compiler admitted >>= maybe (fail "carried-import declaration omitted its stage") pure
+        scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
+
 -- The partial match embeds its defining source location in finalized Core.
 -- The consuming World selects InterfaceOnly metadata, so new body demand must
 -- use that exact Core owner. This is distinct from reusing issued native code.
@@ -1801,9 +1943,9 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                 output <- BS.readFile (worldCellPrepareOutput prepareRequest)
                 certificate <- BS.readFile (directory </> "stage-0" </> "certified-products.cbor")
                 case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
-                  Right (remaining,TList [TString "TPCERT",TInt 10,TList
+                  Right (remaining,TList [TString "TPCERT",TInt 11,TList
                     [TString "segment-originals",_,_,_,_,TList
-                      [TString "world-unavailable",TBytes base,TBytes domain,TString "unsupported-source-recipe"],_]])
+                      [TString "world-unavailable",TBytes base,TBytes domain,TString "unsupported-source-recipe"],_,TList _]])
                     | BL.null remaining,base == worldInputsIdentityBytes facts
                     , domain == worldSourceDomainSha256 (worldInputsSources facts) -> pure ()
                   _ -> fail "World native certificate lost its actual base/source-domain recipe provenance"

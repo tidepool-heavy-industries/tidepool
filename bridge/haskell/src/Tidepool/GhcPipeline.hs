@@ -116,7 +116,7 @@ import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
-  ( rewriteParsedSegmentRoot, moduleInputOccurrences, prepareSegmentDemand, prepareModuleDemand
+  ( rewriteParsedSegmentRoot, moduleInputOccurrences, moduleImportRequests, prepareSegmentDemand, prepareModuleDemand
   , ParsedModuleDemand, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
@@ -141,7 +141,7 @@ import GHC.Driver.Session
 import GHC.Utils.TmpFs (TempDir(..))
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
-import GHC.Core.FVs (exprFreeVars)
+import GHC.Core.FVs (exprSomeFreeVars)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
@@ -308,7 +308,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
-  , checkedValueImportAuthorityFromVerified
+  , noCheckedValueImports, checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes
   , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
@@ -329,7 +329,7 @@ import Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
-  , WorldTypeClosureEntry, worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryInterfaceBody, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -619,7 +619,7 @@ preparedDependencies
   :: HscEnv -> PipelineVariant -> DependencyEvidence -> Maybe ExactCompilation
   -> IO PreparedDependencies
 preparedDependencies _ variant fresh exact
-  | Just (WorldSourceInputBasis _ facts receipt _ _) <- pvWorldSources variant = case exact of
+  | Just (WorldSourceInputBasis _ facts receipt _ _ _) <- pvWorldSources variant = case exact of
       Nothing -> do
         selected <- readIORef receipt
         imports <- case selected of
@@ -1360,7 +1360,119 @@ data PipelineVariant = PipelineVariant
 -- explicit selected-source receipt leaves the compile; no callback owns a world.
 data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFacts
   (IORef (Maybe WorldSourceSelection))
-  ParsedModuleDemand [(ExactIfaceArtifact,ModIface)]
+  ParsedModuleDemand [(ExactIfaceArtifact,ModIface)] WorldImportBasis
+
+-- TYPE custody and lexical adjacency are separate: requirement-only rows
+-- hydrate GHC details but never become lexical imports or native grants.
+-- This request-local value retains neither a compiler environment nor Core.
+data WorldImportBasis = WorldImportBasis
+  (Map.Map (String,String) WorldTypeClosureEntry)
+  [(ExactIfaceArtifact, [(String,String)])]
+  [(String,String)]
+
+readWorldImportBasis :: ExactInputOwner -> HscEnv -> WorldInputFacts
+  -> [ImportIntent] -> ParsedModuleDemand -> IO WorldImportBasis
+readWorldImportBasis owner environment facts intents parsed = do
+  roots <- fmap Set.fromList $ fmap catMaybes $ forM (moduleImportRequests parsed) $ \(name,raw,boot) -> do
+    let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
+        home = homeUnitId (hsc_home_unit environment)
+        selected = case qualifier of
+          NoPkgQual -> Just (unitString home,moduleNameString name)
+          ThisPkg unit | unit == home -> Just (unitString unit,moduleNameString name)
+          _ -> Nothing
+        authored = AuthoredSourceImport name raw `elem` intents
+    case selected of
+      Just key | boot == NotBoot, not authored, worldHasSelectedPrimary facts key -> do
+        found <- findImportedModule environment name qualifier
+        -- A captured current source is qualified by the existing source
+        -- validator, including its exact bytes and SOURCE/boot graph.
+        pure $ case found of
+          Found location actual
+            | (unitString (moduleUnit actual),moduleNameString (moduleName actual)) == key
+            , isJust (ml_hs_file location) -> Nothing
+          _ -> Just key
+      _ -> pure Nothing
+  if Set.null roots then pure (WorldImportBasis Map.empty [] []) else do
+    entries <- readWorldTypeInputs owner environment facts (Set.toAscList roots)
+      >>= either (throwIO . WorldInputsFailure WorldInputsCorrupt) pure
+    lexical <- lexicalClosure entries Set.empty (Set.toAscList roots)
+    sources <- fmap catMaybes $ forM (Map.toAscList entries) $ \(key,entry) -> do
+      found <- findImportedModule environment (mkModuleName (snd key)) (ThisPkg (homeUnitId (hsc_home_unit environment)))
+      case found of
+        Found location actual
+          | (unitString (moduleUnit actual),moduleNameString (moduleName actual)) == key
+          , isJust (ml_hs_file location) -> case worldTypeEntryEvidence entry of
+              ModuleInterfaceEvidence proof | isSourceOriginal (canonicalOrigin proof) -> pure (Just key)
+              _ -> unsupported
+        _ -> do
+          unless (not (any (\(name,raw,boot) ->
+              let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
+                  local = qualifier == NoPkgQual || qualifier == ThisPkg (homeUnitId (hsc_home_unit environment))
+              in local && moduleNameString name == snd key
+                && (boot == IsBoot || AuthoredSourceImport name raw `elem` intents)) (moduleImportRequests parsed))) $
+            throwIO (WorldInputsFailure WorldInputsUnavailable "current source import lacks captured source")
+          pure Nothing
+    pure (WorldImportBasis entries lexical sources)
+  where
+    lexicalClosure _ _ [] = pure []
+    lexicalClosure entries visited (key:rest)
+      | key `Set.member` visited = lexicalClosure entries visited rest
+      | otherwise = do
+          entry <- maybe (throwIO (WorldInputsFailure WorldInputsCorrupt
+            "carried import lost its selected TYPE closure owner")) pure (Map.lookup key entries)
+          imports <- case worldTypeEntryEvidence entry of
+            ModuleInterfaceEvidence proof -> maybe unsupported pure (canonicalSourceImports proof)
+            _ -> unsupported
+          let edges = Set.toAscList (Set.fromList [(unit,name) | (_,name,_,Just unit) <- imports])
+          unless (all (`Map.member` entries) edges) $
+            throwIO (WorldInputsFailure WorldInputsCorrupt "carried lexical import lacks its exact TYPE association")
+          remaining <- lexicalClosure entries (Set.insert key visited) (edges ++ rest)
+          pure ((worldTypeEntryArtifact entry,edges):remaining)
+    unsupported = throwIO (WorldInputsFailure WorldInputsCorrupt
+      "carried import lacks canonical source-import provenance")
+
+worldImportEntries :: WorldImportBasis -> [WorldTypeClosureEntry]
+worldImportEntries (WorldImportBasis entries _ _) = Map.elems entries
+
+qualifyWorldImportSources :: WorldImportBasis -> Ghc ()
+qualifyWorldImportSources (WorldImportBasis _ _ []) = pure ()
+qualifyWorldImportSources (WorldImportBasis entries _ sources) = do
+  environment <- getSession
+  let selected = Map.restrictKeys entries (Set.fromList sources)
+      proofs = Map.mapMaybe (\entry -> case worldTypeEntryEvidence entry of
+        ModuleInterfaceEvidence proof -> Just proof
+        _ -> Nothing) selected
+      interfaces = [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems entries]
+      readPackages key = maybe (throwIO (ExecutionSourcePackageChanged key))
+        (pure . worldTypeEntryPackages) (Map.lookup key entries)
+  _ <- withHeldWorldSourceRefusal $ validateCanonicalSourceInputs True
+    (Just (map worldTypeEntryVerifiedInterface (Map.elems entries))) proofs interfaces
+    (map fst interfaces) [] readPackages (hsc_mod_graph environment) sources
+  pure ()
+
+hydrateWorldImportBasis :: WorldImportBasis -> HscEnv -> IO HscEnv
+hydrateWorldImportBasis basis environment = fst <$> hydrateExactScopeWithProducts environment
+  (map worldTypeEntryVerifiedInterface (worldImportEntries basis)) []
+
+-- Make rebuilds phase environments from its load graph. Reinstall the same
+-- admitted interfaces there, while keeping lexical instance reachability on
+-- the exact source-import graph rather than the broader TYPE requirement set.
+restoreWorldImportBasis :: WorldImportBasis -> HscEnv -> IO HscEnv
+restoreWorldImportBasis basis@(WorldImportBasis _ lexical _) environment
+  | null lexical = pure environment
+  | otherwise = do
+      let owners = Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- lexical]
+          key summary = (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
+          nodes = mgModSummaries' (hsc_mod_graph environment)
+      unless (null [() | ModuleNode _ summary <- nodes, key summary `Set.member` owners
+          , isJust (ml_hs_file (ms_location summary))]) $
+        throwIO (WorldInputsFailure WorldInputsCorrupt "carried interface collides with current source")
+      ready <- hydrateWorldImportBasis basis environment
+      let ordinary (ModuleNode _ summary) = key summary `Set.notMember` owners
+          ordinary _ = True
+      installExactLexicalGraphWithScaffold (mkModuleGraph (filter ordinary nodes)) lexical
+        noCheckedValueImports noGeneratedScaffoldImports ready
+        >>= either (throwIO . WorldInputsFailure WorldInputsCorrupt) pure
 
 data WorldSourceSelection = WorldSourceSelection (Maybe SourceSelectedOriginals)
   [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])] [WorldTypeClosureEntry]
@@ -2531,7 +2643,19 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   (current,verifiedDeclaration) <- either (\reason -> liftIO $ do
     emitWorldAcquisitionRejection "world declaration type input" path reason
     throwIO WorldCellCorrupt) pure declarationInputs
+  let importFailure :: WorldInputsFailure -> IO value
+      importFailure (WorldInputsFailure cause detail) = do
+        emitWorldAcquisitionRejection "world carried import" path detail
+        throwIO (case cause of
+          WorldInputsUnavailable -> WorldCellUnavailable
+          WorldInputsCorrupt -> WorldCellCorrupt)
+  importBasis <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts
+    (sourceImportIntents purpose) parsedDemand `catch` importFailure)
   setSession current
+  qualifyWorldImportSources importBasis
+  qualified <- getSession
+  imported <- liftIO (hydrateWorldImportBasis importBasis qualified `catch` importFailure)
+  setSession imported
   resolvedRef <- liftIO (newIORef Nothing)
   nativeRef <- liftIO (newIORef Nothing)
   let requireNative = readIORef nativeRef >>= maybe (throwIO WorldCellCorrupt) pure
@@ -2583,6 +2707,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
         , pvDownsweepExcludes=maybe [] (pure . mkModuleName . exactModule . worldCellOperandInterface) operand
+            ++ [mkModuleName (exactModule (worldTypeEntryArtifact entry)) | entry <- worldImportEntries importBasis]
             ++ case operation of
               WorldCellSource _ _ prefix _ _ _ -> map ms_mod_name (worldCellPrefixOriginalSummaries prefix)
               WorldObservationSource {} -> []
@@ -2591,7 +2716,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             (Just (WorldPrivateCompletion previous _),WorldDependencyAttempt _ _ policy _ versions canonicalRecovery _ _ _ _) ->
               Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions canonicalRecovery))
             _ -> Nothing
-        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces)
+        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces importBasis)
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- if ms_mod_name summary /= target
               then pvTransformParsed variant target environment summary parsed
@@ -2616,6 +2741,17 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               declared <- mapNativeModule (transformProgramDeclarationImports inventories Nothing environment) baseDeclared
               thenNativeModule declared (transformCompletedValueAliases (worldResolvedAliases resolved) environment)
         , pvPlan = \directory enabled target graph exact -> do
+            environment <- getSession
+            prefixEnvironment <- case operation of
+              WorldCellSource _ _ prefix _ _ _ -> do
+                summary <- case [summary | ModuleNode _ summary <- mgModSummaries' graph
+                    , ms_mod_name summary == target, ms_hsc_src summary == HsSrcFile] of
+                  [summary] -> pure summary
+                  _ -> liftIO (throwIO WorldCellCorrupt)
+                liftIO (restoreWorldCellPrefixFor summary environment {hsc_mod_graph=graph} prefix)
+              WorldObservationSource {} -> pure environment {hsc_mod_graph=graph}
+            ready <- liftIO (restoreWorldImportBasis importBasis prefixEnvironment `catch` importFailure)
+            setSession ready
             planned <- pvPlan variant directory enabled target graph exact
             let sourceOwners = Set.fromList
                   [(unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
@@ -2633,6 +2769,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                       ready <- liftIO (restoreWorldCellPrefixFor summary environment prefix)
                       setSession ready
                     WorldObservationSource {} -> pure ()
+                  environment <- getSession
+                  ready <- liftIO (restoreWorldImportBasis importBasis environment `catch` importFailure)
+                  setSession ready
               , cpBeforeModule = \summary -> do
                   cpBeforeModule planned summary
                   case operation of
@@ -2641,6 +2780,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                       ready <- liftIO (restoreWorldCellPrefixFor summary environment prefix)
                       setSession ready
                     WorldObservationSource {} -> pure ()
+                  environment <- getSession
+                  ready <- liftIO (restoreWorldImportBasis importBasis environment `catch` importFailure)
+                  setSession ready
                   when (ms_mod_name summary == target) $ do
                     environment <- getSession
                     (ready,resolved) <- liftIO (resolveInputs environment sourceOwners)
@@ -2670,7 +2812,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       resolved <- liftIO requireResolved
       (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes _ _) <- completeDependencies
       selectedTypeBodies <- liftIO $ do
-        let entries = worldResolvedTypes resolved ++ sourceTypes ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
+        let entries = worldResolvedTypes resolved ++ sourceTypes ++ worldImportEntries importBasis ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
               ++ maybe [] (Map.elems . worldCellOperandTypes) operand
             selected = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,worldTypeEntryInterfaceBody entry))
               | entry <- entries, let artifact = worldTypeEntryArtifact entry]
@@ -4318,7 +4460,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       then Just <$> liftIO (targetModuleFor modGraphDownsweep path)
       else pure Nothing
     targetQuoteProof <- case (pvWorldSources variant,capturedTarget,policyTarget) of
-      (Just (WorldSourceInputBasis _ _ _ proof _),Just bytes,Just owner)
+      (Just (WorldSourceInputBasis _ _ _ proof _ _),Just bytes,Just owner)
         | moduleDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
         | otherwise -> liftIO (throwIO WorldCellCorrupt)
       (Nothing,_,_) -> pure Nothing
@@ -4688,9 +4830,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let sourceOrder = [summary
           | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
           , ms_hsc_src summary == HsSrcFile]
-    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts receipt _ privateInputs) -> do
+    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts receipt _ privateInputs imports) -> do
       when (isJust (pvExactScope variant)) (liftIO (throwIO WorldCellCorrupt))
-      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts privateInputs modGraphRaw)
+      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts privateInputs imports modGraphRaw)
       liftIO (writeIORef receipt (Just selected))
       pure selected
     sourceSelection <- case pvExactScope variant of
@@ -4708,18 +4850,23 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               (\inputs -> lookupCanonicalOriginalInput inputs (ms_mod summary))
           | otherwise = Nothing
     let nativeReference owner = do
-          WorldSourceInputBasis _ facts _ _ _ <- pvWorldSources variant
+          WorldSourceInputBasis _ facts _ _ _ _ <- pvWorldSources variant
           worldOriginalReferenceFor facts owner
         nativeCanonical summary = isJust (canonicalOriginalFor summary)
           && isJust (nativeReference (ms_mod summary))
         nativeOriginalInputs =
-          [(ms_mod summary,input,reference) | summary <- sourceOrder
+          [(ms_mod summary,hm_iface (canonicalOriginalHome input),reference) | summary <- sourceOrder
             , input <- maybe [] pure (canonicalOriginalFor summary)
             , reference <- maybe [] pure (nativeReference (ms_mod summary))]
+          ++ [(mi_module iface,iface,reference)
+             | WorldSourceInputBasis _ _ _ _ _ imports <- maybe [] pure (pvWorldSources variant)
+             , entry <- worldImportEntries imports
+             , let iface = worldTypeEntryInterface entry
+             , reference <- maybe [] pure (nativeReference (mi_module iface))]
         referenceForName name = case Set.toAscList (Set.fromList
-            [reference | (owner,input,reference) <- nativeOriginalInputs
+            [reference | (owner,iface,reference) <- nativeOriginalInputs
               , nameModule_maybe name == Just owner
-                || any (name `elem`) (map availNames (mi_exports (hm_iface (canonicalOriginalHome input))))]) of
+                || any (name `elem`) (map availNames (mi_exports iface))]) of
           [] -> pure Nothing
           [reference] -> pure (Just reference)
           _ -> throwIO (OriginalNativeNameConflict name)
@@ -4727,8 +4874,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->
             let owners = Set.fromList [key | value <- maybe [] pure selected,(key,_,_,_) <- selectedOriginalRows value]
+                -- Strip the same exact imports this completion recorded,
+                -- including source-less carried interfaces. Their absence
+                -- from source lookup is not a package-resolution witness.
                 (ordinary,_) = sourceEvidenceGraphFor
-                  (Map.fromList [(mkModuleName name,unit) | (unit,name) <- Set.toAscList owners]) modGraphRaw
+                  (Map.fromList [(mkModuleName name,unit)
+                    | (_,edges) <- imports,(_,name,_,unit) <- edges]) modGraphRaw
                 fresh (ModuleNode _ summary) =
                   (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary)) `Set.notMember` owners
                 fresh _ = True
@@ -5684,8 +5835,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     bindings = concatMap (cg_binds . finalizedTidyGuts) finalized
                     rhs (NonRec _ value) = [value]
                     rhs (Rec pairs) = map snd pairs
+                    -- Imported Originals are global Ids. GHC's ordinary
+                    -- exprFreeVars deliberately omits those occurrences.
                     identifiers = [identifier | binding <- bindings,value <- rhs binding
-                      , identifier <- nonDetEltsUniqSet (exprFreeVars value),isId identifier]
+                      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isId value)]
                 selected <- fmap catMaybes $ forM identifiers $ \identifier -> do
                   reference <- referenceForName (idName identifier)
                   pure ((\value -> (idName identifier,preparedRootIdentity identifier,value)) <$> reference)
@@ -7797,7 +7950,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                     Just facade -> let artifact = worldDeclarationInterface facade in
                                       [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ exactModule artifact)
                                         RetainedGeneratedImport [mkModuleName (exactModule artifact)]]
-                                  inherited = prologueImports (cellPlanPrologue lexical) ++ selectedDeclaration
+                                  inherited = map (\imported -> imported {locatedImportIntent=RetainedGeneratedImport})
+                                    (prologueImports (cellPlanPrologue lexical)) ++ selectedDeclaration
                               prefix <- newIORef (WorldCellPrefix 0 emptyHomePackageTable (mkModuleGraph []) Nothing [] basis inherited WorldStagePending)
                               operand <- newIORef Nothing
                               pure (Right (HeldWorldCellAdmission phase
@@ -8886,10 +9040,20 @@ withHeldWorldSourceRefusal action = reifyGhc $ \session ->
       emitWorldAcquisitionRejection "world source import" "<held captured source>" (show failure)
       throwIO WorldCellUnavailable
 
-captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> [(ExactIfaceArtifact,ModIface)] -> ModuleGraph
+captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> [(ExactIfaceArtifact,ModIface)]
+  -> WorldImportBasis -> ModuleGraph
   -> Ghc WorldSourceSelection
-captureHeldWorldSourceSelection owner facts privateInputs graph = do
+captureHeldWorldSourceSelection owner facts privateInputs imported graph = do
+  environment <- getSession
   let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+      home = unitString (homeUnitId (hsc_home_unit environment))
+      -- This classifies actual lexical edges; TYPE dependencies do not
+      -- themselves become imports or current-source claims.
+      carriedOwners = Map.fromList
+        [(mkModuleName (exactModule artifact),exactUnit artifact)
+        | entry <- worldImportEntries imported
+        , let artifact = worldTypeEntryArtifact entry
+        , exactUnit artifact == home]
       demanded = Set.fromList [ownerKey (ms_mod summary)
         | ModuleNode _ summary <- mgModSummaries' graph
         , worldHasSelectedSource facts (ownerKey (ms_mod summary))]
@@ -8900,7 +9064,7 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
     emitWorldAcquisitionRejection "world source import" "<held Context association>"
       ("selected primary owners lack admitted source associations (first 16): " ++ show (take 16 unsupported))
     throwIO WorldCellUnsupported
-  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor Map.empty graph)) [] Map.empty Nothing) else do
+  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor carriedOwners graph)) [] Map.empty Nothing) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs owner initial facts (Set.toAscList demanded))
     (entries,typeEntries) <- case captured of
@@ -8926,7 +9090,8 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
         current = validatedOriginalEvidence validation
         modules = [node | node <- dependencyModules current
           , (dependencyModuleUnit node,dependencyModuleName node) `Set.member` selectedKeys]
-        exactOwners = Map.fromList [(mkModuleName name,unit) | (unit,name) <- Set.toAscList selectedKeys]
+        exactOwners = Map.union carriedOwners
+          (Map.fromList [(mkModuleName name,unit) | (unit,name) <- Set.toAscList selectedKeys])
         (_,allImports) = sourceEvidenceGraphFor exactOwners graph
         imports = filter (\((unit,name,_),_) -> Set.notMember (unit,name) selectedKeys) allImports
         relevantImports = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)

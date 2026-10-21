@@ -69,7 +69,7 @@ import Tidepool.HostBindingAuthority (HostBindingRepresentation, hostBindingRepr
 import Tidepool.ConstructorIdentity (IssuedConstructor)
 import qualified Tidepool.EffectSchema
 import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature)
-import Tidepool.CertifiedProducts (resolvePackageGlobal)
+import Tidepool.CertifiedProducts (resolvePackageGlobal, encodeReceiptIdentity)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..))
 import Tidepool.OriginalProductRoots (requiredOriginalExternalGlobalsWithPrior, unrecoveredExactProducts)
@@ -576,7 +576,7 @@ encodeNativeUses uses = toStrictByteString $ array
           ((interface,interfaceScope),(original,originalScope)) = worldOriginalReferenceBindings reference
       in array [encodeString unit,encodeString name
         ,array [encodeBytes interface,encodeBytes interfaceScope]
-        ,array [encodeBytes original,encodeBytes originalScope],encodeSymbol symbol]
+        ,array [encodeBytes original,encodeBytes originalScope],encodeReceiptIdentity symbol]
 
 type NativeOriginalUse = (SymbolIdentity,WorldOriginalReference)
 type NativeUseCoordinate = (T.Text,T.Text,(BS.ByteString,BS.ByteString),(BS.ByteString,BS.ByteString),SymbolIdentity)

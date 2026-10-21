@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.CertifiedProducts
-  ( encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
+  ( encodeReceiptIdentity
+  , encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
   , CertifiedProductKind(..), TargetCertificationContext
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
   , encodeCertifiedItemProductsWithInputs
@@ -198,7 +199,7 @@ encodeOriginalBinding reference =
 
 encodeWitness :: Map.Map OwnerCoordinate Word -> GlobalWitness -> Encoding
 encodeWitness coordinates (identity, rep, signature, evaluated, owner) = array
-  [encodeIdentity identity, encodeRep rep, maybe encodeNull encodeSignature signature
+  [encodeReceiptIdentity identity, encodeRep rep, maybe encodeNull encodeSignature signature
   , encodeBool evaluated, encodeCompactOwner coordinates owner]
 
 encodeCompactOwner :: Map.Map OwnerCoordinate Word -> WitnessOwner -> Encoding
@@ -648,14 +649,14 @@ certifyItemProducts env context program = do
 
 encodeFullWitness :: GlobalWitness -> Encoding
 encodeFullWitness (identity,rep,signature,evaluated,owner) = array
-  [encodeIdentity identity,encodeRep rep,maybe encodeNull encodeSignature signature,
+  [encodeReceiptIdentity identity,encodeRep rep,maybe encodeNull encodeSignature signature,
    encodeBool evaluated,case owner of
     SourceOwner unit name version ordinal -> array [encodeString "source",encodeString unit,
-      encodeString name,maybe encodeNull encodeString version,encodeWord ordinal,encodeIdentity identity]
-    RetainedOwner generation -> array [encodeString "retained",encodeIdentity identity,encodeWord64 generation]
+      encodeString name,maybe encodeNull encodeString version,encodeWord ordinal,encodeReceiptIdentity identity]
+    RetainedOwner generation -> array [encodeString "retained",encodeReceiptIdentity identity,encodeWord64 generation]
     OriginalBindingOwner reference -> encodeOriginalBinding reference
     PackageOwner unit name seal -> array [encodeString "package",encodeString unit,
-      encodeString name,encodeString seal,encodeIdentity identity]]
+      encodeString name,encodeString seal,encodeReceiptIdentity identity]]
 
 -- Native identity binds the finite graph actually retained for this owner.
 -- Promoted edges name nodes rather than recursively derived versions, so cycles
@@ -715,21 +716,21 @@ retainedNativeVersions emitted exact cached packages products rows = do
     encodeEdge (identity,_,_,_,owner) = case owner of
       SourceOwner unit name _ ordinal
         | Map.member (unit,name) promoted -> Right (array
-            [encodeString "local-source",encodeString unit,encodeString name,encodeWord ordinal,encodeIdentity identity])
+            [encodeString "local-source",encodeString unit,encodeString name,encodeWord ordinal,encodeReceiptIdentity identity])
         | otherwise -> do
             (version,ifaceSha,nativeSha,_) <- lookupSeal (unit,name)
             pure (array [encodeString "source",array (map encodeString [unit,name,version,ifaceSha,nativeSha]),
-              encodeWord ordinal,encodeIdentity identity])
+              encodeWord ordinal,encodeReceiptIdentity identity])
       RetainedOwner generation -> Right (array
-        [encodeString "retained",encodeIdentity identity,encodeWord64 generation])
+        [encodeString "retained",encodeReceiptIdentity identity,encodeWord64 generation])
       OriginalBindingOwner reference -> Right (array
-        [encodeString "original-binding",encodeOriginalBinding reference,encodeIdentity identity])
+        [encodeString "original-binding",encodeOriginalBinding reference,encodeReceiptIdentity identity])
       PackageOwner unit name sha -> do
         path <- case Map.lookup (unit,name) packages of
           Just options | [(selected,selectedSha)] <- Set.toAscList options,selectedSha == sha -> Right selected
           _ -> Left "native demand graph lacks an exact package path seal"
         pure (array [encodeString "package",encodeString unit,encodeString name,
-          encodeString sha,encodeIdentity identity,encodeString (T.pack path)])
+          encodeString sha,encodeReceiptIdentity identity,encodeString (T.pack path)])
 
 -- A locally emitted package value may have no incoming global edge. Its exact
 -- defining interface must still be retained before it is offered to later
@@ -1071,8 +1072,10 @@ encodeModule product groups = array
       (productInterfaces product)
   ]
 
-encodeIdentity :: SymbolIdentity -> Encoding
-encodeIdentity identity = array
+-- | Symbol identity in compiler receipts: an optional parent is null or text.
+-- The execution schema has a distinct tagged-option grammar.
+encodeReceiptIdentity :: SymbolIdentity -> Encoding
+encodeReceiptIdentity identity = array
   [ encodeString (symbolUnit identity), encodeString (symbolModule identity)
   , encodeString (symbolNamespace identity), encodeString (symbolOccurrence identity)
   , maybe encodeNull encodeString (symbolRecordParent identity) ]

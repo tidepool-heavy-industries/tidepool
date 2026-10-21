@@ -152,11 +152,21 @@ outputs. Captured source imports demand only actual Context-selected canonical
 rows and their exact type closure. The shared current-source validator checks
 source bytes, adjacency, packages and interface compatibility. Their qualification
 receipt remains distinct from genuinely fresh generated-source evidence; an
-admitted owner cannot masquerade as a fresh replacement. The initial slice still
-refuses unsupported primary roles, value types with unprepared home dependencies,
-authored declaration/prologue items and multiple inference segments. General
-inherited lexical import activation remains a separate migration obligation;
-this route does not select Originals from passive rows or construct an ExactScope. A completed
+admitted owner cannot masquerade as a fresh replacement. Published import lines
+retain generated import intent when parsed into a later stage; imports submitted
+in the current cell retain authored source intent. The request-local World import
+basis hydrates only reached selected TYPE rows before downsweep and rename.
+Canonical source-import adjacency authorizes its virtual lexical graph;
+implementation TYPE requirements do not become lexical edges. Any captured
+source-less HOME import retains its exact owner in the completion's import
+receipt and is excluded from ordinary package/source lookup evidence. Classify
+actual lexical edges using the same admitted input basis, rather than the
+subset of owners with current source files. Any captured
+current source is qualified before hydration or exclusion can hide a conflict.
+Authored SOURCE/boot imports keep the current-source route. This path neither
+selects Originals from passive rows nor constructs an ExactScope, and TYPE
+hydration grants no native readiness. Public-module queries retain their separate
+source-provenance contract. A completed
 item description is not a published runtime successor. Source request builders
 preflight binary framing plus hex expansion against the same daemon receive
 budget before appending bulk fields; the transport still charges actual cwd.
