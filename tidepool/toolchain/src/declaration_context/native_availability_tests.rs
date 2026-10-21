@@ -1424,8 +1424,56 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         Arc::downgrade(&full.metadata_snapshot().artifacts[&entries[2].descriptor.id]);
     let b_id = entries[1].descriptor.id;
     let a_id = entries[0].descriptor.id;
-    let demand = source_import(&recovered[1].product, 7);
-    let denied_demand = source_import(&recovered[1].product, 9001);
+    let target_binders = [7, 9001].map(|ordinal| {
+        crate::certified_products::original_available_groups(&recovered[1].product)
+            .unwrap()
+            .find(|group| group.original_ordinal() == ordinal)
+            .unwrap()
+            .binders()[0]
+            .clone()
+    });
+    let target_owner = recovered[1].product.owner();
+    let accepted = [7, 9001]
+        .into_iter()
+        .zip(&target_binders)
+        .map(|(ordinal, binder)| AcceptedGlobal {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: target_owner.unit.clone(),
+                module: target_owner.module.clone(),
+                module_version: Some(target_owner.module_version.clone()),
+                original_ordinal: ordinal,
+                binder: binder.clone(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let targets = target_binders
+        .iter()
+        .map(|binder| {
+            prepared_target_fixture(vec![GlobalDecl {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }])
+        })
+        .collect::<Vec<_>>();
+    let mixed_target = prepared_target_fixture(
+        target_binders
+            .iter()
+            .map(|binder| GlobalDecl {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            })
+            .collect(),
+    );
     // A different selected A is unrelated to the proof that supplied B. Both
     // alternatives deliberately share canonical interfaces with their peers.
     let replacement_a = product("ReceiptAncestor", 94);
@@ -1653,44 +1701,32 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     ));
     let consume = |view: &ArtifactView,
                    selection: &crate::certified_products::CertifiedSourceSelection,
-                   imports: &[crate::certified_products::PendingImportOwner],
+                   target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+                   accepted: &[AcceptedGlobal],
                    validation: &mut PackageInterfaceValidation| {
-        let mut fixed = view
-            .inventory()
-            .bind_segment(view, vec![], selection, validation)
-            .expect("bind the actual receipt owner before body demand");
-        let demanded = view.inventory().admit_bound_target(
-            &mut fixed,
+        let observed = AuthenticatedTargetImports::issue(target, accepted, &validation.inventory)
+            .map_err(compiler_evidence_failure)?;
+        let demanded = view.inventory().select_native_target(
             view,
-            NativeArtifactDemand::CertifiedTargetImports(imports),
-            vec![],
             selection,
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            validation,
         )?;
-        drop(fixed);
-        demanded
-            .clone()
-            .bind_target(None, (imports).to_vec())
-            .resolve()
-            .map(|resolved| resolved.groups().clone())
+        demanded.resolve().map(|resolved| resolved.groups().clone())
     };
-    let mut failed_then_retried = admitted
-        .inventory()
-        .bind_segment(&admitted, vec![], &selected, &mut validation)
-        .unwrap();
-    let fixed_before = failed_then_retried.observed_binding_state();
     let cursor_before = admitted.capture_graph_selection();
-    let mixed = [demand.clone(), denied_demand.clone()];
-    let denied = admitted
-        .inventory()
-        .admit_bound_target(
-            &mut failed_then_retried,
-            &admitted,
-            NativeArtifactDemand::CertifiedTargetImports(&mixed),
-            vec![],
-            &selected,
-        )
-        .err()
-        .expect("actual denied group must refuse");
+    let denied = consume(
+        &admitted,
+        &selected,
+        &mixed_target,
+        &accepted,
+        &mut validation,
+    )
+    .unwrap_err();
     assert!(
         matches!(&denied, CompileError::ArtifactInventory(error) if matches!(error.failure,
         crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
@@ -1720,36 +1756,24 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         Some("input_permission_denied" | "bound_permission_denied")
     ));
     assert_eq!(cause["native_refusal"]["body_present"], true);
-    assert_eq!(
-        failed_then_retried.observed_binding_state(),
-        fixed_before,
-        "a valid staged B7 followed by denied B9001 publishes no payload or choice"
-    );
     assert_eq!(admitted.capture_graph_selection(), cursor_before);
-    let retried = admitted
-        .inventory()
-        .admit_bound_target(
-            &mut failed_then_retried,
-            &admitted,
-            NativeArtifactDemand::CertifiedTargetImports(std::slice::from_ref(&demand)),
-            vec![],
-            &selected,
-        )
-        .unwrap();
-    drop(failed_then_retried);
+    let retried = consume(
+        &admitted,
+        &selected,
+        &targets[0],
+        &accepted[..1],
+        &mut validation,
+    )
+    .unwrap();
     assert_eq!(
-        retried
-            .clone()
-            .bind_target(None, (std::slice::from_ref(&demand)).to_vec())
-            .resolve()
-            .map(|resolved| resolved.groups().clone())
-            .unwrap(),
-        exact
+        retried, exact,
+        "failed mixed selection cannot change the retry's exact issuer"
     );
     let groups = consume(
         &admitted,
         &selected,
-        std::slice::from_ref(&demand),
+        &targets[0],
+        &accepted[..1],
         &mut validation,
     )
     .expect("the issued B receipt authorizes its exact group7");
@@ -1769,7 +1793,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .is_err());
 
     assert!(matches!(
-        consume(&admitted, &selected, std::slice::from_ref(&denied_demand), &mut validation),
+        consume(&admitted, &selected, &targets[1], &accepted[1..], &mut validation),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
             crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
                 artifact, original_ordinal: 9001,
@@ -1841,7 +1865,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let requested_groups = consume(
         &selected_view,
         &request_selection,
-        std::slice::from_ref(&demand),
+        &targets[0],
+        &accepted[..1],
         &mut validation,
     )
     .unwrap();
@@ -1855,7 +1880,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     );
     assert!(!request.native_selection.availability.0[&b_id].permits(9001));
     assert!(matches!(
-        consume(&selected_view, &request_selection, &[denied_demand], &mut validation),
+        consume(&selected_view, &request_selection, &targets[1], &accepted[1..], &mut validation),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
             crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
                 artifact, original_ordinal: 9001,
@@ -2598,17 +2623,6 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         let ArtifactPayload::Original(product) = &entry.payload else {
             unreachable!()
         };
-        let definitions =
-            crate::certified_products::original_native_group_definitions(product, 7).unwrap();
-        let binding = match &definitions.bindings()[0] {
-            tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
-            tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
-        };
-        let imports = [crate::certified_products::PendingImportOwner::Source {
-            owner: product.owner().clone(),
-            original_ordinal: 7,
-            binder: binding.identity.clone(),
-        }];
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
@@ -2616,18 +2630,44 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         )
         .unwrap();
         let source = inputs.artifacts();
-        let mut fixed = source
-            .inventory()
-            .bind_segment(source, vec![], &selection, &mut validation)
+        let group = crate::certified_products::original_available_groups(product)
+            .unwrap()
+            .find(|group| group.original_ordinal() == 7)
             .unwrap();
+        let binder = group.binders()[0].clone();
+        let prepared = prepared_target_fixture(vec![GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }]);
+        let accepted = [AcceptedGlobal {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+                module_version: Some(product.owner().module_version.clone()),
+                original_ordinal: 7,
+                binder,
+            },
+        }];
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
         let target = source
             .inventory()
-            .admit_bound_target(
-                &mut fixed,
+            .select_native_target(
                 source,
-                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
                 &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
             .unwrap();
         assert_eq!(
@@ -2935,30 +2975,49 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     )
     .unwrap();
     assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
-    let mut fixed = inputs
-        .artifacts()
-        .inventory()
-        .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
+    let group = crate::certified_products::original_available_groups(&native)
+        .unwrap()
+        .find(|group| group.original_ordinal() == 9001)
         .unwrap();
-    let imports = [source_import(&native, 9001)];
+    let binder = group.binders()[0].clone();
+    let prepared = prepared_target_fixture(vec![GlobalDecl {
+        identity: binder.clone(),
+        rep: RuntimeRep::LiftedRef,
+        entry_signature: None,
+        required_evaluated: false,
+        required_generation: None,
+    }]);
+    let accepted = [AcceptedGlobal {
+        identity: binder.clone(),
+        rep: RuntimeRep::LiftedRef,
+        entry_signature: None,
+        required_evaluated: false,
+        owner: ReceiptImportOwner::Source {
+            unit: native.owner().unit.clone(),
+            module: native.owner().module.clone(),
+            module_version: Some(native.owner().module_version.clone()),
+            original_ordinal: 9001,
+            binder,
+        },
+    }];
+    let observed =
+        AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
     let demanded = inputs
         .artifacts()
         .inventory()
-        .admit_bound_target(
-            &mut fixed,
-            &inputs.artifacts(),
-            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-            vec![],
+        .select_native_target(
+            inputs.artifacts(),
             &selection,
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut validation,
         )
         .expect("later target uses the same issuer's previously unselected body");
     assert!(demanded.artifacts().selected_native_groups().is_empty());
-    let groups = demanded
-        .clone()
-        .bind_target(None, (&imports).to_vec())
-        .resolve()
-        .map(|resolved| resolved.groups().clone())
-        .unwrap();
+    let groups = demanded.resolve().unwrap().groups().clone();
     let expected = offer
         .issued_group_carriers()
         .unwrap()
@@ -4223,18 +4282,43 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
+            let group = crate::certified_products::original_available_groups(&native)
+                .unwrap()
+                .find(|group| group.original_ordinal() == 9001)
                 .unwrap();
-            let imports = [source_import(&native, 9001)];
-            let demanded = inputs.artifacts().inventory().admit_bound_target(
-                &mut fixed,
-                &inputs.artifacts(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
+            let binder = group.binders()[0].clone();
+            let prepared = prepared_target_fixture(vec![GlobalDecl {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }]);
+            let accepted = [AcceptedGlobal {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: native.owner().unit.clone(),
+                    module: native.owner().module.clone(),
+                    module_version: Some(native.owner().module_version.clone()),
+                    original_ordinal: 9001,
+                    binder,
+                },
+            }];
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let demanded = inputs.artifacts().inventory().select_native_target(
+                inputs.artifacts(),
                 &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             );
             assert!(
                 matches!(demanded, Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == entry.descriptor.id)),
@@ -6809,18 +6893,43 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         for demanded in [7, 9001] {
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
+            let group = crate::certified_products::original_available_groups(&native)
+                .unwrap()
+                .find(|group| group.original_ordinal() == demanded)
                 .unwrap();
-            let imports = [source_import(&native, demanded)];
-            let admitted = inputs.artifacts().inventory().admit_bound_target(
-                &mut fixed,
+            let binder = group.binders()[0].clone();
+            let prepared = prepared_target_fixture(vec![GlobalDecl {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }]);
+            let accepted = [AcceptedGlobal {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: native.owner().unit.clone(),
+                    module: native.owner().module.clone(),
+                    module_version: Some(native.owner().module_version.clone()),
+                    original_ordinal: demanded,
+                    binder,
+                },
+            }];
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let admitted = inputs.artifacts().inventory().select_native_target(
                 inputs.artifacts(),
-                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
                 &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             );
             let admitted = admitted.map(|_| ());
             if ordinal == Some(demanded) {
@@ -6834,18 +6943,42 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 );
             }
         }
-        let mut fixed = inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
+        let group = crate::certified_products::original_available_groups(&unrelated)
+            .unwrap()
+            .find(|group| group.original_ordinal() == 7)
             .unwrap();
-        let imports = [source_import(&unrelated, 7)];
-        let denied = inputs.artifacts().inventory().admit_bound_target(
-            &mut fixed,
+        let binder = group.binders()[0].clone();
+        let prepared = prepared_target_fixture(vec![GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }]);
+        let accepted = [AcceptedGlobal {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: unrelated.owner().unit.clone(),
+                module: unrelated.owner().module.clone(),
+                module_version: Some(unrelated.owner().module_version.clone()),
+                original_ordinal: 7,
+                binder,
+            },
+        }];
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
+        let denied = inputs.artifacts().inventory().select_native_target(
             inputs.artifacts(),
-            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-            vec![],
             &selection,
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut validation,
         );
         assert!(
             matches!(denied, Err(CompileError::ArtifactInventory(error))
@@ -7152,32 +7285,53 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 );
                 assert!(selection.receipt_native_body_owners().next().is_none());
                 if index == 0 {
-                    let mut fixed = inputs
-                        .artifacts()
-                        .inventory()
-                        .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
+                    let group = crate::certified_products::original_available_groups(native)
+                        .unwrap()
+                        .find(|group| group.original_ordinal() == 9001)
                         .unwrap();
-                    let imports = [source_import(native, 9001)];
+                    let binder = group.binders()[0].clone();
+                    let prepared = prepared_target_fixture(vec![GlobalDecl {
+                        identity: binder.clone(),
+                        rep: RuntimeRep::LiftedRef,
+                        entry_signature: None,
+                        required_evaluated: false,
+                        required_generation: None,
+                    }]);
+                    let accepted = [AcceptedGlobal {
+                        identity: binder.clone(),
+                        rep: RuntimeRep::LiftedRef,
+                        entry_signature: None,
+                        required_evaluated: false,
+                        owner: ReceiptImportOwner::Source {
+                            unit: native.owner().unit.clone(),
+                            module: native.owner().module.clone(),
+                            module_version: Some(native.owner().module_version.clone()),
+                            original_ordinal: 9001,
+                            binder,
+                        },
+                    }];
+                    let observed = AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &accepted,
+                        &validation.inventory,
+                    )
+                    .unwrap();
                     let demanded = inputs
                         .artifacts()
                         .inventory()
-                        .admit_bound_target(
-                            &mut fixed,
-                            &inputs.artifacts(),
-                            crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                                &imports,
-                            ),
-                            vec![],
+                        .select_native_target(
+                            inputs.artifacts(),
                             &selection,
+                            observed,
+                            None,
+                            None,
+                            &[],
+                            &BTreeMap::new(),
+                            &mut validation,
                         )
                         .expect("restored private Full survives certification and actual demand");
                     assert!(demanded.artifacts().selected_native_groups().is_empty());
-                    let groups = demanded
-                        .clone()
-                        .bind_target(None, (&imports).to_vec())
-                        .resolve()
-                        .map(|resolved| resolved.groups().clone())
-                        .unwrap();
+                    let groups = demanded.resolve().unwrap().groups().clone();
                     let expected = offer
                         .issued_group_carriers()
                         .unwrap()

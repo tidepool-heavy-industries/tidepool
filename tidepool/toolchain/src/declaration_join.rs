@@ -3116,30 +3116,48 @@ mod authored_tests {
                     bindings[0].identity.clone()
                 }
             };
-            let imports = [crate::certified_products::PendingImportOwner::Source {
-                owner: original.owner().clone(),
-                original_ordinal: chosen.original_ordinal,
-                binder,
+            let prepared = crate::declaration_context::prepared_target_fixture(vec![
+                tidepool_repr::execution_schema::GlobalDecl {
+                    identity: binder.clone(),
+                    rep: tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    required_generation: None,
+                },
+            ]);
+            let accepted = [crate::certified_products::AcceptedGlobal {
+                identity: binder.clone(),
+                rep: tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: crate::certified_products::ReceiptImportOwner::Source {
+                    unit: original.owner().unit.clone(),
+                    module: original.owner().module.clone(),
+                    module_version: Some(original.owner().module_version.clone()),
+                    original_ordinal: chosen.original_ordinal,
+                    binder,
+                },
             }];
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
-                .unwrap();
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
             let demanded = inputs
                 .artifacts()
                 .inventory()
-                .admit_bound_target(
-                    &mut fixed,
+                .select_native_target(
                     inputs.artifacts(),
-                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                        &imports,
-                    ),
-                    vec![],
                     &selection,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
                 .unwrap();
-            let demanded = demanded.bind_target(None, imports.to_vec());
             let resolved = demanded.resolve().unwrap();
             let actual = resolved.groups();
             assert!(actual.contains(&chosen));
@@ -3150,10 +3168,10 @@ mod authored_tests {
                     .all(|group| groups.contains(group)),
                 "later demand must consume this accepted owner's exact scoped bindings"
             );
-            let mut denied = imports.clone();
-            let crate::certified_products::PendingImportOwner::Source {
+            let mut denied = accepted.clone();
+            let crate::certified_products::ReceiptImportOwner::Source {
                 original_ordinal, ..
-            } = &mut denied[0]
+            } = &mut denied[0].owner
             else {
                 unreachable!()
             };
@@ -3161,21 +3179,28 @@ mod authored_tests {
             assert!(!groups
                 .iter()
                 .any(|group| group.original_ordinal == u32::MAX));
+            let denied = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &denied,
+                &validation.inventory,
+            )
+            .unwrap();
             assert!(
                 inputs
                     .artifacts()
                     .inventory()
-                    .admit_bound_target(
-                        &mut fixed,
+                    .select_native_target(
                         inputs.artifacts(),
-                        crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                            &denied
-                        ),
-                        vec![],
                         &selection,
+                        denied,
+                        None,
+                        None,
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
                     )
                     .is_err(),
-                "joining interfaces cannot grant an unavailable native ordinal"
+                "joining interfaces cannot grant a nonexistent native ordinal"
             );
             branch_groups.push((carrier, groups));
             branch_joins.push(joined);

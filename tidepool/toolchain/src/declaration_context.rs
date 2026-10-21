@@ -15828,6 +15828,17 @@ fn partition_native_recovery_references(
     (products, interfaces)
 }
 
+/// Authored syntax data for component target tests. Native authority is issued
+/// separately by the production target observation and selection boundaries.
+#[cfg(test)]
+pub(crate) fn prepared_target_fixture(
+    globals: Vec<tidepool_repr::execution_schema::GlobalDecl>,
+) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
+    let mut wire = tidepool_repr::execution_schema::testing::wire_program();
+    wire.globals = globals;
+    Arc::new(tidepool_repr::execution_schema::testing::prepare(wire).unwrap())
+}
+
 #[cfg(test)]
 pub(crate) use tests::{
     assert_source_selected_receipt_pairing, generated_source_admission_fixture,
@@ -16122,6 +16133,10 @@ mod tests {
     }
     use super::*;
     use crate::artifact_inventory::ArtifactKind;
+    use crate::certified_products::{
+        AcceptedGlobal, AuthenticatedTargetImports, ReceiptImportOwner,
+    };
+    use tidepool_repr::execution_schema::{GlobalDecl, RuntimeRep};
 
     include!("declaration_context/program_source_support_history.rs");
     include!("declaration_context/materialization_capture_history.rs");
@@ -20186,9 +20201,29 @@ mod tests {
         });
         context.normalize().unwrap();
         let imports = [PendingImportOwner::Source {
-            binder,
-            owner,
+            binder: binder.clone(),
+            owner: owner.clone(),
             original_ordinal: 7,
+        }];
+        let prepared = prepared_target_fixture(vec![GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }]);
+        let accepted = [AcceptedGlobal {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                module_version: Some(owner.module_version.clone()),
+                original_ordinal: 7,
+                binder,
+            },
         }];
         let inputs = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&Arc::new(context.clone()), None)
@@ -20199,23 +20234,22 @@ mod tests {
             &validation.inventory,
         )
         .unwrap();
-        let mut fixed = inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selected, &mut validation)
-            .unwrap();
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
         let target = inputs
             .artifacts()
             .inventory()
-            .admit_bound_target(
-                &mut fixed,
+            .select_native_target(
                 inputs.artifacts(),
-                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
                 &selected,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
-            .unwrap()
-            .bind_target(None, imports.to_vec());
+            .unwrap();
         let groups = target.resolve().unwrap().groups().clone();
         let published_original = publication
             .context()
@@ -20436,29 +20470,24 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut segment = actual
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let target = actual
                 .artifacts()
                 .inventory()
-                .bind_segment(actual.artifacts(), vec![], &selected, &mut validation)
-                .unwrap();
-            let demanded = actual
-                .artifacts()
-                .inventory()
-                .admit_bound_target(
-                    &mut segment,
+                .select_native_target(
                     actual.artifacts(),
-                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                        &imports,
-                    ),
-                    vec![],
                     &selected,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
-                .unwrap()
-                .bind_target(None, imports.to_vec())
-                .resolve()
-                .unwrap()
-                .groups()
-                .clone();
+                .unwrap();
+            let demanded = target.resolve().unwrap().groups().clone();
             assert!(!demanded.is_empty());
             assert!(demanded
                 .iter()
@@ -25144,11 +25173,6 @@ mod tests {
                 tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
                 tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
             };
-            let imports = [crate::certified_products::PendingImportOwner::Source {
-                owner: product.owner().clone(),
-                original_ordinal: 7,
-                binder: binding.identity.clone(),
-            }];
             let mut validation = PackageInterfaceValidation::default();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -25156,24 +25180,40 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
-                .unwrap();
-            let target = inputs.artifacts().inventory().admit_bound_target(
-                &mut fixed,
-                &inputs.artifacts(),
-                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
+            let prepared = prepared_target_fixture(vec![GlobalDecl {
+                identity: binding.identity.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }]);
+            let accepted = [AcceptedGlobal {
+                identity: binding.identity.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: product.owner().unit.clone(),
+                    module: product.owner().module.clone(),
+                    module_version: Some(product.owner().module_version.clone()),
+                    original_ordinal: 7,
+                    binder: binding.identity.clone(),
+                },
+            }];
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let target = inputs.artifacts().inventory().select_native_target(
+                inputs.artifacts(),
                 &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )?;
-            let groups = target
-                .clone()
-                .bind_target(None, (&imports).to_vec())
-                .resolve()
-                .map(|resolved| resolved.groups().clone())
-                .unwrap();
+            let groups = target.resolve().unwrap().groups().clone();
             assert_eq!(groups.len(), 1);
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
@@ -25791,11 +25831,6 @@ mod tests {
                 tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
                 tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
             };
-            let imports = [crate::certified_products::PendingImportOwner::Source {
-                owner: native.owner().clone(),
-                original_ordinal: 7,
-                binder: binding.identity.clone(),
-            }];
             assert!(matches!(
                 crate::certified_products::original_native_group_imports(native, 7).unwrap()[0],
                 crate::certified_products::ReceiptImportOwner::Retained { generation: 11, .. }
@@ -25807,30 +25842,44 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let mut fixed = inputs
-                .artifacts()
-                .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
-                .unwrap();
+            let prepared = prepared_target_fixture(vec![GlobalDecl {
+                identity: binding.identity.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }]);
+            let accepted = [AcceptedGlobal {
+                identity: binding.identity.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: native.owner().unit.clone(),
+                    module: native.owner().module.clone(),
+                    module_version: Some(native.owner().module_version.clone()),
+                    original_ordinal: 7,
+                    binder: binding.identity.clone(),
+                },
+            }];
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
             let target = inputs
                 .artifacts()
                 .inventory()
-                .admit_bound_target(
-                    &mut fixed,
-                    &inputs.artifacts(),
-                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                        &imports,
-                    ),
-                    vec![],
+                .select_native_target(
+                    inputs.artifacts(),
                     &selection,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
                 .unwrap();
-            let groups = target
-                .clone()
-                .bind_target(None, (&imports).to_vec())
-                .resolve()
-                .map(|resolved| resolved.groups().clone())
-                .unwrap();
+            let groups = target.resolve().unwrap().groups().clone();
             assert_eq!(groups.len(), 1);
             let group = groups.iter().next().unwrap();
             assert_eq!(group.binding.artifact(), id);
@@ -29886,50 +29935,73 @@ mod tests {
         let ArtifactPayload::Original(native) = &entry.payload else {
             panic!("the selected compiler role remains the issued Original");
         };
-        let imports = [3, 7]
-            .into_iter()
-            .map(|ordinal| {
-                let definitions =
-                    crate::certified_products::original_native_group_definitions(native, ordinal)
-                        .unwrap();
-                let binding = match &definitions.bindings()[0] {
-                    tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
-                    tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
-                };
-                crate::certified_products::PendingImportOwner::Source {
-                    owner: owner.clone(),
-                    original_ordinal: ordinal,
-                    binder: binding.identity.clone(),
-                }
-            })
-            .collect::<Vec<_>>();
         let mut validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
             &validation.inventory,
         )
         .unwrap();
-        let mut fixed = inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
-            .unwrap();
+        let accepted = [3, 7]
+            .into_iter()
+            .map(|ordinal| {
+                let group = crate::certified_products::original_available_groups(native)
+                    .unwrap()
+                    .find(|group| group.original_ordinal() == ordinal)
+                    .unwrap();
+                let binder = group.binders()[0].clone();
+                AcceptedGlobal {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    owner: ReceiptImportOwner::Source {
+                        unit: owner.unit.clone(),
+                        module: owner.module.clone(),
+                        module_version: Some(owner.module_version.clone()),
+                        original_ordinal: ordinal,
+                        binder,
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepared_target_fixture(
+            [3, 7]
+                .into_iter()
+                .map(|ordinal| {
+                    let group = crate::certified_products::original_available_groups(native)
+                        .unwrap()
+                        .find(|group| group.original_ordinal() == ordinal)
+                        .unwrap();
+                    GlobalDecl {
+                        identity: group.binders()[0].clone(),
+                        rep: RuntimeRep::LiftedRef,
+                        entry_signature: None,
+                        required_evaluated: false,
+                        required_generation: None,
+                    }
+                })
+                .collect(),
+        );
         let before_demand = std::fs::read_dir(directory.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<BTreeSet<_>>();
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
         let target = inputs
             .artifacts()
             .inventory()
-            .admit_bound_target(
-                &mut fixed,
+            .select_native_target(
                 inputs.artifacts(),
-                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
                 &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
-            .unwrap()
-            .bind_target(None, imports);
+            .unwrap();
         let resolved = target.resolve().unwrap();
         assert_eq!(
             resolved
