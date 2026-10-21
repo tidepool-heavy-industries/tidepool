@@ -1748,6 +1748,8 @@ impl PersistentSession {
                 Some(WorldDeclarationSelection::Joined(
                     projection.receipt().clone(),
                 ))
+            } else if let Some(joined) = self.lib().current_joined_declaration_in(scope) {
+                Some(WorldDeclarationSelection::Joined(joined))
             } else if let Some(recovered) = self.lib().current_recovered_declaration_in(scope) {
                 Some(WorldDeclarationSelection::Recovered(recovered))
             } else {

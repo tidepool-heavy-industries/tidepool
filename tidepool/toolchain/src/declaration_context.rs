@@ -369,11 +369,47 @@ impl PreparedValueSourceSupport {
             ));
         }
         timing.advance("derive_source_support");
-        let source_owners = lexical
+        // A value's direct imports are its actual source dependencies. Their
+        // compiler roles keep the selected Original implementation, so omit
+        // them only when the retained artifact has no Original body. Unrelated
+        // transitive dependencies stay interface-only.
+        let source_support = self.context.compiler_source_support();
+        let compiler_roles = source_support.projection().snapshot_roles();
+        let has_original = |owner: &ExactModuleIdentity| {
+            compiler_roles
+                .get(owner)
+                .is_some_and(|role| role.original().is_some())
+        };
+        let mut source_owners = lexical
             .iter()
             .map(|node| node.owner.clone())
             .chain(value_owners.iter().cloned())
-            .collect();
+            .collect::<BTreeSet<_>>();
+        let mut pending = source_owners
+            .iter()
+            .chain(lexical.iter().flat_map(|node| node.imports.iter()))
+            .filter(|owner| has_original(owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Follow each Original owner's exact selected implementation
+        // requirements, retaining only required owners that still carry an
+        // Original body. Interface-only roles and unrelated dependencies stay
+        // interface-only.
+        let mut visited = BTreeSet::new();
+        while let Some(owner) = pending.pop() {
+            source_owners.insert(owner.clone());
+            if !visited.insert(owner.clone()) {
+                continue;
+            }
+            let Some(entry) = source_support.implementation_entry(&owner) else {
+                continue;
+            };
+            for requirement in &entry.requirements {
+                if has_original(requirement) {
+                    pending.push(requirement.clone());
+                }
+            }
+        }
         let support = self
             .context
             .owner
@@ -29648,6 +29684,13 @@ mod tests {
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
         let view = view_support.artifacts();
+        // The value's direct import keeps its selected Original implementation;
+        // only unrelated retained dependencies may fall back to interface-only.
+        let retained_roles = view_support.projection().snapshot_roles();
+        assert!(retained_roles[&identity("fixture", "InstanceOwner")]
+            .original()
+            .is_some());
+        assert!(retained_roles[&owner].original().is_some());
         assert!(lexical
             .iter()
             .all(|node| node.owner != identity("fixture", "Hidden")));

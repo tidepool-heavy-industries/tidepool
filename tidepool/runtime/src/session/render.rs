@@ -651,6 +651,19 @@ impl DeclLog {
         }
     }
 
+    pub(crate) fn joined_evidence_at(
+        &self,
+        generation: Generation,
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::AcceptedJoin>> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::Joined(joined) => Some(joined.evidence.receipt().clone()),
+            DeclarationSlot::Reserved
+            | DeclarationSlot::Committed(_)
+            | DeclarationSlot::CertifiedAuthored { .. }
+            | DeclarationSlot::Recovered(_) => None,
+        }
+    }
+
     pub(crate) fn certified_authored_at(
         &self,
         generation: Generation,

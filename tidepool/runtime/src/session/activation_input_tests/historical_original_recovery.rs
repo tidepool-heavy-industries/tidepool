@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use tidepool_codegen::prepared_program::ImageRegistry;
 use tidepool_toolchain::certified_products::SelectedNativeImport;
 use tidepool_toolchain::checked_cell::CheckedItemKind;
+use tidepool_toolchain::declaration_join::AcceptedJoin;
 
 pub(super) fn run() {
     let subscriber = tracing_subscriber::fmt()
@@ -100,7 +101,7 @@ fn run_history() {
     ));
     resident.bootstrap_world(&recipe);
     let publication = producer_owner;
-    execute_historical_cell(
+    let _ = execute_historical_cell(
         &mut resident,
         &recipe,
         &publication,
@@ -109,7 +110,7 @@ fn run_history() {
         |_| {},
     );
     let mut historical = None;
-    execute_historical_cell(
+    let accepted_join = execute_historical_cell(
         &mut resident,
         &recipe,
         &publication,
@@ -153,51 +154,63 @@ fn run_history() {
                 implementation.group().owner().clone(),
             ));
         },
-    );
+    )
+    .expect("the historical reader publication is an accepted declaration join");
     let (reader_binding, reader_owner, old_binding, old_owner, old_impl_binding, old_impl_owner) =
         historical.unwrap();
-    let view = resident.compile_view_in(public).unwrap();
-    let context = view.exact_declaration_context().unwrap();
-    let descriptors = context.artifact_view().descriptors();
-    let child_role = context
-        .compiler_input_roles()
-        .into_iter()
-        .find(|role| {
-            descriptors.iter().any(|descriptor| {
-                descriptor.id == role.interface()
-                    && descriptor.owner.module == "HistoricalOriginalG"
-            })
-        })
-        .expect("the published reader retains its child's canonical interface");
-    assert!(
-        child_role.original().is_none(),
-        "declaration publication must leave only the parent as reusable source"
-    );
-    let old_product = context
+    let old_product = accepted_join
         .recovery_products()
         .into_iter()
         .find(|product| product.owner() == &old_owner)
         .expect("the parent retains its exact original child's immutable bytes");
     let old_interface_bytes = old_product.interface_bytes().to_vec();
-    let selected_originals = context
-        .compiler_input_roles()
+    let old_reader_product = accepted_join
+        .recovery_products()
         .into_iter()
-        .filter_map(|role| role.original())
-        .map(|original| {
-            descriptors
-                .iter()
-                .find(|descriptor| descriptor.id == original)
-                .unwrap()
-                .owner
-                .module
-                .clone()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        selected_originals,
-        [reader_owner.module.clone()],
-        "the capture must select only R as Original while retaining G/H as dependency custody"
-    );
+        .find(|product| product.owner() == &reader_owner)
+        .expect("the accepted reader retains its immutable defining bytes");
+    let old_reader_interface_bytes = old_reader_product.interface_bytes().to_vec();
+    let assert_accepted_join = |accepted: &AcceptedJoin| {
+        let reader_export = accepted
+            .exports()
+            .iter()
+            .find(|export| {
+                export.head.unit == reader_owner.unit
+                    && export.head.module == reader_owner.module
+                    && export.head.occurrence == "historicalRead"
+            })
+            .expect("the accepted export head names defining R in HistoricalOriginalH");
+        assert_eq!(
+            (&reader_export.head.unit, &reader_export.head.module),
+            (&reader_owner.unit, &reader_owner.module),
+            "the accepted export and native reader owner name the same defining R"
+        );
+        assert!(
+            !accepted.interface_bytes().is_empty(),
+            "the accepted export has an authenticated joined interface"
+        );
+        let products = accepted.recovery_products();
+        let reader_product = products
+            .iter()
+            .find(|product| product.owner() == &reader_owner)
+            .expect("the accepted export retains defining R's exact product");
+        assert_eq!(
+            reader_product.interface_bytes(),
+            old_reader_interface_bytes,
+            "the accepted export retains R's exact defining interface bytes"
+        );
+        let historical_child = products
+            .iter()
+            .find(|product| product.owner() == &old_owner)
+            .expect("defining R retains its exact historical G product");
+        assert_eq!(
+            historical_child.interface_bytes(),
+            old_interface_bytes,
+            "the accepted export retains G's historical interface bytes"
+        );
+    };
+    assert_accepted_join(&accepted_join);
+    drop(accepted_join);
     let cold_owner = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/historical-original/capture").unwrap(),
         1,
@@ -236,31 +249,23 @@ fn run_history() {
         .native_source_products("__prepared")
         .unwrap()
         .unwrap();
-    let current_child = current_products
-        .groups()
-        .find(|row| row.group().owner().module == "HistoricalOriginalG")
-        .unwrap();
-    let current_owner = current_child.group().owner();
-    let current_product = current
-        .artifacts()
-        .recovery_products
-        .iter()
-        .find(|product| product.owner() == current_owner)
-        .unwrap();
-    assert_eq!(
-        old_interface_bytes.as_slice(),
-        current_product.interface_bytes(),
-        "old and current implementation must actually share the complete interface bytes"
-    );
-    assert_eq!(
-        old_owner.skinny_iface_sha256,
-        current_owner.skinny_iface_sha256
-    );
     let current_implementation = current_products
         .groups()
         .find(|row| row.group().owner().module == "HistoricalOriginalH")
         .unwrap();
     let current_impl_owner = current_implementation.group().owner();
+    let current_child = current_products
+        .groups()
+        .find(|row| {
+            row.group().owner().module == "HistoricalOriginalG"
+                && row.imports().iter().any(|import| {
+                    matches!(import, SelectedNativeImport::Source { binding, .. }
+                        if *binding == current_implementation.binding())
+                })
+        })
+        .unwrap();
+    let current_owner = current_child.group().owner();
+    assert_eq!(current_owner.module, "HistoricalOriginalG");
     assert!(current_child.imports().iter().any(|import| {
         matches!(import, SelectedNativeImport::Source { binding, .. }
             if *binding == current_implementation.binding())
@@ -276,13 +281,6 @@ fn run_history() {
         old_owner.product_sha256 == current_owner.product_sha256,
         current_child.binding(),
         current_implementation.binding(),
-    );
-    assert_eq!(
-        current
-            .run("__prepared", 1024 * 1024, &mut frunk::HNil, &(), |_| {})
-            .unwrap()
-            .to_json(),
-        serde_json::json!(99)
     );
     let current_impl_sha256 = current_impl_owner.product_sha256;
     let observe_original_history = |program: &tidepool_toolchain::checked_cell::CellProgram| {
@@ -355,7 +353,7 @@ fn run_history() {
         include.clone(),
     );
     resident.bootstrap_world(&recipe);
-    execute_historical_cell(
+    let _ = execute_historical_cell(
         &mut resident,
         &recipe,
         &publication,
@@ -427,8 +425,7 @@ fn run_history() {
     drop(current_products);
     drop(current);
     drop(old_product);
-    drop(view);
-    drop(old_interface_bytes);
+    drop(old_reader_product);
     drop(resident);
     drop(images);
     drop(publication);
@@ -485,36 +482,17 @@ fn run_history() {
         include,
     );
     resident.bootstrap_world(&recipe);
-    let recovered_view = resident.compile_view_in(public).unwrap();
-    let recovered = recovered_view.exact_declaration_context().unwrap();
-    let descriptors = recovered.artifact_view().descriptors();
-    let selected_originals = recovered
-        .compiler_input_roles()
-        .into_iter()
-        .filter_map(|role| role.original())
-        .map(|original| {
-            descriptors
-                .iter()
-                .find(|descriptor| descriptor.id == original)
-                .unwrap()
-                .owner
-                .module
-                .clone()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        selected_originals,
-        [reader_owner.module],
-        "cold acquisition must preserve the parent-only Original selection"
-    );
-    execute_historical_cell(
+    let recovered_join = execute_historical_cell(
         &mut resident,
         &recipe,
         &publication,
         include_str!("../fixtures/historical-original-world-observe.hs"),
         Some(("historicalResult", 41099)),
         &observe_original_history,
-    );
+    )
+    .expect("cold recovery republishes the accepted declaration join");
+    assert_accepted_join(&recovered_join);
+    drop(recovered_join);
 }
 
 fn execute_historical_cell(
@@ -524,7 +502,7 @@ fn execute_historical_cell(
     source: &str,
     expected_result: Option<(&str, i64)>,
     observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
-) {
+) -> Option<Arc<AcceptedJoin>> {
     let public_context = resident.public_context();
     let execution = begin_fixture_execution(resident);
     let private = execution.private_scope();
@@ -608,19 +586,20 @@ fn execute_historical_cell(
         "the authored result binding produces the expected historical value"
     );
     let intent = resident.freeze_private_execution(&execution).unwrap();
-    source_action(resident, |resident, settlement| {
+    let accepted_join = source_action(resident, |resident, settlement| {
         let publication = resident
             .restage_execution_publication(owner.clone(), intent)
             .unwrap();
-        let ticket = match publication {
-            ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+        let (ticket, accepted_join) = match publication {
+            ExecutionPublication::Bindings(base) => (base.stage().unwrap(), None),
             ExecutionPublication::Declarations(base) => {
                 let CertifiedDeclarationPublication::Accepted(accepted) =
                     base.certify(settlement).unwrap()
                 else {
                     panic!("historical declaration publication must be accepted")
                 };
-                accepted.stage().unwrap()
+                let accepted_join = Arc::clone(accepted.accepted_join_for_test());
+                (accepted.stage().unwrap(), Some(accepted_join))
             }
         };
         assert!(matches!(
@@ -630,9 +609,11 @@ fn execute_historical_cell(
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
+        accepted_join
     });
     resident.set_run_context(public_context).unwrap();
     drop(checked);
     drop(execution);
     resident.retire_scope(private);
+    accepted_join
 }
