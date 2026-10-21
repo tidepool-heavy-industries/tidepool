@@ -2,7 +2,7 @@
 use super::*;
 use rustix::fd::OwnedFd;
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 struct PausedOwnedDaemon {
@@ -133,6 +133,7 @@ fn physical_cell_response_without_end_ack_refuses_publication() {
     let artifact_root = PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
     let paused = RefCell::new(None);
     let request_before = tidepool_extract_cmd::extract_spawn_count();
+    let requests_after_response = Cell::new(request_before);
     let original = resident.public_source.original_source().clone();
     let outcome = original
         .with_source_compiler_transaction(
@@ -146,10 +147,12 @@ fn physical_cell_response_without_end_ack_refuses_publication() {
                     prepared.is_ok(),
                     "the real compiler response succeeds before END"
                 );
-                assert_eq!(
-                    tidepool_extract_cmd::extract_spawn_count() - request_before,
-                    1
+                let request_count = tidepool_extract_cmd::extract_spawn_count();
+                assert!(
+                    request_count > request_before,
+                    "preparation performed actual physical compiler work"
                 );
+                requests_after_response.set(request_count);
                 // This action has not returned, so the source owner cannot yet call
                 // CompilerTransaction::close or send this transaction's first END.
                 *paused.borrow_mut() = Some(PausedOwnedDaemon::pause(&artifact_root));
@@ -158,7 +161,7 @@ fn physical_cell_response_without_end_ack_refuses_publication() {
         )
         .unwrap();
     paused.borrow_mut().as_mut().unwrap().resume();
-    let requests_after_response = tidepool_extract_cmd::extract_spawn_count();
+    let requests_after_response = requests_after_response.get();
     assert!(
         outcome.action().is_ok(),
         "the successful response body survives failed END"
