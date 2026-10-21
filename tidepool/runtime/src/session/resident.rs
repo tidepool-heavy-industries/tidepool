@@ -7607,7 +7607,7 @@ where
     }
 
     fn admit_turn_code_in<'a>(
-        &self,
+        &mut self,
         scope: ScopeId,
         code: TurnCode<'a>,
         authority: TurnInstallationAdmission<'_>,
