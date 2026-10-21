@@ -2161,7 +2161,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let offers = vec![a_offer, b_offer];
     let private = OriginalCompilerInputs {
         native_fact_base: None,
-                native_completions: Default::default(),
+        native_completions: Default::default(),
         native_availability: RequestNativeAvailability::issue_checked(
             &projection,
             &retain_native_offers(&b, &offers).unwrap(),
@@ -6747,7 +6747,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         .unwrap();
         let private = OriginalCompilerInputs {
             native_fact_base: None,
-                native_completions: Default::default(),
+            native_completions: Default::default(),
             native_availability: RequestNativeAvailability::issue_checked(
                 &projection,
                 &custody,

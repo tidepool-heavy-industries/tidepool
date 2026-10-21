@@ -908,7 +908,7 @@ pub fn prepare_world_cell_program(
     );
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program)?;
+    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program);
     let mut stage_sources = Vec::new();
     let mut planned_declarations = BTreeMap::new();
     let mut outputs = BTreeMap::new();

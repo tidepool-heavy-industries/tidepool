@@ -14,8 +14,8 @@ module Tidepool.PreparedStg
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
   , prepareRecoveredBodies
-  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
-  , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer, newPreparedCanonicalModuleTaskPreparer
+  , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, inheritPreparedBodyOwner, preparedBodyHasOriginalVersion, evictPreparedBodyMatching
+  , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer, newPreparedCanonicalModuleTaskPreparer, newPreparedCanonicalModuleTaskPreparerWithLookup
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   , PreparedComponents, PreparedComponentTask, newPreparedComponentUnitsPreparer
   , runPreparedComponentTask, PreparedUnitKey, PreparedUnitTask
@@ -23,13 +23,13 @@ module Tidepool.PreparedStg
   , preparedUnitTaskKey, preparedComponentTaskKnown, preparedComponentTaskPending
   , runPreparedUnitTask, finishPreparedComponentTask, preparedComponentUnitRows
   , PreparedUnit, preparedUnitModule, samePreparedUnit
-  , preparedComponentModules, preparedComponentVersion, validatePreparedComponents
+  , preparedComponentModules, preparedComponentVersion, preparedComponentInterfaceBody, capturePreparedPackageInterfaces, validatePreparedComponents
   ) where
 
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException
   , throwIO, try, evaluate )
-import Control.Monad (unless, forM)
+import Control.Monad (unless, forM, forM_, foldM)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Data.List (foldl', sortOn)
 import Data.Maybe (fromMaybe, listToMaybe, isJust)
@@ -63,7 +63,8 @@ import GHC.Driver.Config.CoreToStg (initCoreToStgOpts)
 import GHC.Driver.Config.CoreToStg.Prep
   (initCorePrepConfig, initCorePrepPgmConfig)
 import GHC.Driver.Config.Stg.Pipeline (initStgPipelineOpts)
-import GHC.Driver.Env (HscEnv(..))
+import GHC.Driver.Env (HscEnv(..), hsc_home_unit)
+import GHC.Unit.Home (isHomeUnit)
 import GHC.Driver.Session
   (GeneralFlag(..), gopt_set, gopt_unset)
 import GHC.IfaceToCore (typecheckIface)
@@ -79,7 +80,7 @@ import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Env (plusNameEnv, emptyNameEnv, disjointNameEnv)
-import GHC.Unit.Types (Module)
+import GHC.Unit.Types (Module, moduleUnit)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModIface (ModIface, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -87,6 +88,8 @@ import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Types.TypeEnv (typeEnvTyCons, typeEnvIds)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactDigestBytes)
+import qualified Data.ByteString as BS
 import Tidepool.PreparedSites
   ( PreparedSite, SiteRejection, IntrinsicCensus
   , censusPreparedIntrinsics, intrinsicFree, intrinsicNames
@@ -99,7 +102,7 @@ import Tidepool.ConstructorIdentity (IdentityResolver, captureIdentityResolver)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.HomeProducts
-  ( CanonicalOriginalInputs, lookupCanonicalOriginalInput, canonicalOriginalVersion, recoverCanonicalOriginalWithPrevious
+  ( CanonicalOriginalInput, CanonicalOriginalInputs, lookupCanonicalOriginalInput, canonicalOriginalVersion, recoverCanonicalOriginalWithPrevious
   , OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
@@ -107,12 +110,12 @@ import Tidepool.Timing (readTimingEnabled, timePhase, timeModuleDetailPhase, emi
   , ReuseContext, TaskAttempt, TaskComponent(..), TaskOwner(..), timeTaskDetailPhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
-  ( ExactInterfaceFailure(..), readExactInterface
+  ( ExactInterfaceFailure(..), readExactInterface, readCapturedDefiningInterface
   , FatOriginalVersion, fatOriginalOwner, fatOriginalFingerprints, FatIfaceComponent, fatComponentVersion
   , fatComponentOrdinals, fatComponentOrdinal, fatComponentBindings, fatComponentAllBinders
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
-  , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
+  , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceBytes, ownerInterfaceTyCons, ownerInterfaceEntries
   , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
 import Tidepool.FatIface.Internal qualified as Shared
 
@@ -435,6 +438,21 @@ selectPreparedBodyCaches sources = do
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
+-- A request borrows immutable body alternatives for one exact demanded owner.
+-- The destination's mutable buckets remain private to the current completion.
+inheritPreparedBodyOwner :: PreparedBodyCache -> PreparedBodyCache -> Module -> IO ()
+inheritPreparedBodyOwner target source owner = do
+  exact <- Map.lookup owner <$> readMVar (cachedExactBodies source)
+  originals <- Map.lookup owner <$> readMVar (cachedOriginalModules source)
+  forM_ exact $ \entries -> modifyMVar_ (cachedExactBodies target) $ \current -> pure
+    (Map.insertWith (Map.unionWith mergePreparedVariants) owner entries current)
+  forM_ originals $ \entries -> modifyMVar_ (cachedOriginalModules target) $ \current -> pure
+    (Map.insertWith (Map.unionWith mergeOriginalAlternatives) owner entries current)
+
+preparedBodyHasOriginalVersion :: PreparedBodyCache -> OriginalVersion -> IO Bool
+preparedBodyHasOriginalVersion cache version =
+  isJust . lookupOwnerEntry (originalVersionOwner version) version <$> readMVar (cachedOriginalModules cache)
+
 mergeComponentBuckets :: [Map Module (Shared.LoadCache (FatOriginalVersion, Unique, FatPreparationUnit) PreparedModule)]
   -> IO (Map Module (Shared.LoadCache (FatOriginalVersion, Unique, FatPreparationUnit) PreparedModule))
 mergeComponentBuckets sources = mapM
@@ -514,9 +532,16 @@ newPreparedCanonicalModuleTaskPreparer :: HscEnv -> PreparedBodyCache
   -> IO (Map String Id -> Module
     -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
 newPreparedCanonicalModuleTaskPreparer env cache inputs =
+  newPreparedCanonicalModuleTaskPreparerWithLookup env cache (lookupCanonicalOriginalInput inputs)
+
+newPreparedCanonicalModuleTaskPreparerWithLookup :: HscEnv -> PreparedBodyCache
+  -> (Module -> Maybe CanonicalOriginalInput)
+  -> IO (Map String Id -> Module
+    -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
+newPreparedCanonicalModuleTaskPreparerWithLookup env cache lookupInput =
   newPreparedOriginalTaskPreparer env cache
-    (\owner -> lookupCanonicalOriginalInput inputs owner >>= canonicalOriginalVersion)
-    (\owner previous -> case lookupCanonicalOriginalInput inputs owner of
+    (\owner -> lookupInput owner >>= canonicalOriginalVersion)
+    (\owner previous -> case lookupInput owner of
       Nothing -> pure Nothing
       Just input -> recoverCanonicalOriginalWithPrevious env input previous)
 
@@ -689,6 +714,11 @@ preparedComponentUnitRows selected = Map.fromList
 
 preparedComponentVersion :: PreparedComponents -> FatOriginalVersion
 preparedComponentVersion = fatSelectionVersion . componentsSelection
+
+-- The retained bytes are the exact immutable input decoded for this context, never
+-- reconstructed from a later package lookup. HOME contexts have no package proof.
+preparedComponentInterfaceBody :: PreparedComponents -> Maybe ArtifactBytes
+preparedComponentInterfaceBody = ownerInterfaceBytes . componentsContext
 
 componentRows :: PreparedComponents -> [([Int],PreparedModule)]
 componentRows = map (\(roster,unit) -> (roster,preparedUnitModule unit))
@@ -955,6 +985,28 @@ acquireRecoveredWithWorkers workers environment hscEnv owner context bindings = 
     Left reason -> Left (RecoveredModulePreparationFailure owner reason)
     Right value -> Right value
 
+-- Acquire only demanded defining interfaces through the existing context owner.
+-- A supplied seal belongs to an already admitted import/product; absence asks
+-- for a new capture at this active recovery boundary, never at the writer.
+capturePreparedPackageInterfaces :: HscEnv -> OwnerInterfaceCache
+  -> [(Module, Maybe BS.ByteString)]
+  -> IO (Either RecoveredModuleFailure (Map Module ArtifactBytes))
+capturePreparedPackageInterfaces env owners = foldM acquire (Right Map.empty)
+  where
+    acquire (Left failure) _ = pure (Left failure)
+    acquire (Right captured) (owner, expected)
+      | isHomeUnit (hsc_home_unit env) (moduleUnit owner) =
+          pure (Left (RecoveredModuleInterfaceFailure owner "package interface capture refers to HOME"))
+      | otherwise = do
+          context <- acquireRecoveredContext env owners owner
+          pure $ do
+            actual <- context
+            body <- maybe (Left (RecoveredModuleInterfaceFailure owner
+              "package context lacks its captured interface bytes")) Right (ownerInterfaceBytes actual)
+            unless (maybe True (== artifactDigestBytes body) expected)
+              (Left (RecoveredModuleInterfaceFailure owner "captured package interface differs from required seal"))
+            pure (Map.insert owner body captured)
+
 acquireRecoveredContext :: HscEnv -> OwnerInterfaceCache -> Module
   -> IO (Either RecoveredModuleFailure OwnerInterfaceContext)
 acquireRecoveredContext hscEnv ownerCache owner = do
@@ -962,19 +1014,23 @@ acquireRecoveredContext hscEnv ownerCache owner = do
   case cached of
     Just hit -> pure (Right hit)
     Nothing -> do
-      exact <- readExactInterface hscEnv owner
+      exact <- if isHomeUnit (hsc_home_unit hscEnv) (moduleUnit owner)
+        then fmap (fmap (\(iface,location) -> (iface,location,Nothing))) (readExactInterface hscEnv owner)
+        else fmap (fmap (\(iface,location,body) -> (iface,location,Just body)))
+          (readCapturedDefiningInterface hscEnv owner)
       case exact of
         Left (ExactInterfaceFinderFailure reason) ->
           pure (Left (RecoveredModuleFinderFailure owner reason))
         Left (ExactInterfaceReadFailure reason) ->
           pure (Left (RecoveredModuleInterfaceFailure owner reason))
-        Right (iface, location) -> do
+        Right (iface, location, capturedBytes) -> do
           details <- trySynchronous (loadDefiningDetails hscEnv iface)
           case details of
             Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
             Right (tycons, entries) -> do
               hit <- Shared.issueOwnerInterfaceContext owner (mi_iface_hash (mi_final_exts iface))
                 iface location tycons (Map.fromList [(varName identifier,identifier) | identifier <- entries])
+                capturedBytes
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   where

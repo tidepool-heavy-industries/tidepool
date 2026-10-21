@@ -8,6 +8,11 @@ module Tidepool.ExecutionProjection
   , projectPreparedTargetWithConstructors
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
+  , PreparedPackageTarget, projectPreparedPackageTarget
+  , packageTargetProgram, packageTargetConstructors, packageTargetGroups
+  , ProjectedPackageGroup, projectPreparedPackageGroups
+  , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
+  , projectedPackageConstructors, projectedPackageYieldSites
   , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
   , projectOriginalHomeModuleProductDemand
@@ -55,7 +60,10 @@ import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactDigestBytes)
 import Codec.CBOR.Write (toStrictByteString)
+import Codec.CBOR.Encoding qualified as CBOR
+import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
 import Data.Foldable (toList)
@@ -127,12 +135,12 @@ import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (nameSymbolIdentity)
 import Tidepool.ConstructorIdentity (IdentityResolver, unionIdentityResolvers, resolveTypeIdentity, ResolvedTypeIdentity, resolvedTypeIdentity, resolveTypeIdentityEvidence, TypeIdentityFailure, IssuedConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId, issuedIdentityResolver, issueConstructorWithFamily)
-import Tidepool.FatIface (fatOriginalOwner)
+import Tidepool.FatIface (fatOriginalOwner, fatOriginalFingerprints)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
   , pmIdentityResolver, pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings, pmOriginalTopNames
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry
-  , PreparedComponents, preparedComponentModules, preparedComponentVersion )
+  , PreparedComponents, preparedComponentModules, preparedComponentVersion, preparedComponentInterfaceBody )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
@@ -793,10 +801,16 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
 projectPreparedModuleGroupResultsFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
 projectPreparedModuleGroupResultsFor purpose context prepared selection =
+  projectPreparedModuleGroupResultsWithIdentities purpose context
+    (buildTopIdentityMap [prepared]) id prepared selection
+
+projectPreparedModuleGroupResultsWithIdentities :: ProjectionPurpose -> ProjectionContext
+  -> VarEnv SymbolIdentity -> (Word32 -> Word32) -> PreparedModule -> Maybe (Set Word32)
+  -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroupEvidence)]
+projectPreparedModuleGroupResultsWithIdentities purpose context identities codeOrdinal prepared selection =
   [(ordinal, groupBinderSymbols item, projectOne ordinal item onlyGroup)
   | (ordinal, item, onlyGroup) <- surviving]
   where
-    identities = buildTopIdentityMap [prepared]
     evidenceIndex = indexPreparedEvidence prepared
     surviving =
       [ (ordinal, item, onlyGroup)
@@ -840,7 +854,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
       pure (ProjectedGroupEvidence (prepareProjectedGroupEncoding (ProjectedGroup
-        { projectedOriginalOrdinal = ordinal
+        { projectedOriginalOrdinal = codeOrdinal ordinal
         , projectedBinders = binders
         , projectedBody = ProjectedGroupBody
             { projectedEnvelope = ProgramEnvelope schemaVersion
@@ -857,6 +871,110 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
             , projectedJsonLayout = jsonLayout
             }
         })) (map fst (toList (constructors final))) (map psSite (selectedEvidenceSites evidence)))
+
+-- A package product retains the defining version and the evidence issued by
+-- the same final group lowering. It carries no source or installation authority.
+data ProjectedPackageGroup = ProjectedPackageGroup
+  { projectedPackageModule :: Module
+  , projectedPackageDefiningVersion :: BS.ByteString
+  , projectedPackageInterfaceBody :: ArtifactBytes
+  , projectedPackageEvidence :: ProjectedGroupEvidence
+  }
+
+projectedPackageInterfaceSha256 :: ProjectedPackageGroup -> BS.ByteString
+projectedPackageInterfaceSha256 = artifactDigestBytes . projectedPackageInterfaceBody
+
+projectedPackageEncoding :: ProjectedPackageGroup -> ProjectedGroupEncoding
+projectedPackageEncoding = projectedGroupEncoding . projectedPackageEvidence
+
+projectedPackageConstructors :: ProjectedPackageGroup -> [IssuedConstructor]
+projectedPackageConstructors = projectedGroupConstructors . projectedPackageEvidence
+
+projectedPackageYieldSites :: ProjectedPackageGroup -> [Effect.YieldSite]
+projectedPackageYieldSites = projectedGroupYieldSites . projectedPackageEvidence
+
+-- Called on the final recovered closure, after its publication checks. Identity
+-- assignment sees every completed unit before reachability selects groups. The
+-- canonical preparation's complete-owner spellings keep private names stable
+-- when later demand adds a sibling component. Group-local ordinals are not part
+-- of package code identity; the exact binders and body identify the product.
+projectPreparedPackageGroups :: ProjectionContext -> [PreparedComponents]
+  -> PreparedReachability -> Either ProjectionError [ProjectedPackageGroup]
+projectPreparedPackageGroups context components reach =
+  projectPreparedPackageGroupsWithIdentities context components reach
+    (buildTopIdentityMap (concatMap preparedComponentModules components))
+
+projectPreparedPackageGroupsWithIdentities :: ProjectionContext -> [PreparedComponents]
+  -> PreparedReachability -> VarEnv SymbolIdentity -> Either ProjectionError [ProjectedPackageGroup]
+projectPreparedPackageGroupsWithIdentities context components reach identities = do
+  unless (length owners == Set.size (Set.fromList owners))
+    (Left (InvalidPreparedRepresentation "package projection repeats a defining owner"))
+  concat <$> traverse projectComponent components
+  where
+    owners = map (fatOriginalOwner . preparedComponentVersion) components
+    reached binding = any ((`elementOfUniqSet` reachedUniques reach) . varUnique)
+      (topBinders binding)
+    projectComponent component = do
+      interfaceBody <- maybe
+        (Left (InvalidPreparedRepresentation "package group lacks its defining interface byte witness"))
+        Right (preparedComponentInterfaceBody component)
+      let version = preparedComponentVersion component
+          owner = fatOriginalOwner version
+          (interface, core) = fatOriginalFingerprints version
+          definingVersion = SHA256.hash $ toStrictByteString $
+            CBOR.encodeListLen 5 <> CBOR.encodeString "TPPACKAGEDEFINING1"
+            <> CBOR.encodeString (Text.pack (unitString (moduleUnit owner)))
+            <> CBOR.encodeString (Text.pack (moduleNameString (moduleName owner)))
+            <> CBOR.encodeString (Text.pack (show interface))
+            <> CBOR.encodeString (Text.pack (show core))
+      concat <$> traverse (projectModuleGroups owner definingVersion interfaceBody)
+        (preparedComponentModules component)
+    projectModuleGroups owner definingVersion interfaceBody prepared = do
+      let selected = Set.fromList
+            [ ordinal | (ordinal, one) <- preparedBindingGroups prepared
+            , (binding, _) <- pmBindings one, reached binding ]
+      forM (projectPreparedModuleGroupResultsWithIdentities ExecutableTarget context
+          identities (const 0) prepared (Just selected)) $ \(_, _, outcome) -> do
+        evidence <- outcome
+        let group = projectedGroupWire evidence
+        unless (all (isNothing . globalRequiredGeneration)
+            (projectedGlobals (projectedBody group)))
+          (Left (InvalidPreparedRepresentation "package code captures a runtime generation"))
+        pure (ProjectedPackageGroup owner definingVersion interfaceBody evidence)
+
+-- Target code and imported package definitions are one final projection.
+-- Only exports from these exact products may replace known local package tops.
+data PreparedPackageTarget = PreparedPackageTarget
+  { packageTargetProgram :: WireProgram
+  , packageTargetConstructors :: [IssuedConstructor]
+  , packageTargetGroups :: [ProjectedPackageGroup]
+  }
+
+projectPreparedPackageTarget :: [HostBindingRepresentation] -> ProjectionContext
+  -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
+  -> Either ProjectionError PreparedPackageTarget
+projectPreparedPackageTarget hostBindings context home components reach = do
+  let packageModules = concatMap preparedComponentModules components
+      modules = home ++ packageModules
+      identities = buildTopIdentityMap modules
+      packageOwners = Set.fromList (map pmModule packageModules)
+      selectedHome = [filterPreparedBindings reachable prepared
+        | prepared <- home, any reachable (pmBindings prepared)]
+      reachable (binding, _) = any
+        ((`elementOfUniqSet` reachedUniques reach) . varUnique) (topBinders binding)
+  unless (all ((`Set.notMember` packageOwners) . pmModule) home)
+    (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
+  products <- projectPreparedPackageGroupsWithIdentities context components reach identities
+  let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
+      imported = Set.fromList exports
+  unless (length exports == Set.size imported)
+    (Left (InvalidPreparedRepresentation "package products repeat an exported binder"))
+  PreparedProjection checkedContext selected checkedIdentities <-
+    finishProjection context modules identities selectedHome
+  candidate <- projectPreparedCandidateWithImports imported hostBindings
+    checkedContext selected checkedIdentities
+  (program, constructors) <- finalizePreparedCandidate candidate
+  pure (PreparedPackageTarget program constructors products)
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.
@@ -910,7 +1028,12 @@ finalizePreparedCandidate (PreparedCandidate program constructors failures) = ca
 
 projectPreparedCandidateWithHostBindings :: [HostBindingRepresentation] -> ProjectionContext
   -> [PreparedModule] -> VarEnv SymbolIdentity -> Either ProjectionError PreparedCandidate
-projectPreparedCandidateWithHostBindings hostBindings context modules topIdentityMap = do
+projectPreparedCandidateWithHostBindings = projectPreparedCandidateWithImports Set.empty
+
+projectPreparedCandidateWithImports :: Set SymbolIdentity -> [HostBindingRepresentation]
+  -> ProjectionContext -> [PreparedModule] -> VarEnv SymbolIdentity
+  -> Either ProjectionError PreparedCandidate
+projectPreparedCandidateWithImports packageExports hostBindings context modules topIdentityMap = do
   boundJsonAuthority <- foldM admitJsonAuthority (projectionJsonAuthority context)
     (mapMaybe hostBindingRepresentationJsonAuthority hostBindings)
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
@@ -922,7 +1045,8 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
         boundJsonAuthority
         (projectionTextUnit context)
-        (WholeProgramScope (Set.fromList (Map.elems (projectionCurrentOriginals context))))
+        (WholeProgramScope (Set.union packageExports
+          (Set.fromList (Map.elems (projectionCurrentOriginals context)))))
         ExecutableTarget DeferredEntryContracts []
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered

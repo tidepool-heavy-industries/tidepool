@@ -4059,6 +4059,8 @@ def declare_haskell_components():
         "test-source-boot/fixtures/CanonicalMixedConsumer.hs": "test-source-boot/fixtures/CanonicalMixedConsumer.hs",
         "test-source-boot/fixtures/CanonicalMixedSupport.hs": "test-source-boot/fixtures/CanonicalMixedSupport.hs",
         "test-source-boot/fixtures/CanonicalMixedZ.hs": "test-source-boot/fixtures/CanonicalMixedZ.hs",
+        "test-source-boot/fixtures/CanonicalPartial.hs": "test-source-boot/fixtures/CanonicalPartial.hs",
+        "test-source-boot/fixtures/CanonicalPartialConsumer.hs": "test-source-boot/fixtures/CanonicalPartialConsumer.hs",
         "test-source-boot/fixtures/CanonicalSource.hs": "test-source-boot/fixtures/CanonicalSource.hs",
         "test-source-boot/fixtures/CanonicalUnusedConsumer.hs": "test-source-boot/fixtures/CanonicalUnusedConsumer.hs",
         "test-source-boot/fixtures/CanonicalUnusedDependency.hs": "test-source-boot/fixtures/CanonicalUnusedDependency.hs",

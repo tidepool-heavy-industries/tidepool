@@ -6,7 +6,7 @@ module Tidepool.HomeProducts
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
   , validateCandidateCompilerViewProfile, materializeCandidateCompilerView, materializeAdmittedCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
-  , CanonicalOriginalInputs, captureCanonicalOriginalInputs, lookupCanonicalOriginalInput
+  , CanonicalOriginalInputs, captureCanonicalOriginalInputs, validateCanonicalOriginalInputs, canonicalOriginalInputAdditions, lookupCanonicalOriginalInput
   , CanonicalOriginalInput, canonicalOriginalOwner
   , canonicalOriginalVersion, canonicalOriginalHome, canonicalOriginalProof, canonicalOriginalPackages
   , materializeCanonicalOriginalView
@@ -84,7 +84,7 @@ import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CapturedCanonicalMetadata, capturedCanonicalMetadataProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalCoreSha256, canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
+  , canonicalCoreSha256, canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
   , canonicalInterfaceInput, canonicalProofInterfaceBody, canonicalProofOriginalBody
   , captureCanonicalMetadata, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , canonicalProofMatchesOwner )
@@ -160,6 +160,31 @@ newtype CanonicalOriginalInputs = CanonicalOriginalInputs (Map.Map Module Canoni
 
 lookupCanonicalOriginalInput :: CanonicalOriginalInputs -> Module -> Maybe CanonicalOriginalInput
 lookupCanonicalOriginalInput (CanonicalOriginalInputs inputs) owner = Map.lookup owner inputs
+
+-- New acquisitions are checked against the same request's issued predecessor.
+-- Details may complete a current SOURCE knot; product identity stays exact.
+validateCanonicalOriginalInputs :: (Module -> Maybe CanonicalOriginalInput)
+  -> Maybe CanonicalOriginalInputs -> IO ()
+validateCanonicalOriginalInputs _ Nothing = pure ()
+validateCanonicalOriginalInputs previous (Just (CanonicalOriginalInputs current)) =
+  forM_ (Map.toAscList current) $ \(owner,input) -> forM_ (previous owner) $ \old -> do
+    let oldProof = canonicalOriginalProof old
+        proof = canonicalOriginalProof input
+    unless (canonicalOriginalOwner old == owner && canonicalOriginalOwner input == owner
+        && canonicalCertificateSha256 oldProof == canonicalCertificateSha256 proof
+        && canonicalCertificateBytes oldProof == canonicalCertificateBytes proof
+        && canonicalOriginalVersion old == canonicalOriginalVersion input
+        && canonicalOriginalPackages old == canonicalOriginalPackages input
+        && mi_iface_hash (mi_final_exts (hm_iface (canonicalOriginalHome old)))
+          == mi_iface_hash (mi_final_exts (hm_iface (canonicalOriginalHome input))))
+      (throwIO CandidateOriginalOwnerMismatch)
+
+canonicalOriginalInputAdditions :: (Module -> Maybe CanonicalOriginalInput)
+  -> Maybe CanonicalOriginalInputs -> Maybe CanonicalOriginalInputs
+canonicalOriginalInputAdditions _ Nothing = Nothing
+canonicalOriginalInputAdditions previous (Just (CanonicalOriginalInputs inputs)) =
+  let additions = Map.filterWithKey (\owner _ -> case previous owner of Nothing -> True; Just _ -> False) inputs
+  in if Map.null additions then Nothing else Just (CanonicalOriginalInputs additions)
 
 captureCanonicalOriginalInputs :: String
   -> HydratedExactInterfaces

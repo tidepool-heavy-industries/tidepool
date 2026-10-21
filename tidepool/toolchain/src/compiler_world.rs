@@ -1,6 +1,8 @@
 //! Compiler-owned worlds and their exact cold input owners.
 
 use std::any::Any;
+
+pub(crate) mod native_demand;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -4026,6 +4028,7 @@ struct WorldCellOutputAdmission {
     demanded_session_bindings: Vec<tidepool_repr::SessionVarId>,
     pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
     pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
+    native_demands: Arc<native_demand::WorldNativeDemandCompletion>,
     segments: Vec<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>,
     stages: Vec<Arc<CheckedWorldCellStage>>,
     item_proofs: Vec<Arc<WorldItemProof>>,
@@ -4037,24 +4040,12 @@ impl WorldCellOutputAdmission {
     }
 
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
-        &self
-            .reservation
-            .plan()
-            .world()
-            .restoration
-            .inputs
-            .primary_context
+        &self.native_demands.context
     }
-
     pub(crate) fn primary_compiler_inputs(
         &self,
     ) -> &Arc<crate::declaration_context::RequestCompilerInputs> {
-        &self
-            .reservation
-            .plan()
-            .world()
-            .restoration
-            .primary_compiler_inputs
+        &self.native_demands.inputs
     }
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.segments
@@ -4646,28 +4637,18 @@ impl CheckedWorldCellProgram {
     }
 
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
-        &self
-            .output
-            .reservation
-            .plan()
-            .world()
-            .restoration
-            .inputs
-            .primary_context
+        self.output.primary_context()
     }
-
     pub(crate) fn primary_compiler_inputs(
         &self,
     ) -> &Arc<crate::declaration_context::RequestCompilerInputs> {
-        &self
-            .output
-            .reservation
-            .plan()
-            .world()
-            .restoration
-            .primary_compiler_inputs
+        self.output.primary_compiler_inputs()
     }
-
+    pub(crate) fn native_demand_completion(
+        &self,
+    ) -> &Arc<native_demand::WorldNativeDemandCompletion> {
+        &self.output.native_demands
+    }
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.output.segments
     }
@@ -5079,15 +5060,33 @@ fn prepare_world_cell_outputs(
             .map(|operand| operand.retain_for_request())
             .transpose()?
             .unwrap_or_default();
-        let run = world_execute(&command, bound, files)?;
+        for file in files {
+            if !tidepool_extract_cmd::retain_compiler_input_file(file) {
+                return Err(source_failure(
+                    "native preparation lost its compiler input scope",
+                ));
+            }
+        }
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut resolver =
+            native_demand::WorldNativeDemandResolver::new(&reservation, &mut validation)?;
+        let owner = resolver.owner();
+        let run = bound
+            .execute_with_native_demand(&command, owner, &mut resolver)
+            .map_err(CompileError::CompilerEndpoint);
+        let (native_demands, refusal) = resolver.finish();
+        let run = run?;
+
         diagnostics.completed(
             directory.path(),
             &command,
             run.success(),
             &run.output.stderr,
         );
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
-        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let bytes = crate::certified_products::read_bounded_with_operation(
             &output,
             8 << 20,
@@ -5101,6 +5100,7 @@ fn prepare_world_cell_outputs(
             directory,
             &bytes,
             validation,
+            native_demands,
         )
     })
 }
@@ -5456,7 +5456,15 @@ fn admit_world_preparation_response(
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
     mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
+    native_demands: Arc<native_demand::WorldNativeDemandCompletion>,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
+    if !Arc::ptr_eq(&reservation, &native_demands.reservation)
+        || !Arc::ptr_eq(&validation.inventory, &native_demands.operation)
+    {
+        return Err(source_failure(
+            "World native demand completion belongs to another request",
+        ));
+    }
     let packet = validation
         .inventory
         .decode_value(bytes, 8 << 20)
@@ -5532,6 +5540,7 @@ fn admit_world_preparation_response(
     .into_iter()
     .map(|stage| admit_world_stage_inputs(stage, plan, &validation.inventory))
     .collect::<Result<Vec<_>, _>>()?;
+    native_demands.require_emitted_stages(&stages)?;
     validation
         .inventory
         .reserve::<Arc<WorldItemProof>>(completed.len())
@@ -5810,6 +5819,7 @@ fn admit_world_preparation_response(
         common_files,
         captured_files,
         validation,
+        native_demands,
         segments,
         stages,
         item_proofs,
@@ -6275,7 +6285,10 @@ mod answer_tests {
                 Arc::clone(program.reservation()),
                 Arc::clone(program.directory()),
                 bytes,
-                crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+                    &program.output.validation.inventory,
+                )),
+                Arc::clone(&program.output.native_demands),
             )
         };
         match replay(&bytes) {

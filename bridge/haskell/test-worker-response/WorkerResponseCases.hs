@@ -3,11 +3,11 @@
 module WorkerResponseCases where
 
 import Control.Exception (AsyncException(..), IOException, bracket, catch, finally, throwIO, try)
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, forM_)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import Data.List (isPrefixOf)
 import Data.IORef (newIORef, atomicModifyIORef')
 import System.Directory (createDirectory, getTemporaryDirectory, listDirectory, removeFile, removeDirectoryRecursive)
@@ -31,7 +31,7 @@ import Tidepool.GhcPipeline
 import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
 import GHC.IO.Handle (hDuplicate)
-import Tidepool.WorkerServer (WorkerResponse(..), runWorkerLoop)
+import Tidepool.WorkerServer (WorkerResponse(..), runWorkerLoop, NativeDemandReply(..), exchangeNativeDemand, requireNativeDemandOwner)
 import Tidepool.RequestCompletion
   ( captureCompletion, flattenCompletion, finishCompletion )
 
@@ -54,8 +54,27 @@ workerChild oneFreeFd scratch = do
           else transaction handler `catch` catchThreadKilled
     else runWorkerLoop (\transaction -> transaction handler `catch` catchThreadKilled)
   where
-    handler _ _ args = captureCompletion $ do
+    handler _ native _ args = captureCompletion $ do
       case args of
+        ["native-exchange"] -> do
+          exchange <- maybe (fail "exchange-capable request lost its active channel") pure native
+          requireNativeDemandOwner exchange (BS.replicate 32 2) (BS.replicate 32 3) (BS.replicate 32 4)
+          first <- exchangeNativeDemand exchange 3 "first-root"
+          unless (case first of NativeResolved bytes -> bytes == "first-product"; _ -> False)
+            (fail "first native exchange returned another product")
+          second <- exchangeNativeDemand exchange 4 "second-root"
+          unless (case second of NativeResolved bytes -> bytes == "second-product"; _ -> False)
+            (fail "second native exchange returned another product")
+        ["native-budget"] -> do
+          exchange <- maybe (fail "native budget lost its active channel") pure native
+          _ <- exchangeNativeDemand exchange 0 "small"
+          pure ()
+        ["native-refusal"] -> do
+          exchange <- maybe (fail "native refusal lost its active channel") pure native
+          reply <- exchangeNativeDemand exchange 0 "refused-root"
+          case reply of
+            NativeRefused bytes | bytes == "actual-semantic-refusal" -> fail "actual native semantic refusal"
+            _ -> fail "native semantic refusal became successful resolution"
         ["source-free"] -> BSC.hPutStr stdout "captured-control-debug"
         ["source-free-rejected"] -> pure ()
         ["source-free-capture-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
@@ -132,6 +151,39 @@ check scratch = do
       forRequest input output "next-request" $ \code out err ->
         unless (code == 0 && out == successReport && err == "complete-next-request")
           (fail "worker did not continue after oversized capture")
+      let header = "TPNDX001" <> BS.replicate 32 1 <> BS.replicate 32 2
+            <> BS.replicate 32 3 <> BS.replicate 32 4 <> put64 999999999999999999
+          beginNative label = do
+            BS.hPut input (BS.singleton 6 <> header <> frame "." <> put32 1 <> frame label)
+            hFlush input
+          answer stage sequenceNumber wanted outcome reply = do
+            observed <- exact output 161
+            unless (observed == BS.singleton 4 <> header <> put64 stage <> put64 sequenceNumber)
+              (fail "native event lost actual request/stage/sequence correlation")
+            payload <- readFrame output
+            unless (payload == wanted) (fail "native event payload changed through captured stdout")
+            BS.hPut input (BS.singleton 5 <> header <> put64 stage <> put64 sequenceNumber
+              <> BS.singleton outcome <> frame reply)
+            hFlush input
+          terminal expected = do
+            tag <- exact output 1
+            code <- word32 <$> exact output 4
+            out <- readFrame output
+            err <- readFrame output
+            unless (tag == BS.singleton 0 && code == expected
+                && if expected == 0 then out == successReport && BS.null err
+                  else BSC.isInfixOf "actual native semantic refusal" out)
+              (fail "native exchange exposed a premature or incorrect terminal result")
+      beginNative "native-exchange"
+      answer 3 1 "first-root" 0 "first-product"
+      answer 4 2 "second-root" 0 "second-product"
+      terminal 0
+      beginNative "native-refusal"
+      answer 0 1 "refused-root" 1 "actual-semantic-refusal"
+      terminal 1
+      forRequest input output "next-request" $ \code out err ->
+        unless (code == 0 && out == successReport && err == "complete-next-request")
+          (fail "semantic native refusal poisoned ordinary request completion")
       BS.hPut input (BS.singleton 0)
       hFlush input
       ackDone <- exact output 1
@@ -164,6 +216,53 @@ check scratch = do
       leftovers <- listDirectory scratch
       unless (null leftovers) (fail ("capture tempfiles retained: " ++ show leftovers))
       putStrLn "worker response bounds and cleanup: 1 passed"
+
+-- Real protocol channels must retire malformed accepted framing without
+-- waiting for EOF or exposing an unconfirmed terminal result.
+checkNativeExchangeFailures :: FilePath -> IO ()
+checkNativeExchangeFailures scratch = do
+  executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
+    (fail "missing declared worker-response child executable") pure
+  forM_ ["owner","stage","sequence","outcome","oversize","cumulative"] $ \mode ->
+    bracket (createProcess (proc executable ["--worker",scratch])
+        {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit})
+      (\(_,_,_,child) -> terminateProcess child >> void (waitForProcess child)) $
+      \(inputHandle,outputHandle,_,child) -> do
+        input <- maybe (fail "missing native refusal stdin") pure inputHandle
+        output <- maybe (fail "missing native refusal stdout") pure outputHandle
+        BS.hPut input (BS.singleton 1)
+        hFlush input
+        ack <- exact output 1
+        unless (ack == BS.singleton 1) (fail "native refusal lost BEGIN acknowledgement")
+        let header = "TPNDX001" <> BS.replicate 32 1 <> BS.replicate 32 2
+              <> BS.replicate 32 3 <> BS.replicate 32 4 <> put64 999999999999999999
+            cumulative = mode == "cumulative"
+            label = if cumulative then "native-budget" else "native-exchange"
+            stage = if cumulative then 0 else 3
+        BS.hPut input (BS.singleton 6 <> header <> frame "." <> put32 1 <> frame label)
+        hFlush input
+        observed <- exact output 161
+        unless (observed == BS.singleton 4 <> header <> put64 stage <> put64 1)
+          (fail "native refusal case did not reach its genuine outstanding demand")
+        _ <- readFrame output
+        let selectedHeader = if mode == "owner" then BS.take 40 header <> BS.singleton 9 <> BS.drop 41 header else header
+            selectedStage = if mode == "stage" then stage + 1 else stage
+            sequenceNumber = if mode == "sequence" then 2 else 1
+            outcome = if mode == "outcome" then 2 else 0
+            reply = if cumulative then BS.replicate (limit - 331 - 5) 114 else "first-product"
+            lengthAndBody = if mode == "oversize" then put32 (fromIntegral limit + 1) else frame reply
+        BS.hPut input (BS.singleton 5 <> selectedHeader <> put64 selectedStage <> put64 sequenceNumber
+          <> BS.singleton outcome <> lengthAndBody)
+        hFlush input
+        terminal <- timeout 10000000 (waitForProcess child)
+        unless (case terminal of Just (ExitFailure _) -> True; _ -> False)
+          (fail ("malformed or exhausted native exchange did not retire: " ++ mode))
+        emitted <- BS.hGet output 1
+        unless (BS.null emitted) (fail "malformed native exchange emitted an unconfirmed terminal result")
+        hClose input
+        hClose output
+  leftovers <- listDirectory scratch
+  unless (null leftovers) (fail "malformed native exchange retained capture files")
 
 checkPartialAcquisition :: FilePath -> IO ()
 checkPartialAcquisition scratch = do
@@ -311,6 +410,9 @@ frame bytes = put32 (fromIntegral (BS.length bytes)) <> bytes
 put32 :: Word32 -> BS.ByteString
 put32 value = BS.pack [fromIntegral (value `shiftR` n) | n <- [0, 8, 16, 24]]
 
+put64 :: Word64 -> BS.ByteString
+put64 value = BS.pack [fromIntegral (value `shiftR` n) | n <- [0,8..56]]
+
 word32 :: BS.ByteString -> Word32
 word32 bytes = foldr (.|.) 0 [fromIntegral (BS.index bytes i) `shiftL` (8 * i) | i <- [0..3]]
 
@@ -326,7 +428,7 @@ compilerClusterChild scratch = do
   originalCapabilities <- getNumCapabilities
   withResidentCompilerScopes [scratch] $ \runScope ->
     runWorkerLoop $ \transaction -> runScope (pure ()) $ \scope ->
-      transaction $ \sink _ arguments -> do
+      transaction $ \sink _ _ arguments -> do
         mode <- case arguments of [value] -> pure value; _ -> fail "invalid cluster control"
         let primaryFailure = mode `elem` ["source-refusal", "read-primary", "remove-primary"]
         writeFile source (if primaryFailure

@@ -14,7 +14,7 @@ module Tidepool.ExecutionSchema
   , CheckedLayout(..), ConstructorDecl(..), constructorFamily, GlobalDecl(..), OperationDecl(..)
   , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
-  , ProjectedGroup(..), ProjectedGroupBody(..)
+  , ProjectedGroup(..), ProjectedGroupBody(..), PackageCodeOwner(..)
   , TypeNodeId(..), TypeGraph, TypeNode, TypeGraphF(..), TypeNodeF(..), TypeEdgeF(..)
   , RootDomain(..), SourceBinderFlag(..), ParameterFlag(..), ForAllFlag(..)
   , FunctionFlag(..), NominalHeadKind(..), DeclarationFormF(..), TypeLiteral(..), SyntaxRestriction(..)
@@ -265,6 +265,17 @@ data ProjectedGroup = ProjectedGroup
   { projectedOriginalOrdinal :: Word32
   , projectedBinders :: [SymbolIdentity]
   , projectedBody :: ProjectedGroupBody
+  } deriving stock (Eq, Show, Generic)
+
+-- Immutable package provenance carried by the matched compiler receipt.
+-- These wire facts grant neither HOME native availability nor runtime custody.
+data PackageCodeOwner = PackageCodeOwner
+  { packageCodeUnit :: Text
+  , packageCodeModule :: Text
+  , packageCodeCompilerSha256 :: ByteString
+  , packageCodeProfileSha256 :: ByteString
+  , packageCodeInterfaceSha256 :: ByteString
+  , packageCodeDefiningVersionSha256 :: ByteString
   } deriving stock (Eq, Show, Generic)
 
 -- | Reply evidence owned by the exact request constructor. AtSite reads only

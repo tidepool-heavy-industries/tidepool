@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Read-only projection of an already-issued TPHOMEOWNERS v5 certificate.
+-- | Read-only projection of an already-issued TPHOMEOWNERS v6 certificate.
 -- The constructor is private so callers cannot mint or alter native evidence.
 module Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus
@@ -85,7 +85,6 @@ data ImportOwner
   = SourceImport String String String Word SymbolIdentity
   | RetainedImport SymbolIdentity Word64
   | PackageImport String String String SymbolIdentity
-  | RetainedPackageImport String String String SymbolIdentity Word64
 
 data ParsedCensus = ParsedCensus
   { parsedOwner :: !HomeOwner
@@ -128,7 +127,7 @@ decodeCensus = do
   array 9
   magic <- text
   version <- decodeWord
-  unless (magic == "TPHOMEOWNERS" && version == 5) (fail "unsupported TPHOMEOWNERS certificate")
+  unless (magic == "TPHOMEOWNERS" && version == 6) (fail "unsupported TPHOMEOWNERS certificate")
   owner <- homeOwner
   groups <- vector 65536 nativeGroup
   sources <- vector 65536 homeOwner
@@ -173,7 +172,6 @@ decodeImportOwner = do
         Nothing -> fail "stored home source owner lacks its module version"
     ("retained", 3) -> RetainedImport <$> identity <*> decodeWord64
     ("package", 5) -> PackageImport <$> text <*> text <*> digest <*> identity
-    ("retained-package", 6) -> RetainedPackageImport <$> text <*> text <*> digest <*> identity <*> decodeWord64
     _ -> fail "invalid native import owner tag or arity"
 
 homeOwner :: Decoder s HomeOwner
@@ -276,8 +274,6 @@ validateParsed owner groups sources packages requirements = do
         | NativeGlobal{nativeImportOwner = SourceImport unit moduleName _ _ _} <- globals ]
       packageUses = Set.fromList [ (unit, moduleName)
         | NativeGlobal{nativeImportOwner = PackageImport unit moduleName _ _} <- globals ]
-        `Set.union` Set.fromList [ (unit, moduleName)
-        | NativeGlobal{nativeImportOwner = RetainedPackageImport unit moduleName _ _ _} <- globals ]
   unless (sourceUses == Map.keysSet sourceMap && packageUses == Map.keysSet packageMap)
     (fail "unused or missing native source/package owner witness")
   mapM_ (validateGlobal sourceMap packageMap) globals
@@ -293,7 +289,6 @@ validateGlobal sources packages global = case nativeImportOwner global of
         (fail "native source global disagrees with its owner")
       Nothing -> fail "native source global lacks its owner declaration"
   PackageImport unit moduleName sha binder -> validatePackage unit moduleName sha binder
-  RetainedPackageImport unit moduleName sha binder _ -> validatePackage unit moduleName sha binder
   RetainedImport identityValue _ -> unless (identityValue == nativeIdentity global)
     (fail "native retained global identity mismatch")
   where
@@ -322,11 +317,10 @@ requiresDefinition global = case nativeImportOwner global of
   SourceImport{} -> True
   PackageImport{} -> True
   RetainedImport{} -> False
-  RetainedPackageImport{} -> False
 
 encodeCensus :: ParsedCensus -> BS.ByteString
 encodeCensus parsed = toStrictByteString $ encodeListLen 9
-  <> encodeString "TPHOMEOWNERS" <> encodeWord 5
+  <> encodeString "TPHOMEOWNERS" <> encodeWord 6
   <> encodeHome (parsedOwner parsed)
   <> encodeList (map encodeGroup (parsedGroups parsed))
   <> encodeList (map encodeHome (parsedSources parsed))
@@ -354,9 +348,6 @@ encodeImport owner = case owner of
     <> encodeIdentity binder <> encodeWord64 generation
   PackageImport unit moduleName sha binder -> encodeListLen 5 <> encodeString "package"
     <> encodeText unit <> encodeText moduleName <> encodeText sha <> encodeIdentity binder
-  RetainedPackageImport unit moduleName sha binder generation -> encodeListLen 6
-    <> encodeString "retained-package" <> encodeText unit <> encodeText moduleName
-    <> encodeText sha <> encodeIdentity binder <> encodeWord64 generation
 
 encodeHome :: HomeOwner -> Encoding
 encodeHome (unit, moduleName, version, interfaceSha, productSha) = encodeListLen 5
