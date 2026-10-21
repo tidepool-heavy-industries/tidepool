@@ -1930,9 +1930,20 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               valid <- scopedValidateWorldCell compiler grant executor namesPrepare
               unless (either (const False) (const True) valid)
                 (fail "failed expression-name validation poisoned a valid retry")
-            let renderedRecipe = recipe
-                  {worldCellTemplate=T.unpack (T.replace "{{CELL_IMPORTS}}"
-                    "import WorldObservationNames\n{{CELL_IMPORTS}}" (T.pack template))
+            -- Same empty-row expression adapter as resident_cell_check_template
+            -- and TypedSegmentCases: capture requires the local class operation.
+            let expressionAdapter = unlines
+                  ["class TidepoolCellPure value"
+                  ,"instance {-# OVERLAPPABLE #-} TidepoolCellPure value"
+                  ,"instance {-# OVERLAPPING #-} TidepoolWorkbenchTypeError.Unsatisfiable ('TidepoolWorkbenchTypeError.Text \"native IO actions cannot run in notebook cells\") => TidepoolCellPure (IO value)"
+                  ,"instance {-# OVERLAPPING #-} TidepoolWorkbenchTypeError.Unsatisfiable ('TidepoolWorkbenchTypeError.Text \"an Eff action must use the current workbench effect row\") => TidepoolCellPure (Eff effects value)"
+                  ,"class TidepoolCellExpression value where { __tidepoolCellExpression :: value -> Eff '[] () }"
+                  ,"instance {-# OVERLAPPING #-} (effects ~ '[]) => TidepoolCellExpression (Eff effects value) where { __tidepoolCellExpression action = action >> pure () }"
+                  ,"instance {-# OVERLAPPABLE #-} TidepoolCellPure value => TidepoolCellExpression value where { __tidepoolCellExpression _ = pure () }"]
+                renderedTemplate = T.replace "{{CELL_DECLS}}" (T.pack expressionAdapter <> "{{CELL_DECLS}}")
+                  (T.replace "{{CELL_IMPORTS}}"
+                    "import WorldObservationNames\nimport qualified GHC.TypeError as TidepoolWorkbenchTypeError\n{{CELL_IMPORTS}}" (T.pack template))
+                renderedRecipe = recipe {worldCellTemplate=T.unpack renderedTemplate
                   ,worldCellSource="(1 :: Int)\n(2 :: Int)"}
                 renderedQuestion = planRequest {worldCellPlanRecipe=renderedRecipe}
             renderedArgs <- decodeWorldArgs [WorldCellPlan renderedQuestion]
