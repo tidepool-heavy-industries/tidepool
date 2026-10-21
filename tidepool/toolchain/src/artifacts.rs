@@ -3518,7 +3518,30 @@ pub struct ResolvedNativeSourceProduct<'a> {
     group: &'a certified_products::PendingCertifiedGroup,
     binding: crate::artifact_inventory::NativeGroupBinding,
     physical_current: bool,
-    imports: &'a [certified_products::SelectedNativeImport],
+    imports: &'a Arc<[certified_products::SelectedNativeImport]>,
+    artifacts: &'a crate::artifact_inventory::ArtifactView,
+}
+
+/// Owned custody of one selected row and its exact ordered links. The acquired
+/// inventory remains held when the output that lent this row is released.
+#[derive(Clone)]
+pub struct OwnedNativeSourceProduct {
+    group: certified_products::PendingCertifiedGroup,
+    binding: crate::artifact_inventory::NativeGroupBinding,
+    imports: Arc<[certified_products::SelectedNativeImport]>,
+    _artifacts: crate::artifact_inventory::ArtifactView,
+}
+
+impl OwnedNativeSourceProduct {
+    pub fn group(&self) -> &certified_products::PendingCertifiedGroup {
+        &self.group
+    }
+    pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
+        self.binding
+    }
+    pub fn imports(&self) -> &[certified_products::SelectedNativeImport] {
+        &self.imports
+    }
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
@@ -3531,6 +3554,15 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
     }
     pub fn imports(&self) -> &'a [certified_products::SelectedNativeImport] {
         self.imports
+    }
+
+    pub fn to_owned(&self) -> OwnedNativeSourceProduct {
+        OwnedNativeSourceProduct {
+            group: self.group.clone(),
+            binding: self.binding,
+            imports: Arc::clone(self.imports),
+            _artifacts: self.artifacts.clone(),
+        }
     }
 
     pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
@@ -3569,13 +3601,14 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         let mut rows = Vec::with_capacity(resolved.groups().len());
         for binding in resolved.groups().iter().copied() {
             let group = resolved.group(binding)?;
-            let imports = resolved.group_imports(binding)?;
+            let imports = resolved.shared_group_imports(binding)?;
             let physical_current = resolved.has_only_current_source(binding);
             rows.push(ResolvedNativeSourceProduct {
                 group,
                 binding,
                 physical_current,
                 imports,
+                artifacts: resolved.artifacts(),
             });
         }
         Ok(Self {

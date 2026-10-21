@@ -702,6 +702,20 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn shared_group_imports(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&'a Arc<[crate::certified_products::SelectedNativeImport]>, CompileError> {
+        if !self.target.groups().contains(&binding) {
+            return Err(failure(
+                "native source links are outside their resolved target",
+            ));
+        }
+        self.groups
+            .shared_imports(binding)
+            .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
+    }
+
     pub(crate) fn target_link_requirements(
         &self,
     ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
@@ -746,6 +760,12 @@ pub(crate) struct ResolvedNativeTarget<'a> {
     sources: NativeSourceReceipts,
     groups: BTreeSet<NativeGroupBinding>,
     entry_binding: Option<NativeGroupBinding>,
+}
+
+impl<'a> ResolvedNativeTarget<'a> {
+    pub(crate) fn artifacts(&self) -> &'a ArtifactView {
+        self.owner.artifacts()
+    }
 }
 
 impl ResolvedNativeTarget<'_> {
