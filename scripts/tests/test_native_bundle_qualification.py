@@ -3828,9 +3828,9 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertEqual(len(execute.call_args_list), 1)
         self.assertIn('--verify-path', execute.call_args_list[0].args[0])
 
-    def test_unconfirmed_native_service_cannot_publish_a_build_receipt(self):
+    def test_unconfirmed_service_or_inconsistent_outcome_cannot_publish_a_build_receipt(self):
         original, tools, record, pin, nar = self.retained_fixture()
-        for changed in ('missing', 'malformed', 'unfinished', 'different-exit'):
+        for changed in ('missing', 'malformed', 'unfinished', 'different-exit', 'missing-child'):
             with self.subTest(changed=changed):
                 args = self.producer_args(original, tools, record, self.root / ('unsettled-' + changed))
                 def execute(command, **kwargs):
@@ -3844,15 +3844,21 @@ class CatalogSourceTests(unittest.TestCase):
                         elif changed == 'unfinished':
                             qualification.write_json(root / 'owned-compiler-outcome.json',
                                                      {'schema': 1, 'cleanup': {'status': 'unconfirmed'}})
+                        elif changed == 'missing-child':
+                            qualification.write_json(root / 'lifecycle.json',
+                                {'schema': 1, 'cleanup_confirmed': True, 'exit_code': None})
                     qualification.write_json(args.output / 'catalog.json',
                         {'schema': 4, 'source_selection': self.selection(original)})
                     return subprocess.CompletedProcess(command, 0)
                 with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
-                    with self.assertRaisesRegex(ValueError, 'compiler settlement unconfirmed'):
+                    with self.assertRaisesRegex(ValueError, 'compiler settlement unconfirmed|producer outcome unavailable or inconsistent'):
                         qualification.build_native_catalog(args)
                 self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
                 outcome = json.loads((args.output.with_name(args.output.name + '.invocation') / 'outcome.json').read_text())
-                self.assertEqual(outcome['compiler_settlement']['status'], 'unconfirmed')
+                self.assertEqual(outcome['compiler_settlement']['status'],
+                                 'confirmed' if changed in ('different-exit', 'missing-child') else 'unconfirmed')
+                self.assertEqual(outcome['producer_exit_code'],
+                                 7 if changed == 'different-exit' else None if changed in ('missing', 'missing-child') else 0)
                 self.assertFalse(outcome['completed'])
 
     def test_producer_failure_remains_primary_when_native_service_cleanup_is_unknown(self):
@@ -3875,6 +3881,30 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertEqual(outcome['invocation_exit_code'], 23)
         self.assertIsNone(outcome['producer_exit_code'])
         self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+
+    def test_early_child_outcome_survives_unconfirmed_compiler_retirement(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'retirement-failed-after-child')
+        def execute(command, **kwargs):
+            if '--verify-path' in command:
+                return subprocess.CompletedProcess(command, 0)
+            self.complete_compiler(command, 7)
+            root = Path(command[2])
+            qualification.write_json(root / 'lifecycle.json',
+                {'schema': 1, 'cleanup_confirmed': False, 'exit_code': 7,
+                 'execution': {'status': 'exited', 'exit_code': 7}})
+            qualification.write_json(root / 'owned-compiler-outcome.json',
+                                     {'schema': 1, 'cleanup': {'status': 'unconfirmed'}})
+            return subprocess.CompletedProcess(command, 1)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                qualification.build_native_catalog(args)
+        self.assertEqual(failure.exception.returncode, 1)
+        outcome = json.loads((args.output.with_name(args.output.name + '.invocation') / 'outcome.json').read_text())
+        self.assertEqual(outcome['invocation_exit_code'], 1)
+        self.assertEqual(outcome['producer_exit_code'], 7)
+        self.assertEqual(outcome['compiler_settlement']['status'], 'unconfirmed')
+        self.assertFalse(outcome['completed'])
 
     def test_inspection_preserves_refusal_and_secondary_retention_failure_distinctly(self):
         original, tools, record, pin, nar = self.retained_fixture()
@@ -3997,9 +4027,7 @@ class CatalogSourceTests(unittest.TestCase):
         interrupt = KeyboardInterrupt('original invocation cancellation')
         failure, publication = self.real_inspection_with_failed_publication(exit_code=0, interrupt=interrupt)
         self.assertIs(failure, interrupt)
-        cleanup, published = failure.__cause__.exceptions
-        self.assertIn('compiler settlement unconfirmed', str(cleanup))
-        self.assertIs(published, publication)
+        self.assertEqual(failure.__cause__.exceptions, (publication,))
 
     def test_real_inspection_preserves_existing_primary_cause_before_later_publication(self):
         interrupt = KeyboardInterrupt('original invocation cancellation')
@@ -4007,10 +4035,7 @@ class CatalogSourceTests(unittest.TestCase):
         interrupt.__cause__ = cause
         failure, publication = self.real_inspection_with_failed_publication(exit_code=0, interrupt=interrupt)
         self.assertIs(failure, interrupt)
-        prior, cleanup, published = failure.__cause__.exceptions
-        self.assertIs(prior, cause)
-        self.assertIn('compiler settlement unconfirmed', str(cleanup))
-        self.assertIs(published, publication)
+        self.assertEqual(failure.__cause__.exceptions, (cause, publication))
 
     def test_real_inspection_clean_body_publication_failure_remains_nonpass(self):
         failure, publication = self.real_inspection_with_failed_publication(exit_code=0)

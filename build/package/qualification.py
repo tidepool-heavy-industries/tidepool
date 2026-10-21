@@ -1661,11 +1661,11 @@ def catalog_compiler_settlement(compiler_root: Path, return_code: int | None) ->
     confirmed = (isinstance(outcome, dict) and outcome.get("schema") == 1
                  and outcome.get("cleanup") == {"status": "confirmed"}
                  and isinstance(lifecycle, dict) and lifecycle.get("schema") == 1
-                 and lifecycle.get("cleanup_confirmed") is True
-                 and return_code is not None and producer_exit_code is not None
-                 and producer_exit_code == return_code)
+                 and lifecycle.get("cleanup_confirmed") is True)
     return {"status": "confirmed" if confirmed else "unconfirmed",
-            "producer_exit_code": producer_exit_code, **records}
+            "producer_exit_code": producer_exit_code,
+            "invocation_result_consistent": (producer_exit_code == return_code
+                if producer_exit_code is not None and return_code is not None else None), **records}
 
 
 def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) -> Path:
@@ -1699,8 +1699,6 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
     primary = None
     secondary = []
     retention_error = None
-    settlement = None
-    settlement_error = None
     return_code = None
     started = time.monotonic_ns()
     invocation = {
@@ -1732,8 +1730,9 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
     finally:
         settlement = catalog_compiler_settlement(compiler_root, return_code)
         if settlement["status"] != "confirmed":
-            settlement_error = ValueError(f"native catalog compiler settlement unconfirmed; retained evidence: {compiler_root}")
-            secondary.append(settlement_error)
+            secondary.append(ValueError(f"native catalog compiler settlement unconfirmed; retained evidence: {compiler_root}"))
+        if primary is None and settlement["invocation_result_consistent"] is not True:
+            secondary.append(ValueError(f"native catalog producer outcome unavailable or inconsistent; retained evidence: {compiler_root}"))
         # A refusal or timeout does not waive custody of the consumed originals.
         try:
             verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
@@ -1746,12 +1745,13 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
             write_json(invocation_root / "outcome.json", {
                     **invocation, "invocation_exit_code": return_code,
                     "producer_exit_code": settlement["producer_exit_code"],
+                    "invocation_result_consistent": settlement["invocation_result_consistent"],
                     "timed_out": isinstance(primary, subprocess.TimeoutExpired),
                     "invocation_error": str(primary) if primary is not None else None,
                     "retention_recheck": {"passed": retention_error is None,
                                           "error": str(retention_error) if retention_error is not None else None},
                     "compiler_settlement": settlement,
-                    "completed": primary is None and retention_error is None and settlement_error is None,
+                    "completed": primary is None and not secondary,
                     "elapsed_ns": time.monotonic_ns() - started,
                 })
         except BaseException as error:
