@@ -2055,6 +2055,27 @@ tidepool_buildscript_run(
                 ]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
+            finite_tests = ["artifacts::invocation_output::tests::" + name for name in (
+                "finite_package_targets_reuse_exact_bindings_without_crossing_target_slots",
+                "runtime_targets_complete_through_physical_output_with_native_products",
+                "admitted_turn_uses_inline_sites_and_keeps_declarations_without_programs",
+            )]
+            finite_env, finite_resources, finite_worker = compiler_service_test_inputs(
+                package_name, "toolchain_finite_output_tests"
+            )
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_finite_output_tests",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [", render_strings(finite_tests, 8), "    ],",
+                "    expected_count = 3,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1860000,",
+                "    case_compiler_modes = {" + ", ".join(
+                    json.dumps(test) + ': "owned-resident"' for test in finite_tests
+                ) + "},",
+                runtime_arguments(finite_env, finite_resources, finite_worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             for world_target, world_case in [
                 ("toolchain_world_native_seal_test", "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"),
                 ("toolchain_world_original_seal_test", "artifacts::module_product_tests::real_world_original_output_seals_its_actual_native_declaration"),

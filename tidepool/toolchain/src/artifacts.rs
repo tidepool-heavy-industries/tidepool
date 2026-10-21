@@ -2496,8 +2496,8 @@ impl SelectedModuleCandidateOffer {
         run: &tidepool_extract_cmd::ExtractRun,
         deployment: &crate::toolchain::AdmittedCompilerDeployment,
     ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
-        let turn: Arc<[u8]> =
-            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
+        let acquisition = invocation_output::extract_turn(run, deployment, directory)?;
+        let turn = acquisition.turn_owned()?;
         let value = crate::checked_cell::decode(&turn)?;
         let row = crate::checked_cell::row(&value, 2)?;
         let (source, site_observations) = match crate::checked_cell::string(&row[0])? {
@@ -2517,24 +2517,11 @@ impl SelectedModuleCandidateOffer {
             }
         };
         let sites = decode_turn_yield_sites(site_observations)?;
-        let native = invocation_output::extract_native(
-            run,
-            deployment,
-            directory,
-            &invocation_output::InvocationOutputLayout::original(&["__prepared"])?,
-            &mut |_, _, _| {},
-            |_, _| {},
-        )?;
-        let targets = native.bundle.targets();
-        let [target] = targets.as_slice() else {
-            return Err(CompileError::ExtractFailed(
-                "native turn output target count".into(),
-            ));
-        };
+        let native = acquisition.complete()?;
         let mut output = ProgramNativeOutput {
             directory: directory.to_path_buf(),
             target: Arc::new(tidepool_repr::execution_schema::parse_program(
-                &target.prepared_bytes,
+                native.bundle.prepared(),
                 &crate::prepared_artifact::production_requirements()?,
                 DecodeLimits::default(),
             )?),
@@ -6454,6 +6441,10 @@ fn compile_invocation_inner(
             &target_imports,
             &validation.inventory,
         )?;
+        let mut inherited_completion_support = compiler_inputs
+            .as_ref()
+            .map(|inputs| inputs.compiler_source_support().clone())
+            .unwrap_or_else(crate::artifact_inventory::CompilerSourceSupport::empty);
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -6475,23 +6466,22 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                target.native_inputs = Some(
-                    admitted_targets
-                        .for_ordinary_target(target.pending_imports.clone())?
-                        .with_certified_groups(Arc::clone(&selected_groups))?
-                        .complete_native_selection(
-                            target.prepared.prepared(),
-                            &native_output,
-                            &package_products,
-                            compiler_inputs
-                                .as_ref()
-                                .map(|inputs| inputs.compiler_source_support())
-                                .unwrap_or(
-                                    &crate::artifact_inventory::CompilerSourceSupport::empty(),
-                                ),
-                            &validation.inventory,
-                        )?,
-                );
+                let native_inputs = admitted_targets
+                    .for_ordinary_target(target.pending_imports.clone())?
+                    .with_certified_groups(Arc::clone(&selected_groups))?
+                    .complete_native_selection(
+                        target.prepared.prepared(),
+                        &native_output,
+                        &package_products,
+                        &inherited_completion_support,
+                        &validation.inventory,
+                    )?;
+                let completed = native_inputs.completed_selection().ok_or_else(|| {
+                    CompileError::ExtractFailed("finite target lacks its issued completion".into())
+                })?;
+                inherited_completion_support =
+                    inherited_completion_support.with_native_selection_completion(completed)?;
+                target.native_inputs = Some(native_inputs);
             }
         }
         timing::record_stage_with_owners(
