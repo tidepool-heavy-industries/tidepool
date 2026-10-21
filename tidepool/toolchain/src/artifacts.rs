@@ -951,7 +951,6 @@ pub fn prepare_world_cell_program(
                     &segment.originals,
                     &mut validation,
                 )?;
-            let mut native_prefix: Option<Arc<SealedTurnProducts>> = None;
             for &index in stage.ordinals() {
                 let slot = &program.reservation().slots()[index];
                 crate::host_work::checkpoint()?;
@@ -1032,13 +1031,11 @@ pub fn prepare_world_cell_program(
                     &generated,
                     &certified.recovery_products,
                 )?;
-                let cursor = match native_prefix.as_ref() {
-                    Some(prefix) => SegmentItemDemand::from_target(&mut artifacts, &prefix.target),
-                    None => SegmentItemDemand {
-                        selection: &mut artifacts,
-                        view: segment.artifacts(),
-                        groups: segment.group_baseline(),
-                    },
+                let prefix_artifacts = segment.native_prefix_artifacts()?;
+                let cursor = SegmentItemDemand {
+                    selection: &mut artifacts,
+                    view: &prefix_artifacts,
+                    groups: segment.group_baseline(),
                 };
                 let admitted = admit_native_target_products(
                     *program.producer_sha256(),
@@ -1078,7 +1075,6 @@ pub fn prepare_world_cell_program(
                     retained_core_products: certified.retained_core_products,
                     package_interfaces: admitted.package_interfaces,
                 });
-                segment.retain_private_output(products.planned_original_output()?);
                 let output = ProgramNativeOutput {
                     directory,
                     target,
@@ -1092,15 +1088,12 @@ pub fn prepare_world_cell_program(
                     products: Some(products.clone()),
                     source: segment.source_text().to_owned(),
                 };
-                let mut context = segment.admit_program_support(
-                    &program,
-                    products.planned_original_output()?,
-                    &produced,
-                )?;
-                if !item.binders().is_empty() {
-                    context = segment
-                        .admit_value_interface(produced.current_interface(generation)?.clone())?;
-                }
+                let value = if item.binders().is_empty() {
+                    None
+                } else {
+                    Some(produced.current_interface(generation)?.clone())
+                };
+                let context = segment.admit_native_item(&program, &products, &produced, value)?;
                 item_contexts.insert(
                     index,
                     crate::checked_cell::CellProgramItemContext {
@@ -1109,7 +1102,6 @@ pub fn prepare_world_cell_program(
                     },
                 );
                 outputs.insert(index, output);
-                native_prefix = Some(products);
             }
         }
         let (next, source) = segment.finish();
@@ -3753,6 +3745,12 @@ impl SealedTurnProducts {
         self.target.completed_selection()
     }
 
+    pub(crate) fn target_native_inputs(
+        &self,
+    ) -> &crate::artifact_inventory::CertifiedTargetNativeInputs {
+        &self.target
+    }
+
     /// The execution context belongs to this completed output, including its
     /// issued native custody independently of the original compilation inputs.
     pub fn original_execution_context(
@@ -3801,7 +3799,7 @@ impl SealedTurnProducts {
         }
     }
 
-    fn planned_original_output(
+    pub(crate) fn planned_original_output(
         &self,
     ) -> Result<&crate::declaration_context::IssuedOriginalOutput, CompileError> {
         match &self.original {
@@ -8900,7 +8898,7 @@ mod module_product_tests {
                         }),
                         None,
                     )?;
-                    assert_eq!(plan.items().len(), if mixed { 4 } else { 1 });
+                    assert_eq!(plan.items().len(), if mixed { 5 } else { 1 });
                     let origin =
                         CompilerTransactionOrigin::current().expect("actual compiler operation");
                     let subject = WorldCellAdmissionSubject::for_source_transaction(
@@ -8917,7 +8915,7 @@ mod module_product_tests {
                         vec![
                             (0, 31, "baseStage"),
                             (2, 33, "answerStage"),
-                            (3, 34, "resultStage"),
+                            (4, 35, "resultStage"),
                         ]
                     } else {
                         vec![(0, 1, "answer")]
@@ -8944,7 +8942,11 @@ mod module_product_tests {
                             CheckedPlannedCellSlot::Bind { value: 31 },
                             CheckedPlannedCellSlot::Declaration { declaration: 32 },
                             CheckedPlannedCellSlot::Bind { value: 33 },
-                            CheckedPlannedCellSlot::Bind { value: 34 },
+                            CheckedPlannedCellSlot::Expression {
+                                capture: 34,
+                                observation_name: "mixedObservation".into(),
+                            },
+                            CheckedPlannedCellSlot::Bind { value: 35 },
                         ]
                     } else {
                         vec![CheckedPlannedCellSlot::Bind { value: 1 }]
@@ -9012,7 +9014,8 @@ mod module_product_tests {
                 assert_eq!(checked.stages().len(), 3);
                 assert_eq!(checked.stages()[0].ordinals(), &[0]);
                 assert_eq!(checked.stages()[1].ordinals(), &[1]);
-                assert_eq!(checked.stages()[2].ordinals(), &[2, 3]);
+                assert_eq!(checked.stages()[2].ordinals(), &[2, 3, 4]);
+                assert!(checked.item(3).unwrap().binders().is_empty());
                 let first = checked.item(0).expect("actual first binding");
                 let [base] = first.binders() else {
                     panic!("first item captures exactly baseStage");
@@ -9056,7 +9059,27 @@ mod module_product_tests {
                 .seal(&admission)
                 .expect("same actual output after END");
             assert!(matches!(program.basis(), CellProgramBasis::World(_)));
-            assert_eq!(program.items().len(), if mixed { 4 } else { 1 });
+            assert_eq!(program.items().len(), if mixed { 5 } else { 1 });
+            let mut completed = Vec::new();
+            for item in program.items() {
+                if let Some(products) = item.native_products() {
+                    completed.push(Arc::clone(
+                        products
+                            .target_native_inputs()
+                            .completed_selection()
+                            .expect("actual World target completion")
+                            .completion(),
+                    ));
+                }
+                for prior in &completed {
+                    assert!(
+                        item.compiler_context()
+                            .issued_native_completions()
+                            .any(|held| Arc::ptr_eq(held, prior)),
+                        "every item context retains its actual completed target prefix"
+                    );
+                }
+            }
             if declaration_only {
                 let item = &program.items()[0];
                 assert!(item.native().is_none());
@@ -9093,6 +9116,13 @@ mod module_product_tests {
                 );
                 assert!(program.items()[2].native().is_some());
                 assert!(program.items()[3].native().is_some());
+                assert!(program.items()[3]
+                    .native()
+                    .unwrap()
+                    .item()
+                    .binders()
+                    .is_empty());
+                assert!(program.items()[4].native().is_some());
                 assert!(
                     program.items()[0]
                         .compiler_context()
@@ -9104,7 +9134,7 @@ mod module_product_tests {
                     "early item cannot see later declaration"
                 );
                 assert!(
-                    program.items()[3]
+                    program.items()[4]
                         .compiler_context()
                         .compiler_source_support()
                         .projection()

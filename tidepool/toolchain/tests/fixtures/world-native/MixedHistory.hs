@@ -5,4 +5,5 @@ class MixedStageReader value where
 instance MixedStageReader MixedStage where
   readMixedStage (MixedStage value) = value + baseStage
 let answerStage = MixedStage baseStage
+readMixedStage answerStage
 let resultStage = readMixedStage answerStage

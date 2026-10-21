@@ -10372,10 +10372,12 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
 /// One move-only compiler prefix. Runtime settlement authority remains outside
 /// this owner; it carries only actual input and source-output evidence.
 pub(crate) struct WorldProgramContinuation {
+    request: Arc<crate::compiler_world::native_demand::WorldNativeDemandCompletion>,
     context: Arc<ExactDeclarationContext>,
     inputs: Arc<RequestCompilerInputs>,
     program: ProgramSourceSupportState,
     private_input: Option<Arc<OriginalCompilerInputs>>,
+    native_prefix: Option<Arc<crate::artifacts::SealedTurnProducts>>,
 }
 
 impl WorldProgramContinuation {
@@ -10384,11 +10386,46 @@ impl WorldProgramContinuation {
         // Retain that exact basis: rebuilding it would separate certification
         // from the native demand acquired during the compiler request.
         Self {
+            request: Arc::clone(program.native_demand_completion()),
             context: Arc::clone(program.primary_context()),
             inputs: Arc::clone(program.primary_compiler_inputs()),
             program: ProgramSourceSupportState::default(),
             private_input: None,
+            native_prefix: None,
         }
+    }
+
+    fn ensure_program(
+        &self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+    ) -> Result<(), CompileError> {
+        if !Arc::ptr_eq(&self.request, program.native_demand_completion())
+            || !Arc::ptr_eq(self.request.operation(), &program.validation().inventory)
+        {
+            return Err(failure("World native prefix belongs to another request"));
+        }
+        Ok(())
+    }
+
+    fn pending_successor(&self) -> Result<Self, CompileError> {
+        let operation = self.request.operation();
+        operation
+            .reserve::<ExactModuleIdentity>(self.program.source_selected_support.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        for owner in &self.program.source_selected_support {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(owner.unit.len().saturating_add(owner.module.len()))
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+        }
+        Ok(Self {
+            request: Arc::clone(&self.request),
+            context: Arc::clone(&self.context),
+            inputs: Arc::clone(&self.inputs),
+            program: self.program.clone(),
+            private_input: self.private_input.clone(),
+            native_prefix: self.native_prefix.clone(),
+        })
     }
 }
 
@@ -10463,7 +10500,25 @@ impl WorldProgramSegment {
         self.inputs.groups.groups()
     }
     pub(crate) fn group_baseline(&self) -> CertifiedNativeGroupBaseline<'_> {
-        CertifiedNativeGroupBaseline::Demand(&self.inputs.groups)
+        match self.native_prefix() {
+            Some(prior) => CertifiedNativeGroupBaseline::WorldPrefix {
+                stage: &self.inputs.groups,
+                prior: prior.target_native_inputs().certified_groups(),
+            },
+            None => CertifiedNativeGroupBaseline::Demand(&self.inputs.groups),
+        }
+    }
+    fn native_prefix(&self) -> Option<&Arc<crate::artifacts::SealedTurnProducts>> {
+        self.continuation.native_prefix.as_ref()
+    }
+    pub(crate) fn native_prefix_artifacts(&self) -> Result<ArtifactView, CompileError> {
+        match self.native_prefix() {
+            Some(prior) => self.artifacts().with_prior_world_target(
+                prior.target_native_inputs(),
+                self.continuation.request.operation(),
+            ),
+            None => Ok(self.artifacts().clone()),
+        }
     }
     pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
         &self.continuation.program.program_source_lexical
@@ -10481,6 +10536,25 @@ impl WorldProgramSegment {
         output: &IssuedOriginalOutput,
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let next = self.program_support_successor(program, output, produced)?;
+        self.continuation = next;
+        Ok(Arc::clone(&self.continuation.context))
+    }
+
+    fn program_support_successor(
+        &self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        output: &IssuedOriginalOutput,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+    ) -> Result<WorldProgramContinuation, CompileError> {
+        self.continuation.ensure_program(program)?;
+        if !Arc::ptr_eq(
+            self.originals.operation(),
+            self.continuation.request.operation(),
+        ) {
+            return Err(failure("World native prefix has another accounting owner"));
+        }
+        let mut continuation = self.continuation.pending_successor()?;
         let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
             program,
             &self.stage,
@@ -10488,7 +10562,7 @@ impl WorldProgramSegment {
             &self.source_text,
             output,
         )?;
-        let context = &self.continuation.context;
+        let context = &continuation.context;
         let imports = self.source.home_imports()?;
         let generated = self.source.generated_source_owner()?;
         let executable = self.stage.identity().original_owner().is_none();
@@ -10592,12 +10666,11 @@ impl WorldProgramSegment {
         }
         facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         let projected = Arc::new(ExactDeclarationContext::from_facts(facts));
-        let advanced = self
-            .continuation
+        let advanced = continuation
             .inputs
             .advance_program_support(&projected, &fragment)?;
-        self.continuation.program.program_support = Some(ProgramSourceSupport::append_fragment(
-            self.continuation.program.program_support.as_ref(),
+        continuation.program.program_support = Some(ProgramSourceSupport::append_fragment(
+            continuation.program.program_support.as_ref(),
             &fragment,
             imports.into_iter().filter(|(owner, _)| {
                 !executable
@@ -10608,20 +10681,20 @@ impl WorldProgramSegment {
                             .expect("validated generated owner")
             }),
         )?);
-        self.continuation.program.program_source_lexical = self
-            .continuation
+        continuation.program.program_source_lexical = continuation
             .program
             .program_source_lexical
             .append_issued(lexical)?;
-        self.continuation
+        continuation
             .program
             .source_selected_support
             .extend(self.source.selected_originals.keys().cloned());
-        self.continuation.inputs = advanced.inputs;
-        self.continuation.context = advanced.context;
-        Ok(Arc::clone(&self.continuation.context))
+        continuation.inputs = advanced.inputs;
+        continuation.context = advanced.context;
+        Ok(continuation)
     }
 
+    #[cfg(test)]
     pub(crate) fn admit_value_interface(
         &mut self,
         value: Arc<CertifiedValueInterface>,
@@ -10640,8 +10713,35 @@ impl WorldProgramSegment {
         Ok(Arc::clone(&self.continuation.context))
     }
 
-    pub(crate) fn retain_private_output(&mut self, output: &IssuedOriginalOutput) {
-        self.continuation.private_input = Some(Arc::clone(&output.inputs));
+    pub(crate) fn admit_native_item(
+        &mut self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        products: &Arc<crate::artifacts::SealedTurnProducts>,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+        value: Option<Arc<CertifiedValueInterface>>,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let output = products.planned_original_output()?;
+        let mut next = self.program_support_successor(program, output, produced)?;
+        if let Some(value) = value {
+            let inputs = next.inputs.with_program_value_interface(value)?;
+            next.context = Arc::clone(
+                inputs
+                    .world_primary_context
+                    .as_ref()
+                    .expect("World value owner"),
+            );
+            next.inputs = inputs;
+        }
+        let completed = next
+            .inputs
+            .with_native_completion_from(&products.original_execution_context()?)?;
+        next.inputs = completed.inputs;
+        next.context = completed.context;
+        next.private_input = Some(Arc::clone(&output.inputs));
+        next.native_prefix = Some(Arc::clone(products));
+        crate::host_work::checkpoint()?;
+        self.continuation = next;
+        Ok(Arc::clone(&self.continuation.context))
     }
 
     pub(crate) fn finish(self) -> (WorldProgramContinuation, WorldStageSourceAdmission) {
@@ -10941,6 +11041,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         continuation: WorldProgramContinuation,
     ) -> Result<WorldProgramSegment, CompileError> {
         let program = self.program;
+        continuation.ensure_program(program)?;
         let outputs = self.binding.stage.outputs();
         let stage_root = program.directory().path().join(
             outputs
@@ -14958,6 +15059,10 @@ impl CertifiedArtifactGroupBindings {
 pub(crate) enum CertifiedNativeGroupBaseline<'a> {
     Demand(&'a DemandCertifiedGroups),
     Target(&'a CertifiedArtifactGroupBindings),
+    WorldPrefix {
+        stage: &'a DemandCertifiedGroups,
+        prior: &'a CertifiedArtifactGroupBindings,
+    },
     InitialRequest(&'a ProgramAdmissionContinuation),
     Rows(&'a BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a PendingCertifiedGroup>),
 }
@@ -15004,6 +15109,13 @@ fn certify_artifact_view_groups(
     bound_baseline: Option<CertifiedNativeGroupBaseline<'_>>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
+    if let Some(CertifiedNativeGroupBaseline::WorldPrefix { stage, .. }) = bound_baseline {
+        if !Arc::ptr_eq(&stage.operation, &validation.inventory) {
+            return Err(failure(
+                "World native baseline has another accounting owner",
+            ));
+        }
+    }
     let metadata = view.metadata_snapshot();
     let available = metadata
         .artifacts
@@ -15100,6 +15212,14 @@ fn certify_artifact_view_groups(
                 inherit_binding(*binding, &groups.groups[*index])?;
             }
         }
+        Some(CertifiedNativeGroupBaseline::WorldPrefix { stage, prior }) => {
+            for (binding, group) in stage.bound_rows() {
+                inherit_binding(binding, group)?;
+            }
+            for (binding, index) in &prior.bindings {
+                inherit_binding(*binding, &prior.groups[*index])?;
+            }
+        }
         Some(CertifiedNativeGroupBaseline::InitialRequest(request)) => {
             for (binding, index) in &request.groups.bindings {
                 inherit_binding(*binding, &request.groups.groups[*index])?;
@@ -15154,6 +15274,14 @@ fn certify_artifact_view_groups(
         Some(CertifiedNativeGroupBaseline::Target(groups)) => {
             for (binding, prior) in &groups.imports {
                 check_links(*binding, prior)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::WorldPrefix { stage, prior }) => {
+            for (binding, row) in stage.selected_rows() {
+                check_links(*binding, row.imports())?;
+            }
+            for (binding, links) in &prior.imports {
+                check_links(*binding, links)?;
             }
         }
         Some(CertifiedNativeGroupBaseline::InitialRequest(request)) => {

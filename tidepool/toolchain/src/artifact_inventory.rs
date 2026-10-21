@@ -9433,6 +9433,24 @@ impl ArtifactView {
         Ok(retained)
     }
 
+    /// Advance a World item with the prior target's exact selected edges and
+    /// this stage's admitted demand. Compiler roles remain with this stage.
+    pub(crate) fn with_prior_world_target(
+        &self,
+        prior: &CertifiedTargetNativeInputs,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        crate::host_work::checkpoint()?;
+        let prior = prior.artifacts();
+        if !Arc::ptr_eq(&self.lease.inventory.0, &prior.lease.inventory.0) {
+            return Err(failure("World native prefix belongs to another inventory"));
+        }
+        operation
+            .reserve::<(ArtifactId, ArtifactBinding)>(self.namespace().len())
+            .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error.into())))?;
+        self.merge_validated_namespace(prior, self.namespace().clone())
+    }
+
     /// Both views and the exact namespace have already crossed their issuing
     /// owner. Historical edges remain in their immutable scopes, independently
     /// of the compiler namespace selected for this receiving view.
