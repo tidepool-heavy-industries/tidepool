@@ -167,6 +167,7 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
     );
     let mut selected_uses = 0;
     let mut unselected_uses = 0;
+    let mut foreign_stage_contributions = 0;
     for stage in program.stages() {
         let selected = request
             .checked_stage(program, stage, &validation)
@@ -191,6 +192,20 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
             request.acquired_uses.keys(),
         )
         .expect("actual request acquisitions authenticate metadata for each emitted stage");
+        let other_stage = program
+            .stages()
+            .iter()
+            .find(|other| !Arc::ptr_eq(stage, other))
+            .expect("mixed producer emits another actual World stage");
+        let other = request
+            .checked_stage(program, other_stage, &validation)
+            .expect("the same request authenticates its other actual emitted stage");
+        assert!(!Arc::ptr_eq(selected.stage(), other.stage()));
+        assert!(Arc::ptr_eq(
+            selected.initial_inputs(),
+            other.initial_inputs()
+        ));
+        assert!(Arc::ptr_eq(selected.operation(), other.operation()));
         for (reference, acquisition) in &request.acquired_uses {
             let acquired = &request.acquisitions[*acquisition];
             let (acquired_binding, _) = acquired
@@ -207,6 +222,10 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
                         binding, acquired_binding,
                         "stage choice reuses the actual request's exact issued group"
                     );
+                    let support = scoped
+                        .world_stage_group_support(&selected, reference, selected.operation())
+                        .expect("selected use lends its already acquired contribution");
+                    assert_eq!(support.binding(), binding);
                     assert_eq!(
                         executable,
                         acquired
@@ -222,8 +241,36 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
                         executable.is_none(),
                         "a request-wide acquisition cannot become another stage's executable use"
                     );
+                    assert!(scoped.metadata(reference).is_some());
+                    let error = scoped
+                        .world_stage_group_support(&selected, reference, selected.operation())
+                        .err()
+                        .expect("acquired availability cannot lend an unselected stage occurrence");
+                    assert!(matches!(&error, CompileError::CompilerEvidence(error)
+                        if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(
+                            "target Original lost its actual World occurrence"))),
+                        "unselected contribution must refuse at the actual stage ceiling: {error:?}");
                 }
             }
+            let error = scoped
+                .world_stage_group_support(&other, reference, selected.operation())
+                .err()
+                .expect("shared request and operation cannot substitute another actual stage");
+            assert!(
+                matches!(&error, CompileError::CompilerEvidence(error)
+                if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(
+                    "Original contribution belongs to another World stage"))),
+                "cross-stage contribution must refuse its mismatched owner: {error:?}"
+            );
+            foreign_stage_contributions += 1;
+            assert_eq!(
+                scoped
+                    .world_stage_group_support(&selected, reference, selected.operation())
+                    .map(|support| support.binding())
+                    .ok(),
+                expected.map(|(binding, _)| binding),
+                "cross-stage refusal preserves the actual stage's exact contribution decision"
+            );
             let foreign = crate::recovery_artifacts::PackageInterfaceValidation::default();
             assert!(
                 scoped.executable(reference, &foreign.inventory).is_err(),
@@ -249,7 +296,9 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
         selected_uses > 0 && unselected_uses > 0,
         "mixed producer must exercise both selected and unselected actual stage uses"
     );
+    assert!(foreign_stage_contributions > 0);
     eprintln!("actual Original stage ceiling: {selected_uses} selected uses, {unselected_uses} unselected uses");
+    eprintln!("actual Original stage contributions: {selected_uses} selected, {unselected_uses} unselected refusals, {foreign_stage_contributions} foreign-stage refusals");
     let (foreign, refusal) = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
         .expect("same reservation has a distinct initial request acquisition")
         .finish();
