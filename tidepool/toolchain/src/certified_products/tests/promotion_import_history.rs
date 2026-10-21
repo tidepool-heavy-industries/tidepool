@@ -373,7 +373,7 @@ fn certify_promotion(
     for module in &mut packet.modules {
         module.product_sha256 = sha(product_bytes);
     }
-    certify_products(
+    let mut products = certify_products(
         None,
         &packet,
         parsed,
@@ -394,7 +394,15 @@ fn certify_promotion(
         include,
         None,
     )
-    .unwrap()
+    .unwrap();
+    crate::declaration_context::issue_certified_product_native_availability(
+        CanonicalProducerIdentity::from_producer_bytes(producer).sha256(),
+        &mut products,
+        Some(request.compiler_inputs().artifacts()),
+        &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
+    )
+    .unwrap();
+    products
 }
 
 #[test]
@@ -668,7 +676,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
     )
     .is_err());
-    let certified = certify_products(
+    let mut certified = certify_products(
         None,
         &promoted_packet,
         &promoted,
@@ -688,6 +696,13 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &producer,
         &include,
         None,
+    )
+    .unwrap();
+    let output = crate::declaration_context::issue_certified_product_native_availability(
+        canonical_producer,
+        &mut certified,
+        Some(request.compiler_inputs().artifacts()),
+        &mut PackageInterfaceValidation::with_inventory(Arc::clone(promoted.operation())),
     )
     .unwrap();
     let selected_owners = certified
@@ -1285,21 +1300,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
         owner_history
     );
     assert_eq!(certified.recovery_products.len(), owner_history.len());
-    let physical = crate::declaration_context::certified_product_artifact_view_with_validation(
-        canonical_producer,
-        &certified.recovery_products,
-        &certified.module_interfaces,
-        &certified.value_interfaces,
-        Some(request.compiler_inputs().artifacts()),
-        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-        &mut PackageInterfaceValidation::default(),
-    )
-    .unwrap();
-    let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-        &certified.source_selection,
-        &physical,
-    )
-    .unwrap();
     let completed =
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output).unwrap();
     let selected_entries = [current_a, current_b]
@@ -1445,23 +1445,12 @@ fn check_retained_core_promotion_history(item_count: usize) {
         history_context = history_context
             .recover_fixture_projection(projection)
             .unwrap();
-        let physical = crate::declaration_context::certified_product_artifact_view_with_validation(
-            canonical_producer,
-            &next.recovery_products,
-            &next.module_interfaces,
-            &next.value_interfaces,
-            Some(history_context.artifact_view()),
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
-        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &next.source_selection,
-            &physical,
-        )
-        .unwrap();
+        let output = next
+            .original_inputs
+            .as_ref()
+            .expect("promotion helper retains its actual physical issuer");
         let completed =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)
                 .unwrap();
         let selected_entries = [current_a, current_b]
             .into_iter()
