@@ -712,9 +712,7 @@ impl SourceGroupOutline {
                         version: version.clone(),
                         binder: binder.clone(),
                     }),
-                    ImportOwner::Retained { .. }
-                    | ImportOwner::CodeExport { .. }
-                    | ImportOwner::Package { .. } => None,
+                    ImportOwner::Retained { .. } | ImportOwner::Package { .. } => None,
                 }
             })
             .collect();
@@ -1574,7 +1572,7 @@ mod tests {
         let imports = (0..import_count)
             .map(|index| {
                 let binder = testing::identity("Dependency", &format!("import{index}"));
-                let generation = matches!(index % 4, 2 | 3).then_some(9);
+                let generation = (index % 3 == 2).then_some(9);
                 wire.globals.push(GlobalDecl {
                     identity: binder.clone(),
                     rep: RuntimeRep::LiftedRef,
@@ -1582,7 +1580,7 @@ mod tests {
                     required_evaluated: false,
                     required_generation: generation,
                 });
-                match index % 4 {
+                match index % 3 {
                     0 => ImportOwner::Source {
                         version: ModuleVersion([8; 32]),
                         binder,
@@ -1593,15 +1591,9 @@ mod tests {
                         binder,
                         interface_digest: [7; 32],
                     },
-                    2 => ImportOwner::Retained {
+                    _ => ImportOwner::Retained {
                         id: tidepool_repr::SessionVarId::from_extract(index as u64),
                         generation: 9,
-                    },
-                    _ => ImportOwner::CodeExport {
-                        binder,
-                        generation: 9,
-                        root_id: 11,
-                        interface_digest: None,
                     },
                 }
             })
@@ -1784,11 +1776,6 @@ mod tests {
             unreachable!()
         };
         *generation = 10;
-        let mut bad_export = imports.clone();
-        let ImportOwner::CodeExport { generation, .. } = &mut bad_export[3] else {
-            unreachable!()
-        };
-        *generation = 10;
         let mut bad_source_generation = imports.clone();
         bad_source_generation[0] = ImportOwner::Retained {
             id: tidepool_repr::SessionVarId::from_extract(1),
@@ -1799,7 +1786,6 @@ mod tests {
             bad_source,
             bad_package,
             bad_retained,
-            bad_export,
             bad_source_generation,
         ] {
             assert!(CertifiedGroup::admit(owner.clone(), projected.clone(), malformed).is_err());
@@ -2497,6 +2483,7 @@ mod selection_tests {
             .native_domain_selection_in(&tree, ScopeId::ROOT)
             .unwrap();
         assert_eq!(selected.roots().len(), 2);
+
         assert_eq!(
             selected
                 .roots()
