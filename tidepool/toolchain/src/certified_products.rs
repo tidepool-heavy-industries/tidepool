@@ -3661,6 +3661,15 @@ impl CertifiedSourceSelection {
             .chain(self.private_native.issued())
     }
 
+    pub(crate) fn has_unissued_current_native_products(&self) -> bool {
+        self.native_selections().any(|native| {
+            matches!(
+                native.availability,
+                ReceiptNativeAvailability::NewProduct { .. }
+            )
+        })
+    }
+
     pub(crate) fn complete_native_entries(
         &self,
         artifacts: &crate::artifact_inventory::ArtifactView,
@@ -15108,6 +15117,26 @@ pub(crate) mod tests {
             .executable(&references[1], &operation)
             .unwrap()
             .is_none());
+        let granted = mixed
+            .available_group(&references[0], &operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(granted.binding().binding.artifact(), original.artifact);
+        assert_eq!(granted.binding().original_ordinal, 7);
+        assert_eq!(
+            granted
+                .contribution()
+                .group_carrier_pair(granted.binding(), interface.artifact)
+                .unwrap(),
+            (original, interface)
+        );
+        assert!(mixed
+            .available_group(&references[1], &operation)
+            .unwrap()
+            .is_none());
+        assert!(mixed
+            .available_group(&references[0], &InventoryOperation::new(Default::default()))
+            .is_err());
         let before = operation.work_usage().unwrap();
         let unchanged = mixed.with_metadata(&references).unwrap();
         assert_eq!(operation.work_usage().unwrap(), before);
