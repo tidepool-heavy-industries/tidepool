@@ -90,6 +90,7 @@ rust_filegroup(
         "tests/fixtures/SourceDomainEntry.hs": "tidepool/runtime/tests/fixtures/SourceDomainEntry.hs",
         "tests/fixtures/SourceDomainSupport.hs": "tidepool/runtime/tests/fixtures/SourceDomainSupport.hs",
         "tests/fixtures/SourcePublication.hs": "tidepool/runtime/tests/fixtures/SourcePublication.hs",
+        "tests/fixtures/SourcePublicationHome.hs": "tidepool/runtime/tests/fixtures/SourcePublicationHome.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -219,6 +220,7 @@ rust_filegroup(
         "tests/fixtures/SourceDomainEntry.hs": "tidepool/runtime/tests/fixtures/SourceDomainEntry.hs",
         "tests/fixtures/SourceDomainSupport.hs": "tidepool/runtime/tests/fixtures/SourceDomainSupport.hs",
         "tests/fixtures/SourcePublication.hs": "tidepool/runtime/tests/fixtures/SourcePublication.hs",
+        "tests/fixtures/SourcePublicationHome.hs": "tidepool/runtime/tests/fixtures/SourcePublicationHome.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -435,6 +437,7 @@ rust_filegroup(
         "tests/fixtures/SourceDomainEntry.hs": "tidepool/runtime/tests/fixtures/SourceDomainEntry.hs",
         "tests/fixtures/SourceDomainSupport.hs": "tidepool/runtime/tests/fixtures/SourceDomainSupport.hs",
         "tests/fixtures/SourcePublication.hs": "tidepool/runtime/tests/fixtures/SourcePublication.hs",
+        "tests/fixtures/SourcePublicationHome.hs": "tidepool/runtime/tests/fixtures/SourcePublicationHome.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -678,6 +681,7 @@ rust_filegroup(
         "tests/fixtures/SourceDomainEntry.hs": "tidepool/runtime/tests/fixtures/SourceDomainEntry.hs",
         "tests/fixtures/SourceDomainSupport.hs": "tidepool/runtime/tests/fixtures/SourceDomainSupport.hs",
         "tests/fixtures/SourcePublication.hs": "tidepool/runtime/tests/fixtures/SourcePublication.hs",
+        "tests/fixtures/SourcePublicationHome.hs": "tidepool/runtime/tests/fixtures/SourcePublicationHome.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -1641,6 +1645,7 @@ filegroup(
         "tidepool/runtime/tests/fixtures/SourceDomainEntry.hs": "tests/fixtures/SourceDomainEntry.hs",
         "tidepool/runtime/tests/fixtures/SourceDomainSupport.hs": "tests/fixtures/SourceDomainSupport.hs",
         "tidepool/runtime/tests/fixtures/SourcePublication.hs": "tests/fixtures/SourcePublication.hs",
+        "tidepool/runtime/tests/fixtures/SourcePublicationHome.hs": "tests/fixtures/SourcePublicationHome.hs",
         "tidepool/runtime/tests/fixtures/checked-quoter-program.hs": "tests/fixtures/checked-quoter-program.hs",
         "tidepool/runtime/tests/prepared_execution.rs": "tests/prepared_execution.rs",
         "tidepool/runtime/tests/prepared_residency.rs": "tests/prepared_residency.rs",
