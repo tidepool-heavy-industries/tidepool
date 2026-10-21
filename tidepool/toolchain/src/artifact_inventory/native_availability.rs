@@ -978,6 +978,9 @@ pub(super) fn bind_certified_input_demand(
                             },
                         )
                     })?;
+                crate::declaration_context::validate_current_stage_native_inputs(
+                    &current, entries,
+                )?;
                 let Some(chosen) = verified_current_product(&current)? else {
                     let dependencies = current_product_dependencies(
                         state,

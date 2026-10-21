@@ -2930,9 +2930,6 @@ impl<'a> CurrentProductRef<'a> {
             module_version.as_ref(),
             *original_ordinal,
         )?;
-        if binder.unit != *unit || binder.module != *module {
-            return Err(CertificationError::Mismatch("current Source binder owner"));
-        }
         let Some(native) = self
             .selection
             .modules
