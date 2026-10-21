@@ -9877,18 +9877,24 @@ fn authenticate_original_imports(
             }
             let import =
                 validate_global_witness(declaration, group.definitions().signatures(), selected)?;
-            let _ = match import.clone() {
+            match import.clone() {
+                // This body authenticates nominal metadata. Exact pair custody
+                // and membership are checked by the owning acquired graph; an
+                // executable binding is required only for selected groups.
+                ReceiptImportOwner::OriginalBinding { .. } => {}
                 source @ ReceiptImportOwner::Source { .. } => {
-                    resolve_cold_recovery_source(source, witness, product)?
+                    resolve_cold_recovery_source(source, witness, product)?;
                 }
-                other => resolve_receipt_owner_with_validation(
-                    other,
-                    &SourceGroupMap::new(),
-                    None,
-                    &witness.packages,
-                    validation,
-                )?,
-            };
+                other => {
+                    resolve_receipt_owner_with_validation(
+                        other,
+                        &SourceGroupMap::new(),
+                        None,
+                        &witness.packages,
+                        validation,
+                    )?;
+                }
+            }
             imports.push(import);
         }
         group_imports.push(imports);
