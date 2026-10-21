@@ -624,7 +624,6 @@ impl CompletedNativeProductAvailability {
 pub(crate) struct CompletedRequestNativeAvailability {
     artifacts: ArtifactView,
     native_availability: RequestNativeAvailability,
-    native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
     completed: BTreeMap<ArtifactId, Arc<CompletedNativeProductAvailability>>,
 }
 
@@ -635,10 +634,6 @@ impl CompletedRequestNativeAvailability {
 
     pub(crate) fn rows(&self) -> &RequestNativeAvailability {
         &self.native_availability
-    }
-
-    pub(crate) fn own_offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
-        &self.native_offers
     }
 
     pub(crate) fn completed_product(
@@ -2308,7 +2303,6 @@ impl RequestNativeAvailability {
         Ok(CompletedRequestNativeAvailability {
             artifacts,
             native_availability,
-            native_offers: validated.into_offers(),
             completed,
         })
     }
