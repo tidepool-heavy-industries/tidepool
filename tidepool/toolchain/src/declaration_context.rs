@@ -24738,6 +24738,26 @@ mod tests {
         let owned_root = retained.directory().path().to_path_buf();
         let weak = Arc::downgrade(retained);
         let semantic = first.semantic_sha256;
+        {
+            let cached = first
+                .compiler_inputs()
+                .artifacts()
+                .retain_materialization(&first.transport_metadata, |_| {
+                    panic!("the same immutable view must reuse its completed materialization")
+                })
+                .unwrap();
+            assert!(Arc::ptr_eq(retained, &cached));
+        }
+        let row_identities = retained
+            .selected_rows(&first.transport_metadata)
+            .into_iter()
+            .map(|(id, row)| (id, row as *const RetainedArtifactRow as usize))
+            .collect::<BTreeMap<_, _>>();
+        let file_identities = first
+            .input_transport_files()
+            .iter()
+            .map(|file| Arc::as_ptr(file) as usize)
+            .collect::<Vec<_>>();
         let context = Arc::new(
             context
                 .as_ref()
@@ -24760,10 +24780,26 @@ mod tests {
             .iter()
             .zip(second.groups.iter())
             .all(|(left, right)| std::ptr::eq(left.group(), right.group())));
-        assert!(Arc::ptr_eq(
-            &weak.upgrade().unwrap(),
-            second.materialization.as_ref().unwrap()
-        ));
+        let current = second.materialization.as_ref().unwrap();
+        assert_eq!(
+            current
+                .selected_rows(&second.transport_metadata)
+                .into_iter()
+                .map(|(id, row)| (id, row as *const RetainedArtifactRow as usize))
+                .collect::<BTreeMap<_, _>>(),
+            row_identities,
+            "a descendant request shares the exact issued rows"
+        );
+        assert_eq!(
+            second
+                .input_transport_files()
+                .iter()
+                .map(|file| Arc::as_ptr(file) as usize)
+                .collect::<Vec<_>>(),
+            file_identities,
+            "a descendant request shares the exact input file leases"
+        );
+        assert_eq!(current.payload_work.written_bytes, 0);
         let manifest: Value =
             ciborium::de::from_reader(std::fs::read(&second.manifest).unwrap().as_slice()).unwrap();
         for (artifact, row) in paths
