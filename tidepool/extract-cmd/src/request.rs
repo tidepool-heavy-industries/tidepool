@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v28";
-const MAGIC: &[u8; 8] = b"TPREQ028";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v29";
+const MAGIC: &[u8; 8] = b"TPREQ029";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -3018,6 +3018,7 @@ mod tests {
             "--worker-request-v21",
             "--worker-request-v26",
             "--worker-request-v27",
+            "--worker-request-v28",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -3051,6 +3052,7 @@ mod tests {
             b"TPREQ021",
             b"TPREQ026",
             b"TPREQ027",
+            b"TPREQ028",
             b"TPREQ022",
             b"TPREQ023",
         ] {
