@@ -6,7 +6,7 @@ use crate::certified_products::{
         original_groups_fixture, original_groups_fixture_in_unit_with_sites,
         recovered_witness_fixtures,
     },
-    PendingImportOwner,
+    AuthenticatedTargetImports, PendingImportOwner,
 };
 use crate::declaration_context::ExactDeclarationContext;
 use crate::declaration_join::ExactLexicalNode;
@@ -815,10 +815,11 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                     catalog.original(0, version).descriptor.producer_sha256,
                 )
                 .unwrap();
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let receipt =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
-                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                    &validation.inventory,
                 )
                 .unwrap();
             let expected = selected_bindings(selected.artifacts())
@@ -833,32 +834,25 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             assert_eq!(expected.len(), expected_keys.len());
             assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
             let inventory = inputs.artifacts().inventory();
-            let mut fixed = inventory
-                .bind_segment(
-                    inputs.artifacts(),
-                    vec![],
-                    &receipt,
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                )
-                .unwrap();
-            let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
-                unreachable!()
-            };
-            let imports = [PendingImportOwner::Source {
-                owner: product.owner().clone(),
-                original_ordinal: 11,
-                binder: binder(0, 11),
-            }];
+            let (prepared, observations) =
+                super::tests::source_target_data(&[(catalog.original(0, version).as_ref(), 11)]);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                    .unwrap();
             let target = inventory
-                .admit_bound_target(
-                    &mut fixed,
-                    &inventory.empty_view(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
+                .select_native_target(
+                    inputs.artifacts(),
                     &receipt,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
                 .unwrap()
-                .artifacts;
+                .artifacts()
+                .clone();
             assert_eq!(selected_bindings(&target), expected);
             assert_eq!(
                 target
@@ -875,29 +869,22 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                     catalog.generations[version * MODULES]
                 )])
             );
-            let ArtifactPayload::Original(foreign) = &catalog.original(0, 1 - version).payload
-            else {
-                unreachable!()
-            };
-            let foreign_imports = [PendingImportOwner::Source {
-                owner: foreign.owner().clone(),
-                original_ordinal: 11,
-                binder: binder(0, 11),
-            }];
-            let mut fixed = inventory
-                .bind_segment(
-                    inputs.artifacts(),
-                    vec![],
-                    &receipt,
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                )
-                .unwrap();
-            let refused = inventory.admit_bound_target(
-                &mut fixed,
-                &inventory.empty_view(),
-                NativeArtifactDemand::CertifiedTargetImports(&foreign_imports),
-                vec![],
+            let (prepared, observations) = super::tests::source_target_data(&[(
+                catalog.original(0, 1 - version).as_ref(),
+                11,
+            )]);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                    .unwrap();
+            let refused = inventory.select_native_target(
+                inputs.artifacts(),
                 &receipt,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             );
             assert!(
                 matches!(refused, Err(crate::CompileError::ArtifactInventory(error))
