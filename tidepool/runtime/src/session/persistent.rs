@@ -8478,7 +8478,7 @@ mod checkpoint_scope_tests {
         let other = session.mint_notebook_scope_with_lease(None).unwrap();
         assert!(!Arc::ptr_eq(&targets.source, other.original_source()));
         for target_scope in [ScopeId::ROOT, other.scope()] {
-            let before_visibility = session.public_visibility_snapshot_in(target_scope).unwrap();
+            let before_visibility = session.public_visibility_snapshot_in(target_scope);
             let settled = session
                 .with_source_compiler_transaction(
                     other.original_source().clone(),
@@ -8504,7 +8504,7 @@ mod checkpoint_scope_tests {
             ));
             assert!(session.prepared().is_none());
             assert_eq!(
-                session.public_visibility_snapshot_in(target_scope).unwrap(),
+                session.public_visibility_snapshot_in(target_scope),
                 before_visibility
             );
             assert_eq!(
