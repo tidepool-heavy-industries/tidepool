@@ -57,7 +57,7 @@ producer outcome and independent compiler-settlement evidence.
 Native build actions bind only to the authenticated compiler service owned by
 their action; portable prepared fixtures keep their direct worker. The native
 module-package CLI preserves that service's endpoint coordinates while clearing
-ambient cache and catalog selections, and retains failed compiler scratch with
+ambient cache and catalog selections, and retains failed producer scratch with
 its invocation evidence.
 
 The worker emits versioned `dependencies.json` with consumed SHA-256 source

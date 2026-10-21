@@ -158,6 +158,8 @@ fn prepare_environment(scratch: &std::path::Path) -> Result<(), String> {
         std::env::set_var("GHC_ENVIRONMENT", "-");
         std::env::set_var("TMPDIR", scratch);
         std::env::set_var("XDG_CACHE_HOME", scratch.join("cache"));
+        std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
+        std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", scratch);
     }
     Ok(())
 }
@@ -198,6 +200,7 @@ mod tests {
                 .env("TIDEPOOL_COMPILER_MODULES", "/ambient/catalog")
                 .env("TIDEPOOL_EXTRACT_NO_DAEMON", "1")
                 .env("TIDEPOOL_CACHE_DIR", "/ambient/cache")
+                .env("TIDEPOOL_TEST_ARTIFACT_ROOT", "/ambient/artifacts")
                 .env("GHC_PACKAGE_PATH", "/ambient/packages")
                 .env("GHCRTS", "-N8")
                 .env_remove("MODULE_COMPILER_INPUT_MISSING");
@@ -240,6 +243,11 @@ mod tests {
             assert!(std::env::var_os(name).is_none(), "ambient {name} survived");
         }
         assert_eq!(std::env::var("GHC_ENVIRONMENT").unwrap(), "-");
+        assert_eq!(std::env::var("TIDEPOOL_KEEP_TEST_LOGS").unwrap(), "1");
+        assert_eq!(
+            std::path::PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap()),
+            scratch.path()
+        );
         assert_eq!(
             std::path::PathBuf::from(std::env::var_os("TMPDIR").unwrap()),
             scratch.path()
