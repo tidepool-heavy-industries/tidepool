@@ -604,22 +604,6 @@ impl NativeInstantiationPlan {
     }
 }
 
-impl ClosedInstantiationPlan {
-    pub(in crate::session) fn target_constructors(
-        &self,
-    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> + Clone {
-        self.native.target.constructor_declarations()
-    }
-    pub(in crate::session) fn dependency_constructors(
-        &self,
-    ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> {
-        self.native
-            .programs
-            .iter()
-            .flat_map(|program| program.native.image().constructor_declarations())
-    }
-}
-
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct NativeOccurrence {
     program: usize,
@@ -829,18 +813,6 @@ impl NativeInstantiation {
 }
 
 impl PreparedEngine {
-    pub(in crate::session) fn install_closed_turn(
-        &mut self,
-        plan: &ClosedInstantiationPlan,
-        origin: &super::super::resident::CapturedSourceOrigin,
-        selection: &NativeDomainSelection,
-        bindings: &BindingTable,
-    ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        let sources = NativeInstallationSources::closed(plan, origin);
-        let instantiation = plan.native.instantiate(selection.clone())?;
-        self.install_native_turn(&instantiation, &sources, bindings, &BTreeMap::new())
-    }
-
     pub(in crate::session) fn install_native_turn(
         &mut self,
         instantiation: &NativeInstantiation,

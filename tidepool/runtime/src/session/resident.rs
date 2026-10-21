@@ -181,6 +181,14 @@ impl CapturedSourceOrigin {
         source.admitted_original_source().map(Self)
     }
 
+    pub(super) fn admit_install(
+        &self,
+        transaction: &super::RuntimeSourceCompilerTransaction,
+        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<(), super::SourceAdmissionError> {
+        transaction.admit_original(&self.0, target)
+    }
+
     // A closed selection lends only definitions that its native batch is
     // about to instantiate freshly. Existing physical imports
     // retain their own ProgramFacts in the batch installer.
@@ -12898,20 +12906,25 @@ mod authored_publication_tests {
         use tidepool_testing::effect_surface::TestEffectSurface;
 
         tidepool_testing::eval_harness::require_extract();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
+        let preamble = crate::session::insert_preamble_imports(
+            effects.preamble(),
+            "Tidepool.Actors.Internal.Agent (installRequestReceiver)",
+        );
         let templates = vec![TurnTemplate {
             kind: TemplateSelector::Expr,
             source: assemble_expression_module(
-                effects.preamble(),
+                &preamble,
                 "__result",
                 effects.row(),
                 "{{TURN}}",
-                ExpressionLift::Pure,
+                ExpressionLift::Effectful,
             ),
         }];
         for startup in [true, false] {
             let root = tempfile::tempdir().unwrap();
             let mut includes = effects.include_paths().to_vec();
+            includes.push(tidepool_testing::eval_harness::actor_sources_path());
             includes.push(root.path().to_path_buf());
             let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             let TurnResult::Expr { compiled, .. } =
@@ -12920,7 +12933,7 @@ mod authored_publication_tests {
                         TurnRequest {
                             exact_context: None,
                             session_id: None,
-                            turn_text: "(42 :: Int)",
+                            turn_text: "installRequestReceiver >> pure (42 :: Int)",
                             templates: &templates,
                             include: &includes,
                             session_root: root.path(),
@@ -12952,10 +12965,14 @@ mod authored_publication_tests {
             let source = session.mint_notebook_scope_with_lease(None).unwrap();
             let scope = source.scope();
             session
-                .set_run_context(SessionRunContext {
-                    lexical_scope: scope,
-                    ..SessionRunContext::ROOT
-                })
+                .set_actor_execution(
+                    SessionRunContext {
+                        lexical_scope: scope,
+                        ..SessionRunContext::ROOT
+                    },
+                    EffectRunPolicy::SuspendAll,
+                    LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
                 .unwrap();
             // No CompiledTurn or borrowed code survives this transfer. The
             // admission and installed custody must retain its original inputs.
@@ -12969,8 +12986,44 @@ mod authored_publication_tests {
                 }
             })
             .unwrap();
-            let ResidentOutcome::Completed { result, .. } = outcome else {
-                panic!("the pure ordinary target must complete");
+            let ResidentOutcome::Suspended { hole, .. } = outcome else {
+                panic!("the ordinary target must reach its real AgentTools request");
+            };
+            let original = session.parked_original_source(&hole).unwrap();
+            assert!(Arc::ptr_eq(&original, source.original_source()));
+            let parked = session
+                .parked
+                .iter()
+                .find(|entry| entry.name == hole.cont_id())
+                .unwrap()
+                .id;
+            let site = session
+                .state
+                .require_prepared()
+                .unwrap()
+                .parked_site(parked)
+                .unwrap();
+            let callback = session
+                .capture_request_receiver_entry(&hole, i64::try_from(site).unwrap(), RealmId::ROOT)
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(
+                    &callback
+                        .custody
+                        .provenance
+                        .original_sources
+                        .require_unique(site)
+                        .unwrap(),
+                    source.original_source(),
+                ),
+                "the captured real receiver keeps the installing source"
+            );
+            drop(callback);
+            let completed = source_action(&mut session, &source, |session, settlement| {
+                session.resume_classified(hole, (), settlement).unwrap()
+            });
+            let ResidentOutcome::Completed { result, .. } = completed else {
+                panic!("the admitted real effect must resume to completion");
             };
             assert_eq!(result.to_json(), serde_json::json!(42));
             assert_eq!(session.run_context.lexical_scope, scope);

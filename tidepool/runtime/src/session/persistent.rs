@@ -935,6 +935,39 @@ impl PersistentSession {
         self.install_closed_turn_in(scope, compiled.table(), &plan, &origin)
     }
 
+    pub(super) fn resolve_closed_turn_in(
+        &self,
+        scope: ScopeId,
+        plan: &super::prepared::ClosedInstantiationPlan,
+        origin: &super::resident::CapturedSourceOrigin,
+    ) -> Result<ResolvedNativeTurn, PreparedRuntimeError> {
+        if !self.scopes.is_live(scope) {
+            return Err(PreparedRuntimeError::SourceScopeAdmission);
+        }
+        let transaction = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let target = (scope != ScopeId::ROOT)
+            .then(|| self.source_lease_in(scope))
+            .transpose()?;
+        origin.admit_install(transaction, target)?;
+        let selection = self
+            .bindings
+            .native_domain_selection_in(&self.scopes, scope)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        let snapshot = self
+            .bindings
+            .scope_snapshot(&self.scopes, scope)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        Ok(ResolvedNativeTurn {
+            instantiation: plan.native().instantiate(selection)?,
+            sources: super::prepared::NativeInstallationSources::closed(plan, origin),
+            captures: BTreeMap::new(),
+            snapshot,
+        })
+    }
+
     pub(super) fn install_closed_turn_in(
         &mut self,
         scope: ScopeId,
@@ -942,31 +975,8 @@ impl PersistentSession {
         plan: &super::prepared::ClosedInstantiationPlan,
         origin: &super::resident::CapturedSourceOrigin,
     ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
-        self.admit_source_work_in(scope)?;
-        let selection = self
-            .bindings
-            .native_domain_selection_in(&self.scopes, scope)
-            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-        let admitted_metadata = self.stage_install_metadata(
-            Some(metadata),
-            plan.target_constructors(),
-            plan.dependency_constructors(),
-        )?;
-        let mut bootstrap = if self.machine.is_none() {
-            Some(PreparedEngine::empty_certified(
-                self.nursery_size,
-                self.image_registry.clone(),
-            )?)
-        } else {
-            None
-        };
-        let engine = bootstrap
-            .as_mut()
-            .or(self.machine.as_mut())
-            .expect("closed machine exists or was constructed");
-        engine.set_invocation_cancel(self.invocation_cancel.clone());
-        let staged = engine.install_closed_turn(plan, origin, &selection, &self.bindings)?;
-        self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
+        let resolved = self.resolve_closed_turn_in(scope, plan, origin)?;
+        self.install_native_turn_in(scope, metadata, resolved)
     }
 
     fn finish_certified_turn_in(
@@ -7136,7 +7146,14 @@ mod checkpoint_scope_tests {
                     session.bind_in(scope, observation).unwrap();
                     session.save_observation(id, &[]);
                     let resolved = session
-                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
+                        .resolve_closed_turn_in(
+                            scope,
+                            &super::super::prepared::ClosedInstantiationPlan::restrict(plan)
+                                .unwrap(),
+                            &super::super::resident::CapturedSourceOrigin::from_runtime_targets(
+                                targets,
+                            ),
+                        )
                         .unwrap();
                     let admitted = session.public_visibility_snapshot_in(scope).unwrap();
                     let cache = session
@@ -7208,7 +7225,14 @@ mod checkpoint_scope_tests {
                 |_| {},
                 |mut session, _| {
                     let resolved = session
-                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
+                        .resolve_closed_turn_in(
+                            scope,
+                            &super::super::prepared::ClosedInstantiationPlan::restrict(plan)
+                                .unwrap(),
+                            &super::super::resident::CapturedSourceOrigin::from_runtime_targets(
+                                targets,
+                            ),
+                        )
                         .unwrap();
                     let mut metadata = targets.artifacts.table.clone();
                     let staged_only =
