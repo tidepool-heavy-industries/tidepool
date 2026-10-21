@@ -329,7 +329,7 @@ import Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
-  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -1379,12 +1379,23 @@ mergeWorldLexicalOwners = foldM insert Map.empty . concatMap Map.toAscList
 -- This request-local value retains neither a compiler environment nor Core.
 data WorldImportBasis = WorldImportBasis
   (Map.Map (String,String) WorldTypeClosureEntry)
-  [(ExactIfaceArtifact, [(String,String)])]
+  [WorldLexicalImport]
   [(String,String)]
 
+data WorldLexicalImport
+  = WorldSourceLexicalImport ExactIfaceArtifact [(String,String)]
+  | WorldDeclarationLexicalImport VerifiedWorldDeclarationSurface
+
+worldLexicalImportGraph :: [WorldLexicalImport] -> [(ExactIfaceArtifact,[(String,String)])]
+worldLexicalImportGraph = map $ \case
+  WorldSourceLexicalImport artifact edges -> (artifact,edges)
+  -- The verified join facade owns its chosen instance/family inventory.
+  -- Implementation TYPE requirements are not outgoing lexical imports.
+  WorldDeclarationLexicalImport declaration -> (verifiedWorldDeclarationInterface declaration,[])
+
 readWorldImportBasis :: ExactInputOwner -> HscEnv -> WorldInputFacts
-  -> [ImportIntent] -> ParsedModuleDemand -> IO WorldImportBasis
-readWorldImportBasis owner environment facts intents parsed = do
+  -> Maybe VerifiedWorldDeclarationSurface -> [ImportIntent] -> ParsedModuleDemand -> IO WorldImportBasis
+readWorldImportBasis owner environment facts declaration intents parsed = do
   roots <- fmap Set.fromList $ fmap catMaybes $ forM (moduleImportRequests parsed) $ \(name,raw,boot) -> do
     let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
         home = homeUnitId (hsc_home_unit environment)
@@ -1432,15 +1443,28 @@ readWorldImportBasis owner environment facts intents parsed = do
       | otherwise = do
           entry <- maybe (throwIO (WorldInputsFailure WorldInputsCorrupt
             "carried import lost its selected TYPE closure owner")) pure (Map.lookup key entries)
-          imports <- case worldTypeEntryEvidence entry of
-            evidence@(ModuleInterfaceEvidence proof) -> maybe
-              (unsupported "lexical closure" key evidence) pure (canonicalSourceImports proof)
-            evidence -> unsupported "lexical closure" key evidence
-          let edges = Set.toAscList (Set.fromList [(unit,name) | (_,name,_,Just unit) <- imports])
-          unless (all (`Map.member` entries) edges) $
-            throwIO (WorldInputsFailure WorldInputsCorrupt "carried lexical import lacks its exact TYPE association")
-          remaining <- lexicalClosure entries (Set.insert key visited) (edges ++ rest)
-          pure ((worldTypeEntryArtifact entry,edges):remaining)
+          case verifiedJoin entry of
+            Just facade -> do
+              remaining <- lexicalClosure entries (Set.insert key visited) rest
+              pure (WorldDeclarationLexicalImport facade:remaining)
+            Nothing -> do
+              imports <- case worldTypeEntryEvidence entry of
+                evidence@(ModuleInterfaceEvidence proof) -> maybe
+                  (unsupported "lexical closure" key evidence) pure (canonicalSourceImports proof)
+                evidence -> unsupported "lexical closure" key evidence
+              let edges = Set.toAscList (Set.fromList [(unit,name) | (_,name,_,Just unit) <- imports])
+              unless (all (`Map.member` entries) edges) $
+                throwIO (WorldInputsFailure WorldInputsCorrupt "carried lexical import lacks its exact TYPE association")
+              remaining <- lexicalClosure entries (Set.insert key visited) (edges ++ rest)
+              pure (WorldSourceLexicalImport (worldTypeEntryArtifact entry) edges:remaining)
+    verifiedJoin entry = case declaration of
+      Just facade
+        | worldTypeEntryArtifact entry == verifiedWorldDeclarationInterface facade
+        , LexicalJoinEvidence <- worldTypeEntryEvidence entry
+        , any (\selected -> worldTypeEntryArtifact selected == worldTypeEntryArtifact entry
+            && worldTypeEntryEvidence selected == LexicalJoinEvidence)
+            (verifiedWorldDeclarationTypeInputs facade) -> Just facade
+      _ -> Nothing
     unsupported :: String -> (String,String) -> ExactInterfaceEvidence -> IO value
     unsupported stage (unit,name) evidence = throwIO (WorldInputsFailure WorldInputsCorrupt
       ("carried import lacks canonical source-import provenance; phase=" ++ stage
@@ -1483,7 +1507,8 @@ restoreWorldImportBasis :: WorldImportBasis -> HscEnv -> IO HscEnv
 restoreWorldImportBasis basis@(WorldImportBasis _ lexical _) environment
   | null lexical = pure environment
   | otherwise = do
-      let owners = Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- lexical]
+      let graph = worldLexicalImportGraph lexical
+          owners = Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- graph]
           key summary = (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
           nodes = mgModSummaries' (hsc_mod_graph environment)
       unless (null [() | ModuleNode _ summary <- nodes, key summary `Set.member` owners
@@ -1492,7 +1517,7 @@ restoreWorldImportBasis basis@(WorldImportBasis _ lexical _) environment
       ready <- hydrateWorldImportBasis basis environment
       let ordinary (ModuleNode _ summary) = key summary `Set.notMember` owners
           ordinary _ = True
-      installExactLexicalGraphWithScaffold (mkModuleGraph (filter ordinary nodes)) lexical
+      installExactLexicalGraphWithScaffold (mkModuleGraph (filter ordinary nodes)) graph
         noCheckedValueImports noGeneratedScaffoldImports ready
         >>= either (throwIO . WorldInputsFailure WorldInputsCorrupt) pure
 
@@ -2671,7 +2696,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         throwIO (case cause of
           WorldInputsUnavailable -> WorldCellUnavailable
           WorldInputsCorrupt -> WorldCellCorrupt)
-  importBasis <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts
+  importBasis <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts verifiedDeclaration
     (sourceImportIntents purpose) parsedDemand `catch` importFailure)
   prefixImports <- liftIO $ case operation of
     WorldCellSource _ _ prefix _ _ _ -> worldCellPrefixLexicalOwners current prefix
