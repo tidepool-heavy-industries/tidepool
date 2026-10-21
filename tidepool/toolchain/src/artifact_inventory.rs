@@ -855,8 +855,14 @@ pub(crate) struct ArtifactAdmission {
 struct IssuedArtifactCustody {
     lease: Arc<ViewLease>,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    supplied: BTreeMap<ArtifactId, SuppliedArtifactOutcome>,
     target_native_selection: Option<IssuedTargetNativeSelection>,
     source_receipt: IssuedNativeSourceReceipt,
+}
+
+struct SuppliedArtifactOutcome {
+    entry: Arc<ArtifactEntry>,
+    binding: ArtifactBinding,
 }
 
 impl IssuedArtifactCustody {
@@ -3986,6 +3992,7 @@ impl ArtifactInventory {
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
         selection: &crate::certified_products::CertifiedSourceSelection,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<BoundArtifactSelection, CompileError> {
         if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
             return Err(failure("physical segment belongs to another inventory"));
@@ -4000,6 +4007,7 @@ impl ArtifactInventory {
                 &mut selection,
                 parent,
                 entries,
+                validation,
             )?,
         );
         self.index_admitted_segment(parent, physical, captured_facts, &selection)
@@ -4852,6 +4860,37 @@ impl ArtifactInventory {
         )
         .map(|admission| admission.artifacts)
     }
+    pub(crate) fn issue_current_cohort_availability(
+        &self,
+        physical: &ArtifactView,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
+        let classified = native_availability::ClassifiedNativeCohort::classify(
+            physical,
+            selection,
+            &validation.inventory,
+        )?;
+        let originals = classified
+            .entries()
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        let custody = self.issue_selected_custody(
+            physical,
+            classified.entries().to_vec(),
+            classified.available().clone(),
+            false,
+            ArtifactRootIntent::CurrentCohort {
+                selection,
+                classified: &classified,
+            },
+            None,
+        )?;
+        native_availability::CheckedNativeAvailability::from_cohort_custody(custody, &originals)?
+            .validate_current_cohort(validation)
+    }
+
     /// Issue complete private products using only the request's exact external
     /// dependency proofs. This temporary view does not publish execution demand.
     fn issue_private_complete_availability(
@@ -5034,6 +5073,7 @@ impl ArtifactInventory {
         {
             return Ok(IssuedArtifactCustody {
                 lease: Arc::clone(&parent.lease),
+                supplied: BTreeMap::new(),
                 entries: parent
                     .lease
                     .payloads
@@ -5699,6 +5739,24 @@ impl ArtifactInventory {
         };
         // The prior selected closure stays immutable and independently owned.
         // Incoming shared carriers use the newly issued namespace binding.
+        let supplied = supplied
+            .iter()
+            .filter(|(id, _)| planning_entries.contains_key(id))
+            .map(|(id, entry)| {
+                let InventoryNodeKey::Artifact(binding) =
+                    resolve_row(LogicalNodeKey::Artifact(*id))?
+                else {
+                    unreachable!("supplied artifact resolves an artifact binding");
+                };
+                Ok((
+                    *id,
+                    SuppliedArtifactOutcome {
+                        entry: Arc::clone(entry),
+                        binding,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let issuing_payloads = selected.clone();
         // Validate proof retention before publishing the immutable scope. No payload
         // is retained for an unselected source row in an ancestor proof.
@@ -5744,6 +5802,7 @@ impl ArtifactInventory {
         Ok(IssuedArtifactCustody {
             lease,
             entries: selected,
+            supplied,
             target_native_selection,
             source_receipt,
         })
@@ -5907,6 +5966,7 @@ impl ArtifactInventory {
         Ok(IssuedArtifactCustody {
             lease,
             entries: retained_entries,
+            supplied: BTreeMap::new(),
             target_native_selection: None,
             source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
         })
@@ -11083,7 +11143,12 @@ mod tests {
         let inventory = chosen.inventory();
         assert!(chosen.selected_native_groups().is_empty());
         let mut fixed = inventory
-            .bind_segment(chosen, vec![native.clone()], &selection)
+            .bind_segment(
+                chosen,
+                vec![native.clone()],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         assert!(!fixed.view.namespace().contains_key(&id));
         let imports = [issued_source(&native, 7)];
@@ -11350,7 +11415,12 @@ mod tests {
             .with_new_product_dependencies(&prefix.metadata_snapshot(), &[requirement])
             .unwrap();
         let mut fixed = inventory
-            .bind_segment(&prefix, vec![native.clone(), child.clone()], &selection)
+            .bind_segment(
+                &prefix,
+                vec![native.clone(), child.clone()],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let imports = [issued_source(&native, 7)];
         let expected = selected
@@ -11732,7 +11802,7 @@ mod tests {
                         &mut selection,
                         &view,
                         vec![native.clone()],
-                    )
+                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default())
                     .unwrap();
                 let output = issued;
                 let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
@@ -11849,7 +11919,12 @@ mod tests {
             };
             let inventory = inputs.artifacts().inventory();
             let mut fixed = inventory
-                .bind_segment(inputs.artifacts(), vec![], &selection)
+                .bind_segment(
+                    inputs.artifacts(),
+                    vec![],
+                    &selection,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let imports = [issued_source(&native, 7)];
             let result = inventory
@@ -11929,6 +12004,7 @@ mod tests {
                 &mut current,
                 &physical,
                 entries,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
             let closure = current
@@ -11958,7 +12034,12 @@ mod tests {
             let owner = inputs.artifacts().inventory();
             let imports = [issued_source(&native, 7)];
             let mut fixed = owner
-                .bind_segment(inputs.artifacts(), vec![], &selected_receipt)
+                .bind_segment(
+                    inputs.artifacts(),
+                    vec![],
+                    &selected_receipt,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let admitted = owner
                 .admit_bound_target(
@@ -12013,7 +12094,12 @@ mod tests {
             }
             let owner = inputs.artifacts().inventory();
             let mut fixed = owner
-                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .bind_segment(
+                    inputs.artifacts(),
+                    vec![],
+                    &receipt,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let before = fixed.view.capture_graph_selection();
             let denied = owner
@@ -12101,7 +12187,7 @@ mod tests {
                     &mut selection,
                     &physical,
                     vec![native.clone()],
-                )
+                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default())
                 .unwrap();
             let output = issued;
             let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
@@ -12171,7 +12257,12 @@ mod tests {
                 .unwrap();
             let inventory = inputs.artifacts().inventory();
             let mut fixed = inventory
-                .bind_segment(inputs.artifacts(), vec![], &selection)
+                .bind_segment(
+                    inputs.artifacts(),
+                    vec![],
+                    &selection,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let imports = [
                 issued_source(&roots[0].0, 7),
@@ -12263,7 +12354,12 @@ mod tests {
                 .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                 .unwrap();
             let mut fixed = inventory
-                .bind_segment(&chosen, vec![native.clone()], &selection)
+                .bind_segment(
+                    &chosen,
+                    vec![native.clone()],
+                    &selection,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             assert_eq!(fixed.view.namespace()[&id], selected_carrier);
             let imports = [issued_source(&native, 7)];
@@ -13060,7 +13156,12 @@ mod tests {
                 .unwrap();
             let selected = bound_selection_for_entries(&available, &entries);
             let mut fixed = inventory
-                .bind_segment(&available, entries, &selected)
+                .bind_segment(
+                    &available,
+                    entries,
+                    &selected,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let imports = vec![issued_source(&consumer, 0)];
             let before = inventory.metrics();
@@ -13197,7 +13298,12 @@ mod tests {
             .with_new_product_dependencies(&available.metadata_snapshot(), &[proof])
             .unwrap();
         let mut fixed = inventory
-            .bind_segment(&available, vec![], &selected)
+            .bind_segment(
+                &available,
+                vec![],
+                &selected,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let first_imports = [issued_source(&native, 0)];
         let first = inventory
@@ -13303,7 +13409,14 @@ mod tests {
             .unwrap();
         let all = bound_selection_for_entries(&available, &entries);
         let current = bound_selection_for_entries(&available, &[consumer.clone()]);
-        let mut fixed = inventory.bind_segment(&available, entries, &all).unwrap();
+        let mut fixed = inventory
+            .bind_segment(
+                &available,
+                entries,
+                &all,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap();
         let first_imports = vec![issued_source(&consumer, 0)];
         let cursor = inventory
             .admit_bound_target(
@@ -13369,7 +13482,12 @@ mod tests {
                 .unwrap();
             let selected = bound_selection_for_entries(&available, &entries);
             let mut fixed = inventory
-                .bind_segment(&available, entries, &selected)
+                .bind_segment(
+                    &available,
+                    entries,
+                    &selected,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let mut cursor = inventory.empty_view();
             for ordinal in 0..count {
@@ -13512,7 +13630,12 @@ mod tests {
             .unwrap();
         let selected = bound_selection_for_entries(&available, &[captured.clone()]);
         let mut fixed = inventory
-            .bind_segment(&available, vec![captured.clone()], &selected)
+            .bind_segment(
+                &available,
+                vec![captured.clone()],
+                &selected,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         assert!(fixed.entries[&captured.descriptor.id]
             .facts
@@ -13589,7 +13712,12 @@ mod tests {
         );
         let selected = bound_selection_for_entries(&physical, &physical_entries);
         let mut fixed = inventory
-            .bind_segment(&physical, physical_entries, &selected)
+            .bind_segment(
+                &physical,
+                physical_entries,
+                &selected,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let imports = vec![issued_source(&cold, 0)];
         let admitted = inventory
@@ -13720,7 +13848,7 @@ mod tests {
         let graph = combined.capture_graph_selection();
         let nodes = inventory.node_count();
         assert!(
-            matches!(inventory.bind_segment(&combined, vec![], &selected), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. }) && error.owner_conflict.is_some())
+            matches!(inventory.bind_segment(&combined, vec![], &selected, &mut crate::recovery_artifacts::PackageInterfaceValidation::default()), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. }) && error.owner_conflict.is_some())
         );
         assert_eq!(combined.capture_graph_selection(), graph);
         assert_eq!(inventory.node_count(), nodes);
@@ -15519,7 +15647,12 @@ mod tests {
                     );
                 }
                 let missing_private = inventory
-                    .bind_segment(&interfaces, vec![Arc::new(root.clone())], &receipt)
+                    .bind_segment(
+                        &interfaces,
+                        vec![Arc::new(root.clone())],
+                        &receipt,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .err()
                     .expect("product completion requires the private child proof");
                 assert!(
@@ -15600,7 +15733,12 @@ mod tests {
                 );
                 let imports = [issued_source(&root, 12)];
                 let mut fixed = inventory
-                    .bind_segment(&admitted, vec![Arc::new(root.clone())], &receipt)
+                    .bind_segment(
+                        &admitted,
+                        vec![Arc::new(root.clone())],
+                        &receipt,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .unwrap();
                 let closed = inventory
                     .admit_bound_target(
@@ -15644,7 +15782,12 @@ mod tests {
                 }
                 .unwrap();
                 let mut fixed = cold
-                    .bind_segment(&readmitted, vec![Arc::new(root.clone())], &receipt)
+                    .bind_segment(
+                        &readmitted,
+                        vec![Arc::new(root.clone())],
+                        &receipt,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .unwrap();
                 let repeated = cold
                     .admit_bound_target(
@@ -15746,7 +15889,12 @@ mod tests {
             .iter()
             .all(|root| matches!(root, InventoryNodeKey::Artifact(_))));
         let denied = inventory
-            .bind_segment(&interfaces, vec![Arc::new(root.clone())], &ambiguous)
+            .bind_segment(
+                &interfaces,
+                vec![Arc::new(root.clone())],
+                &ambiguous,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .err()
             .expect("product completion refuses competing root proofs");
         assert!(
@@ -17004,7 +17152,12 @@ mod tests {
         let receipt = bound_selection_for_entries(&available, &entries);
         let issuers = originals.each_ref().map(|original| {
             let mut fixed = inventory
-                .bind_segment(&available, entries.clone(), &receipt)
+                .bind_segment(
+                    &available,
+                    entries.clone(),
+                    &receipt,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             inventory
                 .admit_bound_target(
@@ -17796,7 +17949,12 @@ mod tests {
                     .with_new_product_dependencies(&recovered.metadata_snapshot(), &requirements)
                     .unwrap();
                 let mut bound = recovered_inventory
-                    .bind_segment(&recovered, vec![], &certified)
+                    .bind_segment(
+                        &recovered,
+                        vec![],
+                        &certified,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .unwrap();
                 let imports = originals
                     .each_ref()
@@ -17872,7 +18030,12 @@ mod tests {
                     .unwrap();
                 let mut chosen_bound = chosen
                     .inventory()
-                    .bind_segment(&chosen, vec![], &chosen_certified)
+                    .bind_segment(
+                        &chosen,
+                        vec![],
+                        &chosen_certified,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .unwrap();
                 let direct = chosen
                     .inventory()
@@ -18745,7 +18908,12 @@ mod tests {
                 .unwrap();
             let selection = bound_selection_for_entries(&available, &entries);
             let mut fixed = issuer
-                .bind_segment(&available, entries, &selection)
+                .bind_segment(
+                    &available,
+                    entries,
+                    &selection,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let mut cursor = issuer.empty_view();
             let initial = if late_before_merge {
@@ -19099,7 +19267,14 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(observed, expected);
-            let mut bound = inventory.bind_segment(view, vec![], &certified).unwrap();
+            let mut bound = inventory
+                .bind_segment(
+                    view,
+                    vec![],
+                    &certified,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
+                .unwrap();
             let selected = inventory
                 .admit_bound_target(
                     &mut bound,

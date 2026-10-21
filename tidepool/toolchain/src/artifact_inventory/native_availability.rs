@@ -299,6 +299,7 @@ enum CohortNativeRequirement {
 /// All nominal group obligations of one physical output cohort are classified
 /// once. Unavailable obligations remain explicit until local closure is removed.
 pub(super) struct ClassifiedNativeCohort {
+    operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     entries: Vec<Arc<ArtifactEntry>>,
     requirements: BTreeMap<NativeGroupKey, Vec<CohortNativeRequirement>>,
     available: BTreeSet<NativeGroupKey>,
@@ -308,12 +309,12 @@ impl ClassifiedNativeCohort {
     pub(super) fn classify(
         physical: &ArtifactView,
         selection: &crate::certified_products::CertifiedSourceSelection,
-        operation: &tidepool_repr::execution_schema::InventoryOperation,
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Self, CompileError> {
         use crate::certified_products::{CurrentSourceDependency, ReceiptImportOwner};
         let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
         let entries = selection
-            .complete_native_entries(physical)
+            .complete_native_entries(physical, operation)
             .map_err(evidence)?;
         let metadata = physical.metadata_snapshot();
         let mut requirements = BTreeMap::new();
@@ -449,6 +450,7 @@ impl ClassifiedNativeCohort {
             .copied()
             .collect();
         Ok(Self {
+            operation: Arc::clone(operation),
             entries,
             requirements,
             available,
@@ -475,7 +477,11 @@ pub(super) fn bind_classified_cohort(
         offers: Vec::new(),
     };
     for &key in &cohort.available {
-        let mut dependencies = Vec::new();
+        cohort
+            .operation
+            .reserve::<ResolvedNativeDependency>(cohort.requirements[&key].len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut dependencies = Vec::with_capacity(cohort.requirements[&key].len());
         for requirement in &cohort.requirements[&key] {
             crate::host_work::checkpoint()?;
             let (required_owner, edge, target) = match requirement {
@@ -2133,13 +2139,96 @@ impl ValidatedFreshNativeAvailability {
 }
 
 impl CheckedNativeAvailability {
+    pub(super) fn validate_current_cohort(
+        self,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
+        let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
+        let operation = Arc::clone(&validation.inventory);
+        operation
+            .reserve::<NativeOfferContribution>(self.offers.len())
+            .map_err(|error| evidence(error.into()))?;
+        let mut contributions = Vec::with_capacity(self.offers.len());
+        let mut available = BTreeMap::new();
+        for offer in &self.offers {
+            crate::host_work::checkpoint()?;
+            let contribution = offer
+                .contribution_for(&BTreeSet::from([offer.original()]))?
+                .ok_or_else(|| failure("cohort offer lost its own contribution"))?;
+            for id in contribution.originals() {
+                let entry = self
+                    .entries
+                    .get(id)
+                    .ok_or_else(|| failure("cohort proof lost an exact original payload"))?;
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return Err(failure("cohort native proof has non-original payload"));
+                };
+                if !available.contains_key(id) {
+                    operation
+                        .reserve::<(
+                            ArtifactId,
+                            &crate::recovery_artifacts::CertifiedRecoveryProduct,
+                            [usize; 4],
+                        )>(1)
+                        .map_err(|error| evidence(error.into()))?;
+                    product
+                        .original_native()
+                        .ok_or_else(|| failure("cohort native proof lacks authenticated witness"))?
+                        .validate_package_interfaces(validation)
+                        .map_err(evidence)?;
+                    available.insert(*id, product);
+                }
+            }
+            contributions.push(contribution);
+        }
+        let mut inventory = crate::certified_products::OriginalValidationInventory::selected(
+            &available, &operation,
+        )
+        .map_err(evidence)?;
+        for contribution in &contributions {
+            inventory
+                .validate_selected_scope(
+                    crate::certified_products::SelectedOriginalGroupScope::Contribution(
+                        contribution,
+                    ),
+                    validation,
+                )
+                .map_err(evidence)?;
+        }
+        Ok(ValidatedFreshNativeAvailability {
+            roots: self.roots,
+            offers: self.offers,
+        })
+    }
+
     pub(super) fn from_complete_custody(
         admitted: IssuedArtifactCustody,
         originals: &[ArtifactId],
     ) -> Result<Self, CompileError> {
         let entries = admitted.entries.clone();
+        let offers = IssuedNativeOffer::issue_custody(admitted, originals)?;
+        if offers
+            .iter()
+            .any(|offer| matches!(offer.0.body, NativeOfferBody::Partial(_)))
+        {
+            return Err(failure(
+                "complete availability lacks its issued group census",
+            ));
+        }
         Ok(Self {
-            offers: IssuedNativeOffer::issue_complete_custody(admitted, originals)?,
+            offers,
+            entries,
+            roots: originals.iter().copied().collect(),
+        })
+    }
+
+    pub(super) fn from_cohort_custody(
+        admitted: IssuedArtifactCustody,
+        originals: &[ArtifactId],
+    ) -> Result<Self, CompileError> {
+        let entries = admitted.entries.clone();
+        Ok(Self {
+            offers: IssuedNativeOffer::issue_custody(admitted, originals)?,
             entries,
             roots: originals.iter().copied().collect(),
         })
@@ -2313,11 +2402,12 @@ impl IssuedNativeOffer {
 
     /// Complete availability is issued directly by the checked scope solver.
     /// A complete census in bytes alone cannot enter this constructor.
-    fn issue_complete_custody(
+    fn issue_custody(
         admitted: IssuedArtifactCustody,
         originals: &[ArtifactId],
     ) -> Result<Vec<Self>, CompileError> {
         let source_receipt = admitted.source_receipt;
+        let supplied = admitted.supplied;
         let source = admitted.lease;
         let mut offers = Vec::new();
         let state = source.inventory.0.lock().expect("inventory lock");
@@ -2353,10 +2443,10 @@ impl IssuedNativeOffer {
             }
         }
         for &original in originals {
-            let entry = source
-                .payloads
-                .get(&original)
-                .ok_or_else(|| failure("complete availability lacks original custody"))?;
+            let outcome = supplied.get(&original).ok_or_else(|| {
+                failure("native availability lacks its supplied artifact outcome")
+            })?;
+            let entry = &outcome.entry;
             let ArtifactPayload::Original(product) = &entry.payload else {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
@@ -2367,15 +2457,27 @@ impl IssuedNativeOffer {
                     .module_interface()
                     .ok_or_else(|| failure("complete availability lacks canonical interface"))?,
             );
-            let carrier = *source
-                .selection
-                .namespace
-                .get(&original)
-                .ok_or_else(|| failure("complete availability lacks exact original carrier"))?;
-            let canonical =
-                *source.selection.namespace.get(&interface).ok_or_else(|| {
-                    failure("complete availability lacks exact canonical carrier")
-                })?;
+            let carrier = outcome.binding;
+            let mut canonical = state
+                .outgoing(ArtifactBindingNode::Artifact(carrier))
+                .filter_map(|(node, edge)| match node {
+                    ArtifactBindingNode::Artifact(binding)
+                        if binding.artifact == interface
+                            && *edge == ArtifactDependency::Interface =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                });
+            let selected_canonical = canonical
+                .next()
+                .ok_or_else(|| failure("native availability lacks its supplied canonical edge"))?;
+            if canonical.next().is_some() {
+                return Err(failure(
+                    "native availability has competing supplied canonical edges",
+                ));
+            }
+            let canonical = selected_canonical;
             if ambiguous_roots.contains(&(original, carrier)) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
@@ -2384,13 +2486,16 @@ impl IssuedNativeOffer {
             let roots = issued_roots
                 .remove(&(original, carrier))
                 .unwrap_or_default();
-            if !entry
+            let complete = entry
                 .native_group_ordinals
                 .iter()
-                .all(|ordinal| roots.contains_key(ordinal))
+                .all(|ordinal| roots.contains_key(ordinal));
+            if roots
+                .keys()
+                .any(|ordinal| !entry.native_group_ordinals.contains(ordinal))
             {
                 return Err(failure(
-                    "complete availability lacks its issued group census",
+                    "native availability exceeds its supplied group census",
                 ));
             }
             let selected_roots = if roots.is_empty() {
@@ -2444,6 +2549,11 @@ impl IssuedNativeOffer {
             });
             let body = if roots.is_empty() {
                 NativeOfferBody::Empty
+            } else if !complete {
+                NativeOfferBody::Partial(NativeOriginalRequirement {
+                    original,
+                    selection: ExactArtifactSelection::from_snapshot(selected),
+                })
             } else {
                 NativeOfferBody::Full {
                     proof: NativeOriginalRequirement {
@@ -3343,6 +3453,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &physical,
             entries,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap()
         .issued_artifacts()
@@ -3448,6 +3559,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &physical,
             entries,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap()
         .issued_artifacts()
@@ -3820,6 +3932,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &artifacts,
             entries.clone(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
@@ -4268,7 +4381,12 @@ mod normalized_dependency_tests {
             Some(canonical_id)
         );
         let mut fixed = inventory
-            .bind_segment(&receiving, vec![], &selection)
+            .bind_segment(
+                &receiving,
+                vec![],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         assert!(!fixed.view.namespace().contains_key(&hidden_id));
         assert_ne!(
@@ -4352,6 +4470,7 @@ mod normalized_dependency_tests {
             &mut selection,
             &artifacts,
             vec![entry.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         assert!(completed

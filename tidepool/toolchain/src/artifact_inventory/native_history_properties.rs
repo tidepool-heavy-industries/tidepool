@@ -1796,6 +1796,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 &mut selection,
                 &base,
                 Vec::new(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap()
             .issued_artifacts()
@@ -1963,7 +1964,12 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 .unwrap();
             let receiving_inventory = inputs.artifacts().inventory();
             let mut fixed = receiving_inventory
-                .bind_segment(inputs.artifacts(), Vec::new(), &continuation)
+                .bind_segment(
+                    inputs.artifacts(),
+                    Vec::new(),
+                    &continuation,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let target = receiving_inventory.admit_bound_target(
                 &mut fixed,

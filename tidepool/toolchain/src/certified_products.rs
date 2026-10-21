@@ -606,6 +606,7 @@ impl CertifiedSegmentOriginals {
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
                 entries,
+                validation,
             )
             .map(|physical| SegmentOriginalAdmission::OriginalOnly(Arc::new(physical)))
         } else {
@@ -616,6 +617,7 @@ impl CertifiedSegmentOriginals {
                     compiler_inputs.artifacts(),
                     entries,
                     &products.source_selection,
+                    validation,
                 )
                 .map(|bound| {
                     products.source_selection = bound.source_selection().clone();
@@ -3824,6 +3826,7 @@ impl CertifiedSourceSelection {
     pub(crate) fn complete_native_entries(
         &self,
         artifacts: &crate::artifact_inventory::ArtifactView,
+        operation: &InventoryOperation,
     ) -> CertResult<Vec<Arc<crate::artifact_inventory::ArtifactEntry>>> {
         let metadata = artifacts.metadata_snapshot();
         self.visible_modules()
@@ -3838,7 +3841,10 @@ impl CertifiedSourceSelection {
                 }
                 _ => None,
             })
-            .map(|(interface, native)| native.original_entry(interface, &metadata))
+            .map(|(interface, native)| {
+                operation.reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(1)?;
+                native.original_entry(interface, &metadata)
+            })
             .collect()
     }
 
@@ -15055,6 +15061,7 @@ pub(crate) mod tests {
             &mut selected,
             &physical,
             vec![entry.clone(), other_entry.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         let completed = Arc::new(CompilerSourceSupport::close_complete_output(&output).unwrap());
@@ -15540,6 +15547,7 @@ pub(crate) mod tests {
             &mut fresh_selection,
             source.artifacts(),
             vec![fresh_entry],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         );
         assert!(
             matches!(refused,
@@ -15619,6 +15627,7 @@ pub(crate) mod tests {
                 &mut selected,
                 &both,
                 vec![entry.clone()],
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
         let issued = output.native_availability();
@@ -15767,6 +15776,7 @@ pub(crate) mod tests {
                 &mut selected,
                 &view,
                 vec![entry.clone()],
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
         let issued = output.native_availability();
@@ -18193,6 +18203,7 @@ pub(crate) mod tests {
                     &mut selection,
                     input.artifacts(),
                     vec![output_entry.clone()],
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 );
                 if !expected {
                     let outcome = match &completed {
@@ -20187,6 +20198,7 @@ pub(crate) mod tests {
                     &mut physical,
                     &inventory.empty_view(),
                     vec![entry.clone()],
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap()
                 .issued_artifacts()
@@ -20626,6 +20638,7 @@ pub(crate) mod tests {
             &mut physical,
             &inventory.empty_view(),
             entries.clone(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap()
         .issued_artifacts()
@@ -20759,7 +20772,12 @@ pub(crate) mod tests {
         );
         let inventory = inputs.artifacts().inventory();
         let mut fixed = inventory
-            .bind_segment(inputs.artifacts(), entries, &physical)
+            .bind_segment(
+                inputs.artifacts(),
+                entries,
+                &physical,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let source = |ordinal| {
             let definitions = original_native_group_definitions(&product, ordinal).unwrap();
@@ -21259,7 +21277,12 @@ pub(crate) mod tests {
             .err()
             .expect("two exact scopes have no dependency choice");
         let bound_error = inventory
-            .bind_segment(&output, vec![], &selection)
+            .bind_segment(
+                &output,
+                vec![],
+                &selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .err()
             .expect("product completion must consume the same unresolved input choice");
         for error in [selected_error, bound_error] {
@@ -21362,6 +21385,7 @@ pub(crate) mod tests {
             &mut original,
             &physical,
             vec![r_entry.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         let closure = original
@@ -21507,6 +21531,7 @@ pub(crate) mod tests {
             &mut current,
             request.artifacts(),
             entries.clone(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
         let g_current = current.current_product(g_key, &g_entry).unwrap().unwrap();
@@ -21561,7 +21586,12 @@ pub(crate) mod tests {
         assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_j)));
         let owner = finished_artifacts.inventory();
         let mut bound = owner
-            .bind_segment(finished_artifacts, entries, &current)
+            .bind_segment(
+                finished_artifacts,
+                entries,
+                &current,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let imports = [source(&g, 7), source(&j, 9)];
         let admitted_target = owner
@@ -21832,7 +21862,14 @@ pub(crate) mod tests {
                 binder: testing::identity("CohortParent", "entry_5"),
             }];
             let inventory = output.inventory();
-            let mut bound = inventory.bind_segment(&output, vec![], &selection).unwrap();
+            let mut bound = inventory
+                .bind_segment(
+                    &output,
+                    vec![],
+                    &selection,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
+                .unwrap();
             let selected = inventory
                 .admit_certified_with_demand(
                     &output,
@@ -22168,7 +22205,14 @@ pub(crate) mod tests {
                     binder,
                 }];
                 let inventory = output.inventory();
-                let mut bound = inventory.bind_segment(&output, vec![], &selection).unwrap();
+                let mut bound = inventory
+                    .bind_segment(
+                        &output,
+                        vec![],
+                        &selection,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
+                    .unwrap();
                 let selected = inventory
                     .admit_certified_with_demand(
                         &output,
@@ -22323,7 +22367,12 @@ pub(crate) mod tests {
                     "private Input availability is not current physical production"
                 );
                 let mut bound = inventory
-                    .bind_segment(input_view, vec![], &input_selection)
+                    .bind_segment(
+                        input_view,
+                        vec![],
+                        &input_selection,
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .unwrap();
                 let before = bound.observed_binding_state();
                 let before_view = input_view.capture_graph_selection();
