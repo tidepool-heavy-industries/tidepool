@@ -701,8 +701,8 @@ fn restore_native_completion(
     let certified = crate::certified_products::certify_acquired_original_group_rows(
         artifacts, &bindings, validation,
     )?;
-    let products = certified.additional.into_iter().collect::<BTreeMap<_, _>>();
-    if products.len() != bindings.len() || certified.imports.len() != bindings.len() {
+    let certified = certified.rows;
+    if certified.len() != bindings.len() {
         return Err(failure(
             "native completion restoration omitted acquired HOME rows",
         ));
@@ -726,9 +726,10 @@ fn restore_native_completion(
     let mut rows = imbl::OrdMap::new();
     let mut retained = BTreeSet::new();
     for (binding, row) in &facts.rows {
-        let product = products
+        let selected = certified
             .get(binding)
             .ok_or_else(|| failure("completion HOME product is absent"))?;
+        let product = selected.product();
         let acquired = artifacts
             .observed_payload(&binding.binding.artifact())
             .ok_or_else(|| failure("completion HOME payload is absent"))?;
@@ -737,10 +738,7 @@ fn restore_native_completion(
                 "completion HOME producer differs from its issued record",
             ));
         }
-        let actual = certified
-            .imports
-            .get(binding)
-            .ok_or_else(|| failure("completion HOME slot proofs are absent"))?;
+        let actual = selected.imports();
         let definitions = product.group().definitions();
         if row.imports.len() != actual.len() || actual.len() != definitions.globals().len() {
             return Err(failure(
@@ -836,7 +834,7 @@ fn restore_native_completion(
             *binding,
             Arc::new(CompletedNativeSourceRow {
                 binding: *binding,
-                product: Arc::new(product.clone()),
+                product: Arc::clone(product),
                 imports: imports.into(),
             }),
         );
@@ -2617,6 +2615,46 @@ impl CompilerSourceSupport {
                 selected.into_iter().collect(),
             )),
         }))
+    }
+
+    /// Compose independently issued initial native choices with this actual
+    /// prefix's compiler projection. The ordinary same-basis projection keeps
+    /// its guards; only the checked emitted stage can add historical edges.
+    pub(crate) fn project_world_stage_inputs(
+        self: &Arc<Self>,
+        demand: &DemandCompilerProjection,
+        availability: &crate::declaration_context::RequestNativeAvailability,
+        issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
+        prefix_groups: &crate::declaration_context::DemandCertifiedGroups,
+        stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+        original_bindings: &crate::certified_products::OriginalBindingSelection,
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Arc<Self>, CompileError> {
+        if !Arc::ptr_eq(stage.operation(), operation)
+            || !original_bindings.belongs_to(
+                &stage.initial_inputs().shared_compiler_source_support(),
+                operation,
+            )
+            || !prefix_groups.groups().is_empty()
+        {
+            return Err(failure(
+                "World prefix projection cannot issue native group demand",
+            ));
+        }
+        let projected = self.project_demanded_inputs(
+            demand,
+            availability,
+            issued_delta,
+            prefix_groups,
+            operation,
+        )?;
+        let artifacts = projected
+            .artifacts
+            .with_world_stage_initial_inputs(stage)?
+            .retain_original_binding_metadata(original_bindings, operation)?;
+        let mut support = projected.as_ref().clone();
+        support.artifacts = artifacts;
+        Ok(Arc::new(support))
     }
 
     #[tracing::instrument(

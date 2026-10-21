@@ -16,8 +16,8 @@ envelope = ["tidepool-ghc-finalized-module-v1", homeUnits, finalizedModules]
 Each global dictionary row carries one exact symbol, representation, optional
 entry signature, evaluated requirement and a closed owner reference. Source
 owners use `["source", coordinateIndex, ordinal]`; package owners use
-`["package", coordinateIndex]` or `["retained-package", coordinateIndex, generation]`;
-retained home owners use `["retained", generation]`. The owner's binder is the
+`["package", coordinateIndex]`;
+retained values use `["retained", generation]` regardless of their defining module. The owner's binder is the
 same exact symbol already carried by the global. Source coordinates are
 `["source", unit, module, optionalVersion]`; package coordinates are
 `["package", unit, module, interfaceSHA]`. Source coordinates remain independent

@@ -1660,7 +1660,6 @@ pub struct TurnCertification {
     /// Retain the actual output's selecting owner. Group summaries cannot
     /// reconstruct its exact target roots or ordered dependency choices.
     pub(super) original_output: Option<Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
-    pub(super) native_group_proofs: Arc<[tidepool_toolchain::artifacts::OwnedNativeSourceProduct]>,
     pub(super) native_selection:
         Option<Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>>,
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
@@ -1676,89 +1675,41 @@ pub struct TurnCertification {
 /// An operation-local borrow of the actual runtime producer and sealed output.
 pub(super) struct CurrentNativeSources<'a> {
     products: tidepool_toolchain::artifacts::ResolvedNativeSourceProducts<'a>,
-    source: std::borrow::Cow<'a, super::resident::CapturedSourceOrigin>,
+    source: &'a super::resident::CapturedSourceOrigin,
 }
 
 impl<'a> CurrentNativeSources<'a> {
-    pub(super) fn group_proof(
-        &self,
-        pending: &PendingCertifiedGroup,
-    ) -> Result<Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>, CompileError> {
-        selected_group_proof(&self.products, pending)
-    }
-
-    pub(super) fn from_targets(
-        targets: &'a crate::RuntimePreparedTargets,
-        name: &str,
-    ) -> Result<Option<Self>, CompileError> {
-        targets
-            .artifacts
-            .native_source_products(name)
-            .map(|products| {
-                products.map(|products| Self {
-                    products,
-                    source: std::borrow::Cow::Owned(
-                        super::resident::CapturedSourceOrigin::from_runtime_targets(targets),
-                    ),
-                })
-            })
-    }
-
     pub(super) fn target(&self) -> super::resident::NativeSourceCustody {
         self.source.for_current_target(self.products.target())
     }
 
+    pub(super) fn package(
+        &self,
+        definition: super::prepared::ClosedPackageDefinition<'_>,
+    ) -> super::resident::NativeSourceCustody {
+        self.source.for_closed_package_definition(definition)
+    }
+
     pub(super) fn group(
         &self,
-        pending: &PendingCertifiedGroup,
+        selected: &tidepool_toolchain::artifact_inventory::CompletedNativeSourceRow,
     ) -> super::resident::NativeSourceCustody {
-        let mut sources = super::resident::NativeSourceCustody::default();
-        let mut found = false;
-        for row in self
-            .products
-            .groups()
-            .filter(|row| row.matches_group(pending))
-        {
-            found = true;
-            let contribution = match row.physical_current() {
-                Some(current) => self.source.for_current_group(current),
-                None => super::resident::NativeSourceCustody::unknown(
-                    pending
-                        .group()
-                        .definitions()
-                        .sites()
-                        .iter()
-                        .map(|site| site.site),
-                ),
-            };
-            sources.merge(&contribution);
-        }
-        if !found {
-            sources = super::resident::NativeSourceCustody::unknown(
+        let pending = selected.product();
+        let unknown = || {
+            super::resident::NativeSourceCustody::unknown(
                 pending
                     .group()
                     .definitions()
                     .sites()
                     .iter()
                     .map(|site| site.site),
-            );
+            )
+        };
+        match self.products.physical_current_for(selected) {
+            Some(current) => self.source.for_current_group(current),
+            None => unknown(),
         }
-        sources
     }
-}
-
-pub(super) fn selected_group_proof(
-    products: &tidepool_toolchain::artifacts::ResolvedNativeSourceProducts<'_>,
-    pending: &PendingCertifiedGroup,
-) -> Result<Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>, CompileError> {
-    let mut rows = products.groups().filter(|row| row.matches_group(pending));
-    let selected = rows.next();
-    if rows.next().is_some() {
-        return Err(CompileError::ExtractFailed(
-            "native group requires an exact selected binding occurrence".into(),
-        ));
-    }
-    Ok(selected.map(|row| row.to_owned()))
 }
 
 /// Checked runtime output is ready only with its original prefix owner.
@@ -1839,7 +1790,6 @@ impl Default for TurnCertification {
         Self {
             original_output: None,
             native_selection: None,
-            native_group_proofs: Arc::from([]),
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
             groups: Arc::from([]),
@@ -1882,26 +1832,15 @@ impl TurnCertification {
         })?;
         Ok(Some(CurrentNativeSources {
             products: products.native_source_products()?,
-            source: std::borrow::Cow::Borrowed(prefix.captured_source_origin()),
+            source: prefix.captured_source_origin(),
         }))
     }
     /// Carry an ordinary compiler target's complete certified import closure.
     pub(crate) fn from_artifacts(
         artifacts: &crate::CompiledArtifacts,
         target: &crate::TargetArtifact,
-    ) -> Result<Self, CompileError> {
-        let native_group_proofs = target
-            .native_source_products()?
-            .map(|products| {
-                products
-                    .groups()
-                    .map(|row| row.to_owned())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-            .into();
-        Ok(Self {
-            native_group_proofs,
+    ) -> Self {
+        Self {
             native_selection: target.completed_native_selection().cloned(),
             artifact_view: artifacts.artifact_view.clone(),
             groups: artifacts.certified_groups.clone().into(),
@@ -1909,7 +1848,7 @@ impl TurnCertification {
             package_interfaces: target.package_interfaces.clone(),
             recovery_products: artifacts.recovery_products.clone().into(),
             ..Default::default()
-        })
+        }
     }
 
     pub(super) fn host_prototype(&self) -> Result<Self, CompileError> {
@@ -2047,7 +1986,6 @@ impl CompiledTurn {
         let certification = TurnCertification {
             original_output: Some(Arc::clone(products)),
             native_selection: products.completed_native_selection().cloned(),
-            native_group_proofs: Arc::from([]),
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
@@ -2063,6 +2001,24 @@ impl CompiledTurn {
             certification: Some(certification),
             provenance: Arc::default(),
         })
+    }
+
+    pub(crate) fn from_runtime_target(
+        targets: &crate::RuntimePreparedTargets,
+        name: &str,
+    ) -> Result<Self, CompileError> {
+        let target = targets.artifacts.targets.get(name).ok_or_else(|| {
+            CompileError::ExtractFailed(format!("compiled artifact has no target {name:?}"))
+        })?;
+        let certification = TurnCertification::from_artifacts(&targets.artifacts, target);
+        let mut compiled = Self::from_prepared(
+            Arc::clone(target.prepared_owner()),
+            targets.artifacts.table.clone(),
+            targets.artifacts.warnings.clone(),
+            Vec::new(),
+        )?;
+        compiled.certification = Some(certification);
+        Ok(compiled)
     }
 
     /// Admit ordinary prepared code and its complete nominal metadata together.
@@ -5050,7 +5006,6 @@ fn compiled_native_output(
             Ok(TurnCertification {
                 original_output: Some(Arc::clone(products)),
                 native_selection: products.completed_native_selection().cloned(),
-                native_group_proofs: Arc::from([]),
                 artifact_view: products.artifact_view().clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports().to_vec(),

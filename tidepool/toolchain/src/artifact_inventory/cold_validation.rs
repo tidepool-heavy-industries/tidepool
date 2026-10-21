@@ -43,20 +43,22 @@ pub(super) fn validate_selected_rows(
             if row.iter().any(|(target, _)| !plan.contains_key(target)) {
                 return Err(failure("selected row target missing"));
             }
-            // Distinct scopes cannot duplicate one logical dependency in a row.
-            if row
-                .iter()
-                .map(|(target, label)| (target.logical(), label))
-                .collect::<BTreeSet<_>>()
-                .len()
-                != row.len()
+            // Artifact rows have no nominal exact-binding obligations that can
+            // justify two scopes of one payload. Group rows check those below.
+            if matches!(source, ArtifactBindingNode::Artifact(_))
+                && row
+                    .iter()
+                    .map(|(target, label)| (target.logical(), label))
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != row.len()
             {
                 return Err(row_failure());
             }
             match source {
                 ArtifactBindingNode::Artifact(_) => validate_artifact_row(entry, entries, row)?,
                 ArtifactBindingNode::Group(group) => {
-                    validate_group_row(entry, group.original_ordinal, entries, row)?
+                    validate_group_row(entry, group.original_ordinal, entries, plan, row)?
                 }
             }
         }
@@ -207,19 +209,91 @@ fn validate_package_row(
     Ok(())
 }
 
+/// Authenticate the exact pair and full symbol without issuing group permission.
+fn original_requirement(
+    reference: &crate::certified_products::ReceiptImportOwner,
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    plan: &BindingRows,
+) -> Result<(ArtifactBinding, u32), CompileError> {
+    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+        interface,
+        original,
+        ..
+    } = reference
+    else {
+        return Err(row_failure());
+    };
+    let canonical = entries
+        .get(&interface.artifact)
+        .ok_or_else(|| failure("nominal Original canonical payload missing"))?;
+    let code = entries
+        .get(&original.artifact)
+        .ok_or_else(|| failure("nominal Original code payload missing"))?;
+    if !plan.contains_key(&ArtifactBindingNode::Artifact(*interface))
+        || !plan
+            .get(&ArtifactBindingNode::Artifact(*original))
+            .is_some_and(|row| {
+                row.len() == 1
+                    && row.contains(&(
+                        ArtifactBindingNode::Artifact(*interface),
+                        ArtifactDependency::Interface,
+                    ))
+            })
+    {
+        return Err(failure("nominal Original exact canonical pair changed"));
+    }
+    let (_, ordinal) = crate::certified_products::original_reference_payload_member(
+        reference, canonical, code, None,
+    )
+    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+    Ok((*original, ordinal))
+}
+
+/// Cold custody includes nominal bodies even when no group was executable.
+/// Live selected-closure checks deliberately do not require unrelated metadata.
+pub(super) fn validate_nominal_custody(
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    plan: &BindingRows,
+) -> Result<(), CompileError> {
+    let mut seen = BTreeSet::new();
+    for node in plan.keys() {
+        if !matches!(node, ArtifactBindingNode::Artifact(_)) || !seen.insert(node.artifact()) {
+            continue;
+        }
+        let entry = &entries[&node.artifact()];
+        for ordinal in &entry.native_group_ordinals {
+            for requirement in entry.native_requirement_refs_for(*ordinal)? {
+                if let NativeRequirementRef::Original { reference } = requirement {
+                    original_requirement(reference, entries, plan)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_group_row(
     entry: &ArtifactEntry,
     ordinal: u32,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    plan: &BindingRows,
     row: &BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
 ) -> Result<(), CompileError> {
     if !entry.is_native() || !entry.native_group_ordinals.contains(&ordinal) {
         return Err(row_failure());
     }
-    let mut requirements = entry
+    let all_requirements = entry
         .native_requirements_for(ordinal)
         .iter()
         .collect::<BTreeSet<_>>();
+    let mut requirements = all_requirements.clone();
+    let mut originals = BTreeMap::new();
+    for requirement in entry.native_requirement_refs_for(ordinal)? {
+        if let NativeRequirementRef::Original { reference } = requirement {
+            originals.insert(reference, original_requirement(reference, entries, plan)?);
+        }
+    }
+    let mut matched_originals = BTreeMap::new();
     let mut carrier_seen = false;
     for (target, label) in row {
         let required = entries
@@ -235,10 +309,7 @@ fn validate_group_row(
             carrier_seen = true;
             continue;
         }
-        if !requirements.remove(&(required.descriptor.owner.clone(), label.clone())) {
-            return Err(row_failure());
-        }
-        match (target, label, &required.payload) {
+        let source_kind_matches = match (target, label, &required.payload) {
             (
                 ArtifactBindingNode::Group(group),
                 ArtifactDependency::NativeGroup {
@@ -246,22 +317,60 @@ fn validate_group_row(
                     required_ordinal,
                 },
                 ArtifactPayload::Original(product),
-            ) if *dependent_ordinal == ordinal
-                && group.original_ordinal == *required_ordinal
-                && required.native_group_ordinals.contains(required_ordinal)
-                && entry.native_owners.get(&required.descriptor.owner)
-                    == Some(&NativeOwnerKey::from_owner(product.owner())) => {}
+            ) => {
+                *dependent_ordinal == ordinal
+                    && group.original_ordinal == *required_ordinal
+                    && required.native_group_ordinals.contains(required_ordinal)
+                    && entry.native_owners.get(&required.descriptor.owner)
+                        == Some(&NativeOwnerKey::from_owner(product.owner()))
+            }
             (
                 ArtifactBindingNode::Artifact(_),
                 ArtifactDependency::NativeBinding {
                     dependent_ordinal, ..
                 },
                 _,
-            ) if *dependent_ordinal == ordinal && required.is_compiler_interface() => {}
-            _ => return Err(row_failure()),
+            ) => *dependent_ordinal == ordinal && required.is_compiler_interface(),
+            _ => false,
+        };
+        let source_key = (required.descriptor.owner.clone(), label.clone());
+        let source_matches = source_kind_matches && all_requirements.contains(&source_key);
+        if source_matches && !requirements.remove(&source_key) {
+            return Err(row_failure());
+        }
+        let mut original_matches = false;
+        if let (
+            ArtifactBindingNode::Group(group),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal,
+                required_ordinal,
+            },
+        ) = (target, label)
+        {
+            if *dependent_ordinal != ordinal || group.original_ordinal != *required_ordinal {
+                return Err(row_failure());
+            }
+            let carrier = plan.get(target).and_then(|child| {
+                child.iter().find_map(|(node, edge)| {
+                    (*edge == ArtifactDependency::Interface).then_some(*node)
+                })
+            });
+            for (reference, (original, expected_ordinal)) in &originals {
+                if *expected_ordinal == *required_ordinal
+                    && carrier == Some(ArtifactBindingNode::Artifact(*original))
+                {
+                    if matched_originals.insert(*reference, *group).is_some() {
+                        return Err(row_failure());
+                    }
+                    original_matches = true;
+                }
+            }
+        }
+        if !source_matches && !original_matches {
+            return Err(row_failure());
         }
     }
-    if !carrier_seen || !requirements.is_empty() {
+    if !carrier_seen || !requirements.is_empty() || matched_originals.len() != originals.len() {
         return Err(row_failure());
     }
     Ok(())

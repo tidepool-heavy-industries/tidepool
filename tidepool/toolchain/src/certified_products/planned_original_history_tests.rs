@@ -46,6 +46,7 @@ impl IssuedOriginal {
                 &mut self.certified.source_selection,
                 self.request.compiler_inputs().artifacts(),
                 physical.entries(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap()
             .issued_artifacts()

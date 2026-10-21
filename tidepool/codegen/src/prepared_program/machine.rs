@@ -64,8 +64,7 @@ use crate::native_stack::{NativeEntryAdmission, NativeStackScope};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
-    ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger, SiteDependencies,
-    SiteDependency,
+    ContinuationFrame, PreparedFrameEvidence, ResourceLedger, SiteDependencies, SiteDependency,
 };
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
 use std::cell::RefCell;
@@ -212,10 +211,6 @@ pub struct ResidencyCounts {
     /// Live stable cell allocations owned by handles and parked frames.
     pub root_cells: usize,
     pub handles: usize,
-    /// Installed-program tops retained as machine-lifetime export roots
-    /// ([`PreparedMachine::retain_export_top`]), counted apart from
-    /// `handles` so neither class hides the other's growth.
-    pub code_exports: usize,
     pub parked: usize,
     pub stack_map_links: usize,
     pub static_regions: usize,
@@ -1660,7 +1655,6 @@ impl<'code> PreparedMachine<'code> {
             persistent_roots: self.machine.persistent_roots_count(),
             root_cells: self.machine.root_cells_live(),
             handles: self.handle_count(),
-            code_exports: self.handles.counts().code_exports,
             parked: self.parked_count(),
             stack_map_links: self.machine.stack_map_link_count(),
             static_regions: self
@@ -2714,29 +2708,6 @@ impl<'code> PreparedMachine<'code> {
         id: ProgramId,
         value: ValueId,
     ) -> Result<PreparedHandle, ExecutionError> {
-        self.retain_top_as(id, value, HandleClass::Value)
-    }
-
-    /// [`Self::retain_top`] for a machine-lifetime export root: the same
-    /// handle, accounted as [`HandleClass::CodeExport`] and therefore
-    /// outside `residency().handles` and outside every scope closure. Use it
-    /// for a top a later program will import rather than compile its own
-    /// copy of; the root is what keeps the defining program, and so its
-    /// code, alive for those importers.
-    pub fn retain_export_top(
-        &mut self,
-        id: ProgramId,
-        value: ValueId,
-    ) -> Result<PreparedHandle, ExecutionError> {
-        self.retain_top_as(id, value, HandleClass::CodeExport)
-    }
-
-    fn retain_top_as(
-        &mut self,
-        id: ProgramId,
-        value: ValueId,
-        class: HandleClass,
-    ) -> Result<PreparedHandle, ExecutionError> {
         self.ensure_handle_access()?;
         let installed = self
             .programs
@@ -2793,18 +2764,12 @@ impl<'code> PreparedMachine<'code> {
             drop(roots);
             return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         };
-        let raw = match class {
-            HandleClass::Value => self.handles.insert_handle_with_sites(
-                root,
-                RealmId::ROOT,
-                RuntimeRep::LiftedRef,
-                sites.clone(),
-            ),
-            HandleClass::CodeExport => {
-                self.handles
-                    .insert_export_handle_with_sites(root, RuntimeRep::LiftedRef, sites)
-            }
-        };
+        let raw = self.handles.insert_handle_with_sites(
+            root,
+            RealmId::ROOT,
+            RuntimeRep::LiftedRef,
+            sites,
+        );
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,

@@ -358,6 +358,20 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "B forces its own actual CAF"
     );
 
+    let captured_a = resident
+        .retain_lexical_scope(installation_a.scope())
+        .unwrap();
+    assert!(
+        !resident
+            .state
+            .bindings()
+            .native_domain_selection_in(resident.state.scope_tree(), captured_a.scope())
+            .unwrap()
+            .roots()
+            .is_empty(),
+        "the capture holds A's actual installed native instances"
+    );
+
     // Public B is its actual issued lease, not installer I_B or a named substitute.
     resident.public_source = source_b.clone();
     resident.set_run_context(resident.public_context()).unwrap();
@@ -396,6 +410,23 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "P.fst packageFirst + if PackageProbe.packageProbe 1 > 0 && PackageProbe.packageSibling '\\NUL' > 0 then 1 else 0",
         43,
     );
+    let callable = public_package_function(
+        &mut resident,
+        &recipe,
+        "packageFunction",
+        "\\n -> P.fst packageSecond + n",
+    );
+    let callable_selection = public_package_cell(
+        &mut resident,
+        &recipe,
+        "packageFunctionUse",
+        "packageFunction 2",
+        45,
+    );
+    assert!(callable_selection.target_imports().iter().any(|import| matches!(import,
+        tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
+            if identity == &callable)),
+        "the common installer must consume an actual retained callable, not recompile its body");
     let public_second = observed_package_cafs(&mut resident, public_b);
     assert!(assert_unchanged_public_caf(&public_second, forced_key, first_caf).evaluated);
     let (_, before_expression) = selected_package_roots(&resident, public_b);
@@ -494,6 +525,12 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
             .unwrap()
     ));
     resident.bootstrap_world_in(&recipe, &source_b);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: captured_a.scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
     let cutoff = source_a.source_admission().fence_if_idle().unwrap();
     assert!(cutoff
         .retire(
@@ -506,6 +543,29 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         source_a.admit_source(),
         Err(crate::session::SourceAdmissionError::Closed { .. })
     ));
+    let before_refusal = resident.residency();
+    let before_compile =
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+    let refused = source_action(&mut resident, |resident, settlement| {
+        resident.run_with_sites("capturedAFenced", prepared.compiled().code(), settlement)
+    });
+    assert!(
+        matches!(refused,
+        Err(ResidentError::Session(SessionError::SourceAdmission(crate::session::SourceAdmissionError::Closed { scope, .. })))
+            if scope == source_a.scope()),
+        "an actual captured A environment cannot initiate native installation after A's cutoff"
+    );
+    assert_eq!(
+        resident.residency(),
+        before_refusal,
+        "source refusal preserves all existing native instances"
+    );
+    assert_eq!(
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+        before_compile,
+        "the source admission gate precedes native image preparation"
+    );
+    resident.set_run_context(resident.public_context()).unwrap();
     public_package_cell(
         &mut resident,
         &recipe,
@@ -513,6 +573,17 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "packageCallback 2 + if PackageProbe.packageLater 37 == 23 then 0 else 1000",
         44,
     );
+    let callback_selection = public_package_cell(
+        &mut resident,
+        &recipe,
+        "packageCallbackAfterCutoff",
+        "P.sum (P.map packageFunction [0,1])",
+        87,
+    );
+    assert!(callback_selection.target_imports().iter().any(|import| matches!(import,
+        tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
+            if identity == &callable)),
+        "a package callback keeps the SAME actual retained callable after independent A retires");
     let (restored_domain, restored_roots) = selected_package_roots(&resident, public_b);
     assert_eq!(restored_domain, late_domain);
     for key in &newly_selected {
@@ -534,6 +605,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         forced_b[&forced_key].lease.instance(),
         public_after_cutoff[&forced_key].lease.instance()
     );
+    drop(captured_a);
     drop(resident);
     drop(installation_b);
     drop(installation_a);
@@ -547,9 +619,9 @@ fn public_package_cell(
     name: &str,
     expression: &str,
     expected: i64,
-) {
+) -> Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection> {
     let source = format!("{name} <- pure (({expression}), T.pack (P.show ({expression})))");
-    public_package_binding(resident, recipe, name, &source, Some(expected));
+    public_package_binding(resident, recipe, name, &source, Some(expected))
 }
 
 fn public_package_binding(
@@ -558,7 +630,7 @@ fn public_package_binding(
     name: &str,
     source: &str,
     expected: Option<i64>,
-) {
+) -> Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection> {
     let public = resident.public_context();
     let execution = begin_fixture_execution(resident);
     let private = execution.private_scope();
@@ -570,6 +642,14 @@ fn public_package_binding(
         .unwrap();
     let (bound, compiled, reservation) =
         compile_checked_binding(resident, recipe, source, execution.clone());
+    let selection = compiled
+        .certification
+        .as_ref()
+        .unwrap()
+        .native_selection
+        .as_ref()
+        .unwrap()
+        .clone();
     let [binder] = bound.as_slice() else {
         panic!("one actual package-using public binder")
     };
@@ -599,6 +679,59 @@ fn public_package_binding(
     drop(reservation);
     drop(execution);
     resident.retire_scope(private);
+    selection
+}
+
+fn public_package_function(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    name: &str,
+    expression: &str,
+) -> tidepool_repr::execution_schema::SymbolIdentity {
+    let public = resident.public_context();
+    let execution = begin_fixture_execution(resident);
+    let private = execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: private,
+            ..public
+        })
+        .unwrap();
+    let source = format!("{name} <- pure ({expression})");
+    let (bound, compiled, reservation) =
+        compile_checked_binding(resident, recipe, &source, execution.clone());
+    let [binder] = bound.as_slice() else {
+        panic!("one real callable binding");
+    };
+    let completed = source_action(resident, |resident, settlement| {
+        resident.run_bind_with_sites(
+            name,
+            compiled.code(),
+            binder,
+            reservation.generation(),
+            settlement,
+        )
+    })
+    .unwrap();
+    assert!(
+        matches!(completed, ResidentOutcome::Completed { .. }),
+        "the actual callable must complete before publication"
+    );
+    let identity = resident
+        .state
+        .bindings()
+        .get(tidepool_repr::SessionVarId::from_extract(binder.var_id))
+        .expect("native completion owns its actual BindingEntry")
+        .value
+        .identity
+        .clone();
+    publish_checked_fixture(resident, &execution, 1);
+    resident.set_run_context(public).unwrap();
+    drop(compiled);
+    drop(reservation);
+    drop(execution);
+    resident.retire_scope(private);
+    identity
 }
 
 fn public_package_expression(resident: &mut TestSession, recipe: &InputRecipe) {

@@ -1252,7 +1252,7 @@ def runtime_test_cases(binary):
     tests = ["session::admission::tests::" + name for name in (
         "initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes",
         "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
-        "native_admission_commits_the_live_machine_export_owner",
+        "native_admission_commits_only_exact_scoped_value_owners",
         "selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values",
         "settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
         "world_private_admission_requires_the_actual_transaction_original",

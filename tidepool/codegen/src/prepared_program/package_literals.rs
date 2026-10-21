@@ -132,7 +132,7 @@ impl LiteralOwner {
                 binder: binder.clone(),
                 interface_digest: *interface_digest,
             }),
-            ImportOwner::Retained { .. } | ImportOwner::CodeExport { .. } => None,
+            ImportOwner::Retained { .. } => None,
         }
     }
 }

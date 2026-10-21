@@ -226,21 +226,8 @@ fn native_code_identity_excludes_live_owners_and_preserves_definition_contracts(
     };
     let first = CertifiedGroup::admit(owner.clone(), group.clone(), retained(1)).unwrap();
     let later = CertifiedGroup::admit(owner.clone(), group.clone(), retained(2)).unwrap();
-    let exported = CertifiedGroup::admit(
-        owner.clone(),
-        group.clone(),
-        vec![ImportOwner::CodeExport {
-            binder: binder.clone(),
-            generation: 1,
-            root_id: 99,
-            interface_digest: None,
-        }],
-    )
-    .unwrap();
     assert_ne!(first, later);
-    assert_ne!(first, exported);
     assert_eq!(first.code_identity(), later.code_identity());
-    assert_eq!(first.code_identity(), exported.code_identity());
     let mut foreign = owner.clone();
     foreign.product_sha256[0] ^= 1;
     let different = CertifiedGroup::admit(foreign, group.clone(), retained(1)).unwrap();

@@ -736,10 +736,12 @@ fn replay_native_transport_history(
     )
     .unwrap();
     let bind = || {
-        inputs
-            .artifacts()
-            .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selected)
+        inputs.artifacts().inventory().bind_segment(
+            inputs.artifacts(),
+            vec![],
+            &selected,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
     };
     for index in 0..2 {
         let mut fixed = bind().unwrap();
@@ -1050,7 +1052,12 @@ fn replay_native_transport_history(
         );
         let mut fixed = view
             .inventory()
-            .bind_segment(view, vec![], &continued_selection)
+            .bind_segment(
+                view,
+                vec![],
+                &continued_selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let imports = [source_import(&dependent, 7)];
         let admitted = view

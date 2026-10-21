@@ -3090,7 +3090,7 @@ mod authored_tests {
                 .prepare_compilation(request_root.path(), endpoint.identity().producer_bytes())
                 .unwrap();
             let inputs = request.compiler_inputs();
-            let validation = PackageInterfaceValidation::default();
+            let mut validation = PackageInterfaceValidation::default();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
@@ -3124,7 +3124,7 @@ mod authored_tests {
             let mut fixed = inputs
                 .artifacts()
                 .inventory()
-                .bind_segment(inputs.artifacts(), vec![], &selection)
+                .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
                 .unwrap();
             let demanded = inputs
                 .artifacts()

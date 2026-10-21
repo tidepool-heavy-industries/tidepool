@@ -1845,6 +1845,98 @@ mod tests {
     }
 
     #[test]
+    fn recursive_home_exports_preserve_nonsequential_value_ids() {
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(template) = wire.bindings[0].clone() else {
+            unreachable!()
+        };
+        let expected = [("z", ValueId(8)), ("a", ValueId(3)), ("m", ValueId(12))];
+        let tops = expected
+            .iter()
+            .enumerate()
+            .map(|(index, (name, id))| {
+                let mut top = template.clone();
+                top.identity = testing::identity("Fixture", name);
+                top.binding.id = *id;
+                let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+                    unreachable!()
+                };
+                *body = index;
+                top
+            })
+            .collect();
+        wire.expressions.nodes = vec![wire.expressions.nodes[0].clone(); expected.len()];
+        wire.bindings = vec![Group::Recursive(tops)];
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 9).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let registry = ImageRegistry::new();
+        let image = DemandedHomeImage::prepare(
+            group.code_identity(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap();
+        let binding = NativeHomeBinding {
+            issuer: NativeArtifactBinding {
+                artifact: [1; 32],
+                selection: [2; 32],
+            },
+            original_ordinal: group.original_ordinal(),
+        };
+        let domain = super::super::super::SourceInstanceDomain::single();
+        let requests = expected
+            .iter()
+            .map(|(_, value)| {
+                BatchLeaseRequest::for_home_code(0, &image, binding, domain, *value).unwrap()
+            })
+            .collect();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let installed = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: Arc::clone(image.image()),
+                    imports: vec![],
+                }],
+                requests,
+            )
+            .unwrap();
+        assert_eq!(installed.programs.len(), 1);
+        assert_eq!(installed.leases.len(), expected.len());
+        for (name, value) in expected {
+            let lease = installed
+                .leases
+                .iter()
+                .find(|lease| lease.export() == &testing::identity("Fixture", name))
+                .unwrap();
+            assert_eq!(lease.value(), value);
+            let direct = machine.retain_top(installed.programs[0], value).unwrap();
+            assert_eq!(
+                machine.handle_current_pointer(direct),
+                machine.handle_current_pointer(lease.handle())
+            );
+            assert!(machine.release(direct));
+            assert!(machine.release(lease.handle()));
+        }
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
     fn neutral_home_image_installs_exact_root_and_executes_without_live_import_ids() {
         let groups = [certified_caf_group()];
         let binder = SourceBinder {

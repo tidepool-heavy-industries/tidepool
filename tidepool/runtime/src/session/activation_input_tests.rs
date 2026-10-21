@@ -3798,6 +3798,39 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
                 panic!("actual custom display remains available")
             }
         };
+    let ActivationRendererNative::Renderable(bundle) = &compiled.renderer.native else {
+        panic!("renderable native custody")
+    };
+    let before_images =
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+    let before_fault = resident.residency();
+    let refused = source_action(&mut resident, |resident, _| {
+        resident.admit_turn_code_with_images_in(
+            compiled.admission().scope_lease.scope(),
+            fixture.producer.code(),
+            TurnInstallationAdmission::Compilation,
+            Some(bundle),
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(ResidentError::Prepared(
+                PreparedRuntimeError::MissingPreparedNativeImage
+            ))
+        ),
+        "a real separately issued producer cannot use the renderer's native plan"
+    );
+    assert_eq!(
+        resident.residency(),
+        before_fault,
+        "a mismatched native plan publishes no program or mutable instance"
+    );
+    assert_eq!(
+        before_images,
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+        "Ready plan refusal never compiles"
+    );
     let ResidentOutcome::Completed { result, .. } =
         source_action(&mut resident, |resident, settlement| {
             resident.run_activation_preview(compiled, settlement)
@@ -4046,7 +4079,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     );
     eprintln!(
         "original ordinary-home display Ready bundle images: {}",
-        bundle.image_owners().len()
+        bundle.image_owners().count()
     );
     for (first, next) in bundle.image_owners().zip(repeated.image_owners()) {
         assert!(Arc::ptr_eq(first, next));
@@ -4114,47 +4147,6 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         !compiled.admission().is_consumed(),
         "authored-turn refusal must not spend the affine preview admission"
     );
-    let before_fault = resident.residency();
-    {
-        let incomplete = bundle.omitting_target_image();
-        let refused = source_action(&mut resident, |resident, _| {
-            let admission = resident
-                .admit_turn_code_in(
-                    compiled.admission().scope_lease.scope(),
-                    compiled.renderer.compiled.code(),
-                    TurnInstallationAdmission::ActivationPreviewFresh(compiled.admission()),
-                )
-                .unwrap();
-            let provenance = resident.provenance_for(&admission).unwrap();
-            resident.install_admitted_turn(
-                admission,
-                TurnImageAcquisition::Ready {
-                    bundle: &incomplete,
-                },
-                provenance,
-                None,
-            )
-        });
-        assert!(
-            matches!(
-                refused,
-                Err(ResidentError::Prepared(
-                    PreparedRuntimeError::MissingPreparedNativeImage
-                ))
-            ),
-            "a registry hit outside complete Ready custody is refused"
-        );
-        assert_eq!(
-            resident.residency(),
-            before_fault,
-            "no native program or mutable instance publishes on lookup refusal"
-        );
-        assert_eq!(
-            before,
-            tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
-            "lookup refusal never compiles"
-        );
-    }
     let ResidentOutcome::Completed { result, .. } =
         source_action(&mut resident, |resident, settlement| {
             resident.run_activation_preview(compiled, settlement)
@@ -4166,6 +4158,11 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     assert_eq!(
         result.to_json(),
         serde_json::json!(["original task display 42", false])
+    );
+    assert_eq!(
+        before,
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+        "the actual Ready execution consumes its prepared plan without compiling"
     );
     assert!(
         resident.state.bindings().get(binding).is_some(),

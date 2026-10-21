@@ -967,7 +967,9 @@ fn read_catalog_view_interface(
     let interface = match &entry.payload {
         ArtifactPayload::Canonical(interface) => interface,
         ArtifactPayload::Original(product) => product.module_interface().unwrap(),
-        ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => panic!("catalog original or canonical owner required"),
+        ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => {
+            panic!("catalog original or canonical owner required")
+        }
     };
     read_owned_slice(
         interface
@@ -2049,7 +2051,7 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
     let admitted = admit_borrowed_catalog_receipt(&fixture, &selected, &packages, |_| {}).unwrap();
     assert_eq!(admitted.groups.len(), 1);
     assert!(
-        matches!(admitted.groups[0].imports(), [crate::certified_products::PendingImportOwner::Package { unit, module, .. }]
+        matches!(admitted.groups[0].imports(), [crate::certified_products::ReceiptImportOwner::Package { unit, module, .. }]
         if unit == "external" && module == "External")
     );
     assert!(Arc::ptr_eq(

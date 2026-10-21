@@ -696,6 +696,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 &mut selection,
                 &physical,
                 entries,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
         let output = issued;
@@ -833,7 +834,12 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
             let inventory = inputs.artifacts().inventory();
             let mut fixed = inventory
-                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .bind_segment(
+                    inputs.artifacts(),
+                    vec![],
+                    &receipt,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
                 unreachable!()
@@ -879,7 +885,12 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 binder: binder(0, 11),
             }];
             let mut fixed = inventory
-                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .bind_segment(
+                    inputs.artifacts(),
+                    vec![],
+                    &receipt,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let refused = inventory.admit_bound_target(
                 &mut fixed,
@@ -914,11 +925,15 @@ fn reference_source_islands_distinguish_exact_helper_variants() {
         _ => unreachable!(),
     };
     let imports = crate::certified_products::original_native_group_imports(consumer, 11).unwrap();
+    let helper = match &catalog.original(1, 1).payload {
+        ArtifactPayload::Original(product) => product.owner(),
+        _ => unreachable!(),
+    };
     assert!(imports.iter().any(|import| matches!(import,
-        PendingImportOwner::Source { owner, original_ordinal: 3, .. }
-        if owner == match &catalog.original(1, 1).payload {
-            ArtifactPayload::Original(product) => product.owner(), _ => unreachable!(),
-        }
+        crate::certified_products::ReceiptImportOwner::Source {
+            unit, module, module_version, original_ordinal: 3, ..
+        } if unit == &helper.unit && module == &helper.module
+            && module_version.as_ref() == Some(&helper.module_version)
     )));
     assert_ne!(
         catalog.expected_ids([Some(0); MODULES]),
@@ -1524,7 +1539,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                     ).unwrap();
                     let issued = crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                         &mut physical_selection, &inventory.empty_view(), entries,
-                    );
+                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default());
                     if !published[domain] {
                         let missing = issued.expect_err(
                             "physical issuance requires group 11's actual captured value owner",
