@@ -1172,12 +1172,20 @@ mod tests {
                 let envelope_sha256: [u8; 32] = Sha256::digest(product.bytes()).into();
                 assert_eq!(reference.envelope_sha256, envelope_sha256);
                 assert_eq!(reference.product_sha256, *product.product_sha256());
+                let descriptor =
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_package_code(
+                        &reference,
+                    );
+                assert_eq!(product.descriptor(), &descriptor);
+                assert_eq!(product.artifact_id(), package_binding.binding().artifact);
                 let restored = certified_products::CertifiedPackageCodeProduct::restore(
                     storage.path(),
                     &reference,
                     &mut PackageInterfaceValidation::default(),
                 )
                 .unwrap();
+                assert_eq!(restored.descriptor(), &descriptor);
+                assert_eq!(restored.artifact_id(), product.artifact_id());
                 let restored_storage = tempfile::tempdir().unwrap();
                 assert_eq!(
                     restored
