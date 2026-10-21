@@ -1871,6 +1871,21 @@ tidepool_buildscript_run(
                     runtime_arguments(package_env, package_resources, package_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                cold_history = "session::turn::scaling_tests::historical_original_executes_old_child_beside_current_same_interface_source"
+                cold_env, cold_resources, cold_worker = compiler_service_test_inputs(
+                    package_name, "runtime_historical_original_recovery_test"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_historical_original_recovery_test",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([cold_history], 8), "    ],",
+                    "    expected_count = 1,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(cold_history) + ': "owned-resident"},',
+                    runtime_arguments(cold_env, cold_resources, cold_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 for world_target, world_tests in [
                     ("actor_compiler_world_queries_test", [

@@ -1021,6 +1021,44 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "runtime_historical_original_recovery_test",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = [
+        "session::turn::scaling_tests::historical_original_executes_old_child_beside_current_same_interface_source",
+    ],
+    expected_count = 1,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    case_compiler_modes = {"session::turn::scaling_tests::historical_original_executes_old_child_beside_current_same_interface_source": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:freer_resume_prepared",
+        "//bridge/haskell:freer_retention_prepared",
+        "//bridge/haskell:m3_vertical_prepared",
+        "toolchains//:ghc",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_M3_FIXTURE_DIR": "$(location //bridge/haskell:m3_vertical_prepared)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "runtime_admission_tests",
     binary = ":tidepool_runtime_unit_tests",
     exact_tests = [
