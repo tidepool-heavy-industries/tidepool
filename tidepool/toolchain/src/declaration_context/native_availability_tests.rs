@@ -2832,7 +2832,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     let reusable_support = recover_fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
         full.clone(),
-        [],
+        [offer.clone()],
     )
     .unwrap();
     let interfaces = reusable_support
