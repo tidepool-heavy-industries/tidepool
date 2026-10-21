@@ -7782,14 +7782,18 @@ impl ProgramSourceSupport {
                 imports: requirements,
                 produced: physical.produced_source(&owner)?,
             };
-            if row.produced.is_some() {
+            if let Some(produced) = &row.produced {
                 let entry = incoming.implementation_entry(&owner).ok_or_else(|| {
                     failure("produced program source lacks its compiler support entry")
                 })?;
                 if !row.matches_entry(entry) {
-                    return Err(failure(
-                        "produced program source changed its physical entry",
-                    ));
+                    return Err(failure(&format!(
+                        "produced program source changed its physical entry; owner={owner:?}; incoming={:?}; incoming_kind={:?}; physical={:?}; physical_canonical={:?}",
+                        entry.descriptor.id,
+                        entry.descriptor.kind,
+                        produced.row().original_artifact_id(),
+                        produced.row().canonical,
+                    )));
                 }
             }
             Self::retain_imports(&mut retained, owner, row.imports, row.produced)?;
