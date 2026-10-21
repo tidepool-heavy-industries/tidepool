@@ -1,8 +1,6 @@
 use super::*;
 
-use crate::artifact_inventory::{
-    ArtifactEntry, CanonicalProducerIdentity, NativeArtifactDemand,
-};
+use crate::artifact_inventory::{ArtifactEntry, CanonicalProducerIdentity, NativeArtifactDemand};
 use crate::cache::{DependencyEvidence, ModuleEvidence, SourceEvidence};
 use crate::certified_products::{
     AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedProducts, CertifiedReceipt,
