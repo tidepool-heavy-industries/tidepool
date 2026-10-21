@@ -84,6 +84,9 @@ fn validate_artifact_row(
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     row: &BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
 ) -> Result<(), CompileError> {
+    if let ArtifactPayload::PackageCode(product) = &entry.payload {
+        return validate_package_row(entry.descriptor.id, product, entries, row);
+    }
     let canonical = match &entry.payload {
         ArtifactPayload::Original(product) => Some(
             product
@@ -162,6 +165,44 @@ fn validate_artifact_row(
     }
     if !requirements.is_empty() {
         return Err(row_failure());
+    }
+    Ok(())
+}
+
+fn validate_package_row(
+    artifact: ArtifactId,
+    product: &crate::certified_products::CertifiedPackageCodeProduct,
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    row: &BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
+) -> Result<(), CompileError> {
+    let invalid =
+        |reason| admission_failure(ArtifactInventoryFailure::PackageCode { artifact, reason });
+    let expected = product.code().globals().len();
+    if row.len() != expected {
+        return Err(invalid(PackageCodeRefusal::ImportCount {
+            expected,
+            actual: row.len(),
+        }));
+    }
+    let mut seen = BTreeSet::new();
+    for (target, label) in row {
+        let (
+            ArtifactBindingNode::Artifact(binding),
+            ArtifactDependency::PackageCodeImport { global_index },
+        ) = (target, label)
+        else {
+            return Err(invalid(PackageCodeRefusal::WrongKind));
+        };
+        if !seen.insert(*global_index) || *global_index as usize >= expected {
+            return Err(invalid(PackageCodeRefusal::ImportContract));
+        }
+        let target = entries
+            .get(&binding.artifact)
+            .ok_or_else(|| invalid(PackageCodeRefusal::MissingBinding { binding: *binding }))?;
+        let ArtifactPayload::PackageCode(target) = &target.payload else {
+            return Err(invalid(PackageCodeRefusal::WrongKind));
+        };
+        package_code::validate_import(artifact, product, *global_index as usize, target)?;
     }
     Ok(())
 }

@@ -963,7 +963,73 @@ pub struct DefinitionsView<'a> {
     json_layout: &'a Option<JsonLayout>,
 }
 
+/// Structural facts about a top-level value. Local signature indices have
+/// already been resolved in the defining program's table.
+#[derive(Clone, Copy, Debug)]
+pub struct ExportContract<'a> {
+    pub identity: &'a SymbolIdentity,
+    pub value: ValueId,
+    pub rep: RuntimeRep,
+    pub entry_signature: Option<&'a Signature>,
+    pub evaluated: bool,
+}
+
 impl<'a> DefinitionsView<'a> {
+    pub fn export_contracts(self) -> impl Iterator<Item = Result<ExportContract<'a>, ParseError>> {
+        self.bindings
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops.as_slice(),
+            })
+            .map(move |top| {
+                let (rep, entry_signature, evaluated) = match &top.binding.rhs {
+                    HeapRhs::Bytes(_) => (RuntimeRep::Address, None, true),
+                    HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
+                        let signature =
+                            self.signatures.get(signature.0 as usize).ok_or_else(|| {
+                                ParseError::InvalidReference(
+                                    "export signature outside defining table".into(),
+                                )
+                            })?;
+                        (
+                            RuntimeRep::LiftedRef,
+                            Some(signature),
+                            !matches!(top.binding.rhs, HeapRhs::Thunk { .. }),
+                        )
+                    }
+                    HeapRhs::Constructor { constructor, .. } => {
+                        let constructor = self
+                            .constructors
+                            .get(constructor.0 as usize)
+                            .ok_or_else(|| {
+                                ParseError::InvalidReference(
+                                    "export constructor outside defining table".into(),
+                                )
+                            })?;
+                        (constructor.result_rep, None, true)
+                    }
+                };
+                Ok(ExportContract {
+                    identity: &top.identity,
+                    value: top.binding.id,
+                    rep,
+                    entry_signature,
+                    evaluated,
+                })
+            })
+    }
+
+    pub fn export_contract(self, value: ValueId) -> Result<Option<ExportContract<'a>>, ParseError> {
+        for contract in self.export_contracts() {
+            let contract = contract?;
+            if contract.value == value {
+                return Ok(Some(contract));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn envelope(self) -> &'a ProgramEnvelope {
         self.envelope
     }
@@ -1809,8 +1875,12 @@ fn parse_module_products_inner(
                 "module product requires an array".into(),
             ));
         };
-        let [Value::Text(unit), Value::Text(name), Value::Bytes(interface), Value::Array(groups)] =
-            fields.as_slice()
+        let [
+            Value::Text(unit),
+            Value::Text(name),
+            Value::Bytes(interface),
+            Value::Array(groups),
+        ] = fields.as_slice()
         else {
             return Err(ParseError::Malformed(
                 "invalid module product fields".into(),
