@@ -2986,13 +2986,13 @@ originalPackageProjection = withScratch $ \work -> do
   originalOnly <- certifyProjectedProducts work "original-only" original sourceProducts [] env >>= either fail pure
   mixed <- certifyProjectedProducts work "mixed" original sourceProducts [("target",target)] env >>= either fail pure
   let packageOwner = \case CodecPackageOwner {} -> True; _ -> False
-      retainedOwner = \case CodecRetainedPackageOwner {} -> True; _ -> False
+      retainedOwner = \case CodecRetainedOwner {} -> True; _ -> False
   coldOwners <- certificateOwners coldCertificate
   sourceOwners <- certificateOwners originalOnly
   mixedOwners <- certificateOwners mixed
   unless (any packageOwner coldOwners && any packageOwner sourceOwners
       && not (any retainedOwner sourceOwners) && any retainedOwner mixedOwners && any packageOwner mixedOwners) $
-    fail "canonical certification did not preserve original Package and executable RetainedPackage independently"
+    fail "canonical certification did not preserve original Package and executable Retained values independently"
   verifyOriginalOnlyPackageRefusal work original sourceProducts originalOnly
   bad <- case packageGlobals of
     value : _ -> pure value
@@ -6728,7 +6728,7 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
       producer = prHscEnv (pprPipelineResult cold)
       consumers = [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
         , ms_mod_name summary == mkModuleName "InstanceConsumer"]
-  verifyRetainedPackageWitness producer evidence
+  verifyPackageAndRetainedWitnesses producer evidence
   lexical <- forM ["InstanceOwner", "InstanceRelay"] $ \name -> do
     requirements <- either fail pure (preparedHomeRequirements cold "main" name)
     unless (preparedExactCompilation cold == Nothing
@@ -6754,11 +6754,11 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
       _ -> liftIO (fail "instance graph lacks one source consumer")
   putStrLn "selected home instance edges: transitive instance, package exclusion and owner mismatch passed"
 
-verifyRetainedPackageWitness :: HscEnv -> DependencyEvidence -> IO ()
-verifyRetainedPackageWitness producer evidence = do
+verifyPackageAndRetainedWitnesses :: HscEnv -> DependencyEvidence -> IO ()
+verifyPackageAndRetainedWitnesses producer evidence = do
   let package = SymbolIdentity "ghc-internal" "GHC.Internal.Base" "value" "map" Nothing
       home = SymbolIdentity "main" "InstanceConsumer" "value" "result" Nothing
-      global identity generation = GlobalDecl identity LiftedRefRep Nothing False (Just generation)
+      global identity generation = GlobalDecl identity LiftedRefRep Nothing False generation
       program globals = WireProgram
         { programEnvelope = ProgramEnvelope schemaVersion "test" "matched" executionAbiVersion
             (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" [])
@@ -6768,8 +6768,8 @@ verifyRetainedPackageWitness producer evidence = do
       encode globals = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
         [("target", program globals)] evidence "" ""
   withTiming $ do
-    let repeated = replicate 1000 (global package 0)
-          ++ [global (package { symbolOccurrence = "id" }) 0]
+    let repeated = replicate 1000 (global package Nothing)
+          ++ [global (package { symbolOccurrence = "id" }) Nothing]
         certify = do
           started <- getMonotonicTimeNSec
           certified <- captureDiagnostics $ do
@@ -6809,21 +6809,21 @@ verifyRetainedPackageWitness producer evidence = do
         fail "package certification lost its counted duplicate-read evidence"
       putStrLn ("package certification requests=1001 owner_loads=1 final_reads=1"
         ++ " final_bytes=" ++ show actual ++ " former_final_bytes=" ++ show repeatedBytes)
-    encode [global package 0, global (package { symbolOccurrence = "$missingSibling" }) 0] >>= \case
+    encode [global package Nothing, global (package { symbolOccurrence = "$missingSibling" }) Nothing] >>= \case
       Left _ -> pure ()
       Right _ -> fail "checked package interface authorized an absent sibling"
   verifyChangedPackageInterface producer package evidence program global
-  bytes <- encode [global package 0, global home 7] >>= either fail pure
+  bytes <- encode [global package (Just 0), global home (Just 7)] >>= either fail pure
   retainByteOracle "mixed-retained" bytes
-  owners <- certificateOwners bytes
-  unless (any (\case
-      CodecRetainedPackageOwner "ghc-internal" "GHC.Internal.Base" packageHash _ 0 -> length packageHash == 64
-      _ -> False) owners
-      && any (\case CodecRetainedOwner _ 7 -> True; _ -> False) owners) $
-    fail "positive package evidence lost its lease or confused a retained home owner"
-  encode [global (package { symbolModule = "Missing.Package.Owner" }) 0] >>= \case
+  retainedFacts <- certificateFacts bytes
+  let owners = codecCertificateOwners retainedFacts
+  unless (CodecRetainedOwner package 0 `elem` owners
+      && CodecRetainedOwner home 7 `elem` owners
+      && null (codecCertificatePackages retainedFacts)) $
+    fail "retained values lost their exact generation or acquired package code demand"
+  encode [global (package { symbolModule = "Missing.Package.Owner" }) Nothing] >>= \case
     Left _ -> pure ()
-    Right _ -> fail "retained package owner without loaded interface evidence was accepted"
+    Right _ -> fail "ordinary package owner without loaded interface evidence was accepted"
   let constructor = SymbolIdentity "ghc-internal" "GHC.Internal.Stack.Types" "value" "EmptyCallStack" Nothing
       synthetic = constructor { symbolOccurrence = "$internalSyntheticPackageSibling" }
       localProgram identities = (program [])
@@ -6871,9 +6871,9 @@ verifyRetainedPackageWitness producer evidence = do
     let repeatedImplicit = replicate 32 implicit
         ordered = identities ++ repeatedImplicit
     (forward, forwardLog) <- captureDiagnostics
-      (encode (map (`global` 0) ordered) >>= either fail pure)
+      (encode (map (`global` Nothing) ordered) >>= either fail pure)
     (backward, backwardLog) <- captureDiagnostics
-      (encode (map (`global` 0) (reverse ordered)) >>= either fail pure)
+      (encode (map (`global` Nothing) (reverse ordered)) >>= either fail pure)
     retainDiagnosticOracle "implicit-forward" forwardLog
     retainDiagnosticOracle "implicit-backward" backwardLog
     forwardFacts <- certificateFacts forward
@@ -6892,7 +6892,7 @@ verifyRetainedPackageWitness producer evidence = do
         fail "repeated implicit lookup escaped its certification-owned catalog capture"
   withTiming $ do
     (_, diagnostics) <- captureDiagnostics
-      (encode (map (`global` 0) identities) >>= either fail pure)
+      (encode (map (`global` Nothing) identities) >>= either fail pure)
     retainDiagnosticOracle "five-package-identities" diagnostics
     unless (count "certified_package_global_requests" diagnostics == 5
         && count "certified_package_owner_loads" diagnostics == 3
@@ -6901,7 +6901,7 @@ verifyRetainedPackageWitness producer evidence = do
       fail "package catalog did not share ordinary, class, constructor and wired owner captures"
   forM_ [package { symbolModule = "GHC.Internal.Prelude" },
       package { symbolNamespace = "type" }] $ \identity -> do
-    encode [global identity 0] >>= \case
+    encode [global identity Nothing] >>= \case
       Left _ -> pure ()
       Right _ -> fail "package catalog admitted a reexport owner or another namespace"
     resolvePackageGlobal producer identity >>= \case
@@ -6920,11 +6920,11 @@ verifyRetainedPackageWitness producer evidence = do
   unless (null (codecCertificatePackages internal) && null (codecCertificateOwners internal)) $
     fail "noncanonical internal package helper supplied external interface authority"
   encodeProgram ((localProgram [constructor, synthetic])
-    { programGlobals = [global synthetic 0] }) >>= \case
+    { programGlobals = [global synthetic Nothing] }) >>= \case
       Left _ -> pure ()
-      Right _ -> fail "witnessed package module authorized a noncanonical retained sibling"
+      Right _ -> fail "witnessed package module authorized a noncanonical package sibling"
   putStrLn "local package exports: canonical constructor without globals, internal helper and synthetic demand refusal passed"
-  putStrLn "retained package witnesses: authenticated map/gen0, home/gen7 and missing package refusal passed"
+  putStrLn "package and retained witnesses: ordinary package checks, exact map/gen0 and home/gen7 passed"
 
   where
     count :: String -> String -> Integer
@@ -6947,14 +6947,13 @@ verifyRetainedPackageWitness producer evidence = do
       | index >= 0 && index < length owners = Just (symbolOccurrence (case owners !! index of
           CodecSourceOwner _ _ _ _ binder -> binder
           CodecRetainedOwner binder _ -> binder
-          CodecPackageOwner _ _ _ binder -> binder
-          CodecRetainedPackageOwner _ _ _ binder _ -> binder))
+          CodecPackageOwner _ _ _ binder -> binder))
       | otherwise = Nothing
 
 -- A mutable installed interface exercises the same environment on successive
 -- certifications. No successful owner selection may survive into the next one.
 verifyChangedPackageInterface :: HscEnv -> SymbolIdentity -> DependencyEvidence
-  -> ([GlobalDecl] -> WireProgram) -> (SymbolIdentity -> Word64 -> GlobalDecl) -> IO ()
+  -> ([GlobalDecl] -> WireProgram) -> (SymbolIdentity -> Maybe Word64 -> GlobalDecl) -> IO ()
 verifyChangedPackageInterface producer identity evidence program global = withScratch $ \work -> do
   let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
         (mkModuleName (T.unpack (symbolModule identity)))
@@ -6966,7 +6965,7 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
   addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
   let environment = producer { hsc_FC = finder }
       encode = encodeCertifiedProducts environment OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts environment) [] Nothing []
-        [("target", program [global identity 0, global identity 0])] evidence "" ""
+        [("target", program [global identity Nothing, global identity Nothing])] evidence "" ""
   first <- encode >>= either fail pure
   (firstId, _) <- resolvePackageGlobal environment identity >>= either fail pure
   BS.writeFile path "invalid interface"

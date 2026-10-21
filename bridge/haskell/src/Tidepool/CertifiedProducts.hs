@@ -126,7 +126,7 @@ certifiedOriginalExternalDemand context identity = case Map.lookup identity (tar
                 | (_,_,_,_,SourceOwner unit name version ordinal) <- witnesses]
               leaves = Set.fromList [symbol
                 | (symbol,_,_,_,owner) <- witnesses
-                , case owner of PackageOwner _ _ _ Nothing -> True; OriginalBindingOwner _ -> True; _ -> False]
+                , case owner of PackageOwner _ _ _ -> True; OriginalBindingOwner _ -> True; _ -> False]
           -- Retained values (including retained package values) are complete
           -- runtime boundaries, not requests to recover their implementation.
           visit (Set.insert coordinate seen) (Set.union packages leaves) (next ++ pending)
@@ -166,14 +166,14 @@ data WitnessOwner
   = SourceOwner T.Text T.Text (Maybe T.Text) Word
   | RetainedOwner Word64
   | OriginalBindingOwner WorldOriginalReference
-  | PackageOwner T.Text T.Text T.Text (Maybe Word64)
+  | PackageOwner T.Text T.Text T.Text
   deriving (Eq, Ord)
 
 type GlobalWitness = (SymbolIdentity, RuntimeRep, Maybe Signature, Bool, WitnessOwner)
 
 ownerCoordinate :: WitnessOwner -> Maybe OwnerCoordinate
 ownerCoordinate (SourceOwner unit name version _) = Just (SourceCoordinate unit name version)
-ownerCoordinate (PackageOwner unit name sha _) = Just (PackageCoordinate unit name sha)
+ownerCoordinate (PackageOwner unit name sha) = Just (PackageCoordinate unit name sha)
 ownerCoordinate (RetainedOwner _) = Nothing
 ownerCoordinate (OriginalBindingOwner reference) = Just (OriginalBindingCoordinate reference)
 
@@ -204,10 +204,8 @@ encodeCompactOwner coordinates owner = case owner of
     [encodeString "source", index (SourceCoordinate unit name version), encodeWord ordinal]
   RetainedOwner generation -> array [encodeString "retained", encodeWord64 generation]
   OriginalBindingOwner reference -> array [encodeWord 3,index (OriginalBindingCoordinate reference)]
-  PackageOwner unit name sha Nothing -> array
+  PackageOwner unit name sha -> array
     [encodeString "package", index (PackageCoordinate unit name sha)]
-  PackageOwner unit name sha (Just generation) -> array
-    [encodeString "retained-package", index (PackageCoordinate unit name sha), encodeWord64 generation]
   where index coordinate = encodeWord (coordinates Map.! coordinate)
 
 -- The producer's group inventory is only a suggestion. Rust compares every
@@ -580,8 +578,7 @@ retainedInputClosure context = visit Set.empty Set.empty
     visit _ inputs [] = Right inputs
     visit seen inputs ((identity,_,_,_,owner):pending) = case owner of
       RetainedOwner generation -> visit seen (Set.insert (identity,generation) inputs) pending
-      PackageOwner _ _ _ (Just generation) -> visit seen (Set.insert (identity,generation) inputs) pending
-      PackageOwner _ _ _ Nothing -> visit seen inputs pending
+      PackageOwner _ _ _ -> visit seen inputs pending
       -- Hidden retained capture requirements remain with Rust's exact selected
       -- native closure; Haskell does not infer an empty executable closure.
       OriginalBindingOwner _ -> visit seen inputs pending
@@ -640,10 +637,8 @@ encodeFullWitness (identity,rep,signature,evaluated,owner) = array
       encodeString name,maybe encodeNull encodeString version,encodeWord ordinal,encodeIdentity identity]
     RetainedOwner generation -> array [encodeString "retained",encodeIdentity identity,encodeWord64 generation]
     OriginalBindingOwner reference -> encodeOriginalBinding reference
-    PackageOwner unit name seal Nothing -> array [encodeString "package",encodeString unit,
-      encodeString name,encodeString seal,encodeIdentity identity]
-    PackageOwner unit name seal (Just generation) -> array [encodeString "retained-package",encodeString unit,
-      encodeString name,encodeString seal,encodeIdentity identity,encodeWord64 generation]]
+    PackageOwner unit name seal -> array [encodeString "package",encodeString unit,
+      encodeString name,encodeString seal,encodeIdentity identity]]
 
 -- Native identity binds the finite graph actually retained for this owner.
 -- Promoted edges name nodes rather than recursively derived versions, so cycles
@@ -712,18 +707,17 @@ retainedNativeVersions emitted exact cached packages products rows = do
         [encodeString "retained",encodeIdentity identity,encodeWord64 generation])
       OriginalBindingOwner reference -> Right (array
         [encodeString "original-binding",encodeOriginalBinding reference,encodeIdentity identity])
-      PackageOwner unit name sha generation -> do
+      PackageOwner unit name sha -> do
         path <- case Map.lookup (unit,name) packages of
           Just options | [(selected,selectedSha)] <- Set.toAscList options,selectedSha == sha -> Right selected
           _ -> Left "native demand graph lacks an exact package path seal"
-        pure (array ([encodeString (maybe "package" (const "retained-package") generation),
-          encodeString unit,encodeString name,encodeString sha,encodeIdentity identity]
-          ++ maybe [] (pure . encodeWord64) generation ++ [encodeString (T.pack path)]))
+        pure (array [encodeString "package",encodeString unit,encodeString name,
+          encodeString sha,encodeIdentity identity,encodeString (T.pack path)])
 
 -- A locally emitted package value may have no incoming global edge. Its exact
 -- defining interface must still be retained before it is offered to later
--- turns. One canonical binder proves each module's selected interface; later
--- retained-package demands independently prove their own canonical binder.
+-- turns. One canonical binder proves each module's selected interface;
+-- ordinary package demands independently prove their own canonical binder.
 -- Noncanonical compiler helpers remain internal and do not supply evidence.
 certifyLocalPackageExports :: HscEnv -> PackageWitnessResolver
   -> IORef [PackageWitness] -> [WireProgram] -> IO ()
@@ -800,10 +794,7 @@ encodeGlobalWitness
   -> IO (Either String GlobalWitness)
 encodeGlobalWitness env resolvePackage packageRef references binders homeModules identity rep signature evaluated generation = do
   selected <- case generation of
-    Just wanted
-      | toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
-          pure (Right (RetainedOwner wanted))
-      | otherwise -> packageOwner resolvePackage packageRef identity (Just wanted)
+    Just wanted -> pure (Right (RetainedOwner wanted))
     Nothing | Just reference <- Map.lookup identity references -> pure (Right (OriginalBindingOwner reference))
     Nothing -> case Map.lookup identity binders of
       Just (unit, name, version, ordinal) -> pure (Right (SourceOwner unit name version ordinal))
@@ -811,7 +802,7 @@ encodeGlobalWitness env resolvePackage packageRef references binders homeModules
         | (symbolUnit identity, symbolModule identity) `Set.member` homeModules
             || toUnitId (moduleUnit (symbolOwner identity)) `Set.member` hsc_all_home_unit_ids env ->
             pure (Left ("external home global has no certified source group: " ++ show identity))
-        | otherwise -> packageOwner resolvePackage packageRef identity Nothing
+        | otherwise -> packageOwner resolvePackage packageRef identity
   pure $ do
     owner <- selected
     Right (identity, rep, signature, evaluated, owner)
@@ -820,9 +811,9 @@ symbolOwner :: SymbolIdentity -> Module
 symbolOwner identity = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
   (mkModuleName (T.unpack (symbolModule identity)))
 
-packageOwner :: PackageWitnessResolver -> IORef [PackageWitness] -> SymbolIdentity -> Maybe Word64
+packageOwner :: PackageWitnessResolver -> IORef [PackageWitness] -> SymbolIdentity
   -> IO (Either String WitnessOwner)
-packageOwner resolvePackage packageRef identity generation = do
+packageOwner resolvePackage packageRef identity = do
   selected <- resolvePackage identity
   case selected of
     Left reason -> pure (Left reason)
@@ -831,7 +822,7 @@ packageOwner resolvePackage packageRef identity generation = do
       modifyIORef' packageRef ((symbolUnit identity,
         symbolModule identity, packagePath witness, sha) :)
       pure (Right (PackageOwner
-        (symbolUnit identity) (symbolModule identity) sha generation))
+        (symbolUnit identity) (symbolModule identity) sha))
 
 -- Capture only witnesses actually selected by this certification. Existing
 -- tokens already own their bytes; digest-keyed sharing avoids rereading or

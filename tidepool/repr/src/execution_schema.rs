@@ -1203,17 +1203,6 @@ pub enum ImportOwner {
         id: SessionVarId,
         generation: u64,
     },
-    /// An immutable native export selected from the owning machine's live
-    /// ledger. `root_id` is its existing process-unique rooted-value identity,
-    /// not a session binding id or a serialized compiler authority.
-    CodeExport {
-        binder: SymbolIdentity,
-        generation: u64,
-        root_id: u64,
-        /// Producer-authenticated package provenance, when required by a
-        /// retained-package certificate. It never authorizes a missing export.
-        interface_digest: Option<[u8; 32]>,
-    },
     Package {
         unit: String,
         module: String,
@@ -1451,12 +1440,6 @@ impl CertifiedGroup {
                 }
                 ImportOwner::Retained { generation, .. } => {
                     declaration.required_generation == Some(*generation)
-                }
-                ImportOwner::CodeExport {
-                    binder, generation, ..
-                } => {
-                    binder == &declaration.identity
-                        && declaration.required_generation == Some(*generation)
                 }
                 ImportOwner::Package {
                     unit,

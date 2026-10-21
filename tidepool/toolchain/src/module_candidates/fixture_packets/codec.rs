@@ -535,13 +535,6 @@ enum ImportOwnerFact {
         interface_sha256: String,
         binder: IdentityFact,
     },
-    RetainedPackage {
-        unit: String,
-        module: String,
-        interface_sha256: String,
-        binder: IdentityFact,
-        generation: u64,
-    },
 }
 impl From<&crate::certified_products::ReceiptImportOwner> for ImportOwnerFact {
     fn from(owner: &crate::certified_products::ReceiptImportOwner) -> Self {
@@ -590,19 +583,6 @@ impl From<&crate::certified_products::ReceiptImportOwner> for ImportOwnerFact {
                 module: module.clone(),
                 interface_sha256: hex(interface_digest),
                 binder: binder.into(),
-            },
-            ReceiptImportOwner::RetainedPackage {
-                unit,
-                module,
-                binder,
-                interface_digest,
-                generation,
-            } => Self::RetainedPackage {
-                unit: unit.clone(),
-                module: module.clone(),
-                interface_sha256: hex(interface_digest),
-                binder: binder.into(),
-                generation: *generation,
             },
         }
     }
