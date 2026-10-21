@@ -7570,6 +7570,252 @@ mod tests {
     }
 
     #[test]
+    fn program_fragment_pairs_native_rows_with_final_payload_acquisitions() {
+        use crate::declaration_context::NativeTransportMode;
+
+        for distinct_witness in [false, true] {
+            let receiving_entries = decision_affinity_entries();
+            let incoming_entries = if distinct_witness {
+                decision_affinity_entries()
+            } else {
+                receiving_entries
+                    .iter()
+                    .map(|entry| Arc::new((**entry).clone()))
+                    .collect()
+            };
+            for (receiving, incoming) in receiving_entries.iter().zip(&incoming_entries) {
+                assert_eq!(receiving, incoming);
+                assert!(!Arc::ptr_eq(receiving, incoming));
+                let (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) =
+                    (&receiving.payload, &incoming.payload)
+                else {
+                    unreachable!()
+                };
+                assert_eq!(first.source_sha256(), second.source_sha256());
+                assert_eq!(
+                    Arc::ptr_eq(
+                        first.original_native().unwrap(),
+                        second.original_native().unwrap()
+                    ),
+                    !distinct_witness
+                );
+            }
+            let child = receiving_entries[0].descriptor.id;
+            let parent = receiving_entries[1].descriptor.id;
+            let [receiving, incoming] = [
+                (
+                    receiving_entries.clone(),
+                    "ReceivingWrapper",
+                    BTreeSet::from([NativeGroupKey {
+                        artifact: child,
+                        original_ordinal: 9,
+                    }]),
+                ),
+                (
+                    incoming_entries,
+                    "IncomingWrapper",
+                    BTreeSet::from([NativeGroupKey {
+                        artifact: parent,
+                        original_ordinal: 7,
+                    }]),
+                ),
+            ]
+            .map(|(entries, marker, groups)| {
+                let inventory = ArtifactInventory::default();
+                let base = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        entries.clone(),
+                        NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let view = inventory
+                    .admit_recovery_selection(
+                        &base,
+                        vec![Arc::new(crate::artifact_inventory::tests::entry(
+                            marker,
+                            &[],
+                        ))],
+                        &groups,
+                    )
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+                    view,
+                )
+                .unwrap()
+            });
+            for (owner, row) in receiving.selected.iter() {
+                let other = &incoming.selected[owner];
+                assert_eq!(row.interface.0, other.interface.0);
+                assert_eq!(
+                    row.original.as_ref().unwrap().0,
+                    other.original.as_ref().unwrap().0
+                );
+                assert!(!Arc::ptr_eq(
+                    &row.original.as_ref().unwrap().1,
+                    &other.original.as_ref().unwrap().1,
+                ));
+            }
+            // Incoming offers add a different genuine contribution while the
+            // receiver keeps its exact Original roles and root decisions.
+            let incoming = incoming.for_source_owners(&BTreeSet::new()).unwrap();
+            let old_graph = receiving.artifacts.capture_graph_selection();
+            let old_decisions = receiving.input_decisions.recorded_facts().clone();
+            let old_rows = receiving
+                .native_availability
+                .rows()
+                .cloned()
+                .collect::<Vec<_>>();
+            let old_facts = receiving.native_availability.snapshot_facts().unwrap();
+            let old_metadata = receiving
+                .projection
+                .project_metadata(receiving.artifacts.metadata_snapshot())
+                .unwrap();
+            let mut expected_facts = old_facts.clone();
+            for (id, incoming) in incoming.native_availability.snapshot_facts().unwrap() {
+                let previous = expected_facts.get_mut(&id).unwrap();
+                assert_eq!(previous.owner, incoming.owner);
+                if incoming.mode == NativeTransportMode::Full {
+                    previous.mode = NativeTransportMode::Full;
+                }
+                for (identity, contribution) in incoming.contributions {
+                    if let Some(prior) = previous
+                        .contributions
+                        .insert(identity, contribution.clone())
+                    {
+                        assert_eq!(prior, contribution);
+                    }
+                }
+            }
+            assert_ne!(
+                expected_facts, old_facts,
+                "the contribution merge cannot take its equality fast path"
+            );
+            let expected_offers = receiving
+                .native_offers
+                .iter()
+                .chain(incoming.native_offers.iter())
+                .map(|offer| {
+                    (
+                        offer.snapshot_identity().unwrap(),
+                        offer.issued_group_carriers().unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let appended = receiving.append_program_fragment(&incoming);
+            if distinct_witness {
+                assert!(
+                    matches!(appended, Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
+                        if receiving_entries.iter().any(|entry| entry.descriptor.id == artifact)))
+                );
+                continue;
+            }
+            let delta = appended.unwrap();
+            let support = delta.support;
+            let metadata = support
+                .program_fragment_metadata(&old_metadata, &incoming, &delta.changed_owners)
+                .unwrap();
+            let cold = support
+                .projection
+                .project_metadata(support.artifacts.metadata_snapshot())
+                .unwrap();
+            assert_eq!(metadata.entries, cold.entries);
+            assert_eq!(metadata.retained.artifacts, cold.retained.artifacts);
+            assert_eq!(
+                metadata.retained.interface_representatives,
+                cold.retained.interface_representatives
+            );
+            assert_eq!(
+                support.native_availability.snapshot_facts().unwrap(),
+                expected_facts
+            );
+            assert_eq!(support.input_decisions.recorded_facts(), &old_decisions);
+            assert_eq!(
+                support.artifacts.capture_graph_selection().native_groups,
+                old_graph.native_groups
+            );
+            assert_eq!(
+                support
+                    .native_offers
+                    .iter()
+                    .map(|offer| (
+                        offer.snapshot_identity().unwrap(),
+                        offer.issued_group_carriers().unwrap()
+                    ))
+                    .collect::<BTreeMap<_, _>>(),
+                expected_offers
+            );
+            for entry in metadata
+                .entries
+                .values()
+                .chain(metadata.retained.artifacts.values())
+                .chain(metadata.retained.entries.values())
+                .chain(metadata.retained.interface_representatives.values())
+            {
+                assert!(Arc::ptr_eq(
+                    entry,
+                    &support.artifacts.lease.payloads[&entry.descriptor.id]
+                ));
+            }
+            for row in support.selected.values() {
+                for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                    assert!(Arc::ptr_eq(
+                        entry,
+                        &support.artifacts.lease.payloads[&binding.artifact]
+                    ));
+                }
+            }
+            for row in support.native_availability.rows() {
+                let id = row.original_artifact_id();
+                let payload = &support.artifacts.lease.payloads[&id];
+                assert!(Arc::ptr_eq(
+                    row.target_original(row.original_owner()).unwrap(),
+                    payload
+                ));
+                assert!(Arc::ptr_eq(payload, &metadata.retained.artifacts[&id]));
+            }
+            let closed = support.close_request(None, &Default::default()).unwrap();
+            assert_eq!(
+                closed.native_availability.snapshot_facts().unwrap(),
+                expected_facts
+            );
+            assert_eq!(closed.input_decisions.recorded_facts(), &old_decisions);
+            for row in closed.native_availability.rows() {
+                let id = row.original_artifact_id();
+                assert!(Arc::ptr_eq(
+                    row.target_original(row.original_owner()).unwrap(),
+                    &closed.artifacts.lease.payloads[&id],
+                ));
+                assert!(Arc::ptr_eq(
+                    row,
+                    support.native_availability.issued_row(id).unwrap()
+                ));
+            }
+            let unchanged = closed
+                .native_availability
+                .retain_acquisitions(&closed.artifacts)
+                .unwrap();
+            assert!(unchanged.same_acquisition(&closed.native_availability));
+            assert_eq!(receiving.artifacts.capture_graph_selection(), old_graph);
+            assert_eq!(
+                receiving.native_availability.snapshot_facts().unwrap(),
+                old_facts
+            );
+            for row in old_rows {
+                assert!(Arc::ptr_eq(
+                    &row,
+                    receiving
+                        .native_availability
+                        .issued_row(row.original_artifact_id())
+                        .unwrap()
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn program_original_promotion_qualifies_once_and_keeps_issued_dependencies() {
         let entries = decision_affinity_entries();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
