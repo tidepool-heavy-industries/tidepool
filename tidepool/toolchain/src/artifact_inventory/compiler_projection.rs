@@ -1430,7 +1430,7 @@ pub(crate) fn complete_native_selection(
 /// held in the inherited graphs for this slot's identity+interface seal.
 /// Absent or more than one exact held binding is a typed refusal; this never
 /// searches fresh products or falls back to a seal+symbol first match.
-fn resolve_held_package_binding(
+pub(crate) fn resolve_held_package_binding(
     identity: &tidepool_repr::execution_schema::SymbolIdentity,
     seal: &[u8; 32],
     graphs: &[Arc<super::IssuedPackageCodeGraph>],

@@ -29,7 +29,7 @@ modules. No fixture supplies package authority; the compiler issues it.
 
 | Fixture | Scenario it discriminates | Regression it catches |
 |---|---|---|
-| `SameSealTwoProducts.hs` | `onlySort` reaches `sort` alone; `sortThenUnlines` reaches `sort` + `unlines`. Both share the `actualSort` worker symbol under one seal. | Each target keeps its own ordered slots under reversed target order. |
+| `SameSealTwoProducts.hs` | `onlyPack` reaches `Data.Text.Internal.pack` alone; `packThenUnpack` reaches `pack` + `unpack`. The current compiler emits package products per binding, so both targets resolve the shared `pack` worker to one immutable envelope. | Reversing target order must not change either target's exact ordered slots, body, or child history. |
 | `TransitiveCompetitor.hs` | `viaText` reaches `Data.Text.Internal` transitively through `Data.Text`; `directText` reaches it directly. | Old selector cannot keep the transitive child distinct from the direct sibling projection. |
 | `RepeatedSlots.hs` | Three `sort` demands share one immutable `actualSort` body plus one Ord dictionary. | Byte dedup must not duplicate the retained payload. |
 | `DuplicateEnvelope.hs` | One defining module reached under two different child histories. | Envelope-SHA keying collapses two occurrences; OccurrenceId keeps them distinct. |
@@ -161,7 +161,22 @@ oracle passes with the shared slot resolving to one body.
 
 The producer's per-target binder map is now correctly target-scoped, so the
 remaining failure is not the request-wide-map collapse; it is the missing
-byte-identical-row deduplication. The reversed-targets oracle asserts distinct
-body bytes per target once a fixture reproduces the constructor/type
-renumbering (`peer-review-package-byte-comparison.json`); simple `sort`/`pack`
-fixtures do not, and instead reach the duplicate-row refusal first.
+byte-identical-row deduplication. P1's bisimulation dedup (merged through the
+P tip `420fdf7ebb`) fixes that refusal, so the reversed-targets oracle keeps
+its truthful order/reverse-order assertion and no longer expects distinct body
+bytes for one shared symbol.
+
+## Authenticated historical same-seal/different-body control
+
+The synthetic same-module/different-subset fixture cannot reproduce the
+constructor/type renumbering, so the same-seal/different-body positive is
+covered by four authenticated compiler envelopes under
+`tests/fixtures/package-occurrence-linkage/historical/` (plus two captured
+interfaces and `manifest.json`). The non-ignored test
+`historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match`
+decodes each envelope through the production reader
+(`CertifiedPackageCodeProduct::restore` -> `parse_code` ->
+`PackageGroupCode::admit`), admits both bodies under one shared owner/seal,
+selects each by its own occurrence `ArtifactId` through
+`IssuedPackageCodeGraph::issue`, and proves `resolve_held_package_binding`
+refuses the two-body seal+symbol match while accepting each body alone.

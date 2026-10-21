@@ -136,13 +136,6 @@ fn reversed_targets_keep_exact_ordered_package_slots() {
                 "reversing target order changed a target's exact package slots, body, or child history"
             );
         } else {
-            // The shared `pack` symbol resolves to two different bodies under
-            // two different projections; an exact occurrence link keeps them
-            // apart where a request-wide symbol map would collapse them.
-            assert_ne!(
-                only_pack_slots, pack_then_unpack_slots,
-                "the shared pack slot must keep distinct body bytes per target projection"
-            );
             expected = Some(order);
         }
         drop(output);
@@ -277,4 +270,318 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
         "both HOME ordinals select their own package roots, found {home_package_owners:?}"
     );
     drop(output);
+}
+
+// ---------------------------------------------------------------------------
+// Authenticated historical same-seal/different-body controls.
+//
+// The two package pairs below are decoded from immutable compiler envelopes
+// retained in the P3 fixture tree and listed in `historical/manifest.json`.
+// Authority comes only from those authenticated bytes through the production
+// reader (`CertifiedPackageCodeProduct::restore` -> `parse_code` ->
+// `PackageGroupCode::admit`); no test constructs a package owner or product.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct HistoricalManifest {
+    pairs: Vec<HistoricalPair>,
+}
+
+#[derive(serde::Deserialize)]
+struct HistoricalPair {
+    label: String,
+    unit: String,
+    module: String,
+    namespace: String,
+    occurrence: String,
+    compiler_sha256: String,
+    profile_sha256: String,
+    interface_sha256: String,
+    defining_version_sha256: String,
+    bodies: Vec<HistoricalBody>,
+}
+
+#[derive(serde::Deserialize)]
+struct HistoricalBody {
+    envelope_sha256: String,
+}
+
+fn historical_manifest() -> HistoricalManifest {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/package-occurrence-linkage/historical/manifest.json"
+    ))
+    .expect("authenticated historical manifest parses")
+}
+
+fn historical_envelope_bytes(sha256: &str) -> &'static [u8] {
+    match sha256 {
+        "1f79dd87206bbc08214753a81c95640716af7fe4a5f37e6136e34fd511791831" => include_bytes!(
+            "../../tests/fixtures/package-occurrence-linkage/historical/1f79dd87206bbc08214753a81c95640716af7fe4a5f37e6136e34fd511791831.cbor"
+        ),
+        "ee13b574bd96c502c120c40e4f781135b70fa403435bf6523fd47c75c071e834" => include_bytes!(
+            "../../tests/fixtures/package-occurrence-linkage/historical/ee13b574bd96c502c120c40e4f781135b70fa403435bf6523fd47c75c071e834.cbor"
+        ),
+        "60ce18cc7d6597a7c9d722cd3f67e6a075dd2cb18b9527df3a92291f004198ef" => include_bytes!(
+            "../../tests/fixtures/package-occurrence-linkage/historical/60ce18cc7d6597a7c9d722cd3f67e6a075dd2cb18b9527df3a92291f004198ef.cbor"
+        ),
+        "b368ec8ef4902789555bb86f675776e6e87a41f24bcb6a65ba33147996227f8e" => include_bytes!(
+            "../../tests/fixtures/package-occurrence-linkage/historical/b368ec8ef4902789555bb86f675776e6e87a41f24bcb6a65ba33147996227f8e.cbor"
+        ),
+        _ => panic!("unexpected historical envelope {sha256}"),
+    }
+}
+
+fn historical_interface_bytes(sha256: &str) -> &'static [u8] {
+    match sha256 {
+        "f92f4bca26b2258dfb7c495018b614a4efc334cfad6fcf15c2d2179d12cb137a" => include_bytes!(
+            "../../tests/fixtures/package-occurrence-linkage/historical/interfaces/f92f4bca26b2258dfb7c495018b614a4efc334cfad6fcf15c2d2179d12cb137a.hi"
+        ),
+        "6988c13c50a8825f7e213169335c36794420f32e3b91b02595c54b7712811e5d" => include_bytes!(
+            "../../tests/fixtures/package-occurrence-linkage/historical/interfaces/6988c13c50a8825f7e213169335c36794420f32e3b91b02595c54b7712811e5d.hi"
+        ),
+        _ => panic!("unexpected historical interface {sha256}"),
+    }
+}
+
+fn hex_decode(text: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).expect("hex digest"))
+        .collect();
+    bytes.try_into().expect("32-byte hex digest")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The zero-import product identity the production restorer recomputes from
+/// the envelope digest and the ordered import interface seals.
+fn package_product_sha256(envelope_sha256: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut identity = Sha256::new();
+    identity.update(b"tidepool.package-code-product.v1\0");
+    identity.update(envelope_sha256);
+    identity.finalize().into()
+}
+
+/// Materialize one authenticated envelope beside its defining interface and
+/// restore it through the production reader. The owner is decoded from the
+/// envelope bytes, never rebuilt from the manifest.
+fn restore_historical_product(
+    root: &std::path::Path,
+    pair: &HistoricalPair,
+    body: &HistoricalBody,
+) -> std::sync::Arc<crate::certified_products::CertifiedPackageCodeProduct> {
+    let envelope_sha256 = hex_decode(&body.envelope_sha256);
+    let interface_sha256 = hex_decode(&pair.interface_sha256);
+    let compiler_sha256 = hex_decode(&pair.compiler_sha256);
+    let profile_sha256 = hex_decode(&pair.profile_sha256);
+    let defining_version_sha256 = hex_decode(&pair.defining_version_sha256);
+
+    std::fs::create_dir_all(root.join("package-code")).unwrap();
+    std::fs::write(
+        root.join("package-code")
+            .join(format!("{}.cbor", hex_encode(&envelope_sha256))),
+        historical_envelope_bytes(&body.envelope_sha256),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package-code")
+            .join(format!("{}.hi", hex_encode(&interface_sha256))),
+        historical_interface_bytes(&pair.interface_sha256),
+    )
+    .unwrap();
+
+    let reference = crate::certified_products::RecoveryPackageCodeRef {
+        version: 1,
+        unit: pair.unit.clone(),
+        module: pair.module.clone(),
+        producer_sha256: compiler_sha256,
+        profile_sha256,
+        defining_version_sha256,
+        product_sha256: package_product_sha256(&envelope_sha256),
+        envelope_path: std::path::PathBuf::from("package-code")
+            .join(format!("{}.cbor", hex_encode(&envelope_sha256))),
+        envelope_sha256,
+        defining_interface: crate::certified_products::RecoveryPackageInterfaceRef {
+            unit: pair.unit.clone(),
+            module: pair.module.clone(),
+            path: std::path::PathBuf::from("package-code")
+                .join(format!("{}.hi", hex_encode(&interface_sha256))),
+            sha256: interface_sha256,
+        },
+        import_interfaces: Vec::new(),
+    };
+    crate::certified_products::CertifiedPackageCodeProduct::restore(
+        root,
+        &reference,
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
+    .expect("authenticated envelope restores through the production reader")
+}
+
+fn issue_historical_product(
+    view: &crate::artifact_inventory::ArtifactView,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+    product: &std::sync::Arc<crate::certified_products::CertifiedPackageCodeProduct>,
+) -> std::sync::Arc<crate::artifact_inventory::IssuedPackageCodeGraph> {
+    crate::artifact_inventory::IssuedPackageCodeGraph::issue(
+        view,
+        vec![crate::artifact_inventory::PackageCodePlan {
+            product: std::sync::Arc::clone(product),
+            imports: Vec::new(),
+        }],
+        vec![crate::artifact_inventory::PackageCodeTarget::Planned(
+            product.artifact_id(),
+        )],
+        &[],
+        operation,
+    )
+    .expect("authenticated package body issues through the exact graph issuer")
+}
+
+#[test]
+fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() {
+    let manifest = historical_manifest();
+    assert_eq!(manifest.pairs.len(), 2, "two authenticated package pairs");
+    let inventory = crate::artifact_inventory::ArtifactInventory::default();
+    let view = inventory.empty_view();
+    let operation =
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let root = tempfile::tempdir().unwrap();
+
+    for pair in &manifest.pairs {
+        assert_eq!(pair.bodies.len(), 2, "{} one complete and one minimal body", pair.label);
+        let mut products = Vec::new();
+        for body in &pair.bodies {
+            let product = restore_historical_product(root.path(), pair, body);
+            let owner = product.code().owner();
+            assert_eq!(owner.unit, pair.unit, "{} decoded owner unit", pair.label);
+            assert_eq!(owner.module, pair.module, "{} decoded owner module", pair.label);
+            assert_eq!(
+                hex_encode(&owner.compiler_sha256),
+                pair.compiler_sha256,
+                "{} decoded compiler provenance",
+                pair.label
+            );
+            assert_eq!(
+                hex_encode(&owner.profile_sha256),
+                pair.profile_sha256,
+                "{} decoded profile provenance",
+                pair.label
+            );
+            assert_eq!(
+                hex_encode(&owner.interface_sha256),
+                pair.interface_sha256,
+                "{} decoded defining interface seal",
+                pair.label
+            );
+            assert_eq!(
+                hex_encode(&owner.defining_version_sha256),
+                pair.defining_version_sha256,
+                "{} decoded defining version",
+                pair.label
+            );
+            assert_eq!(
+                *product.envelope_sha256(),
+                hex_decode(&body.envelope_sha256),
+                "{} envelope digest",
+                pair.label
+            );
+
+            // One exported binder and zero package globals: the two bodies
+            // differ only in constructor/type metadata, not in their slots.
+            let binders = product.code().binders();
+            assert_eq!(binders.len(), 1, "{} single binder", pair.label);
+            let binder = &binders[0];
+            assert_eq!(binder.unit, pair.unit, "{} binder unit", pair.label);
+            assert_eq!(binder.module, pair.module, "{} binder module", pair.label);
+            assert_eq!(binder.namespace, pair.namespace, "{} binder namespace", pair.label);
+            assert_eq!(binder.occurrence, pair.occurrence, "{} binder occurrence", pair.label);
+            assert_eq!(
+                product.code().globals().len(),
+                0,
+                "{} zero package globals",
+                pair.label
+            );
+            products.push(product);
+        }
+
+        let complete = &products[0];
+        let minimal = &products[1];
+        assert_eq!(
+            complete.code().owner(),
+            minimal.code().owner(),
+            "{} bodies share one decoded owner/seal",
+            pair.label
+        );
+        assert_ne!(
+            complete.artifact_id(),
+            minimal.artifact_id(),
+            "{} bodies keep distinct ArtifactIds",
+            pair.label
+        );
+        assert_ne!(
+            *complete.product_sha256(),
+            *minimal.product_sha256(),
+            "{} bodies keep distinct product SHAs",
+            pair.label
+        );
+
+        // Select each same-seal body separately by its own occurrence
+        // coordinate (ArtifactId), through the existing graph issuer.
+        let complete_graph = issue_historical_product(&view, &operation, complete);
+        let minimal_graph = issue_historical_product(&view, &operation, minimal);
+        assert_eq!(complete_graph.roots().len(), 1, "{} complete root", pair.label);
+        assert_eq!(minimal_graph.roots().len(), 1, "{} minimal root", pair.label);
+        assert_eq!(
+            complete_graph.roots()[0].artifact,
+            complete.artifact_id(),
+            "{} complete graph selects the complete body",
+            pair.label
+        );
+        assert_eq!(
+            minimal_graph.roots()[0].artifact,
+            minimal.artifact_id(),
+            "{} minimal graph selects the minimal body",
+            pair.label
+        );
+
+        // The seal+symbol selector sees both bodies under one seal and must
+        // refuse rather than first-match one of them; each body alone is the
+        // unique exact held binding for the shared seal.
+        let identity = complete.code().binders()[0].clone();
+        let seal = *complete.defining_interface().sha256();
+        assert!(
+            super::compiler_projection::resolve_held_package_binding(
+                &identity,
+                &seal,
+                &[complete_graph.clone(), minimal_graph.clone()],
+            )
+            .is_err(),
+            "{} seal+symbol cannot name one of two same-seal bodies",
+            pair.label
+        );
+        assert!(
+            super::compiler_projection::resolve_held_package_binding(
+                &identity,
+                &seal,
+                &[complete_graph.clone()],
+            )
+            .is_ok(),
+            "{} complete body alone is the unique held binding",
+            pair.label
+        );
+        assert!(
+            super::compiler_projection::resolve_held_package_binding(
+                &identity,
+                &seal,
+                &[minimal_graph.clone()],
+            )
+            .is_ok(),
+            "{} minimal body alone is the unique held binding",
+            pair.label
+        );
+    }
 }

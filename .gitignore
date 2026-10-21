@@ -61,6 +61,9 @@ bridge/haskell/test/text_cbor/
 !bridge/haskell/test-prepared-stg/fixtures/import-producer.cbor
 !bridge/haskell/test-prepared-stg/fixtures/import-consumer.cbor
 !bridge/haskell/test-prepared-stg/fixtures/import-consumer-result.cbor
+# Authenticated historical package fixtures (P3 same-seal/different-body controls).
+!tidepool/toolchain/tests/fixtures/package-occurrence-linkage/historical/*.cbor
+!tidepool/toolchain/tests/fixtures/package-occurrence-linkage/historical/interfaces/*.hi
 *.log
 dump_*.rs
 test_*.hs

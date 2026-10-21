@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "pairs": [
+    {
+      "label": "ghc-prim:GHC.CString.unpackCString#",
+      "unit": "ghc-prim",
+      "module": "GHC.CString",
+      "namespace": "value",
+      "occurrence": "unpackCString#",
+      "compiler_sha256": "208651411909397f75b922c77eecb14bebe9d73eedda58a44198580cd166005d",
+      "profile_sha256": "15663ac19c31058a9203f6404f72cad491923a1f34209bc68cff3bbbf3111880",
+      "interface_sha256": "f92f4bca26b2258dfb7c495018b614a4efc334cfad6fcf15c2d2179d12cb137a",
+      "defining_version_sha256": "d4d98115f25f2bb4d615de26e7676cd3c9052a1c7639fa38fc1a17644d7c6117",
+      "bodies": [
+        {
+          "kind": "complete",
+          "envelope_sha256": "1f79dd87206bbc08214753a81c95640716af7fe4a5f37e6136e34fd511791831",
+          "group_bytes_sha256": "04b0418d0e6b2e4ba811eab9a482ac54771f2cccb1a3fe1f7a6cf8c80ed0ca6f"
+        },
+        {
+          "kind": "minimal",
+          "envelope_sha256": "ee13b574bd96c502c120c40e4f781135b70fa403435bf6523fd47c75c071e834",
+          "group_bytes_sha256": "dc82caae94b3d9991fd2c25f0ce6e3390887bfc249c56c97386ff61f63505e85"
+        }
+      ]
+    },
+    {
+      "label": "text-2.1.2-f933:Data.Text.Internal.$wouter",
+      "unit": "text-2.1.2-f933",
+      "module": "Data.Text.Internal",
+      "namespace": "value",
+      "occurrence": "$wouter",
+      "compiler_sha256": "208651411909397f75b922c77eecb14bebe9d73eedda58a44198580cd166005d",
+      "profile_sha256": "15663ac19c31058a9203f6404f72cad491923a1f34209bc68cff3bbbf3111880",
+      "interface_sha256": "6988c13c50a8825f7e213169335c36794420f32e3b91b02595c54b7712811e5d",
+      "defining_version_sha256": "0be8a3314e36e2c5661b4927df6703e8590cf4a20d053ffd416acd7d7ddfbec1",
+      "bodies": [
+        {
+          "kind": "complete",
+          "envelope_sha256": "b368ec8ef4902789555bb86f675776e6e87a41f24bcb6a65ba33147996227f8e",
+          "group_bytes_sha256": "f1e24a515bd76d03eb50523f466e2f7ffab4aa53127453f8c1ff77e309216e07"
+        },
+        {
+          "kind": "minimal",
+          "envelope_sha256": "60ce18cc7d6597a7c9d722cd3f67e6a075dd2cb18b9527df3a92291f004198ef",
+          "group_bytes_sha256": "b5eafcaa1d75bd6799a9f2c97b03acf81dc7152afed02d3ffa54c1123fb30ef6"
+        }
+      ]
+    }
+  ]
+}
