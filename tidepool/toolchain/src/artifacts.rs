@@ -317,7 +317,7 @@ impl YieldSite {
                 expected,
             });
         }
-        let witness = |index| {
+        let witness = |index: usize| {
             self.input_type_witnesses[index]
                 .as_ref()
                 .ok_or(RequestInputLayoutError::MissingWitness { site, index })
