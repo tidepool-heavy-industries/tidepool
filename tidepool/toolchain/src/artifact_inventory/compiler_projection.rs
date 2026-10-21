@@ -1485,12 +1485,15 @@ impl SupportDraft {
 
     /// Merge completion custody into the draft. Completion-set bookkeeping and
     /// pairing against the final acquired entries happen once in [`close`].
+    /// Only the incoming completions merge custody here; repeated enrichment
+    /// never re-folds the accumulated set, and [`close`] performs the single
+    /// final pairing pass.
     fn append_completion_refs(
         &mut self,
         incoming: &NativeSelectionCompletions,
     ) -> Result<(), CompileError> {
         let completions = self.native_completions.append(incoming)?;
-        for completion in completions.iter() {
+        for completion in incoming.iter() {
             self.artifacts = self.artifacts.retain_custody(completion.artifacts())?;
         }
         self.native_completions = completions;
