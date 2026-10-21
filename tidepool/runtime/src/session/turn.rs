@@ -1708,6 +1708,13 @@ impl<'a> CurrentNativeSources<'a> {
         self.source.for_current_target(self.products.target())
     }
 
+    pub(super) fn package(
+        &self,
+        definition: super::prepared::ClosedPackageDefinition<'_>,
+    ) -> super::resident::NativeSourceCustody {
+        self.source.for_closed_package_definition(definition)
+    }
+
     pub(super) fn group(
         &self,
         pending: &PendingCertifiedGroup,
@@ -2063,6 +2070,24 @@ impl CompiledTurn {
             certification: Some(certification),
             provenance: Arc::default(),
         })
+    }
+
+    pub(crate) fn from_runtime_target(
+        targets: &crate::RuntimePreparedTargets,
+        name: &str,
+    ) -> Result<Self, CompileError> {
+        let target = targets.artifacts.targets.get(name).ok_or_else(|| {
+            CompileError::ExtractFailed(format!("compiled artifact has no target {name:?}"))
+        })?;
+        let certification = TurnCertification::from_artifacts(&targets.artifacts, target)?;
+        let mut compiled = Self::from_prepared(
+            Arc::clone(target.prepared_owner()),
+            targets.artifacts.table.clone(),
+            targets.artifacts.warnings.clone(),
+            Vec::new(),
+        )?;
+        compiled.certification = Some(certification);
+        Ok(compiled)
     }
 
     /// Admit ordinary prepared code and its complete nominal metadata together.

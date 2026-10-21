@@ -2099,30 +2099,15 @@ impl CheckedTurnCompletion {
     /// Native installation changes runtime selection and custody, not the
     /// compiler prefix from which this exact item was prepared. Keep its
     /// association current before evaluation can suspend on a compiler query.
-    pub(crate) fn install_certified_turn_in(
+    pub(crate) fn install_native_turn_in(
         &self,
         session: &mut PersistentSession,
         scope: ScopeId,
         metadata: &tidepool_repr::DataConTable,
-        target: super::prepared::ScopedTargetImage,
-        source_evidence: &BTreeMap<
-            tidepool_codegen::prepared_program::SourceBinder,
-            (tidepool_repr::execution_schema::CachedHomeOwner, u32),
-        >,
-        inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
-        retained_sources: &dyn Fn(
-            super::persistent::ValidatedRetainedSourceRef<'_>,
-        ) -> Option<super::resident::NativeSourceCustody>,
+        resolved: super::persistent::ResolvedNativeTurn,
     ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
         self.install_native_in(session, scope, |session| {
-            session.install_certified_turn_in(
-                scope,
-                metadata,
-                target,
-                source_evidence,
-                inherited_needed,
-                retained_sources,
-            )
+            session.install_native_turn_in(scope, metadata, resolved)
         })
     }
 

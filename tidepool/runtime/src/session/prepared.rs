@@ -6,8 +6,12 @@
 //! Parsing, linking, compiled-owner construction, execution, cancellation,
 //! disposition, and retained-program reuse cross this boundary in that order.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc, OnceLock};
+#[cfg(test)]
+use tidepool_codegen::prepared_program::{InheritedSourceDemand, SourceInstanceLease};
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
@@ -15,7 +19,10 @@ use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
 #[path = "prepared/closed.rs"]
 mod closed;
-pub(super) use closed::{ClosedInstantiationPlan, ClosedNativeDefinition};
+pub(super) use closed::{
+    ClosedInstantiationPlan, ClosedNativeDefinition, ClosedPackageDefinition,
+    NativeInstallationSources, NativeInstantiation, NativeInstantiationPlan, ResolvedNativeCapture,
+};
 
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
@@ -24,13 +31,12 @@ use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::SourceInstanceDomain;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
-    DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
-    InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, NativeInstanceAttachment,
-    NativeInstanceLease, PackageLiteral, Parcel, ParkRequest, PreparedCallOptions,
-    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as CodegenPreparedOuter, PreparedReplyEvidence, PreparedResult,
-    PreparedResultBatch, ProgramId, RunOptions, ScopedDemandedImage, ScopedSourceBinder,
-    SourceBinder, SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
+    DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder,
+    ManagedField, ManagedNode, NativeInstanceAttachment, NativeInstanceLease, PackageLiteral,
+    Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
+    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
+    PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
+    ScopedDemandedImage, ScopedSourceBinder, SourceBinder, SourceLiteral, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -41,7 +47,7 @@ use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
     link_program, CachedHomeOwner, CertifiedGroup, ConstructorIdentity, ConstructorReply,
-    DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError,
+    DefinitionsView, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError,
     MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow,
     SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
 };
@@ -715,14 +721,14 @@ enum NativeProductProof {
     Source {
         _product: tidepool_toolchain::artifacts::OwnedNativeSourceProduct,
     },
-    ClosedHome {
+    SelectedHome {
         _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
         _binding: tidepool_toolchain::artifact_inventory::NativeGroupBinding,
     },
     Package {
         _binding: tidepool_toolchain::artifact_inventory::PackageCodeBinding,
     },
-    ClosedTarget {
+    SelectedTarget {
         _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
     },
 }
@@ -858,6 +864,7 @@ impl ScopedTargetImage {
 
 /// Strong custody of native code and its literal storage, with no installed state.
 pub(crate) struct NativeImageBundle {
+    plan: Arc<NativeInstantiationPlan>,
     registry: Arc<ImageRegistry>,
     images: BTreeMap<usize, Arc<CompiledProgram>>,
     target: usize,
@@ -891,9 +898,6 @@ impl NativeImageBundle {
         compiled: &super::turn::CompiledTurn,
         registry: &Arc<ImageRegistry>,
     ) -> Result<Self, PreparedRuntimeError> {
-        use tidepool_codegen::prepared_program::{PendingGroupInventory, SourceGroupOutline};
-        use tidepool_repr::execution_schema::CertifiedGroupCode;
-        use tidepool_toolchain::certified_products::PendingImportOwner;
         let certification = compiled
             .certification
             .as_ref()
@@ -910,169 +914,37 @@ impl NativeImageBundle {
         proof
             .validate_yield_sites(&compiled.asks)
             .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
-        let target_literals =
-            immutable_literal_owners(compiled.prepared().globals(), &certification.target_owners)?;
-        let outlines = certification
-            .groups
-            .iter()
-            .map(|pending| {
-                immutable_literal_owners(pending.group().globals(), pending.imports())?;
-                let imports = pending
-                    .imports()
-                    .iter()
-                    .filter_map(|owner| match owner {
-                        PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
-                            version: owner.module_version.clone(),
-                            binder: binder.clone(),
-                        }),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                SourceGroupOutline::from_projected(
-                    pending.owner().clone(),
-                    pending.group(),
-                    imports,
-                )
-                .map_err(Into::into)
-            })
-            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
-        let roots = certification
-            .target_owners
-            .iter()
-            .filter_map(|owner| match owner {
-                PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
-                    version: owner.module_version.clone(),
-                    binder: binder.clone(),
-                }),
-                _ => None,
-            });
-        // Close only source edges; historical retained contracts do not select a
-        // group or require a live machine merely to compile its definitions.
-        let selected = PendingGroupInventory::new(outlines)?.seal_with_inherited(
-            roots,
-            &BTreeMap::new(),
-            &HashMap::new(),
-        )?;
-        let groups = selected
-            .new_group_indices()
-            .iter()
-            .map(|index| {
-                let pending = &certification.groups[*index];
-                CertifiedGroupCode::admit(pending.owner().clone(), pending.group().clone())
-                    .map(|code| (code, pending.imports()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Native custody must correspond to the exact original owner/ordinal,
-        // not just a binder with the same module-version spelling.
-        for owner in certification
-            .target_owners
-            .iter()
-            .chain(groups.iter().flat_map(|(_, imports)| imports.iter()))
-        {
-            if let PendingImportOwner::Source {
-                owner,
-                original_ordinal,
-                binder,
-            } = owner
-            {
-                if !groups.iter().any(|(code, _)| {
-                    code.owner() == owner
-                        && code.original_ordinal() == *original_ordinal
-                        && code.binders().contains(binder)
-                }) {
-                    return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
-                        SourceBinder {
-                            version: owner.module_version.clone(),
-                            binder: binder.clone(),
-                        },
-                    ));
-                }
-            }
-        }
-        let mut images = Vec::with_capacity(groups.len() + 1);
-        let mut literals = BTreeMap::new();
-        let mut byte_images = HashMap::new();
-        for (index, (group, imports)) in groups.iter().enumerate() {
-            let definitions = group.definitions();
-            if imports.is_empty()
-                && definitions.globals().is_empty()
-                && matches!(definitions.bindings(), [Group::NonRecursive(top)] if matches!(top.binding.rhs, HeapRhs::Bytes(_)))
-            {
-                let image = CompiledProgram::prepare_source_group_code(
-                    group,
-                    &[],
-                    &BTreeMap::new(),
-                    &BTreeMap::new(),
-                    registry,
-                )
-                .map_err(PreparedRuntimeError::Compile)?;
-                for (binder, literal) in image.source_literals() {
-                    if literals
-                        .insert(binder.clone(), literal.clone())
-                        .is_some_and(|prior| prior != literal)
-                    {
-                        return Err(DemandError::DuplicateBinder(binder).into());
-                    }
-                }
-                byte_images.insert(index, image);
-            }
-        }
-        let target = CompiledProgram::prepare_target_code(
-            compiled.prepared(),
-            &target_literals,
-            // Activation preview retains its source-only preparation contract.
-            // External package literals require the completed package recipe;
-            // this route cannot supply their storage or installation authority.
-            &BTreeMap::new(),
-            &literals,
+        let plan = Arc::new(NativeInstantiationPlan::prepare_code(
+            &compiled.code(),
             registry,
-        )
-        .map_err(PreparedRuntimeError::Compile)?;
-        let packages = if certification
-            .package_interfaces
-            .matches_target(compiled.prepared())
-        {
-            target.package_literals(|unit, module| {
-                certification
-                    .package_interfaces
-                    .interface_digest(unit, module)
-            })
-        } else {
-            BTreeMap::new()
-        };
-        let target_key = Arc::as_ptr(&target) as usize;
-        images.push(target);
-        for (index, (group, imports)) in groups.iter().enumerate() {
-            let image = match byte_images.remove(&index) {
-                Some(image) => image,
-                None => CompiledProgram::prepare_source_group_code(
-                    group,
-                    &immutable_literal_owners(group.definitions().globals(), imports)?,
-                    &packages,
-                    &literals,
-                    registry,
-                )
-                .map_err(PreparedRuntimeError::Compile)?,
-            };
-            images.push(image);
-        }
-        tracing::info!(target: "tidepool_runtime::activation_renderer", image_instance = images[0].image_instance_id(), images = images.len(), outcome = "prepared", "activation renderer native custody");
-        for (index, image) in images.iter().enumerate() {
-            tracing::info!(target: "tidepool_runtime::activation_renderer", bundle_target = images[0].image_instance_id(), image_instance = image.image_instance_id(), role = if index == 0 { "target" } else { "source" }, literal_producer = !image.source_literals().is_empty(), outcome = "native_image", "activation renderer native custody");
-        }
+        )?);
+        let images = plan
+            .images()
+            .map(|image| (Arc::as_ptr(image) as usize, Arc::clone(image)))
+            .collect();
+        let target = Arc::as_ptr(plan.target_image()) as usize;
         Ok(Self {
-            registry: registry.clone(),
-            images: images
-                .into_iter()
-                .map(|image| (Arc::as_ptr(&image) as usize, image))
-                .collect(),
-            target: target_key,
+            plan,
+            registry: Arc::clone(registry),
+            images,
+            target,
         })
+    }
+
+    pub(in crate::session) fn native_plan(
+        &self,
+        code: &super::turn::TurnCode<'_>,
+    ) -> Result<Arc<NativeInstantiationPlan>, PreparedRuntimeError> {
+        if !self.plan.matches_code(code) || self.plan.images().any(|image| !self.holds(image)) {
+            return Err(PreparedRuntimeError::MissingPreparedNativeImage);
+        }
+        Ok(Arc::clone(&self.plan))
     }
 
     #[cfg(test)]
     pub(super) fn omitting_image(&self, key: usize) -> Self {
         Self {
+            plan: Arc::clone(&self.plan),
             registry: self.registry.clone(),
             images: self
                 .images
@@ -1103,76 +975,6 @@ impl NativeImageBundle {
             .get(&self.target)
             .map(|image| image.image_instance_id())
     }
-}
-
-fn immutable_literal_owners(
-    globals: &[tidepool_repr::execution_schema::GlobalDecl],
-    pending: &[tidepool_toolchain::certified_products::PendingImportOwner],
-) -> Result<Vec<Option<tidepool_codegen::prepared_program::LiteralOwner>>, PreparedRuntimeError> {
-    use tidepool_codegen::prepared_program::LiteralOwner;
-    use tidepool_toolchain::certified_products::PendingImportOwner;
-    if globals.len() != pending.len() {
-        return Err(PreparedRuntimeError::CertifiedTargetOwners);
-    }
-    globals
-        .iter()
-        .zip(pending)
-        .map(|(global, owner)| {
-            let literal = match owner {
-                PendingImportOwner::Source { owner, binder, .. }
-                    if binder == &global.identity
-                        && global.required_generation.is_none()
-                        && binder.unit == owner.unit
-                        && binder.module == owner.module =>
-                {
-                    Some(LiteralOwner::Source {
-                        version: owner.module_version.clone(),
-                        binder: binder.clone(),
-                    })
-                }
-                PendingImportOwner::Package {
-                    unit,
-                    module,
-                    binder,
-                    interface_digest,
-                } if binder == &global.identity
-                    && &binder.unit == unit
-                    && &binder.module == module
-                    && global.required_generation.is_none() =>
-                {
-                    Some(LiteralOwner::Package {
-                        unit: unit.clone(),
-                        module: module.clone(),
-                        binder: binder.clone(),
-                        interface_digest: *interface_digest,
-                    })
-                }
-                PendingImportOwner::Retained {
-                    identity,
-                    generation,
-                } if identity == &global.identity
-                    && global.required_generation == Some(*generation) =>
-                {
-                    None
-                }
-                PendingImportOwner::RetainedPackage {
-                    unit,
-                    module,
-                    binder,
-                    generation,
-                    ..
-                } if binder == &global.identity
-                    && &binder.unit == unit
-                    && &binder.module == module
-                    && global.required_generation == Some(*generation) =>
-                {
-                    None
-                }
-                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners),
-            };
-            Ok(literal)
-        })
-        .collect()
 }
 
 /// An immutable source-produced entry and the native images needed to install it.
@@ -1277,12 +1079,6 @@ fn target_owners_match(prepared: &PreparedProgram, owners: &[ImportOwner]) -> bo
                 }
                 ImportOwner::Retained { generation, .. } => {
                     declaration.required_generation == Some(*generation)
-                }
-                ImportOwner::CodeExport {
-                    binder, generation, ..
-                } => {
-                    binder == &declaration.identity
-                        && declaration.required_generation == Some(*generation)
                 }
                 ImportOwner::Package {
                     unit,
@@ -1631,8 +1427,6 @@ pub(crate) struct CertifiedTurnInstall {
     pub leases: Vec<NativeInstanceLease>,
     pub domain_leases: Vec<NativeInstanceAttachment>,
     admitted: Vec<AdmittedProgramFacts>,
-    package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
-    exports: BTreeMap<SymbolIdentity, CodeExport>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -3200,12 +2994,6 @@ pub struct PreparedEngine {
     /// refusal). The prepared route's analogue of
     /// `PreparedEngine::heap_stats`'s `gc_count` -- see [`Self::heap_stats`].
     major_collections: u64,
-    /// Package-defined tops already installed on this machine, offered to
-    /// every later turn as executable imports (see [`CodeExport`] and
-    /// [`exportable_code_tops`]). Grows once, on the turns that first reach
-    /// a package definition, and is never invalidated: a package's code
-    /// cannot change under a live session.
-    code_exports: BTreeMap<SymbolIdentity, CodeExport>,
     /// Shared with every other machine of this run when the composition
     /// root wires one up ([`Self::set_image_registry`]); `None` keeps
     /// today's behavior (every install compiles its own image). A registry
@@ -3214,322 +3002,11 @@ pub struct PreparedEngine {
     registry: Option<Arc<ImageRegistry>>,
 }
 
-/// One installed package top a later turn may import instead of projecting
-/// its own copy of the body.
-///
-/// `handle` roots the top's value on this machine ([`PreparedMachine::retain_top`]),
-/// which also keeps its defining program -- and therefore its code -- alive
-/// for as long as anything can import it. `entry` is the PRODUCER's own
-/// signature for the top, so [`link_program`] compares a later turn's
-/// declared entry evidence against the real callable rather than against an
-/// echo of itself.
-#[derive(Clone)]
-struct CodeExport {
-    program: ProgramId,
-    handle: PreparedHandle,
-    entry: Option<Signature>,
-    /// The exact GHC-loaded package interface selected for this exported
-    /// binder. Ordinary legacy roots may have no digest, but protected package
-    /// owners require a complete match before native resolution.
-    interface_digest: Option<[u8; 32]>,
-}
-
-fn matches_protected_package_interface(export: &CodeExport, requested: &[u8; 32]) -> bool {
-    requested != &[0; 32] && export.interface_digest.as_ref() == Some(requested)
-}
-
-/// The generation every code export is offered at. Package code is fixed for
-/// the life of a process -- a different package set is a different extractor
-/// deployment, which the toolchain fingerprint already refuses to mix -- so
-/// there is nothing for a generation to distinguish, and every turn is told
-/// the same number it will be handed back at install.
-const CODE_EXPORT_GENERATION: u64 = 0;
-
 /// GHC's unit id for everything compiled from source in this session: the
 /// turn target, the session declaration environment and binding store, the workspace source layer,
 /// and the Tidepool library modules on the include path. All of it can
 /// differ from one turn to the next, so none of it is ever exported.
 pub(super) const HOME_UNIT: &str = "main";
-
-/// Which of `prepared`'s own tops later turns may import rather than project
-/// a body for: the ones an INSTALLED PACKAGE defines.
-///
-/// A package's unit id (`ghc-internal`, `text-2.1.2-2594`, ...) names a
-/// built, content-versioned package in the compiler's package database. Its
-/// unfoldings cannot change while one session runs, so a top recovered from
-/// one is the same code this turn, next turn, and after a source reload --
-/// which is exactly what makes it safe to hand a later turn the already
-/// compiled copy. Everything under [`HOME_UNIT`] is excluded for the
-/// opposite reason.
-///
-/// Byte tops (GHC `StgTopStringLit`) are excluded: they have no managed
-/// value to retain. A constructor top is excluded unless its result is a
-/// lifted reference, because that is the only representation
-/// [`PreparedMachine::retain_top`] mints a handle for and a representation
-/// disagreement at link time would fail the turn rather than fall back.
-fn exportable_code_tops(
-    prepared: &PreparedProgram,
-) -> Vec<(SymbolIdentity, ValueId, Option<Signature>)> {
-    let signature = |id: tidepool_repr::execution_schema::SignatureId| {
-        prepared.signatures().get(id.0 as usize).cloned()
-    };
-    let mut exports = Vec::new();
-    for group in prepared.bindings() {
-        let tops = match group {
-            Group::NonRecursive(top) => std::slice::from_ref(top),
-            Group::Recursive(tops) => tops.as_slice(),
-        };
-        for top in tops {
-            if top.identity.unit == HOME_UNIT || top.identity.namespace != "value" {
-                continue;
-            }
-            let entry = match &top.binding.rhs {
-                HeapRhs::Bytes(_) => continue,
-                HeapRhs::Constructor { constructor, .. } => {
-                    let lifted = prepared
-                        .constructors()
-                        .get(constructor.0 as usize)
-                        .is_some_and(|row| row.result_rep == RuntimeRep::LiftedRef);
-                    if !lifted {
-                        continue;
-                    }
-                    None
-                }
-                HeapRhs::Function { signature: id, .. } | HeapRhs::Thunk { signature: id, .. } => {
-                    signature(*id)
-                }
-            };
-            exports.push((top.identity.clone(), top.binding.id, entry));
-        }
-    }
-    exports
-}
-
-#[derive(Clone, Copy)]
-struct PackageOwnerRef<'a> {
-    unit: &'a str,
-    module: &'a str,
-    binder: &'a SymbolIdentity,
-    interface_digest: &'a [u8; 32],
-}
-
-impl PackageOwnerRef<'_> {
-    fn matches(self, owner: &ImportOwner) -> bool {
-        matches!(owner, ImportOwner::Package { unit, module, binder, interface_digest }
-            if unit.as_str() == self.unit && module.as_str() == self.module && binder == self.binder
-                && interface_digest == self.interface_digest)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct CodeExportOwnerRef<'a> {
-    binder: &'a SymbolIdentity,
-    generation: u64,
-    root_id: u64,
-    interface_digest: Option<&'a [u8; 32]>,
-}
-
-impl CodeExportOwnerRef<'_> {
-    fn to_owned(self) -> ImportOwner {
-        ImportOwner::CodeExport {
-            binder: self.binder.clone(),
-            generation: self.generation,
-            root_id: self.root_id,
-            interface_digest: self.interface_digest.copied(),
-        }
-    }
-}
-
-fn certified_package_owner_diagnostic(
-    target: &ImageTarget,
-    target_owners: &[ImportOwner],
-    demanded: &[SelectedNativeImage],
-    owner: PackageOwnerRef<'_>,
-    target_exports: &BTreeMap<SymbolIdentity, ValueId>,
-    code_exports: &BTreeMap<SymbolIdentity, CodeExport>,
-    interfaces_match: bool,
-    interface_digest: Option<[u8; 32]>,
-    limits: PackageOwnerDiagnosticLimits,
-) -> CertifiedPackageOwnerDiagnostic {
-    let binder = owner.binder;
-
-    let globals = target.prepared.globals();
-    let target_globals: Vec<_> = globals
-        .iter()
-        .zip(
-            target_owners
-                .iter()
-                .map(Some)
-                .chain(std::iter::repeat(None)),
-        )
-        .take(limits.target_globals)
-        .map(|(global, owner)| PackageTargetGlobalFact {
-            identity: global.identity.clone(),
-            required_generation: global.required_generation,
-            owner: owner.cloned(),
-        })
-        .collect();
-
-    let direct_groups: BTreeSet<_> = demanded
-        .iter()
-        .enumerate()
-        .filter(|(_, image)| {
-            image
-                .group()
-                .imports()
-                .iter()
-                .any(|import| owner.matches(import))
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let mut group_order: Vec<_> = direct_groups.iter().copied().collect();
-    group_order.extend(
-        demanded
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !direct_groups.contains(index))
-            .map(|(index, _)| index),
-    );
-    let selected_group_count = group_order.len().min(limits.groups);
-    group_order.truncate(selected_group_count);
-
-    let mut demanded_groups: Vec<_> = group_order
-        .iter()
-        .map(|index| {
-            let group = demanded[*index].group();
-            PackageDemandedGroupFact {
-                owner: group.owner().clone(),
-                original_ordinal: group.original_ordinal(),
-                imports: Vec::new(),
-                imports_omitted: 0,
-                import_count: group.imports().len(),
-            }
-        })
-        .collect();
-    let mut remaining_imports = limits.imports;
-    // Preserve the exact failed import first, then source-owner edges because
-    // they explain how a missing package definition entered the closure.
-    for priority in 0..3 {
-        for (fact_index, demanded_index) in group_order.iter().enumerate() {
-            let imports = demanded[*demanded_index].group().imports();
-            for (position, import) in imports.iter().enumerate() {
-                let selected_priority = if owner.matches(import) {
-                    0
-                } else if matches!(import, ImportOwner::Source { .. }) {
-                    1
-                } else {
-                    2
-                };
-                if selected_priority != priority {
-                    continue;
-                }
-                if remaining_imports == 0 {
-                    continue;
-                }
-                demanded_groups[fact_index]
-                    .imports
-                    .push(PackageDemandedImportFact {
-                        position,
-                        owner: import.clone(),
-                    });
-                remaining_imports -= 1;
-            }
-        }
-    }
-    for group in &mut demanded_groups {
-        group.imports.sort_by_key(|import| import.position);
-        group.imports_omitted = group.import_count - group.imports.len();
-    }
-
-    let target_top_binding = target
-        .prepared
-        .bindings()
-        .iter()
-        .flat_map(|group| match group {
-            Group::NonRecursive(top) => std::slice::from_ref(top),
-            Group::Recursive(tops) => tops.as_slice(),
-        })
-        .find(|top| top.identity == *binder);
-    let target_top = target_top_binding.map_or(
-        PackageTargetTopFact {
-            kind: PackageTargetTopKind::Absent,
-            exportability: PackageTargetTopExportability::Absent,
-            literal_admitted: false,
-        },
-        |top| {
-            let literal_admitted = target.package_literals.contains_key(binder);
-            let kind = match &top.binding.rhs {
-                HeapRhs::Bytes(_) => PackageTargetTopKind::Bytes,
-                HeapRhs::Constructor { .. } => PackageTargetTopKind::Constructor,
-                HeapRhs::Function { .. } => PackageTargetTopKind::Function,
-                HeapRhs::Thunk { .. } => PackageTargetTopKind::Thunk,
-            };
-            let (kind, exportability) = if top.identity.unit == HOME_UNIT {
-                (kind, PackageTargetTopExportability::HomeUnit)
-            } else if top.identity.namespace != "value" {
-                (kind, PackageTargetTopExportability::NotValueNamespace)
-            } else {
-                match &top.binding.rhs {
-                    HeapRhs::Bytes(_) if literal_admitted => {
-                        (kind, PackageTargetTopExportability::Exportable)
-                    }
-                    HeapRhs::Bytes(_) => {
-                        (kind, PackageTargetTopExportability::ByteLiteralNotAdmitted)
-                    }
-                    HeapRhs::Constructor { constructor, .. }
-                        if target
-                            .prepared
-                            .constructors()
-                            .get(constructor.0 as usize)
-                            .is_some_and(|row| row.result_rep == RuntimeRep::LiftedRef) =>
-                    {
-                        (kind, PackageTargetTopExportability::Exportable)
-                    }
-                    HeapRhs::Constructor { .. } => {
-                        (kind, PackageTargetTopExportability::ConstructorNotLifted)
-                    }
-                    HeapRhs::Function { .. } => (kind, PackageTargetTopExportability::Exportable),
-                    HeapRhs::Thunk { .. } => (kind, PackageTargetTopExportability::Exportable),
-                }
-            };
-            PackageTargetTopFact {
-                kind,
-                exportability: if target_exports.contains_key(binder) {
-                    PackageTargetTopExportability::Exportable
-                } else {
-                    exportability
-                },
-                literal_admitted,
-            }
-        },
-    );
-    let retained_export =
-        code_exports
-            .get(binder)
-            .map_or(PackageRetainedExportFact::Missing, |export| {
-                PackageRetainedExportFact::Present {
-                    interface_digest: export.interface_digest,
-                    protected_interface_matches: matches_protected_package_interface(
-                        export,
-                        owner.interface_digest,
-                    ),
-                }
-            });
-
-    CertifiedPackageOwnerDiagnostic {
-        target_globals,
-        target_globals_omitted: globals.len().saturating_sub(limits.target_globals),
-        target_global_count: globals.len(),
-        target_owner_count: target_owners.len(),
-        demanded_groups,
-        demanded_groups_omitted: demanded.len().saturating_sub(selected_group_count),
-        demanded_group_count: demanded.len(),
-        target_top,
-        retained_export,
-        target_interfaces_match: interfaces_match,
-        target_interface_digest: interface_digest,
-    }
-}
 
 /// How many programs may install between major collections before one runs
 /// regardless of byte growth. Bounds the residency test's `programs` count:
@@ -3874,7 +3351,6 @@ impl PreparedEngine {
         registry: Option<Arc<ImageRegistry>>,
     ) -> Result<(Self, ProgramId), PreparedRuntimeError> {
         let entry = prepared.entry();
-        let exports = exportable_code_tops(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
         let image = match &registry {
             Some(registry) => match registry.lookup(&linked) {
@@ -3896,7 +3372,7 @@ impl PreparedEngine {
         let mut engine = Self::from_machine(machine, registry);
         // The first program can conflict only with itself.
         let admitted = engine.admit_program_facts(facts)?;
-        engine.finish_program_install(program, admitted, exports)?;
+        engine.finish_program_install(program, admitted)?;
         Ok((engine, program))
     }
 
@@ -3913,7 +3389,6 @@ impl PreparedEngine {
             installs_since_major: 0,
             old_bytes_at_last_major: 0,
             major_collections: 0,
-            code_exports: BTreeMap::new(),
             registry,
         }
     }
@@ -4128,202 +3603,17 @@ impl PreparedEngine {
     /// An existing export keeps its root. Optional absence is benign only on a
     /// reusable machine; retention failures release this stage's earlier roots
     /// and return the original error without publishing a partial export map.
-    fn stage_code_exports(
-        &mut self,
-        program: ProgramId,
-        exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
-        required: &BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
-        certified_exports: &BTreeMap<SymbolIdentity, [u8; 32]>,
-    ) -> Result<BTreeMap<SymbolIdentity, CodeExport>, PreparedRuntimeError> {
-        let mut staged = BTreeMap::<SymbolIdentity, CodeExport>::new();
-        for (identity, value, entry) in exports {
-            if self.code_exports.contains_key(&identity) {
-                continue;
-            }
-            let handle = match self.machine.retain_export_top(program, value) {
-                Ok(handle) => handle,
-                Err(ExecutionError::MissingEntry(_))
-                    if !required.contains_key(&identity)
-                        && self.machine.disposition() == MachineDisposition::Reusable =>
-                {
-                    continue;
-                }
-                Err(error) => {
-                    for export in staged.into_values() {
-                        assert!(
-                            self.release(export.handle),
-                            "failed export stage retains its earlier root"
-                        );
-                    }
-                    return Err(PreparedRuntimeError::Install(error));
-                }
-            };
-            // Recovered package definitions may have no incoming edge in this
-            // target. Their export provenance comes from this same sealed
-            // target's package closure, before a later target imports them.
-            let interface_digest = certified_exports
-                .get(&identity)
-                .copied()
-                .or_else(|| required.get(&identity).map(|(_, digest)| *digest));
-            staged.insert(
-                identity,
-                CodeExport {
-                    program,
-                    handle,
-                    entry,
-                    interface_digest,
-                },
-            );
-        }
-        Ok(staged)
-    }
-
-    /// Complete an ordinary install at its fallible owner. Its pin protects
-    /// the install-to-first-run gap; no retention runs after publication.
     fn finish_program_install(
         &mut self,
         program: ProgramId,
         admitted: AdmittedProgramFacts,
-        exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
     ) -> Result<(), PreparedRuntimeError> {
         self.machine
             .pin(program)
             .map_err(PreparedRuntimeError::Install)?;
-        let exports =
-            match self.stage_code_exports(program, exports, &BTreeMap::new(), &BTreeMap::new()) {
-                Ok(exports) => exports,
-                Err(error) => {
-                    assert!(self.unpin(program), "refused install retains its pin");
-                    // Integrity failures keep native code/heap custody intact.
-                    // Cleanup must neither collect an unavailable machine nor
-                    // replace the first retention failure with a cleanup failure.
-                    if self.machine.disposition() == MachineDisposition::Reusable {
-                        if let Err(cleanup) = self.quiesce_and_collect_now() {
-                            tracing::warn!(
-                                ?cleanup,
-                                "failed to collect refused export installation"
-                            );
-                        }
-                    }
-                    return Err(error);
-                }
-            };
         self.publish_admitted_program(program, admitted);
-        self.code_exports.extend(exports);
         self.installs_since_major += 1;
         Ok(())
-    }
-
-    /// Every package top this machine already carries, as the extractor
-    /// wants them: `(identity, generation)` pairs whose bodies the next
-    /// turn's projection drops in favour of a declared global.
-    pub(crate) fn code_export_retentions(
-        &self,
-    ) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {
-        self.code_exports
-            .keys()
-            .map(|identity| (identity.clone(), CODE_EXPORT_GENERATION))
-    }
-
-    /// Only live exports with an authenticated package interface may cause a
-    /// checked compiler projection to omit their native definitions. Ordinary
-    /// graph installs also retain package tops, but do not issue that proof.
-    #[cfg(test)]
-    pub(crate) fn protected_code_export_retentions(
-        &self,
-    ) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {
-        self.code_exports.iter().filter_map(|(identity, export)| {
-            (export
-                .interface_digest
-                .is_some_and(|digest| digest != [0; 32])
-                && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle))
-            .then(|| (identity.clone(), CODE_EXPORT_GENERATION))
-        })
-    }
-
-    /// Resolve an advertised immutable export through this engine's exact live
-    /// ledger. Native `ValueHandle` identities are issued process-wide and
-    /// never reused; retaining that identity fences a later install against a
-    /// different machine or a replacement root, even at the same generation.
-    pub(crate) fn retained_code_export_owner(
-        &self,
-        identity: &SymbolIdentity,
-        generation: u64,
-    ) -> Option<ImportOwner> {
-        if generation != CODE_EXPORT_GENERATION {
-            return None;
-        }
-        let export = self.code_exports.get(identity)?;
-        (self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)).then(|| {
-            ImportOwner::CodeExport {
-                binder: identity.clone(),
-                generation,
-                root_id: export.handle.raw().0,
-                interface_digest: export.interface_digest,
-            }
-        })
-    }
-
-    pub(crate) fn retained_package_code_export_owner(
-        &self,
-        identity: &SymbolIdentity,
-        generation: u64,
-        interface_digest: &[u8; 32],
-    ) -> Option<ImportOwner> {
-        let export = self.code_exports.get(identity)?;
-        if !matches_protected_package_interface(export, interface_digest) {
-            return None;
-        }
-        self.retained_code_export_owner(identity, generation)
-    }
-
-    pub(crate) fn retained_code_export_owner_installed_by(
-        &self,
-        identity: &SymbolIdentity,
-        program: ProgramId,
-    ) -> Option<ImportOwner> {
-        (self.code_exports.get(identity)?.program == program)
-            .then(|| self.retained_code_export_owner(identity, CODE_EXPORT_GENERATION))
-            .flatten()
-    }
-
-    fn code_export_import(
-        &self,
-        owner: CodeExportOwnerRef<'_>,
-        declaration: &tidepool_repr::execution_schema::GlobalDecl,
-    ) -> Result<BatchImport, PreparedRuntimeError> {
-        let CodeExportOwnerRef {
-            binder,
-            generation,
-            root_id,
-            interface_digest,
-        } = owner;
-        let export = self
-            .code_exports
-            .get(binder)
-            .filter(|export| {
-                binder == &declaration.identity
-                    && declaration.required_generation == Some(generation)
-                    && generation == CODE_EXPORT_GENERATION
-                    && export.handle.raw().0 == root_id
-                    && export.handle.rep() == declaration.rep
-                    && interface_digest
-                        .is_none_or(|digest| matches_protected_package_interface(export, digest))
-                    && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)
-            })
-            .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.to_owned()))?;
-        // The batch owner checks the declared callable signature and required
-        // evaluatedness against this producer's signature and live native root.
-        Ok(BatchImport::Existing {
-            handle: export.handle,
-            entry_signature: export.entry.clone(),
-        })
-    }
-
-    /// How many package tops later turns can import instead of recompiling.
-    #[must_use]
-    pub fn code_export_count(&self) -> usize {
-        self.code_exports.len()
     }
 
     fn publish_admitted_program(
@@ -4392,7 +3682,6 @@ impl PreparedEngine {
             self.resolve_imports(&prepared, bindings, index, retained_sources)?;
         let resolve_imports_ms = lap();
         let import_count = imports.len();
-        let exports = exportable_code_tops(&prepared);
         let mut facts = ProgramFacts::of(&prepared);
         facts.native_sources.merge(&imported_sources);
         // Site evidence is checked before anything is compiled or published:
@@ -4418,12 +3707,12 @@ impl PreparedEngine {
             imports = import_count,
             "prepared install"
         );
-        self.finish_program_install(program, admitted, exports)?;
+        self.finish_program_install(program, admitted)?;
         Ok(program)
     }
 
     /// Resolve `prepared`'s declared globals against `bindings`/`index` (and
-    /// this machine's package-top exports), one live-handle fact snapshot
+    /// the exact scoped value owner), one live-handle fact snapshot
     /// per import, including its paired runtime source contribution.
     fn resolve_imports(
         &self,
@@ -4440,36 +3729,6 @@ impl PreparedEngine {
             let Some(entry) =
                 resolve_prepared_import(bindings, index, identity, declaration.required_generation)
             else {
-                // Not a session value binding: it may be a package top an
-                // earlier turn already installed and this turn was told to
-                // import (see `code_exports`). Absent from both: left out,
-                // and `link_program` reports the typed `MissingImport`. This
-                // is the legacy ordinary resolver; protected package imports
-                // use exact `ImportOwner::Package` provenance below.
-                if let Some(export) = self.code_exports.get(identity).cloned() {
-                    let evaluated = self
-                        .machine
-                        .handle_is_evaluated(export.handle)
-                        .map_err(PreparedRuntimeError::Install)?;
-                    values.values.insert(
-                        identity.clone(),
-                        ImportedValue {
-                            identity: identity.clone(),
-                            rep: export.handle.rep(),
-                            entry_signature: export.entry,
-                            evaluated,
-                            generation: CODE_EXPORT_GENERATION,
-                        },
-                    );
-                    imports.insert(identity.clone(), export.handle);
-                    sources.merge(
-                        &self
-                            .programs
-                            .get(&export.program)
-                            .expect("resolved native export retains its physical program facts")
-                            .native_sources,
-                    );
-                }
                 continue;
             };
             let BoundValue { handle, .. } = &entry.value;
@@ -4507,838 +3766,14 @@ impl PreparedEngine {
         bindings.register_source_instances_in_domains(scopes, scope, attachments, &self.machine)
     }
 
-    /// Install one executable target and only its newly demanded certified
-    /// source groups in a single native transaction. Existing source imports
-    /// are selected by exact lexical instance leases supplied by the caller;
-    /// this method never searches a machine-global mutable-instance cache.
-    /// The returned source tokens must be admitted to scoped custody before
-    /// the pins on `groups` are released.
-    pub(crate) fn install_certified_turn(
-        &mut self,
-        target: ScopedTargetImage,
-        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        inherited_needed: &[InheritedSourceDemand],
-        inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
-        exact_external: &HashMap<ImportOwner, PreparedHandle>,
-        bindings: &BindingTable,
-        retained_sources: &HashMap<ImportOwner, NativeSourceCustody>,
-    ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        let demanded = target.demanded();
-        let target_owners = target.owners();
-        let mut target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
-            .into_iter()
-            .map(|(identity, value, _)| (identity, value))
-            .collect();
-        // Literal package imports are native image inputs, not managed exports.
-        // Only the sealed target's admitted literal tokens select these rows.
-        target_exports.extend(
-            target
-                .prepared
-                .bindings()
-                .iter()
-                .flat_map(|group| match group {
-                    Group::NonRecursive(top) => std::slice::from_ref(top),
-                    Group::Recursive(tops) => tops.as_slice(),
-                })
-                .filter(|top| {
-                    top.identity.unit != HOME_UNIT
-                        && top.identity.namespace == "value"
-                        && matches!(top.binding.rhs, HeapRhs::Bytes(_))
-                        && target.package_literals.contains_key(&top.identity)
-                })
-                .map(|top| (top.identity.clone(), top.binding.id)),
-        );
-        let mut target_packages = BTreeMap::new();
-        let matches_target = target.package_interfaces.matches_target(&target.prepared);
-        let certified_exports = target_exports
-            .keys()
-            .filter_map(|binder| {
-                matches_target
-                    .then(|| {
-                        target
-                            .package_interfaces
-                            .interface_digest(&binder.unit, &binder.module)
-                    })
-                    .flatten()
-                    .filter(|digest| *digest != [0; 32])
-                    .map(|digest| (binder.clone(), digest))
-            })
-            .collect();
-        for owner in target_owners.iter().chain(
-            demanded
-                .iter()
-                .flat_map(|selected| selected.group().imports()),
-        ) {
-            let ImportOwner::Package {
-                unit,
-                module,
-                binder,
-                interface_digest,
-            } = owner
-            else {
-                continue;
-            };
-            if *interface_digest == [0; 32] {
-                return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
-            }
-            if let Some(export) = self.code_exports.get(binder) {
-                if !matches_protected_package_interface(export, interface_digest) {
-                    return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                        owner: owner.clone(),
-                        evidence: CertifiedPackageOwnerEvidence::RetainedExport {
-                            interface_digest: export.interface_digest,
-                        },
-                    });
-                }
-                continue;
-            }
-            let target_definition = target_exports.get(binder).copied();
-            let target_interface_digest = target.package_interfaces.interface_digest(unit, module);
-            let value = target_definition
-                .filter(|_| {
-                    binder.unit == *unit
-                        && binder.module == *module
-                        && matches_target
-                        && target_interface_digest == Some(*interface_digest)
-                })
-                .ok_or_else(|| PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                    owner: owner.clone(),
-                    evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
-                        present: target_definition.is_some(),
-                        interfaces_match: matches_target,
-                        interface_digest: target_interface_digest,
-                        diagnostic: Some(Box::new(certified_package_owner_diagnostic(
-                            &target,
-                            target_owners,
-                            &demanded,
-                            PackageOwnerRef {
-                                unit,
-                                module,
-                                binder,
-                                interface_digest,
-                            },
-                            &target_exports,
-                            &self.code_exports,
-                            matches_target,
-                            target_interface_digest,
-                            PackageOwnerDiagnosticLimits::default(),
-                        ))),
-                    },
-                })?;
-            if let Some(previous) =
-                target_packages.insert(binder.clone(), (value, *interface_digest))
-            {
-                if previous != (value, *interface_digest) {
-                    return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                        owner: owner.clone(),
-                        evidence: CertifiedPackageOwnerEvidence::ConflictingTargetDefinition {
-                            previous_binding: previous.0,
-                            requested_binding: value,
-                            previous_interface_digest: previous.1,
-                            requested_interface_digest: *interface_digest,
-                        },
-                    });
-                }
-            }
-        }
-        self.install_certified_turn_admitted(
-            target,
-            source_evidence,
-            inherited_needed,
-            inherited,
-            exact_external,
-            bindings,
-            retained_sources,
-            target_packages,
-            certified_exports,
-        )
-    }
-
-    // The only production caller supplies package tops admitted against the
-    // protected target/interface certificate above. Native installation still
-    // checks their full identity, representation and callable signature.
-    fn install_certified_turn_admitted(
-        &mut self,
-        mut target: ScopedTargetImage,
-        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        inherited_needed: &[InheritedSourceDemand],
-        inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
-        exact_external: &HashMap<ImportOwner, PreparedHandle>,
-        bindings: &BindingTable,
-        retained_sources: &HashMap<ImportOwner, NativeSourceCustody>,
-        target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
-        certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
-    ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        let demanded = std::mem::take(&mut target.demanded);
-        let target_owners = target.owners();
-        struct DiagnosticDigest<'a>(&'a [u8]);
-        impl std::fmt::Display for DiagnosticDigest<'_> {
-            fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                for byte in self.0 {
-                    write!(output, "{byte:02x}")?;
-                }
-                Ok(())
-            }
-        }
-        fn observe_source_import(
-            owner: &CachedHomeOwner,
-            ordinal: u32,
-            key: &ScopedSourceBinder,
-            existing: Option<&SourceInstanceLease>,
-            consumer_image: u64,
-            target_image: u64,
-        ) {
-            tracing::debug!(target: "tidepool_runtime::prepared",
-                group_unit = owner.unit, group_module = owner.module,
-                group_module_version = %DiagnosticDigest(&owner.module_version.0),
-                group_iface_sha256 = %DiagnosticDigest(&owner.skinny_iface_sha256),
-                group_product_sha256 = %DiagnosticDigest(&owner.product_sha256),
-                original_ordinal = ordinal, source_domain = ?key.domain,
-                source_binder = ?key.source.binder,
-                source_instance = ?existing.map(SourceInstanceLease::instance),
-                existing_source = existing.is_some(),
-                consumer_image_instance = consumer_image, target_image_instance = target_image,
-                "certified source import resolved");
-        }
-        if !target_owners_match(&target.prepared, target_owners) {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-        }
-
-        let mut source = BTreeMap::<ScopedSourceBinder, (usize, ValueId)>::new();
-        for (index, selected) in demanded.iter().enumerate() {
-            let group = selected.group();
-            for (binder, id) in group.exported_values() {
-                let key = ScopedSourceBinder {
-                    domain: selected.domain(),
-                    source: SourceBinder {
-                        version: group.owner().module_version.clone(),
-                        binder: binder.clone(),
-                    },
-                };
-                if inherited.contains_key(&key) || source.insert(key.clone(), (index, id)).is_some()
-                {
-                    return Err(DemandError::DuplicateBinder(key.source).into());
-                }
-            }
-        }
-
-        let mut late_sources = BTreeMap::new();
-        for requested in inherited_needed {
-            let key = ScopedSourceBinder {
-                domain: requested.domain(),
-                source: requested.binder().clone(),
-            };
-            if inherited.contains_key(&key)
-                || source.contains_key(&key)
-                || late_sources.insert(key.clone(), requested).is_some()
-            {
-                return Err(DemandError::DuplicateBinder(key.source).into());
-            }
-        }
-
-        let mut pending = target_owners
-            .iter()
-            .filter_map(|owner| match owner {
-                ImportOwner::Source { version, binder } => {
-                    Some(target.qualified_source(&SourceBinder {
-                        version: version.clone(),
-                        binder: binder.clone(),
-                    }))
-                }
-                ImportOwner::Retained { .. }
-                | ImportOwner::CodeExport { .. }
-                | ImportOwner::Package { .. } => None,
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut reachable = BTreeSet::new();
-        let mut needed_late = BTreeSet::new();
-        while let Some(binder) = pending.pop() {
-            if let Some(&(index, _)) = source.get(&binder) {
-                if reachable.insert(index) {
-                    pending.extend(
-                        demanded[index]
-                            .group()
-                            .imports()
-                            .iter()
-                            .filter_map(|owner| match owner {
-                                ImportOwner::Source { version, binder } => {
-                                    Some(demanded[index].qualified_source(&SourceBinder {
-                                        version: version.clone(),
-                                        binder: binder.clone(),
-                                    }))
-                                }
-                                ImportOwner::Retained { .. }
-                                | ImportOwner::CodeExport { .. }
-                                | ImportOwner::Package { .. } => None,
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                    );
-                }
-            } else if late_sources.contains_key(&binder) {
-                needed_late.insert(binder);
-            } else if !inherited.contains_key(&binder) {
-                return Err(DemandError::MissingSource(binder.source).into());
-            }
-        }
-        if reachable.len() != demanded.len() || needed_late.len() != late_sources.len() {
-            return Err(PreparedRuntimeError::UnreachableCertifiedGroup);
-        }
-
-        for key in target_owners
-            .iter()
-            .filter_map(|owner| match owner {
-                ImportOwner::Source { version, binder } => {
-                    Some(target.qualified_source(&SourceBinder {
-                        version: version.clone(),
-                        binder: binder.clone(),
-                    }))
-                }
-                _ => None,
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .chain(
-                demanded
-                    .iter()
-                    .flat_map(|selected| {
-                        selected
-                            .group()
-                            .imports()
-                            .iter()
-                            .filter_map(|owner| match owner {
-                                ImportOwner::Source { version, binder } => {
-                                    Some(selected.qualified_source(&SourceBinder {
-                                        version: version.clone(),
-                                        binder: binder.clone(),
-                                    }))
-                                }
-                                _ => None,
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        {
-            let expected = source_evidence.get(&key.source).ok_or_else(|| {
-                PreparedRuntimeError::InvalidCertifiedSourceOwner(key.source.clone())
-            })?;
-            let actual = if let Some(&(index, _)) = source.get(&key) {
-                let group = demanded[index].group();
-                (group.owner(), group.original_ordinal())
-            } else if let Some(lease) = inherited.get(&key) {
-                (lease.owner(), lease.original_ordinal())
-            } else if let Some(requested) = late_sources.get(&key) {
-                (requested.owner(), requested.original_ordinal())
-            } else {
-                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
-                    key.source,
-                ));
-            };
-            if actual.0 != &expected.0 || actual.1 != expected.1 {
-                return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
-                    key.source,
-                ));
-            }
-        }
-
-        let mut late_leases = BTreeMap::new();
-        let mut late_attachments = Vec::<NativeInstanceAttachment>::new();
-        let mut late_roots = BTreeMap::<
-            (
-                tidepool_codegen::prepared_program::GroupInstanceId,
-                SourceBinder,
-            ),
-            usize,
-        >::new();
-        let mut new_late_roots = Vec::<NativeInstanceLease>::new();
-        for (key, requested) in late_sources {
-            let physical = (requested.anchor().instance(), requested.binder().clone());
-            let existing = bindings.retained_source_sibling_attachment(requested);
-            let new_root = existing.is_none() && !late_roots.contains_key(&physical);
-            let issued = if let Some(existing) = existing {
-                Ok(existing)
-            } else if let Some(index) = late_roots.get(&physical) {
-                self.machine
-                    .share_certified_source_attachment(requested, &late_attachments[*index])
-            } else {
-                self.machine.retain_certified_source_attachment(requested)
-            };
-            let attachment = match issued {
-                Ok(attachment) => attachment,
-                Err(error) => {
-                    for lease in new_late_roots {
-                        assert!(
-                            self.release(lease.handle()),
-                            "staged sibling source root remains live"
-                        );
-                    }
-                    return Err(PreparedRuntimeError::Install(error));
-                }
-            };
-            let lease = attachment.lease().clone();
-            if new_root {
-                new_late_roots.push(lease.clone());
-            }
-            late_roots.entry(physical).or_insert(late_attachments.len());
-            let NativeInstanceLease::Home(home) = lease else {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
-            };
-            late_leases.insert(key, home);
-            late_attachments.push(attachment);
-        }
-
-        let result = (|| -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-            let mut facts: Vec<_> = demanded
-                .iter()
-                .map(|selected| {
-                    let mut facts = ProgramFacts::from_image(selected.image(), None);
-                    facts.native_sources = selected
-                        .sources
-                        .select(facts.sites.iter().map(|site| site.site));
-                    facts.native_product = selected
-                        .proof
-                        .clone()
-                        .map(|product| NativeProductProof::Source { _product: product });
-                    facts
-                })
-                .collect();
-            facts.push(ProgramFacts::from_image(
-                &target.image,
-                Some(target.prepared.entry()),
-            ));
-            let target_facts = facts.last_mut().expect("target facts are final");
-            target_facts.native_sources = target
-                .sources
-                .select(target_facts.sites.iter().map(|site| site.site));
-            // A reduced target need not redeclare the Settled constructors:
-            // it may reuse the exact original definitions already installed
-            // by an earlier target or one of this batch's source groups.
-            // ProgramFacts still carries the constructor identities used by
-            // the decoder, and a conflicting host-id pair is never accepted.
-            let settled = SettledIds::from_facts(self.programs.values().chain(facts.iter()))?;
-            if let Some(target_facts) = facts.last_mut() {
-                target_facts.settled = settled;
-            }
-            let mut admitted = self.plan_batch_evidence(facts)?;
-            // A target can contain incidental package tops absent from its
-            // selected canonical interfaces. Keep those definitions local;
-            // their presence cannot issue a retained package import later.
-            let exports: Vec<_> = exportable_code_tops(&target.prepared)
-                .into_iter()
-                .filter(|(identity, _, _)| {
-                    certified_exports.contains_key(identity)
-                        || target_packages.contains_key(identity)
-                })
-                .collect();
-            let mut programs = Vec::with_capacity(demanded.len() + 1);
-            let mut package_updates = BTreeMap::<SymbolIdentity, [u8; 32]>::new();
-            let mut source_needed = BTreeSet::<ScopedSourceBinder>::new();
-            let observe_imports =
-                tracing::enabled!(target: "tidepool_runtime::prepared", tracing::Level::DEBUG);
-            let mut source_imports_resolved = 0u64;
-            let target_image_instance = target.image.image_instance_id();
-
-            let mut direct_sources = Vec::with_capacity(demanded.len() + 1);
-            let mut append = |image: Arc<CompiledProgram>,
-                              globals: &[tidepool_repr::execution_schema::GlobalDecl],
-                              owners: &[ImportOwner],
-                              source_plan: &dyn Fn(
-                &SourceBinder,
-            )
-                -> Result<ScopedSourceBinder, DemandError>|
-             -> Result<(), PreparedRuntimeError> {
-                let mut imports = Vec::with_capacity(owners.len());
-                let mut imported_sources = NativeSourceCustody::default();
-                for (index, (declaration, owner)) in globals.iter().zip(owners).enumerate() {
-                    let import = match owner {
-                        ImportOwner::Source { version, binder } => {
-                            let binder_key = SourceBinder {
-                                version: version.clone(),
-                                binder: binder.clone(),
-                            };
-                            let key = source_plan(&binder_key)?;
-                            if let Some(&(group, binding)) = source.get(&key) {
-                                if observe_imports {
-                                    let selected = demanded[group].group();
-                                    observe_source_import(
-                                        selected.owner(),
-                                        selected.original_ordinal(),
-                                        &key,
-                                        None,
-                                        image.image_instance_id(),
-                                        target_image_instance,
-                                    );
-                                    source_imports_resolved += 1;
-                                }
-                                if image.authenticated_source_literal(GlobalId(index as u32))
-                                    != Some(&key.source)
-                                {
-                                    source_needed.insert(key);
-                                }
-                                BatchImport::Source { group, binding }
-                            } else {
-                                let lease = inherited
-                                    .get(&key)
-                                    .or_else(|| late_leases.get(&key))
-                                    .filter(|lease| {
-                                        lease.binder() == &key.source
-                                            && lease.owner().module_version == *version
-                                            && lease.owner().unit == binder.unit
-                                            && lease.owner().module == binder.module
-                                    })
-                                    .ok_or_else(|| {
-                                        DemandError::MissingSource(key.source.clone())
-                                    })?;
-                                self.machine
-                                    .handle_is_evaluated(lease.handle())
-                                    .map_err(PreparedRuntimeError::Install)?;
-                                if observe_imports {
-                                    observe_source_import(
-                                        lease.owner(),
-                                        lease.original_ordinal(),
-                                        &key,
-                                        Some(lease),
-                                        image.image_instance_id(),
-                                        target_image_instance,
-                                    );
-                                    source_imports_resolved += 1;
-                                }
-                                BatchImport::Existing {
-                                    handle: lease.handle(),
-                                    entry_signature: lease.entry_signature().cloned(),
-                                }
-                            }
-                        }
-                        ImportOwner::Retained { id, generation } => {
-                            let entry = bindings.get(*id).ok_or_else(|| {
-                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                            })?;
-                            let handle = exact_external.get(owner).copied().ok_or_else(|| {
-                                PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
-                            })?;
-                            if entry.module.gen().0 != *generation
-                                || entry.value.identity != declaration.identity
-                                || entry.value.handle != handle
-                            {
-                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                    owner.clone(),
-                                ));
-                            }
-                            BatchImport::Existing {
-                                handle,
-                                entry_signature: None,
-                            }
-                        }
-                        ImportOwner::CodeExport {
-                            binder,
-                            generation,
-                            root_id,
-                            interface_digest,
-                        } => self.code_export_import(
-                            CodeExportOwnerRef {
-                                binder,
-                                generation: *generation,
-                                root_id: *root_id,
-                                interface_digest: interface_digest.as_ref(),
-                            },
-                            declaration,
-                        )?,
-                        ImportOwner::Package {
-                            unit,
-                            module,
-                            binder,
-                            interface_digest,
-                        } => {
-                            if *interface_digest == [0; 32]
-                                || declaration.identity != *binder
-                                || binder.unit != *unit
-                                || binder.module != *module
-                            {
-                                return Err(
-                                    PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                                        owner: owner.clone(),
-                                        evidence:
-                                            CertifiedPackageOwnerEvidence::DeclarationMismatch {
-                                                declaration: declaration.identity.clone(),
-                                            },
-                                    },
-                                );
-                            }
-                            let import = if let Some(export) = self.code_exports.get(binder) {
-                                if !matches_protected_package_interface(export, interface_digest) {
-                                    return Err(
-                                        PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                                            owner: owner.clone(),
-                                            evidence:
-                                                CertifiedPackageOwnerEvidence::RetainedExport {
-                                                    interface_digest: export.interface_digest,
-                                                },
-                                        },
-                                    );
-                                }
-                                BatchImport::Existing {
-                                    handle: export.handle,
-                                    entry_signature: export.entry.clone(),
-                                }
-                            } else {
-                                let &(binding, digest) = target_packages
-                                    .get(binder)
-                                    .filter(|(_, digest)| digest == interface_digest)
-                                    .ok_or_else(|| {
-                                        PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                                            owner: owner.clone(),
-                                            evidence:
-                                                CertifiedPackageOwnerEvidence::TargetDefinition {
-                                                    present: exports
-                                                        .iter()
-                                                        .any(|(identity, _, _)| identity == binder),
-                                                    interfaces_match: target
-                                                        .package_interfaces
-                                                        .matches_target(&target.prepared),
-                                                    interface_digest: target
-                                                        .package_interfaces
-                                                        .interface_digest(unit, module),
-                                                    diagnostic: None,
-                                                },
-                                        }
-                                    })?;
-                                debug_assert_eq!(digest, *interface_digest);
-                                BatchImport::Source {
-                                    group: demanded.len(),
-                                    binding,
-                                }
-                            };
-                            if !target.package_literals.contains_key(binder) {
-                                if let Some(previous) =
-                                    package_updates.insert(binder.clone(), *interface_digest)
-                                {
-                                    if previous != *interface_digest {
-                                        return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
-                                            owner: owner.clone(),
-                                            evidence: CertifiedPackageOwnerEvidence::ConflictingPackageProof {
-                                                previous_interface_digest: previous,
-                                            },
-                                        });
-                                    }
-                                }
-                            }
-                            import
-                        }
-                    };
-                    // Literal imports cannot carry executable source obligations.
-                    if image.import_is_literal(GlobalId(index as u32)) == Some(false) {
-                        match owner {
-                            ImportOwner::Retained { id, .. } => {
-                                let sources = retained_sources.get(owner).ok_or(
-                                    PreparedRuntimeError::MissingRetainedSource { id: *id },
-                                )?;
-                                imported_sources.merge(sources);
-                            }
-                            ImportOwner::Source { version, binder } => {
-                                let key = source_plan(&SourceBinder {
-                                    version: version.clone(),
-                                    binder: binder.clone(),
-                                })?;
-                                if !source.contains_key(&key) {
-                                    let lease = inherited
-                                        .get(&key)
-                                        .or_else(|| late_leases.get(&key))
-                                        .expect("validated existing source remains acquired");
-                                    let facts =
-                                        self.programs.get(&lease.instance().program()).expect(
-                                            "live source instance retains admitted program facts",
-                                        );
-                                    imported_sources.merge(&facts.native_sources);
-                                }
-                            }
-                            ImportOwner::CodeExport { binder, .. }
-                            | ImportOwner::Package { binder, .. } => {
-                                if let BatchImport::Existing { .. } = &import {
-                                    let export = self
-                                        .code_exports
-                                        .get(binder)
-                                        .expect("validated export remains installed");
-                                    let facts = self
-                                        .programs
-                                        .get(&export.program)
-                                        .expect("live export retains admitted program facts");
-                                    imported_sources.merge(&facts.native_sources);
-                                }
-                            }
-                        }
-                    }
-                    imports.push(import);
-                }
-                direct_sources.push(imported_sources);
-                programs.push(BatchProgram { image, imports });
-                Ok(())
-            };
-            for selected in &demanded {
-                append(
-                    Arc::clone(selected.image()),
-                    selected.group().definitions().globals(),
-                    selected.group().imports(),
-                    &|source| selected.qualified_source(source),
-                )?;
-            }
-            append(
-                Arc::clone(&target.image),
-                target.prepared.globals(),
-                target_owners,
-                &|source| target.qualified_source(source),
-            )?;
-            drop(append);
-            if observe_imports {
-                tracing::debug!(target: "tidepool_runtime::prepared",
-                    target_image_instance, source_imports_resolved,
-                    resolved_programs = programs.len(),
-                    "certified source import resolution complete");
-            }
-            let requests = source_needed
-                .iter()
-                .map(|binder| {
-                    let &(group, value) = source
-                        .get(binder)
-                        .expect("source edge selected an in-batch binder");
-                    let proof = demanded[group]
-                        .proof
-                        .as_ref()
-                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-                    let binding = proof.binding();
-                    let key = tidepool_codegen::prepared_program::NativeHomeBinding {
-                        issuer: tidepool_codegen::prepared_program::NativeArtifactBinding {
-                            artifact: binding.binding.artifact().0,
-                            selection: binding.binding.selection().0,
-                        },
-                        original_ordinal: binding.original_ordinal,
-                    };
-                    BatchLeaseRequest::for_home(
-                        group,
-                        &demanded[group].native,
-                        key,
-                        binder.domain,
-                        value,
-                    )
-                    .map_err(PreparedRuntimeError::Install)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let installed = self
-                .machine
-                .install_shared_batch_with_leases(programs, requests)
-                .map_err(|mut error| {
-                    if let ExecutionError::BatchImportContract(evidence) = &mut error {
-                        let owners = if evidence.program == demanded.len() {
-                            Some(target_owners)
-                        } else {
-                            demanded
-                                .get(evidence.program)
-                                .map(|selected| selected.group().imports())
-                        };
-                        evidence.owner = owners
-                            .and_then(|owners| owners.get(evidence.import_position))
-                            .cloned();
-                    }
-                    PreparedRuntimeError::Install(error)
-                })?;
-            assert_eq!(installed.programs.len(), demanded.len() + 1);
-            assert_eq!(installed.causal_members.len(), admitted.len());
-            for (sources, facts) in direct_sources.iter_mut().zip(&admitted) {
-                sources.merge(&facts.facts.native_sources);
-            }
-            for (facts, members) in admitted.iter_mut().zip(&installed.causal_members) {
-                let mut sources = NativeSourceCustody::default();
-                for member in members {
-                    sources.merge(&direct_sources[*member]);
-                }
-                facts.facts.native_sources = sources;
-            }
-            let native_sources = admitted
-                .last()
-                .expect("target facts are final")
-                .facts
-                .native_sources
-                .clone();
-            let target_id = *installed
-                .programs
-                .last()
-                .expect("target is always the final batch candidate");
-            for id in installed.programs.iter().copied() {
-                self.machine
-                    .pin(id)
-                    .expect("batch returned installed program");
-            }
-            let mut staged = CertifiedTurnInstall {
-                native_sources,
-                target: target_id,
-                groups: installed.programs[..installed.programs.len() - 1].to_vec(),
-                domain_leases: installed.source_attachments,
-                leases: installed.leases,
-                admitted,
-                package_updates,
-                exports: BTreeMap::new(),
-            };
-            staged.exports = match self.stage_code_exports(
-                target_id,
-                exports,
-                &target_packages,
-                &certified_exports,
-            ) {
-                Ok(exports) => exports,
-                Err(error) => {
-                    let tokens = std::mem::take(&mut staged.leases);
-                    if let Err(cleanup) = self.abort_certified_turn(staged, tokens) {
-                        tracing::warn!(?cleanup, "failed to collect refused export batch");
-                    }
-                    return Err(error);
-                }
-            };
-            Ok(staged)
-        })();
-        match result {
-            Ok(mut staged) => {
-                // The producer appends demanded groups in order and the target
-                // last. Check cardinality before associating diagnostic rows;
-                // a zip alone would silently drop a missing batch result.
-                assert_eq!(staged.groups.len(), demanded.len());
-                for (selected, program) in demanded.iter().zip(&staged.groups) {
-                    tracing::debug!(target: "tidepool_runtime::prepared",
-                        group_owner = ?selected.group().owner(),
-                        original_ordinal = selected.group().original_ordinal(),
-                        group_domain = ?selected.domain(),
-                        image_instance = selected.image().image_instance_id(),
-                        program = ?program,
-                        "certified group staged");
-                }
-                staged.domain_leases.extend(late_attachments);
-                staged.leases.extend(new_late_roots);
-                Ok(staged)
-            }
-            Err(error) => {
-                for lease in new_late_roots {
-                    assert!(
-                        self.release(lease.handle()),
-                        "failed install retains sibling source root"
-                    );
-                }
-                Err(error)
-            }
-        }
-    }
-
     /// Publish the staged native batch only after scope custody accepted all
     /// source lease tokens. Its machine programs are pinned but invisible to
-    /// the session's facts, site and package-export ledgers until this call.
+    /// the session's facts, site ledgers until this call.
     pub(crate) fn commit_certified_turn(&mut self, staged: CertifiedTurnInstall) -> ProgramId {
         assert!(
             staged.leases.is_empty(),
             "source leases must enter scope custody"
         );
-        self.code_exports.extend(staged.exports);
-        for (binder, digest) in staged.package_updates {
-            self.code_exports
-                .get_mut(&binder)
-                .expect("preflighted package export remains installed")
-                .interface_digest = Some(digest);
-        }
         let programs = staged
             .groups
             .iter()
@@ -5375,12 +3810,6 @@ impl PreparedEngine {
             assert!(
                 self.release(token.handle()),
                 "rejected source token remains rooted"
-            );
-        }
-        for export in staged.exports.into_values() {
-            assert!(
-                self.release(export.handle),
-                "unpublished export remains rooted"
             );
         }
         for program in staged

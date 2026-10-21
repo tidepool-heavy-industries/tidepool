@@ -15,12 +15,14 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
-    session_var_id, ImageRegistry, InheritedSourceDemand, Parcel, PreparedHandle, PreparedOuter,
-    PreparedResult, ProgramId, SourceBinder,
+    session_var_id, ImageRegistry, Parcel, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
 };
+#[cfg(test)]
+use tidepool_codegen::prepared_program::{InheritedSourceDemand, SourceBinder};
+#[cfg(test)]
+use tidepool_repr::execution_schema::CachedHomeOwner;
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity,
-    TypeIdentity,
+    ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity, TypeIdentity,
 };
 
 use super::admission::CheckedTurnCompletion;
@@ -185,6 +187,21 @@ impl CapturedSourceOrigin {
     pub(super) fn for_closed_definition(
         &self,
         definition: super::prepared::ClosedNativeDefinition<'_>,
+    ) -> NativeSourceCustody {
+        NativeSourceCustody {
+            sites: Arc::new(
+                definition
+                    .sites()
+                    .iter()
+                    .map(|site| (site.site, RuntimeSourceOrigin::Known(self.0.clone())))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(super) fn for_closed_package_definition(
+        &self,
+        definition: super::prepared::ClosedPackageDefinition<'_>,
     ) -> NativeSourceCustody {
         NativeSourceCustody {
             sites: Arc::new(
@@ -3193,7 +3210,7 @@ struct AdmittedTurnCode<'a> {
 
 enum NativeTurnAdmission {
     Portable,
-    Scoped(super::persistent::ResolvedCertifiedTurn),
+    Native(super::persistent::ResolvedNativeTurn),
     Closed {
         plan: Arc<super::prepared::ClosedInstantiationPlan>,
         origin: CapturedSourceOrigin,
@@ -4753,33 +4770,6 @@ where
             .install_prepared_with_sources(prepared, Some(metadata), &retained_sources)
     }
 
-    /// Admit one compiler-certified target and its demanded source closure
-    /// against a single scope snapshot under this session's machine checkout.
-    /// The persistent registrar owns every new source root before the target
-    /// can be run; failed registration rolls the native batch back.
-    fn install_certified_turn_in(
-        &mut self,
-        scope: ScopeId,
-        metadata: &DataConTable,
-        target: super::prepared::ScopedTargetImage,
-        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        inherited_needed: &[InheritedSourceDemand],
-    ) -> Result<super::persistent::InstalledCertifiedTurn, PreparedRuntimeError> {
-        let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-            self.binding_provenance
-                .get(&input.id().raw())
-                .map(|provenance| provenance.source_custody())
-        };
-        self.state.install_certified_turn_in(
-            scope,
-            metadata,
-            target,
-            source_evidence,
-            inherited_needed,
-            &retained_sources,
-        )
-    }
-
     fn retire_failed_turn_source_instances(
         &mut self,
         scope: ScopeId,
@@ -5510,13 +5500,6 @@ where
     #[must_use]
     pub fn codegen_totals(&self) -> Option<(u64, u64)> {
         self.state.codegen_totals()
-    }
-
-    /// How many package tops this session's machine can hand a later turn
-    /// instead of recompiling; `None` before bootstrap.
-    #[must_use]
-    pub fn code_export_count(&self) -> Option<usize> {
-        self.state.code_export_count()
     }
 
     /// Prepared old-space bytes as of the last successful between-turn
@@ -7073,30 +7056,13 @@ where
         let table = code
             .table()
             .with_json_layout(json_runtime_layout_optional(code.prepared()));
-        let (_constructor_table, _sites, prepared, certification) = code.into_parts();
-        let prepared = Arc::unwrap_or_clone(prepared);
-        let (program, source_keys) = if let Some(certification) = certification.as_ref() {
-            let resolved = self
-                .state
-                .resolve_certification_in(scope, &prepared, certification)?;
-            let registry = self.state.certified_image_registry();
-            let target =
-                super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
-            let installed = self.install_certified_turn_in(
-                scope,
-                &table,
-                target,
-                &resolved.source_evidence,
-                &resolved.inherited_needed,
-            )?;
-            let (program, source_keys, _native_sources) = installed.into_parts();
-            (program, source_keys)
-        } else {
-            (
-                self.install_prepared_with_sources(prepared, &table)?.0,
-                Default::default(),
-            )
-        };
+        let admission =
+            self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?;
+        let provenance = self.provenance_for(&admission)?;
+        let installed =
+            self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
+        let program = installed.program;
+        let source_keys = installed.source_keys;
         let realm = self.run_context.resource_scope;
         let mounted = (|| {
             let handle = {
@@ -7612,6 +7578,16 @@ where
         code: TurnCode<'a>,
         authority: TurnInstallationAdmission<'_>,
     ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
+        self.admit_turn_code_with_images_in(scope, code, authority, None)
+    }
+
+    fn admit_turn_code_with_images_in<'a>(
+        &mut self,
+        scope: ScopeId,
+        code: TurnCode<'a>,
+        authority: TurnInstallationAdmission<'_>,
+        images: Option<&super::prepared::NativeImageBundle>,
+    ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
         match authority {
             TurnInstallationAdmission::Compilation => {
                 refuse_generic_activation_preview_install(code.certification())?;
@@ -7628,44 +7604,36 @@ where
                 Self::validate_activation_preview_code(spent.admission(), &code)?;
             }
         }
-        // A checked cell's actual settled prefix owns its installation origin.
-        // Closed immutable code can be instantiated under that source without
-        // borrowing live package exports from a prior source or domain.
-        if let Some(certification) = code.certification() {
-            if let Some(prefix) = certification.checked_prefix() {
-                if !certification
-                    .checked_execution()
-                    .is_some_and(|execution| execution.matches_target(code.prepared()))
-                {
-                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
-                }
-                let registry = self.state.certified_image_registry();
-                if let Some(plan) =
-                    super::prepared::ClosedInstantiationPlan::prepare_code(&code, &registry)?
-                {
-                    let origin = prefix.captured_source_origin().clone();
-                    return Ok(AdmittedTurnCode {
-                        code,
-                        scope,
-                        resolved: NativeTurnAdmission::Closed {
-                            plan: Arc::new(plan),
-                            origin,
-                        },
-                    });
-                }
+        let resolved = if code.certification().is_some() {
+            let plan = match images {
+                Some(images) => images.native_plan(&code)?,
+                None => Arc::new(super::prepared::NativeInstantiationPlan::prepare_code(
+                    &code,
+                    &self.state.certified_image_registry(),
+                )?),
+            };
+            let provenance = &self.binding_provenance;
+            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+                provenance
+                    .get(&input.id().raw())
+                    .map(|owner| owner.source_custody())
+            };
+            NativeTurnAdmission::Native(self.state.resolve_native_turn_in(
+                scope,
+                &code,
+                plan,
+                &retained_sources,
+            )?)
+        } else {
+            if images.is_some() {
+                return Err(PreparedRuntimeError::MissingPreparedNativeImage.into());
             }
-        }
-        let resolved = code
-            .certification()
-            .map(|certification| {
-                self.state
-                    .resolve_certification_in(scope, code.prepared(), certification)
-            })
-            .transpose()?;
+            NativeTurnAdmission::Portable
+        };
         Ok(AdmittedTurnCode {
             code,
             scope,
-            resolved: resolved.map_or(NativeTurnAdmission::Portable, NativeTurnAdmission::Scoped),
+            resolved,
         })
     }
 
@@ -7686,14 +7654,11 @@ where
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
         let mut retained = Vec::new();
-        if let NativeTurnAdmission::Scoped(resolved) = &admission.resolved {
-            let imports = resolved.target_owners.iter().chain(
-                resolved
-                    .groups
-                    .iter()
-                    .flat_map(|group| group.group().original().imports()),
-            );
-            retained = retained_import_metadata(imports, &self.binding_provenance);
+        if let NativeTurnAdmission::Native(resolved) = &admission.resolved {
+            retained = resolved
+                .retained_ids()
+                .filter_map(|id| self.binding_provenance.get(&id.raw()))
+                .collect();
         }
         {
             let provenance = Arc::make_mut(&mut provenance);
@@ -7893,10 +7858,11 @@ where
         // admission belongs to the separately issued detached scope below.
         // Binding claimed the admission exactly once; neither provenance
         // admission nor lease validation spends it.
-        let provenance_admission = self.admit_turn_code_in(
+        let provenance_admission = self.admit_turn_code_with_images_in(
             self.run_context.lexical_scope,
             renderer.compiled.code(),
             TurnInstallationAdmission::ActivationPreviewFresh(admission),
+            Some(images),
         )?;
         let provenance = self.provenance_for(&provenance_admission)?;
         drop(provenance_admission);
@@ -7917,10 +7883,11 @@ where
         // lease check. A refusal after this point leaves the admission spent;
         // that is fail-closed and cannot be resealed.
         let spent = bound.try_consume()?;
-        let execution_admission = self.admit_turn_code_in(
+        let execution_admission = self.admit_turn_code_with_images_in(
             admission.scope_lease.scope(),
             renderer.compiled.code(),
             TurnInstallationAdmission::ActivationPreviewSpent(&spent),
+            Some(images),
         )?;
         self.run_prepared_for_purpose(
             execution_admission,
@@ -8124,47 +8091,15 @@ where
                     .install_closed_turn_in(scope, &metadata, &plan, &origin)?,
             }
             .into_parts(),
-            NativeTurnAdmission::Scoped(resolved) => {
-                let prepared = Arc::unwrap_or_clone(prepared);
-                let target = match images {
-                    TurnImageAcquisition::Ready { bundle } => {
-                        super::prepared::ScopedTargetImage::lookup_scoped(
-                            prepared, &resolved, bundle,
-                        )?
-                    }
-                    TurnImageAcquisition::Compile => {
-                        let registry = self.state.certified_image_registry();
-                        super::prepared::ScopedTargetImage::compile_scoped(
-                            prepared, &resolved, &registry,
-                        )?
-                    }
-                };
-                let retained_sources =
-                    |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                        self.binding_provenance
-                            .get(&input.id().raw())
-                            .map(|p| p.source_custody())
-                    };
-                match checked {
-                    Some(checked) => checked.install_certified_turn_in(
-                        &mut self.state,
-                        scope,
-                        &metadata,
-                        target,
-                        &resolved.source_evidence,
-                        &resolved.inherited_needed,
-                        &retained_sources,
-                    )?,
-                    None => self.install_certified_turn_in(
-                        scope,
-                        &metadata,
-                        target,
-                        &resolved.source_evidence,
-                        &resolved.inherited_needed,
-                    )?,
+            NativeTurnAdmission::Native(resolved) => match checked {
+                Some(checked) => {
+                    checked.install_native_turn_in(&mut self.state, scope, &metadata, resolved)?
                 }
-                .into_parts()
+                None => self
+                    .state
+                    .install_native_turn_in(scope, &metadata, resolved)?,
             }
+            .into_parts(),
             NativeTurnAdmission::Portable => {
                 if matches!(images, TurnImageAcquisition::Ready { .. }) {
                     return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
