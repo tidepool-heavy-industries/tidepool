@@ -7799,9 +7799,7 @@ pub(crate) fn original_home_requirements_with_validation(
 ) -> CertResult<Vec<CachedHomeOwner>> {
     match product.original_native() {
         Some(witness) if witness.matches_original(product) => {
-            for package in witness.packages.values() {
-                verify_package_interface(validation, package)?;
-            }
+            witness.validate_package_interfaces(validation)?;
             Ok(witness.sources.clone())
         }
         Some(_) => Err(CertificationError::Mismatch(
@@ -8078,9 +8076,7 @@ pub(crate) fn original_execution_source_digest_with_validation(
 ) -> CertResult<Option<[u8; 32]>> {
     match product.original_native() {
         Some(witness) if witness.matches_original(product) => {
-            for package in witness.packages.values() {
-                verify_package_interface(validation, package)?;
-            }
+            witness.validate_package_interfaces(validation)?;
             Ok(witness.execution_source_sha256)
         }
         Some(_) => Err(CertificationError::Mismatch(
@@ -9188,15 +9184,20 @@ fn validate_owned_originals_with_validation(
                                 "home owner downgraded to package",
                             ));
                         }
-                        validate_package_owner(
+                        let package = package_owner_witness(
                             unit,
                             module,
                             binder,
                             interface_digest,
                             &sources,
                             &witness.packages,
+                        )?;
+                        witness.package_interfaces.bind_witness(
+                            &(unit.clone(), module.clone()),
+                            package,
                             validation,
                         )?;
+                        verify_package_interface(validation, package)?;
                     }
                     PendingImportOwner::Retained { .. } => {}
                 }
@@ -9909,15 +9910,20 @@ impl<'a> OriginalValidationInventory<'a> {
                             "home owner downgraded to package",
                         ));
                     }
-                    validate_package_owner(
+                    let package = package_owner_witness(
                         unit,
                         module,
                         binder,
                         interface_digest,
                         &package_sources,
                         &witness.packages,
+                    )?;
+                    witness.package_interfaces.bind_witness(
+                        &(unit.clone(), module.clone()),
+                        package,
                         validation,
                     )?;
+                    verify_package_interface(validation, package)?;
                     if let Some(resolved) = &mut resolved {
                         charge_symbol(&validation.inventory, binder)?;
                         resolved.push(SelectedNativeImport::Package {
@@ -25596,7 +25602,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn original_native_witness_checks_package_drift_and_zero_group_downgrade() {
+    fn original_native_witness_retains_package_custody_and_refuses_zero_group_downgrade() {
         let root = tempfile::tempdir().unwrap();
         let external_unit = "external-package";
         let package_path = root.path().join("External.hi");
@@ -25708,26 +25714,164 @@ pub(crate) mod tests {
                 "home owner downgraded to package"
             ))
         ));
-        std::fs::write(&package_path, [0x44]).unwrap();
-        assert!(matches!(
-            original_home_requirements_with_validation(
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+        let entry = Arc::new(ArtifactEntry::original([1; 32], (*consumer).clone()).unwrap());
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let metadata = view.metadata_snapshot();
+        let available = metadata
+            .artifacts
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+            .collect();
+        let expected_import = PendingImportOwner::Package {
+            unit: external_unit.into(),
+            module: "External".into(),
+            binder: SymbolIdentity {
+                unit: external_unit.into(),
+                ..testing::identity("External", "entry")
+            },
+            interface_digest: sha(&[0x43]),
+        };
+        let expected_digest = original_execution_source_digest_with_validation(
+            consumer,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let raw = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            consumer.owner().clone(),
+            consumer.interface_bytes().to_vec(),
+            consumer.product_bytes().to_vec(),
+            consumer.package_imports_bytes().to_vec(),
+            consumer.certification_bytes().to_vec(),
+        );
+        assert!(raw.original_native().is_none());
+        for missing in [false, true] {
+            if missing {
+                std::fs::remove_file(&package_path).unwrap();
+            } else {
+                std::fs::write(&package_path, [0x44]).unwrap();
+            }
+            let token = consumer
+                .original_native()
+                .unwrap()
+                .package_interfaces()
+                .get(&(external_unit.into(), "External".into()))
+                .unwrap();
+            assert_eq!(token.bytes().as_ref(), &[0x43]);
+            assert!(original_home_requirements_with_validation(
                 consumer,
                 &mut PackageInterfaceValidation::default(),
-            ),
-            Err(CertificationError::CapturedModulePayload(
-                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
-            ))
-        ));
-        assert!(matches!(
-            certify_owned_products_with_validation(
+            )
+            .unwrap()
+            .is_empty());
+            assert_eq!(
+                original_execution_source_digest_with_validation(
+                    consumer,
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap(),
+                expected_digest
+            );
+            let reused = view
+                .retained_original_entry_with_validation(
+                    [1; 32],
+                    consumer,
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap()
+                .expect("same admitted entry keeps its captured package bytes");
+            assert!(Arc::ptr_eq(&reused, &entry));
+            let owned = certify_owned_products_with_validation(
                 &[consumer],
                 &[],
-                &mut PackageInterfaceValidation::default()
-            ),
-            Err(CertificationError::CapturedModulePayload(
-                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
-            ))
-        ));
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            assert_eq!(owned.len(), 1);
+            assert_eq!(owned[0].owner(), consumer.owner());
+            assert_eq!(owned[0].group().original_ordinal(), 7);
+            assert_eq!(owned[0].imports(), &[expected_import.clone()]);
+            let mut validation = PackageInterfaceValidation::default();
+            let mut checked =
+                OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
+            let selected = checked
+                .certify_selected_scope(
+                    SelectedOriginalGroupScope::View(&view),
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .unwrap()
+                .rows;
+            assert_eq!(selected.len(), 1);
+            let (binding, group) = selected.first_key_value().unwrap();
+            assert_eq!(binding.binding.artifact(), entry.descriptor.id);
+            assert_eq!(binding.original_ordinal, 7);
+            assert_eq!(group.product().imports(), &[expected_import.clone()]);
+            for error in [
+                original_execution_source_digest_with_validation(
+                    &raw,
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap_err(),
+                home_execution_source_digest_with_validation(
+                    consumer.certification_bytes(),
+                    consumer.owner(),
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap_err(),
+            ] {
+                match (missing, error) {
+                    (
+                        true,
+                        CertificationError::CapturedModulePayload(
+                            crate::recovery_artifacts::RecoveryArtifactError::Unavailable(path),
+                        ),
+                    ) => assert_eq!(path, package_path),
+                    (
+                        false,
+                        CertificationError::CapturedModulePayload(
+                            crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(path),
+                        ),
+                    ) => assert_eq!(path, package_path),
+                    (_, error) => {
+                        panic!("raw package admission lost its physical cause: {error:?}")
+                    }
+                }
+            }
+        }
+        std::fs::write(&package_path, [0x43]).unwrap();
+        let mut wrong_seal = decode_home_witness_with_operation(
+            consumer.certification_bytes(),
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+        let wrong_digest = sha(&[0x45]);
+        wrong_seal
+            .packages
+            .values_mut()
+            .for_each(|witness| witness.sha256 = wrong_digest);
+        for (_, _, globals) in &mut wrong_seal.groups {
+            for global in globals {
+                if let ReceiptImportOwner::Package {
+                    interface_digest, ..
+                } = &mut global.owner
+                {
+                    *interface_digest = wrong_digest;
+                }
+            }
+        }
+        let wrong_seal = encode_home_witness(&wrong_seal).unwrap();
+        assert!(matches!(home_execution_source_digest_with_validation(
+            &wrong_seal, consumer.owner(), &mut PackageInterfaceValidation::default(),
+        ), Err(CertificationError::CapturedModulePayload(
+            crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(path),
+        )) if path == package_path));
     }
 
     #[test]

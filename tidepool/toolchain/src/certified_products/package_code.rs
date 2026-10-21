@@ -246,22 +246,31 @@ impl PackageInterfaceCustody {
         self.interfaces.is_empty()
     }
 
+    pub(super) fn bind_witness(
+        &self,
+        owner: &(String, String),
+        witness: &PackageInterfaceWitness,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<()> {
+        let token = self
+            .interfaces
+            .get(owner)
+            .filter(|token| token.sha256() == &witness.sha256)
+            .ok_or(CertificationError::Mismatch(
+                "package interface witness custody",
+            ))?;
+        validation
+            .register_package_interface(&witness.selected_path, token)
+            .map_err(package_validation_error)
+    }
+
     pub(super) fn bind_witnesses(
         &self,
         witnesses: &BTreeMap<(String, String), PackageInterfaceWitness>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<()> {
         for (owner, witness) in witnesses {
-            let token = self
-                .interfaces
-                .get(owner)
-                .filter(|token| token.sha256() == &witness.sha256)
-                .ok_or(CertificationError::Mismatch(
-                    "package interface witness custody",
-                ))?;
-            validation
-                .register_package_interface(&witness.selected_path, token)
-                .map_err(package_validation_error)?;
+            self.bind_witness(owner, witness, validation)?;
         }
         Ok(())
     }
