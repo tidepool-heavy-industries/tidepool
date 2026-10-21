@@ -1,4 +1,4 @@
 module NativeTurnExpr where
 
 {-# NOINLINE __prepared #-}
-__prepared = ({{TURN_TEXT}})
+__prepared = ({{TURN}})

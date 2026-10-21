@@ -1,3 +1,3 @@
 module NativeTurnDecl where
 
-{{TURN_TEXT}}
+{{TURN}}
