@@ -229,20 +229,19 @@ impl ClosedInstantiationPlan {
         compiled: &super::super::turn::CompiledTurn,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
-        Self::prepare_code(&compiled.code(), registry)?
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)
+        Self::prepare_code(&compiled.code(), registry)
     }
 
     pub(in crate::session) fn prepare_code(
         code: &super::super::turn::TurnCode<'_>,
         registry: &ImageRegistry,
-    ) -> Result<Option<Self>, PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         let selection = code
             .certification()
             .and_then(|certification| certification.native_selection.as_ref())
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
         if has_retained_inputs(selection) {
-            return Ok(None);
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
         Self::restrict(Arc::new(NativeInstantiationPlan::prepare_code(code, registry)?))
     }
@@ -250,13 +249,13 @@ impl ClosedInstantiationPlan {
     /// Restrict this exact prepared plan without rebuilding its imports or images.
     pub(in crate::session) fn restrict(
         native: Arc<NativeInstantiationPlan>,
-    ) -> Result<Option<Self>, PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         if has_retained_inputs(&native.selection) {
-            return Ok(None);
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
         BatchProgram::validate_closed(&native.closed_batch()?)
             .map_err(PreparedRuntimeError::Install)?;
-        Ok(Some(Self { native }))
+        Ok(Self { native })
     }
 
     fn target_definition(&self) -> ClosedNativeDefinition<'_> {
