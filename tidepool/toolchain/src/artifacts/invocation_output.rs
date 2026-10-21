@@ -1,8 +1,8 @@
 //! Complete named physical output for native and portable compiler consumers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use tidepool_repr::execution_schema::{DecodeLimits, InventoryOperation};
@@ -252,6 +252,194 @@ impl InvocationOutputBundle<PortableOutput> {
     pub(crate) fn dependencies(&self) -> &[u8] {
         self.get(&Artifact::Dependencies)
     }
+}
+
+/// A borrow of the immutable bytes and provenance held by a completed native
+/// compiler operation. Its variants are private: paths and digests cannot mint
+/// this authority independently of their production output owner.
+pub(crate) struct CapturedNativeOutput<'a> {
+    owner: NativeOutputOwner<'a>,
+}
+
+enum NativeOutputOwner<'a> {
+    World(&'a crate::compiler_world::CheckedWorldCellProgram),
+    Finite(&'a FiniteNativeOutput),
+}
+
+struct FiniteNativeOutput {
+    root: PathBuf,
+    producer: [u8; 32],
+    profile: [u8; 32],
+    operation: Arc<InventoryOperation>,
+    files: BTreeMap<PathBuf, Arc<[u8]>>,
+}
+
+impl<'a> CapturedNativeOutput<'a> {
+    pub(crate) fn from_world(program: &'a crate::compiler_world::CheckedWorldCellProgram) -> Self {
+        Self {
+            owner: NativeOutputOwner::World(program),
+        }
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        match &self.owner {
+            NativeOutputOwner::World(program) => program.directory().path(),
+            NativeOutputOwner::Finite(output) => &output.root,
+        }
+    }
+
+    pub(crate) fn producer_sha256(&self) -> &[u8; 32] {
+        match &self.owner {
+            NativeOutputOwner::World(program) => program.producer_sha256(),
+            NativeOutputOwner::Finite(output) => &output.producer,
+        }
+    }
+
+    pub(crate) fn profile_sha256(&self) -> &[u8; 32] {
+        match &self.owner {
+            NativeOutputOwner::World(program) => program.logical().profile_sha256(),
+            NativeOutputOwner::Finite(output) => &output.profile,
+        }
+    }
+
+    pub(crate) fn operation(&self) -> &Arc<InventoryOperation> {
+        match &self.owner {
+            NativeOutputOwner::World(program) => &program.validation().inventory,
+            NativeOutputOwner::Finite(output) => &output.operation,
+        }
+    }
+
+    pub(crate) fn bytes(&self, relative: &Path) -> Result<&Arc<[u8]>, CompileError> {
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(CompileError::ExtractFailed(
+                "invalid native output path".into(),
+            ));
+        }
+        match &self.owner {
+            NativeOutputOwner::World(program) => {
+                crate::checked_cell::world_output_bytes(program, relative)
+            }
+            NativeOutputOwner::Finite(output) => output
+                .files
+                .get(relative)
+                .ok_or_else(|| CompileError::MissingOutput(output.root.join(relative))),
+        }
+    }
+}
+
+/// This owner can only be returned after successful compiler completion and
+/// acquisition of its exact named output. Portable output has no such issuer.
+pub(super) struct CompletedNativeOutputBundle<P> {
+    pub(super) bundle: InvocationOutputBundle<P>,
+    pub(super) receipt: certified_products::CertifiedReceipt,
+    output: FiniteNativeOutput,
+}
+
+impl<P> CompletedNativeOutputBundle<P> {
+    pub(super) fn native_output(&self) -> CapturedNativeOutput<'_> {
+        CapturedNativeOutput {
+            owner: NativeOutputOwner::Finite(&self.output),
+        }
+    }
+}
+
+pub(super) trait NativeOutputPurpose {}
+impl NativeOutputPurpose for NativeOutput {}
+impl NativeOutputPurpose for OriginalOutput {}
+
+/// Keep the actual completed transaction, selected deployment, physical root,
+/// decoded receipt and its captured members together at the compile front door.
+pub(super) fn extract_native<P: NativeOutputPurpose>(
+    run: tidepool_extract_cmd::ExtractRun,
+    deployment: &crate::toolchain::AdmittedCompilerDeployment,
+    root: &Path,
+    layout: &InvocationOutputLayout<P>,
+    on_stage: &mut impl FnMut(&str, std::time::Duration, u64),
+    log_stderr: impl FnOnce(&str, bool),
+) -> Result<CompletedNativeOutputBundle<P>, CompileError> {
+    let bundle = super::extract_and_read(run, root, layout, on_stage, log_stderr)?;
+    let association = deployment.package_source_association().ok_or_else(|| {
+        CompileError::ExtractFailed(
+            "native output requires an admitted package service profile".into(),
+        )
+    })?;
+    let root = std::fs::canonicalize(root)?;
+    let receipt_bytes =
+        super::CompilerSidecar::CertifiedProducts.read(&root, bundle.operation())?;
+    if receipt_bytes.is_empty() {
+        return Err(CompileError::ExtractFailed(
+            "native output product certificate unavailable".into(),
+        ));
+    }
+    let receipt = certified_products::decode_receipt_with_operation(
+        &receipt_bytes,
+        Some(&root),
+        bundle.operation(),
+    )
+    .map_err(compiler_evidence_failure)?;
+    let mut files = BTreeMap::new();
+    for path in receipt
+        .package_products
+        .iter()
+        .map(|product| root.join(&product.relative_path))
+        .chain(
+            receipt
+                .packages
+                .values()
+                .map(|witness| witness.selected_path.clone()),
+        )
+    {
+        let relative = path.strip_prefix(&root).map_err(|_| {
+            CompileError::ExtractFailed("native package member is outside completed output".into())
+        })?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(CompileError::ExtractFailed(
+                "invalid native package member path".into(),
+            ));
+        }
+        if files.contains_key(relative) {
+            continue;
+        }
+        if std::fs::canonicalize(&path)? != path {
+            return Err(CompileError::ExtractFailed(
+                "native package member aliases another path".into(),
+            ));
+        }
+        bundle
+            .operation()
+            .reserve::<(PathBuf, Arc<[u8]>)>(1)
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let bytes = certified_products::read_bounded_with_operation(
+            &path,
+            bundle.operation().limits().max_module_bytes as u64,
+            bundle.operation(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        files.insert(relative.to_path_buf(), bytes.into());
+    }
+    let output = FiniteNativeOutput {
+        root,
+        producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            &deployment.producer_identity,
+        )
+        .sha256(),
+        profile: *association.profile_id(),
+        operation: Arc::clone(bundle.operation()),
+        files,
+    };
+    Ok(CompletedNativeOutputBundle {
+        bundle,
+        receipt,
+        output,
+    })
 }
 
 #[cfg(test)]
