@@ -4144,7 +4144,8 @@ impl RequestCompilerInputs {
     /// These references do not add compiler roles or executable target demand.
     pub fn issued_native_completions(
         &self,
-    ) -> impl Iterator<Item = &Arc<crate::artifact_inventory::IssuedNativeSelectionCompletion>> {
+    ) -> impl Iterator<Item = &Arc<crate::artifact_inventory::IssuedNativeSelectionCompletion>>
+    {
         self.compiler_source_support().native_completions().iter()
     }
 
@@ -10333,25 +10334,16 @@ pub(crate) struct WorldProgramContinuation {
 }
 
 impl WorldProgramContinuation {
-    pub(crate) fn begin(
-        program: &crate::compiler_world::CheckedWorldCellProgram,
-    ) -> Result<Self, CompileError> {
-        let mut context = Arc::clone(program.primary_context());
-        let mut inputs = Arc::clone(program.primary_compiler_inputs());
-        if let Some(operand) = program.reservation().plan().operand() {
-            let operand_types = Arc::new(ExactDeclarationContext::checked_value_interface_context(
-                operand.checked_row(),
-            )?);
-            let extended = inputs.with_type_interfaces(&[operand_types])?;
-            context = extended.context;
-            inputs = extended.inputs;
-        }
-        Ok(Self {
-            context,
-            inputs,
+    pub(crate) fn begin(program: &crate::compiler_world::CheckedWorldCellProgram) -> Self {
+        // The request owner already incorporated the operand's TYPE inputs.
+        // Retain that exact basis: rebuilding it would separate certification
+        // from the native demand acquired during the compiler request.
+        Self {
+            context: Arc::clone(program.primary_context()),
+            inputs: Arc::clone(program.primary_compiler_inputs()),
             program: ProgramSourceSupportState::default(),
             private_input: None,
-        })
+        }
     }
 }
 

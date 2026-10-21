@@ -898,7 +898,7 @@ pub fn prepare_world_cell_program(
     );
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program)?;
+    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program);
     let mut stage_sources = Vec::new();
     let mut planned_declarations = BTreeMap::new();
     let mut outputs = BTreeMap::new();
@@ -3699,7 +3699,7 @@ impl SealedTurnProducts {
     pub fn published_source_original_selection(
         &self,
         revision: &str,
-        public_root: &crate::declaration_context::ExactModuleIdentity,
+        public_root: &crate::declaration_join::ExactModuleIdentity,
     ) -> Result<Arc<crate::declaration_context::PublishedSourceOriginalSelection>, CompileError>
     {
         let original = self.original_compile_input.as_ref().ok_or_else(|| {
