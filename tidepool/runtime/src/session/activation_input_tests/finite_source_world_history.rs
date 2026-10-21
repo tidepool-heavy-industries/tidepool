@@ -102,9 +102,15 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     let unpublished_b = resident.mint_unpublished_notebook_scope(None).unwrap();
     let source_b = unpublished_b.lease().clone();
     assert_ne!(source_a.scope(), source_b.scope());
-    let installation_a = install_package_source(&mut resident, &prepared, &source_a);
-    let installation_b = install_package_source(&mut resident, &prepared, &source_b);
+    let capsule_a = prepare_package_source(&mut resident, &prepared, &source_a);
+    let capsule_b = prepare_package_source(&mut resident, &prepared, &source_b);
+    let installation_a = capsule_a.installation_scope().clone();
+    let installation_b = capsule_b.installation_scope().clone();
     assert_ne!(installation_a.scope(), installation_b.scope());
+    // Both physical installations now exist, and neither entry has run. The
+    // held native leases supply the CAF observations at this exact boundary.
+    run_package_source(&mut resident, capsule_a, &source_a);
+    run_package_source(&mut resident, capsule_b, &source_b);
 
     // Public B is its actual issued lease, not installer I_B or a named substitute.
     resident.public_source = source_b.clone();
@@ -206,22 +212,29 @@ fn public_package_cell(
     resident.retire_scope(private);
 }
 
-fn install_package_source(
+fn prepare_package_source(
     resident: &mut TestSession,
     prepared: &crate::session::PreparedSourceEntry,
     source: &Arc<crate::session::RuntimeLexicalScopeLease>,
-) -> Arc<crate::session::RuntimeLexicalScopeLease> {
+) -> crate::session::PreparedSourceStartupEntry {
     let capsule = source_action_with_original(
         &mut resident.resident,
         source.original_source().clone(),
         |resident, _| resident.prepare_source_startup_entry(prepared),
     )
     .unwrap();
-    let installation_b = capsule.installation_scope().clone();
-    assert_ne!(installation_b.scope(), source.scope());
+    assert_ne!(capsule.installation_scope().scope(), source.scope());
+    capsule
+}
+
+fn run_package_source(
+    resident: &mut TestSession,
+    capsule: crate::session::PreparedSourceStartupEntry,
+    source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+) {
     resident
         .set_run_context(SessionRunContext {
-            lexical_scope: installation_b.scope(),
+            lexical_scope: capsule.installation_scope().scope(),
             ..SessionRunContext::ROOT
         })
         .unwrap();
@@ -235,6 +248,4 @@ fn install_package_source(
         panic!("the genuine source startup must complete its pure package demand");
     };
     assert_eq!(result.to_json(), serde_json::json!(42));
-
-    installation_b
 }
