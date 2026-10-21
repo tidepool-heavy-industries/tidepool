@@ -273,6 +273,7 @@ impl ClosedInstantiationPlan {
             .iter()
             .zip(&imports)
             .enumerate()
+            .filter(|(index, _)| !literals.contains_key(index))
             .map(|(index, (product, imports))| {
                 Self::compile_product(product, imports, &products, &literals, registry)
                     .map(|image| (index, image))
@@ -292,6 +293,7 @@ impl ClosedInstantiationPlan {
             registry,
         )
         .map_err(PreparedRuntimeError::Compile)?;
+        programs.append(&mut literals);
         let programs = products
             .iter()
             .zip(imports)
