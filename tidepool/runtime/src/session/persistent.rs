@@ -6317,13 +6317,13 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn durable_bootstrap_publishes_native_visibility_before_private_admission() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        use super::super::prepared::tests::install_source_publication_fixture;
         let root = tempfile::tempdir().unwrap();
         let (mut session, public, owner) = bootstrap_session(root.path(), 930);
         let seal = session
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
-        let (target, added) = install_selected_source_fixture(&mut session, public, "a");
+        let (target, added, _placement) = install_source_publication_fixture(&mut session, public);
         assert!(!added.is_empty());
         session.advance_public_visibility(public);
         assert!(matches!(

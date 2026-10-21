@@ -11835,11 +11835,12 @@ mod authored_publication_tests {
         let before = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap();
-        let (program, source_keys) =
-            crate::session::prepared::tests::install_selected_source_fixture(
+        let (program, source_keys, _second_placement) =
+            crate::session::prepared::tests::install_runtime_fixture_in(
                 &mut session.state,
                 ScopeId::ROOT,
-                "late",
+                crate::session::prepared::tests::compile_source_publication_fixture(),
+                "second",
             );
         assert_ne!(program, prior);
         assert!(!source_keys.is_empty());
