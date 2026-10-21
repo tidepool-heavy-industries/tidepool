@@ -946,9 +946,15 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
                 .all(|(digest, file)| std::ptr::eq(*file, expected[digest])));
         }
         let metadata = context.compiler_metadata_snapshot().unwrap();
+        let artifacts = metadata
+            .retained
+            .artifacts
+            .iter()
+            .map(|(id, entry)| (*id, Arc::clone(entry)))
+            .collect::<BTreeMap<_, _>>();
         let flat = RetainedArtifactMaterialization::capture_custody(
             &[diamond],
-            &metadata.retained.artifacts,
+            &artifacts,
             &BTreeSet::new(),
         )
         .unwrap();
