@@ -6470,22 +6470,14 @@ pub(crate) fn original_reference_payload_member<'a>(
         if let Some(operation) = operation {
             operation.charge(group.group.binders().len())?;
         }
-        if group.group.binders().contains(binder) {
+        if group.group.binders().contains(binder)
+            || group.group.binders().contains(&reexported)
+        {
             if ordinal.replace(group.group.original_ordinal()).is_some() {
                 return Err(CertificationError::OriginalMembership(Box::new(
                     OriginalMembershipFailure::AmbiguousSymbol {
                         owner: product.owner().clone(),
                         symbol: binder.clone(),
-                    },
-                )));
-            }
-        }
-        if group.group.binders().contains(&reexported) {
-            if ordinal.replace(group.group.original_ordinal()).is_some() {
-                return Err(CertificationError::OriginalMembership(Box::new(
-                    OriginalMembershipFailure::AmbiguousSymbol {
-                        owner: product.owner().clone(),
-                        symbol: reexported.clone(),
                     },
                 )));
             }
