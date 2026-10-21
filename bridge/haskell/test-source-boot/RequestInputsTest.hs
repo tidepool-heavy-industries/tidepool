@@ -1448,12 +1448,15 @@ failRetainedCountWrite asynchronous action = do
   pure result
 
 withRetainedCountFault :: IORef Bool -> IO () -> IO a -> IO a
-withRetainedCountFault fired fault action = mask $ \restore -> do
+withRetainedCountFault = withDiagnosticCountFault "original_inputs.retained_encoded_bytes"
+
+withDiagnosticCountFault :: String -> IORef Bool -> IO () -> IO a -> IO a
+withDiagnosticCountFault counter fired fault action = mask $ \restore -> do
   oldEncoding <- hGetEncoding stderr
   oldBuffering <- hGetBuffering stderr
   armed <- newIORef True
   suffix <- newIORef ""
-  let marker = "tidepool-count name=original_inputs.retained_encoded_bytes "
+  let marker = "tidepool-count name=" ++ counter ++ " "
       wrapped (TextEncoding name makeDecoder makeEncoder) =
         TextEncoding name makeDecoder $ do
           BufferCodec encode recover close getState setState <- makeEncoder
@@ -1850,7 +1853,8 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
           ,"observation1, observation3_unit, __tidepool_segment_probe_1 :: Int"
           ,"observation1 = 1", "observation3_unit = 3", "__tidepool_segment_probe_1 = 9"]
     (packetPath,_primary) <- writeWorldCellAdmissionPacketWithSources handles work producer profile contextParcel
-      [("WorldObservationNames.hs",collisionModule)]
+      [("WorldObservationNames.hs",collisionModule)
+      ,("WorldCancellationNames.hs","module WorldCancellationNames where\ncancellationName :: Int\ncancellationName = 1\n")]
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
@@ -1918,9 +1922,58 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               invalid <- scopedValidateWorldCell compiler grant executor wrong
               unless (either (== WorldCellCorrupt) (const False) invalid)
                 (fail "receiving World accepted an expression name absent from its held plan")
+              foreignAdmission <- scopedValidateWorldCell compiler grant executor
+                namesPrepare {worldCellPrepareRealization=reference ++ "0"}
+              unless (either (== WorldCellUnavailable) (const False) foreignAdmission)
+                (fail "same logical World accepted a foreign realization's names")
               valid <- scopedValidateWorldCell compiler grant executor namesPrepare
               unless (either (const False) (const True) valid)
                 (fail "failed expression-name validation poisoned a valid retry")
+            let renderedRecipe = recipe
+                  {worldCellTemplate=T.unpack (T.replace "{{CELL_IMPORTS}}"
+                    "import WorldObservationNames\n{{CELL_IMPORTS}}" (T.pack template))
+                  ,worldCellSource="(1 :: Int)\n(2 :: Int)"}
+                renderedQuestion = planRequest {worldCellPlanRecipe=renderedRecipe}
+            renderedArgs <- decodeWorldArgs [WorldCellPlan renderedQuestion]
+            renderedBytes <- (withBoundCompilerRequest (const (pure ())) compiler renderedArgs >=> finishCompletion)
+              runBoundWorldCellPlan
+            renderedNames <- case deserialiseFromBytes decodeTerm (BL.fromStrict renderedBytes) of
+              Right (remaining,TList fields) | BL.null remaining -> case last fields of
+                TList rows -> forM rows $ \row -> case row of
+                  TList [TInt ordinal,TString name] -> pure (ordinal,T.unpack name)
+                  _ -> fail "rendered expression plan lost an issued name"
+                _ -> fail "rendered expression plan lost its names table"
+              _ -> fail "rendered expression plan is malformed"
+            let renderedPrepare = WorldCellPrepareRequest identity reference renderedRecipe Nothing renderedBytes
+                  (BS.replicate 32 10) 17
+                  [(fromIntegral ordinal,PlannedExpression (101+fromIntegral ordinal) name) | (ordinal,name) <- renderedNames]
+                  (work </> "rendered-expression-names") (work </> "rendered-expression-names.cbor")
+            (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
+              admitted <- scopedValidateWorldCell compiler grant executor renderedPrepare >>= either (fail . show) pure
+              stage <- scopedPrepareWorldCellStage compiler admitted >>= maybe
+                (fail "expression admission lost its real rendered stage") pure
+              issued <- maybe (fail "expression stage has no typed source") pure (heldWorldCellStageTypedSource stage)
+              unless ("__tidepool_segment_probe_1X" `isInfixOf` preparedTypedSegmentSource issued)
+                (fail "generated expression helper shadowed an unused imported export")
+              -- This checks the actual generated stage, without issuing native
+              -- products or claiming runtime capture/reservation authority.
+              _ <- scopedCompileWorldCell compiler admitted CheckedEnvironment Set.empty
+              pure ()
+            let cancellationRecipe = recipe
+                  {worldCellTemplate=T.unpack (T.replace "{{CELL_IMPORTS}}"
+                    "import WorldCancellationNames\n{{CELL_IMPORTS}}" (T.pack template))
+                  ,worldCellSource="(1 :: Int)"}
+                cancellationQuestion = planRequest {worldCellPlanRecipe=cancellationRecipe}
+                issueCancellation = do
+                  args <- decodeWorldArgs [WorldCellPlan cancellationQuestion]
+                  (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldCellPlan
+            fired <- newIORef False
+            interrupted <- try (withDiagnosticCountFault "world.cell.name_scope_ready" fired
+              (throwIO ThreadKilled) issueCancellation) :: IO (Either AsyncException BS.ByteString)
+            reached <- readIORef fired
+            unless (reached && case interrupted of Left ThreadKilled -> True; _ -> False)
+              (fail "expression plan did not propagate cancellation before dependency commitment")
+            _ <- issueCancellation
             slots <- scopedRunGhc compiler $ do
               environment <- getSession
               plan <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment)
@@ -2295,9 +2348,11 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
           (fail "later native demand replayed an already finalized SOURCE owner")
       unless (sum (counterValues "world.cell.prior_source_preparations" diagnostics) > 0)
         (fail "SOURCE history did not prepare its newly demanded prior source body")
+      unless (counterValues "world.cell.source_frontends.main:WorldCancellationNames" diagnostics == [1,1])
+        (fail "cancelled expression plan published its pending captured source preparation")
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 14 1)
+      unless (admissionParses == replicate 15 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 

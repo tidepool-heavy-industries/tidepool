@@ -2546,6 +2546,7 @@ runHeldWorldCellPlanning producer universe baseEnv timing attempt
   let selected = HeldWorldCellPlan plan scope (allocateWorldExpressionNames recipe plan scope)
       commit = liftIO $ do
         requireCompilerExecutorOpen executor
+        when (isJust pending) (emitCount timing "world.cell.name_scope_ready" 1)
         mapM_ (\prepared -> commitHeldWorldDependencies prepared world) pending
   case operation of
     IssueWorldCellPlan _ -> do
