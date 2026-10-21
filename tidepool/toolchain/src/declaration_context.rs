@@ -8436,7 +8436,7 @@ impl<'a> ProductCompilerInputs<'a> {
         let Some(support) = self.program_support else {
             return Ok(None);
         };
-        let Some(row) = support.imports.get(entry.descriptor.owner.as_ref()) else {
+        let Some(row) = support.imports.get(&entry.descriptor.owner) else {
             return Ok(None);
         };
         let Some(receipt) = &row.produced else {
