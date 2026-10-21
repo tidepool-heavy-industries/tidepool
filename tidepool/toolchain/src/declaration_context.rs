@@ -1221,6 +1221,22 @@ pub(crate) struct NativeTransportAvailability {
     contributions: Arc<[Arc<crate::artifact_inventory::NativeOfferContribution>]>,
 }
 
+/// One exact acquisition choice and the contribution that grants it.
+pub(crate) struct ChosenNativeGroupSupport {
+    binding: crate::artifact_inventory::NativeGroupBinding,
+    contribution: Arc<crate::artifact_inventory::NativeOfferContribution>,
+}
+
+impl ChosenNativeGroupSupport {
+    pub(crate) fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
+        self.binding
+    }
+
+    pub(crate) fn contribution(&self) -> &Arc<crate::artifact_inventory::NativeOfferContribution> {
+        &self.contribution
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeInputClassification {
     CompilerRole,
@@ -1323,6 +1339,81 @@ struct CompletedRequestNativeProducts<'a> {
 }
 
 impl NativeTransportAvailability {
+    /// Resolve an acquisition's recorded choice, or its unique genuine issuer.
+    /// Only absent permission is unavailable; a broken recorded choice refuses.
+    pub(crate) fn choose_group(
+        &self,
+        source: &crate::artifact_inventory::CompilerSourceSupport,
+        key: NativeGroupKey,
+        canonical: ArtifactId,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Option<ChosenNativeGroupSupport>, CompileError> {
+        let budget = NativeDemandBudget(Some(operation));
+        budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+        let identity = identity(&owner.unit, &owner.module);
+        if self.original_artifact_id() != key.artifact
+            || self.canonical != canonical
+            || self.original_owner() != owner
+        {
+            return Err(compiler_evidence_failure(
+                crate::certified_products::CertificationError::InputDecision {
+                    owner: identity,
+                    reason:
+                        crate::artifact_inventory::InputDecisionRefusal::ArtifactIdentityMismatch,
+                },
+            ));
+        }
+        let mut candidates = BTreeMap::new();
+        for contribution in self.contributions.iter() {
+            budget.checkpoint()?;
+            for binding in contribution.groups(key) {
+                budget.checkpoint()?;
+                if let std::collections::btree_map::Entry::Vacant(slot) = candidates.entry(binding)
+                {
+                    budget.reserve::<(
+                        crate::artifact_inventory::NativeGroupBinding,
+                        Arc<crate::artifact_inventory::NativeOfferContribution>,
+                        [usize; 4],
+                    )>(1)?;
+                    slot.insert(Arc::clone(contribution));
+                }
+            }
+        }
+        budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
+            candidates.len(),
+        )?;
+        let selected = crate::certified_products::select_input_native_group_candidates(
+            source,
+            key,
+            canonical,
+            owner,
+            &identity,
+            candidates.keys().copied().collect(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        if !self.permits(key.original_ordinal) {
+            return Ok(None);
+        }
+        let mut selected = selected.into_iter();
+        let binding = selected
+            .next()
+            .ok_or_else(|| failure("permitted native group lacks its scoped contribution"))?;
+        if selected.next().is_some() {
+            return Err(crate::artifact_inventory::admission_failure(
+                crate::artifact_inventory::ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: key.artifact,
+                },
+            ));
+        }
+        Ok(Some(ChosenNativeGroupSupport {
+            binding,
+            contribution: candidates
+                .remove(&binding)
+                .expect("checked exact acquisition candidate"),
+        }))
+    }
+
     fn canonical_for(original: &ArtifactEntry) -> Result<ArtifactId, CompileError> {
         let ArtifactPayload::Original(product) = &original.payload else {
             return Err(failure("normalized native row is not original"));
@@ -2874,8 +2965,7 @@ impl DemandNativeInputs {
                 "resolved native inputs belong to another request operation",
             ));
         }
-        let mut roots = BTreeMap::new();
-        let mut proofs = BTreeMap::new();
+        let mut roots = BTreeMap::<NativeGroupKey, ChosenNativeGroupSupport>::new();
         let mut original_use_roots = BTreeMap::new();
         for global in &inputs.sources {
             budget.checkpoint()?;
@@ -2918,43 +3008,16 @@ impl DemandNativeInputs {
                 artifact: id,
                 original_ordinal: *original_ordinal,
             };
-            let mut candidates = BTreeSet::new();
-            for contribution in row.contributions.iter() {
-                budget.checkpoint()?;
-                for binding in contribution.groups(key) {
-                    budget.checkpoint()?;
-                    if !candidates.contains(&binding) {
-                        budget
-                            .reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
-                                1,
-                            )?;
-                        candidates.insert(binding);
-                    }
-                }
-            }
-            // Share the existing input-decision policy with the target issuer.
-            // The exact cold choice is consulted even when availability is empty.
-            let candidates = crate::certified_products::select_input_native_group_candidates(
-                &self.cold.source_support,
-                key,
-                role.interface(),
-                native_owner,
-                &owner,
-                candidates,
-            )
-            .map_err(compiler_evidence_failure)?;
-            if !row.permits(*original_ordinal) {
-                return Err(failure(
-                    "receipt native group exceeds its issued permission",
-                ));
-            }
-            let mut candidates = candidates.into_iter();
-            let binding = candidates
-                .next()
-                .ok_or_else(|| failure("receipt native group lacks its scoped contribution"))?;
-            if candidates.next().is_some() {
-                return Err(failure("receipt native group has ambiguous scoped issuers"));
-            }
+            let chosen = row
+                .choose_group(
+                    &self.cold.source_support,
+                    key,
+                    role.interface(),
+                    native_owner,
+                    &operation,
+                )?
+                .ok_or_else(|| failure("receipt native group exceeds its issued permission"))?;
+            let binding = chosen.binding();
             if let Some(reference) = original_use {
                 budget.reserve::<(
                     crate::certified_products::ReceiptImportOwner,
@@ -2969,39 +3032,26 @@ impl DemandNativeInputs {
                 }
             }
             if let Some(previous) = roots.get(&key) {
-                if *previous != binding {
+                if previous.binding() != binding {
                     return Err(failure("receipt native group changed its scoped issuer"));
                 }
             } else {
-                let proof = row
-                    .contributions
-                    .iter()
-                    .find(|proof| proof.contains_group(binding))
-                    .ok_or_else(|| failure("receipt native decision lacks its contribution"))?;
-                budget.reserve::<(
-                    NativeGroupKey,
-                    crate::artifact_inventory::NativeGroupBinding,
-                    [usize; 4],
-                )>(1)?;
-                budget.reserve::<(
-                    NativeGroupKey,
-                    Arc<crate::artifact_inventory::NativeOfferContribution>,
-                    [usize; 4],
-                )>(1)?;
-                roots.insert(key, binding);
-                proofs.insert(key, Arc::clone(proof));
+                budget.reserve::<(NativeGroupKey, ChosenNativeGroupSupport, [usize; 4])>(1)?;
+                roots.insert(key, chosen);
             }
         }
         let mut bindings = BTreeSet::new();
         let mut available = BTreeMap::new();
         let mut selected_contributions = Vec::new();
         let mut retained_bindings = BTreeSet::new();
-        for (key, binding) in roots {
+        for (key, chosen) in roots {
             budget.checkpoint()?;
+            let binding = chosen.binding();
             budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;
             let root = BTreeSet::from([binding]);
-            let (closure, retained) =
-                proofs[&key].for_groups_with_runtime_requirements(&root, &operation)?;
+            let (closure, retained) = chosen
+                .contribution()
+                .for_groups_with_runtime_requirements(&root, &operation)?;
             retained_bindings.extend(retained);
             for id in closure.originals() {
                 budget.checkpoint()?;
