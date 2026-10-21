@@ -1,8 +1,7 @@
 use super::*;
 
 use crate::artifact_inventory::{
-    ArtifactBindingNode, ArtifactDependency, ArtifactEntry, CanonicalProducerIdentity,
-    NativeArtifactDemand, NativeGroupKey,
+    ArtifactEntry, CanonicalProducerIdentity, NativeArtifactDemand,
 };
 use crate::cache::{DependencyEvidence, ModuleEvidence, SourceEvidence};
 use crate::certified_products::{
@@ -256,11 +255,11 @@ fn select_original_groups(
 fn selected_package_closure(
     current: &BTreeMap<(String, String), PackageInterfaceWitness>,
     certified: &CertifiedProducts,
+    groups: &[certified_products::PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<(String, String), PackageInterfaceWitness>, CompileError> {
     let catalog = package_availability_with_validation(current, certified, validation)?;
-    let groups = select_original_groups(certified, validation)?;
-    catalog.select(groups.groups(), &[], &validation.inventory)
+    catalog.select(groups, &[], &validation.inventory)
 }
 
 #[test]
@@ -395,8 +394,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         if binder == &reader())
     );
 
-    // Public inheritance and a current package receipt independently reach
-    // the same consumer. Neither grants lexical imports for this original.
+    // Public inheritance retains availability without selecting a body or
+    // granting lexical imports for this original.
     let public_view = crate::declaration_context::certified_product_artifact_view_with_validation(
         producer,
         &issued.recovery_products,
@@ -452,7 +451,9 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let mut bound = inventory
         .bind_segment(public_inputs.artifacts(), Vec::new(), &public_selection)
         .unwrap();
-    let demanded = inventory
+    let public_before = public_inputs.artifacts().clone();
+    let public_original_hash = public_original.semantic_sha256();
+    let refused = inventory
         .admit_bound_target(
             &mut bound,
             public_inputs.artifacts(),
@@ -460,45 +461,17 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             Vec::new(),
             &public_selection,
         )
-        .unwrap()
-        .bind_target(None, imports.clone());
-    let resolved = demanded.resolve().unwrap();
-    assert_eq!(resolved.groups().len(), 1);
-    assert_eq!(
-        resolved
-            .groups()
-            .iter()
-            .map(|group| NativeGroupKey {
-                artifact: group.binding.artifact(),
-                original_ordinal: group.original_ordinal,
-            })
-            .collect::<BTreeSet<_>>(),
-        view.selected_native_groups(),
-    );
-    let actual_carriers = demanded
-        .artifacts()
-        .binding_dependencies()
-        .into_iter()
-        .filter_map(
-            |(dependent, required, edge)| match (dependent, required, edge) {
-                (
-                    ArtifactBindingNode::Group(group),
-                    ArtifactBindingNode::Artifact(carrier),
-                    ArtifactDependency::Interface,
-                ) if resolved.groups().contains(&group)
-                    && carrier.artifact == group.binding.artifact() =>
-                {
-                    Some((group, carrier))
-                }
-                _ => None,
-            },
-        )
-        .collect::<BTreeSet<_>>();
-    assert_eq!(actual_carriers, offered_carriers);
-    assert_eq!(resolved.imports(), imports);
+        .err()
+        .expect("another request's Source imports cannot select an empty public choice");
+    assert!(matches!(refused, CompileError::ArtifactInventory(error)
+        if matches!(error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty { .. }))));
+    assert!(public_request.groups.is_empty());
+    assert_eq!(public_inputs.artifacts(), &public_before);
+    assert_eq!(public_original.semantic_sha256(), public_original_hash);
     let inherited = selected_package_closure(
         &BTreeMap::new(),
         &issued,
+        request.groups.as_ref(),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
@@ -511,6 +484,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert!(selected_package_closure(
         &BTreeMap::new(),
         &issued,
+        request.groups.as_ref(),
         &mut PackageInterfaceValidation::default(),
     )
     .is_err());
@@ -527,6 +501,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert!(selected_package_closure(
         &conflicting,
         &issued,
+        request.groups.as_ref(),
         &mut PackageInterfaceValidation::default(),
     )
     .is_err());
@@ -537,6 +512,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let current = selected_package_closure(
         &current,
         &issued,
+        request.groups.as_ref(),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
@@ -721,15 +697,16 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         }),
     );
     assert_eq!(subset.groups.len(), 2);
+    let selected_validation = &mut PackageInterfaceValidation::default();
+    let selected_groups = select_original_groups(&subset, selected_validation).unwrap();
     let all_groups = selected_package_closure(
         &BTreeMap::new(),
         &subset,
-        &mut PackageInterfaceValidation::default(),
+        selected_groups.groups(),
+        selected_validation,
     )
     .unwrap();
     assert!(all_groups.contains_key(&arbitrary_owner));
-    let selected_validation = &mut PackageInterfaceValidation::default();
-    let selected_groups = select_original_groups(&subset, selected_validation).unwrap();
     let subset_groups = selected_groups
         .groups()
         .iter()
@@ -753,6 +730,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let inherited = selected_package_closure(
         &BTreeMap::new(),
         &issued,
+        request.groups.as_ref(),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
