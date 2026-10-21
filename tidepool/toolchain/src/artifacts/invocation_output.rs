@@ -869,6 +869,65 @@ mod tests {
     }
 
     #[test]
+    fn finite_package_targets_reuse_exact_bindings_without_crossing_target_slots() {
+        let root = tempfile::tempdir().unwrap();
+        let includes = [root.path().to_owned()];
+        let invocation = crate::artifacts::CompileInvocation {
+            source: include_str!("../../tests/fixtures/invocation-output/NativePackageTargets.hs"),
+            targets: &["second", "first"],
+            include: &includes,
+            fallback_module_name: "NativePackageTargets",
+        };
+        let mut executions = 0;
+        let output =
+            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
+                executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
+            })
+            .expect("actual finite native package output through common admission");
+        assert_eq!(executions, 1);
+        let completed = |target: &str| {
+            output.targets[target]
+                .native_inputs
+                .as_ref()
+                .expect("finite target has its actual native inputs")
+                .completed_selection()
+                .expect("finite target has its coissued completion")
+        };
+        let first = completed("first");
+        let second = completed("second");
+        let package_bindings = |selection: &crate::artifact_inventory::CompletedNativeSelection| {
+            selection
+                .completion()
+                .package_bindings()
+                .map(|binding| binding.binding())
+                .collect::<BTreeSet<_>>()
+        };
+        let first_packages = package_bindings(first);
+        let second_packages = package_bindings(second);
+        assert!(
+            !first_packages.is_empty(),
+            "reverse must use actual package code"
+        );
+        assert!(
+            !second_packages.is_empty(),
+            "the dependent target must retain actual package code"
+        );
+        assert!(
+            !first_packages.is_disjoint(&second_packages),
+            "overlapping package code keeps its exact already-issued binding"
+        );
+        assert!(!first.target_imports().is_empty());
+        assert!(!second.target_imports().is_empty());
+        assert!(
+            first
+                .target_imports()
+                .iter()
+                .all(|left| { second.target_imports().iter().all(|right| left != right) }),
+            "independent target slots retain their own exact Source/Package export values"
+        );
+    }
+
+    #[test]
     fn runtime_targets_complete_through_physical_output_with_native_products() {
         let root = tempfile::tempdir().unwrap();
         let includes = [root.path().to_owned()];
