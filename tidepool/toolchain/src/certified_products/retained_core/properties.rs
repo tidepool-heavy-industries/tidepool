@@ -39,10 +39,10 @@ fn identity(unit: &str, module: &str, occurrence: &str) -> SymbolIdentity {
     }
 }
 
-fn external_owner(history: u8, binder: u8) -> PendingImportOwner {
+fn external_owner(history: u8, binder: u8) -> NominalImportOwner {
     let mut module_version = [0; 32];
     module_version[0] = history;
-    PendingImportOwner::Source {
+    NominalImportOwner::Source {
         owner: CachedHomeOwner {
             unit: "historical-unit".into(),
             module: "External".into(),
@@ -55,8 +55,8 @@ fn external_owner(history: u8, binder: u8) -> PendingImportOwner {
     }
 }
 
-fn local_owner(to: usize, target: &LogicalNode) -> PendingImportOwner {
-    PendingImportOwner::Source {
+fn local_owner(to: usize, target: &LogicalNode) -> NominalImportOwner {
+    NominalImportOwner::Source {
         owner: CachedHomeOwner {
             unit: "model-unit".into(),
             module: format!("M{to}"),
@@ -112,7 +112,7 @@ fn versions(graph: &LogicalGraph) -> BTreeMap<Key, ModuleVersion> {
 fn local_input_variant(
     graph: &LogicalGraph,
     from: usize,
-    change: impl FnOnce(&mut PendingImportOwner),
+    change: impl FnOnce(&mut NominalImportOwner),
 ) -> BTreeMap<Key, ModuleVersion> {
     let mut promoted = promote(graph, false);
     let imports = promoted
@@ -124,7 +124,7 @@ fn local_input_variant(
     let import = imports
         .iter_mut()
         .find(|import| match import {
-            PendingImportOwner::Source { owner, .. } => {
+            NominalImportOwner::Source { owner, .. } => {
                 promoted_has_target(graph, owner.unit.as_str(), owner.module.as_str())
             }
             _ => false,
@@ -538,7 +538,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
                 .values()
                 .flatten()
                 .filter_map(|import| match import {
-                    PendingImportOwner::Source { owner, .. }
+                    NominalImportOwner::Source { owner, .. }
                         if promoted.contains_key(&(owner.unit.clone(), owner.module.clone())) =>
                     {
                         Some(owner)
@@ -556,7 +556,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
                 // semantic input boundary; they are not claims about accepted
                 // compiler receipts after owner validation.
                 let ordinal_changed = local_input_variant(&graph, from, |import| {
-                    if let PendingImportOwner::Source {
+                    if let NominalImportOwner::Source {
                         original_ordinal, ..
                     } = import
                     {
@@ -566,7 +566,7 @@ fn retained_graph_exhausts_three_node_dags_and_local_import_mutations() {
                 assert_eq!(changed_versions(&before, &ordinal_changed), expected);
 
                 let binder_changed = local_input_variant(&graph, from, |import| {
-                    if let PendingImportOwner::Source { binder, .. } = import {
+                    if let NominalImportOwner::Source { binder, .. } = import {
                         binder.occurrence.push_str("-variant");
                     }
                 });

@@ -1189,9 +1189,31 @@ impl OriginalNativeWitness {
         )
     }
 
+    fn validate_promoted_nominal_groups(
+        &self,
+        current: &[(&ProjectedGroup, Vec<ReceiptImportOwner>)],
+    ) -> CertResult<()> {
+        self.validate_group_metadata(
+            current
+                .iter()
+                .map(|(group, imports)| (*group, imports.as_slice())),
+            |original, imports| Ok(original.imports() == imports),
+        )
+    }
+
     fn validate_groups<'a>(
         &self,
         current: impl ExactSizeIterator<Item = (&'a ProjectedGroup, &'a [PendingImportOwner])>,
+    ) -> CertResult<()> {
+        self.validate_group_metadata(current, |original, imports| {
+            Ok(original.source_imports(self)?.as_slice() == imports)
+        })
+    }
+
+    fn validate_group_metadata<'a, I: 'a>(
+        &self,
+        current: impl ExactSizeIterator<Item = (&'a ProjectedGroup, &'a [I])>,
+        imports_match: impl Fn(&AuthenticatedOriginalGroup, &[I]) -> CertResult<bool>,
     ) -> CertResult<()> {
         if current.len() != self.groups.len() {
             return Err(original_group_conflict(
@@ -1228,7 +1250,7 @@ impl OriginalNativeWitness {
                     },
                 ));
             }
-            if original.source_imports(self)?.as_slice() != imports {
+            if !imports_match(original, imports)? {
                 return Err(original_group_conflict(
                     &self.owner,
                     OriginalGroupFailure::PromotionImports {
@@ -11741,10 +11763,10 @@ pub(crate) fn certify_products_with_validation(
             .iter()
             .cloned()
             .map(|import| {
-                resolve_receipt_owner_with_validation(
+                retained_core::NominalImportOwner::authenticate(
                     import,
                     &source_groups,
-                    Some(&source_selection),
+                    &source_selection,
                     &receipt.packages,
                     validation,
                 )
@@ -11822,18 +11844,31 @@ pub(crate) fn certify_products_with_validation(
             .iter()
             .filter(|(_, current, _, _)| current == owner)
             .map(|(_, _, group, _)| {
-                let mut imports = resolved[&group.original_ordinal()].clone();
+                let mut imports = resolved[&group.original_ordinal()]
+                    .iter()
+                    .map(retained_core::NominalImportOwner::receipt)
+                    .collect::<Vec<_>>();
                 for import in &mut imports {
-                    if let PendingImportOwner::Source { owner, .. } = import {
-                        if let Some(version) = promotion_owners.get(owner) {
-                            owner.module_version = version.clone();
+                    if let ReceiptImportOwner::Source {
+                        unit,
+                        module,
+                        module_version,
+                        ..
+                    } = import
+                    {
+                        if let Some((_, version)) = promotion_owners.iter().find(|(owner, _)| {
+                            owner.unit == *unit
+                                && owner.module == *module
+                                && module_version.as_ref() == Some(&owner.module_version)
+                        }) {
+                            *module_version = Some(version.clone());
                         }
                     }
                 }
                 (group, imports)
             })
             .collect::<Vec<_>>();
-        native.validate_promoted_groups(&current)?;
+        native.validate_promoted_nominal_groups(&current)?;
         sharing.0.insert(owner.clone());
     }
     source_selection.promote(&promotion_versions)?;

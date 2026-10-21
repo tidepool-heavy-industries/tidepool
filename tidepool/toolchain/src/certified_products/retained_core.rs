@@ -4,13 +4,146 @@ use super::*;
 
 type OwnerKey = (String, String);
 
-/// Staged only after canonical payloads, native groups and actual global owners
+/// Authenticated nominal metadata for stable identity, never execution demand.
+#[derive(Clone, Debug)]
+pub(super) enum NominalImportOwner {
+    Source {
+        owner: CachedHomeOwner,
+        original_ordinal: u32,
+        binder: SymbolIdentity,
+    },
+    OriginalBinding {
+        unit: String,
+        module: String,
+        interface: crate::artifact_inventory::ArtifactBinding,
+        original: crate::artifact_inventory::ArtifactBinding,
+        binder: SymbolIdentity,
+    },
+    Retained {
+        identity: SymbolIdentity,
+        generation: u64,
+    },
+    Package {
+        unit: String,
+        module: String,
+        binder: SymbolIdentity,
+        interface_digest: [u8; 32],
+    },
+}
+
+impl NominalImportOwner {
+    pub(super) fn authenticate(
+        receipt: ReceiptImportOwner,
+        sources: &SourceGroupMap,
+        selection: &CertifiedSourceSelection,
+        packages: &BTreeMap<OwnerKey, PackageInterfaceWitness>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Self> {
+        Ok(
+            match normalize_receipt_metadata(receipt, sources, selection, packages, validation)? {
+                ReceiptImportOwner::Source {
+                    unit,
+                    module,
+                    module_version,
+                    original_ordinal,
+                    binder,
+                } => Self::Source {
+                    owner: selection
+                        .receipt_source_member(&unit, &module, module_version.as_ref())?
+                        .clone(),
+                    original_ordinal,
+                    binder,
+                },
+                ReceiptImportOwner::OriginalBinding {
+                    unit,
+                    module,
+                    interface,
+                    original,
+                    binder,
+                } => Self::OriginalBinding {
+                    unit,
+                    module,
+                    interface,
+                    original,
+                    binder,
+                },
+                ReceiptImportOwner::Retained {
+                    identity,
+                    generation,
+                } => Self::Retained {
+                    identity,
+                    generation,
+                },
+                ReceiptImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    interface_digest,
+                } => Self::Package {
+                    unit,
+                    module,
+                    binder,
+                    interface_digest,
+                },
+            },
+        )
+    }
+
+    pub(super) fn receipt(&self) -> ReceiptImportOwner {
+        match self {
+            Self::Source {
+                owner,
+                original_ordinal,
+                binder,
+            } => ReceiptImportOwner::Source {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                module_version: Some(owner.module_version.clone()),
+                original_ordinal: *original_ordinal,
+                binder: binder.clone(),
+            },
+            Self::OriginalBinding {
+                unit,
+                module,
+                interface,
+                original,
+                binder,
+            } => ReceiptImportOwner::OriginalBinding {
+                unit: unit.clone(),
+                module: module.clone(),
+                interface: *interface,
+                original: *original,
+                binder: binder.clone(),
+            },
+            Self::Retained {
+                identity,
+                generation,
+            } => ReceiptImportOwner::Retained {
+                identity: identity.clone(),
+                generation: *generation,
+            },
+            Self::Package {
+                unit,
+                module,
+                binder,
+                interface_digest,
+            } => ReceiptImportOwner::Package {
+                unit: unit.clone(),
+                module: module.clone(),
+                binder: binder.clone(),
+                interface_digest: *interface_digest,
+            },
+        }
+    }
+}
+
+/// Staged after canonical payloads, native groups and nominal import membership
 /// passed their owning validators. Local source versions are not yet issued.
 pub(super) struct PromotedModule {
     pub(super) canonical_sha256: [u8; 32],
     pub(super) product_sha256: [u8; 32],
     pub(super) package_sha256: [u8; 32],
-    pub(super) groups: BTreeMap<u32, Vec<PendingImportOwner>>,
+    pub(super) groups: BTreeMap<u32, Vec<NominalImportOwner>>,
 }
 
 pub(super) fn module_versions(
@@ -54,7 +187,7 @@ fn graph_value(
             .get(&key)
             .ok_or(CertificationError::Mismatch("retained graph owner"))?;
         for import in node.groups.values().flatten() {
-            if let PendingImportOwner::Source { owner, .. } = import {
+            if let NominalImportOwner::Source { owner, .. } = import {
                 let selected = (owner.unit.clone(), owner.module.clone());
                 if promoted.contains_key(&selected) {
                     pending.push(selected);
@@ -96,7 +229,7 @@ fn graph_value(
 }
 
 fn edge_value(
-    import: &PendingImportOwner,
+    import: &NominalImportOwner,
     promoted: &BTreeMap<OwnerKey, PromotedModule>,
     packages: &BTreeMap<OwnerKey, PackageInterfaceWitness>,
 ) -> CertResult<Value> {
@@ -112,7 +245,7 @@ fn edge_value(
         )?))
     };
     Ok(match import {
-        PendingImportOwner::Source {
+        NominalImportOwner::Source {
             owner,
             original_ordinal,
             binder,
@@ -134,7 +267,12 @@ fn edge_value(
                 ])
             }
         }
-        PendingImportOwner::Retained {
+        NominalImportOwner::OriginalBinding { binder, .. } => value_array([
+            value_text("original-binding"),
+            value_import(&import.receipt()),
+            value_identity(binder),
+        ]),
+        NominalImportOwner::Retained {
             identity,
             generation,
         } => value_array([
@@ -142,7 +280,7 @@ fn edge_value(
             value_identity(identity),
             Value::Integer((*generation).into()),
         ]),
-        PendingImportOwner::Package {
+        NominalImportOwner::Package {
             unit,
             module,
             binder,
@@ -177,8 +315,8 @@ mod tests {
         }
     }
 
-    fn source(module: &str) -> PendingImportOwner {
-        PendingImportOwner::Source {
+    fn source(module: &str) -> NominalImportOwner {
+        NominalImportOwner::Source {
             owner: CachedHomeOwner {
                 unit: "main".into(),
                 module: module.into(),
@@ -191,7 +329,7 @@ mod tests {
         }
     }
 
-    fn node(imports: Vec<PendingImportOwner>) -> PromotedModule {
+    fn node(imports: Vec<NominalImportOwner>) -> PromotedModule {
         PromotedModule {
             canonical_sha256: [1; 32],
             product_sha256: [2; 32],
@@ -243,7 +381,7 @@ mod tests {
         );
         for node in nodes.values_mut() {
             for import in node.groups.values_mut().flatten() {
-                let PendingImportOwner::Source { owner, .. } = import else {
+                let NominalImportOwner::Source { owner, .. } = import else {
                     unreachable!()
                 };
                 owner.module_version = ModuleVersion([99; 32]);
@@ -257,7 +395,7 @@ mod tests {
     fn promotion_identity_binds_external_native_owners_and_retained_generations() {
         let mut nodes = BTreeMap::from([(key("A"), node(vec![source("External")]))]);
         let original = version(&nodes);
-        let PendingImportOwner::Source { owner, .. } = &mut nodes
+        let NominalImportOwner::Source { owner, .. } = &mut nodes
             .get_mut(&key("A"))
             .unwrap()
             .groups
@@ -268,7 +406,7 @@ mod tests {
         };
         owner.module_version = ModuleVersion([7; 32]);
         assert_ne!(version(&nodes), original);
-        let PendingImportOwner::Source { owner, .. } = &mut nodes
+        let NominalImportOwner::Source { owner, .. } = &mut nodes
             .get_mut(&key("A"))
             .unwrap()
             .groups
@@ -282,13 +420,13 @@ mod tests {
         assert_ne!(version(&nodes), original);
         nodes.get_mut(&key("A")).unwrap().groups.insert(
             2,
-            vec![PendingImportOwner::Retained {
+            vec![NominalImportOwner::Retained {
                 identity: binder("main", "Lib.G1", "retained"),
                 generation: 1,
             }],
         );
         let generation_one = version(&nodes);
-        let PendingImportOwner::Retained { generation, .. } = &mut nodes
+        let NominalImportOwner::Retained { generation, .. } = &mut nodes
             .get_mut(&key("A"))
             .unwrap()
             .groups
@@ -304,7 +442,7 @@ mod tests {
     #[test]
     fn promotion_identity_binds_transitive_inherited_native_version() {
         let mut inherited = source("H");
-        let PendingImportOwner::Source { owner, .. } = &mut inherited else {
+        let NominalImportOwner::Source { owner, .. } = &mut inherited else {
             unreachable!()
         };
         owner.module_version = ModuleVersion([7; 32]);
@@ -314,7 +452,7 @@ mod tests {
             (key("Unrelated"), node(vec![])),
         ]);
         let original = module_versions(&nodes, &BTreeMap::new()).unwrap();
-        let PendingImportOwner::Source { owner, .. } = &mut nodes
+        let NominalImportOwner::Source { owner, .. } = &mut nodes
             .get_mut(&key("B"))
             .unwrap()
             .groups
@@ -337,6 +475,87 @@ mod tests {
     }
 
     #[test]
+    fn promotion_original_reference_matches_haskell_edge_and_binds_every_nominal_field() {
+        use crate::artifact_inventory::{ArtifactBinding, ArtifactId, ArtifactSelectionId};
+        let reference = NominalImportOwner::OriginalBinding {
+            unit: "main".into(),
+            module: "Original".into(),
+            interface: ArtifactBinding {
+                artifact: ArtifactId([11; 32]),
+                selection: ArtifactSelectionId([12; 32]),
+            },
+            original: ArtifactBinding {
+                artifact: ArtifactId([13; 32]),
+                selection: ArtifactSelectionId([14; 32]),
+            },
+            binder: SymbolIdentity {
+                record_parent: Some("Parent".into()),
+                ..binder("main", "Original", "field")
+            },
+        };
+        // The Haskell retainedNativeVersions writer nests encodeOriginalBinding
+        // and the complete outer SymbolIdentity, including namespace and parent.
+        let expected = value_array([
+            value_text("original-binding"),
+            value_array([
+                value_text("original-binding"),
+                value_text("main"),
+                value_text("Original"),
+                value_array([Value::Bytes(vec![11; 32]), Value::Bytes(vec![12; 32])]),
+                value_array([Value::Bytes(vec![13; 32]), Value::Bytes(vec![14; 32])]),
+            ]),
+            value_array([
+                value_text("main"),
+                value_text("Original"),
+                value_text("value"),
+                value_text("field"),
+                value_text("Parent"),
+            ]),
+        ]);
+        assert_eq!(
+            edge_value(&reference, &BTreeMap::new(), &BTreeMap::new()).unwrap(),
+            expected
+        );
+        let original = version(&BTreeMap::from([(key("A"), node(vec![reference.clone()]))]));
+        assert_eq!(
+            hex(&original.0),
+            "a9677ae303d03c7ec2ae92566cd383107ccf97ac63eedd1a6743ff469793e85c"
+        );
+        for changed in 0..11 {
+            let mut variant = reference.clone();
+            let NominalImportOwner::OriginalBinding {
+                unit,
+                module,
+                interface,
+                original,
+                binder,
+            } = &mut variant
+            else {
+                unreachable!()
+            };
+            match changed {
+                0 => unit.push_str("-other"),
+                1 => module.push_str("Other"),
+                2 => interface.artifact.0[0] ^= 1,
+                3 => interface.selection.0[0] ^= 1,
+                4 => original.artifact.0[0] ^= 1,
+                5 => original.selection.0[0] ^= 1,
+                6 => binder.unit.push_str("-other"),
+                7 => binder.module.push_str("Other"),
+                8 => binder.namespace = "type".into(),
+                9 => binder.occurrence.push_str("Other"),
+                10 => binder.record_parent = None,
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                version(&BTreeMap::from([(key("A"), node(vec![variant]))])),
+                original,
+                "field {changed}"
+            );
+        }
+    }
+
+    #[test]
     fn promotion_identity_preserves_zero_group_nodes() {
         let mut empty = node(vec![]);
         empty.groups.clear();
@@ -350,7 +569,7 @@ mod tests {
     #[test]
     fn promotion_identity_binds_package_seal_and_path() {
         let identity = binder("pkg", "Package", "value");
-        let package = PendingImportOwner::Package {
+        let package = NominalImportOwner::Package {
             unit: "pkg".into(),
             module: "Package".into(),
             binder: identity.clone(),
@@ -374,7 +593,7 @@ mod tests {
         packages.get_mut(&package_key).unwrap().selected_path = "/package/original.hi".into();
         packages.get_mut(&package_key).unwrap().sha256 = [9; 32];
         assert!(module_versions(&nodes, &packages).is_err());
-        let PendingImportOwner::Package {
+        let NominalImportOwner::Package {
             interface_digest, ..
         } = &mut nodes
             .get_mut(&key("A"))
