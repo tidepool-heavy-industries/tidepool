@@ -84,6 +84,9 @@ fn validate_artifact_row(
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     row: &BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
 ) -> Result<(), CompileError> {
+    if let ArtifactPayload::PackageCode(product) = &entry.payload {
+        return validate_package_row(entry.descriptor.id, product, entries, row);
+    }
     let canonical = match &entry.payload {
         ArtifactPayload::Original(product) => Some(
             product
@@ -91,7 +94,7 @@ fn validate_artifact_row(
                 .ok_or_else(|| failure("native canonical carrier missing"))?,
         ),
         ArtifactPayload::Canonical(interface) => Some(interface),
-        ArtifactPayload::Interface(_, _) => None,
+        ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
     };
     if let Some(canonical) = canonical {
         let sealed = canonical
@@ -139,7 +142,7 @@ fn validate_artifact_row(
             .get(&binding.artifact)
             .ok_or_else(|| failure("selected dependency payload missing"))?;
         if *label != ArtifactDependency::Interface
-            || required.is_native()
+            || !required.is_compiler_interface()
             || !requirements.remove(&required.descriptor.owner)
         {
             return Err(row_failure());
@@ -162,6 +165,44 @@ fn validate_artifact_row(
     }
     if !requirements.is_empty() {
         return Err(row_failure());
+    }
+    Ok(())
+}
+
+fn validate_package_row(
+    artifact: ArtifactId,
+    product: &crate::certified_products::CertifiedPackageCodeProduct,
+    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    row: &BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
+) -> Result<(), CompileError> {
+    let invalid =
+        |reason| admission_failure(ArtifactInventoryFailure::PackageCode { artifact, reason });
+    let expected = product.code().globals().len();
+    if row.len() != expected {
+        return Err(invalid(PackageCodeRefusal::ImportCount {
+            expected,
+            actual: row.len(),
+        }));
+    }
+    let mut seen = BTreeSet::new();
+    for (target, label) in row {
+        let (
+            ArtifactBindingNode::Artifact(binding),
+            ArtifactDependency::PackageCodeImport { global_index },
+        ) = (target, label)
+        else {
+            return Err(invalid(PackageCodeRefusal::WrongKind));
+        };
+        if !seen.insert(*global_index) || *global_index as usize >= expected {
+            return Err(invalid(PackageCodeRefusal::ImportContract));
+        }
+        let target = entries
+            .get(&binding.artifact)
+            .ok_or_else(|| invalid(PackageCodeRefusal::MissingBinding { binding: *binding }))?;
+        let ArtifactPayload::PackageCode(target) = &target.payload else {
+            return Err(invalid(PackageCodeRefusal::WrongKind));
+        };
+        package_code::validate_import(artifact, product, *global_index as usize, target)?;
     }
     Ok(())
 }
@@ -216,7 +257,7 @@ fn validate_group_row(
                     dependent_ordinal, ..
                 },
                 _,
-            ) if *dependent_ordinal == ordinal && !required.is_native() => {}
+            ) if *dependent_ordinal == ordinal && required.is_compiler_interface() => {}
             _ => return Err(row_failure()),
         }
     }
@@ -245,7 +286,10 @@ fn validate_transitive_conflicts(
             ArtifactPayload::Original(product) => {
                 ConflictOwner::Native(NativeOwnerKey::from_owner(product.owner()))
             }
-            _ => ConflictOwner::Interface(entry.descriptor.owner.clone()),
+            ArtifactPayload::PackageCode(_) => continue,
+            ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => {
+                ConflictOwner::Interface(entry.descriptor.owner.clone())
+            }
         };
         owners
             .entry(owner)

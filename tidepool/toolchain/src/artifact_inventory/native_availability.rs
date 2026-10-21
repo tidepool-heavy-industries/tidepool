@@ -1188,7 +1188,7 @@ pub(crate) fn validate_consumed_native_namespace(
     let canonical = match &selected.payload {
         ArtifactPayload::Canonical(interface) => Some(interface),
         ArtifactPayload::Original(product) => product.module_interface(),
-        ArtifactPayload::Interface(..) => None,
+        ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
     };
     if canonical != product.module_interface()
         || (matches!(selected.payload, ArtifactPayload::Original(_))

@@ -967,7 +967,7 @@ fn read_catalog_view_interface(
     let interface = match &entry.payload {
         ArtifactPayload::Canonical(interface) => interface,
         ArtifactPayload::Original(product) => product.module_interface().unwrap(),
-        ArtifactPayload::Interface(..) => panic!("catalog original or canonical owner required"),
+        ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => panic!("catalog original or canonical owner required"),
     };
     read_owned_slice(
         interface

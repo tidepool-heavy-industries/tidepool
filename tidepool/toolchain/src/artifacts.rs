@@ -1499,7 +1499,7 @@ fn immutable_candidates_in_context_with_catalog(
                 crate::artifact_inventory::ArtifactPayload::Original(product) => {
                     product.module_interface()?
                 }
-                crate::artifact_inventory::ArtifactPayload::Interface(_, _) => return None,
+                crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return None,
             };
             Some((
                 (canonical.unit().to_owned(), canonical.module().to_owned()),

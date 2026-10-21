@@ -1819,7 +1819,7 @@ fn checked_relative(path: &Path) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, RecoveryArtifactError> {
+pub(crate) fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, RecoveryArtifactError> {
     if !checked_relative(relative) {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -1903,7 +1903,7 @@ fn read_admission_bytes(
     Ok(bytes)
 }
 
-fn read_checked(
+pub(crate) fn read_checked(
     path: &Path,
     expected: &[u8; 32],
     limit: u64,
@@ -1918,7 +1918,7 @@ fn read_checked(
     Ok(bytes)
 }
 
-fn materialize_copy_with_validation(
+pub(crate) fn materialize_copy_with_validation(
     path: &Path,
     bytes: &[u8],
     digest: &[u8; 32],
@@ -2170,6 +2170,7 @@ fn admit_certified_interface<'a>(
 ) -> Result<ValidatedInterfaceBytes<'a>, RecoveryArtifactError> {
     use crate::artifact_inventory::ArtifactPayload;
     let (unit, module, bytes, packages) = match payload {
+        ArtifactPayload::PackageCode(_) => return Err(RecoveryArtifactError::InvalidReference),
         ArtifactPayload::Original(product) => (
             product.owner().unit.as_str(),
             product.owner().module.as_str(),
@@ -2238,6 +2239,7 @@ impl ValidatedInterfaceInput {
         mode: MaterializationMode,
     ) -> Result<MaterializedInterfaceInput, RecoveryArtifactError> {
         let (bytes, packages) = match &self.entry.payload {
+            crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return Err(RecoveryArtifactError::InvalidReference),
             crate::artifact_inventory::ArtifactPayload::Original(product) => {
                 (product.interface_bytes(), product.package_imports_bytes())
             }

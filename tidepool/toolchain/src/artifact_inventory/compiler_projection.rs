@@ -17,6 +17,7 @@ struct PublicationNativeInputs {
     facts: Arc<crate::exact_context::PublicationNativeFacts>,
     offers: Arc<[IssuedNativeOffer]>,
     availability: crate::declaration_context::RequestNativeAvailability,
+    completions: NativeSelectionCompletions,
     decisions: IssuedInputNativeDecisions,
     artifacts: ArtifactView,
     projection: CompilerInputProjection,
@@ -38,6 +39,7 @@ impl PublicationNativeAuthority {
                 facts: Arc::clone(source.native_fact_owner()),
                 offers: Arc::clone(&source.native_offers),
                 availability: source.native_availability.clone(),
+                completions: source.native_completions.clone(),
                 decisions: source.input_decisions.clone(),
                 artifacts: source.artifacts.clone(),
                 projection: source.projection.clone(),
@@ -88,6 +90,7 @@ impl PublicationNativeAuthority {
             &facts.input_decisions,
         )?;
         if let PublicationNativeState::Acquired(inputs) = &self.0 {
+            restored = restored.with_native_completion_refs(&inputs.completions)?;
             restored.input_decisions = inputs
                 .decisions
                 .with_recorded_facts(restored.input_decisions.facts.clone());
@@ -97,6 +100,7 @@ impl PublicationNativeAuthority {
                 facts,
                 offers: Arc::clone(&restored.native_offers),
                 availability: restored.native_availability,
+                completions: restored.native_completions,
                 decisions: restored.input_decisions,
                 artifacts: restored.artifacts,
                 projection: prior,
@@ -338,6 +342,127 @@ pub struct CompilerInputProjection {
     recorded_roles: imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
 }
 
+/// Closed immutable destinations selected for one HOME global slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletedNativeImport {
+    Source {
+        binding: NativeGroupBinding,
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+    Retained {
+        binding: ArtifactBinding,
+        identity: tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+    },
+    Package {
+        binding: super::PackageCodeBinding,
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletedNativeSourceRow {
+    binding: NativeGroupBinding,
+    product: Arc<crate::certified_products::PendingCertifiedGroup>,
+    imports: Arc<[CompletedNativeImport]>,
+}
+impl CompletedNativeSourceRow {
+    pub fn binding(&self) -> NativeGroupBinding {
+        self.binding
+    }
+    pub fn product(&self) -> &Arc<crate::certified_products::PendingCertifiedGroup> {
+        &self.product
+    }
+    pub fn imports(&self) -> &[CompletedNativeImport] {
+        &self.imports
+    }
+}
+impl PartialEq for CompletedNativeSourceRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.binding == other.binding && self.imports == other.imports
+    }
+}
+impl Eq for CompletedNativeSourceRow {}
+
+/// A selected executable closure owns its immutable products and exact links.
+/// It is separate from broader Original availability and Original certificate bytes.
+#[derive(Debug)]
+pub struct IssuedNativeSelectionCompletion {
+    artifacts: ArtifactView,
+    rows: imbl::OrdMap<NativeGroupBinding, Arc<CompletedNativeSourceRow>>,
+    packages: Arc<super::IssuedPackageCodeGraph>,
+    retained: Arc<[super::NativeBindingRequirement]>,
+}
+impl IssuedNativeSelectionCompletion {
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &Arc<CompletedNativeSourceRow>> {
+        self.rows.values()
+    }
+    pub fn package_bindings(
+        &self,
+    ) -> impl ExactSizeIterator<Item = super::PackageCodeBinding> + '_ {
+        self.packages.bindings()
+    }
+    pub fn retained_requirements(&self) -> &[super::NativeBindingRequirement] {
+        &self.retained
+    }
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        &self.artifacts
+    }
+}
+impl PartialEq for IssuedNativeSelectionCompletion {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.retained == other.retained
+            && self
+                .packages
+                .bindings()
+                .map(|binding| binding.binding())
+                .eq(other.packages.bindings().map(|binding| binding.binding()))
+    }
+}
+impl Eq for IssuedNativeSelectionCompletion {}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NativeSelectionCompletions(imbl::Vector<Arc<IssuedNativeSelectionCompletion>>);
+impl NativeSelectionCompletions {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<IssuedNativeSelectionCompletion>> {
+        self.0.iter()
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub(crate) fn append(&self, incoming: &Self) -> Result<Self, CompileError> {
+        let mut retained = self.clone();
+        for completion in incoming.iter() {
+            crate::host_work::checkpoint()?;
+            if retained
+                .iter()
+                .any(|prior| Arc::ptr_eq(prior, completion) || prior == completion)
+            {
+                continue;
+            }
+            for prior in retained.iter() {
+                for (binding, row) in &completion.rows {
+                    if prior.rows.get(binding).is_some_and(|old| old != row) {
+                        return Err(failure("native completion changed an exact HOME slot"));
+                    }
+                }
+            }
+            retained.0.push_back(Arc::clone(completion));
+        }
+        Ok(retained)
+    }
+}
+impl PartialEq for NativeSelectionCompletions {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .iter()
+                .all(|left| other.iter().any(|right| left == right))
+    }
+}
+impl Eq for NativeSelectionCompletions {}
+
 /// Matched compiler roles and exact custody selected by their existing issuer.
 /// Required type interfaces do not grant lexical imports or native body demand.
 #[derive(Clone, Debug)]
@@ -346,6 +471,7 @@ pub(crate) struct CompilerSourceSupport {
     artifacts: ArtifactView,
     native_fact_owner: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
     native_offers: Arc<[IssuedNativeOffer]>,
+    native_completions: NativeSelectionCompletions,
     native_offer_facts: imbl::OrdMap<[u8; 32], crate::exact_context::NativeOfferSnapshotFacts>,
     native_availability: crate::declaration_context::RequestNativeAvailability,
     selected: Arc<AdmittedCompilerRoles>,
@@ -410,6 +536,7 @@ impl PartialEq for CompilerSourceSupport {
         self.projection == other.projection
             && self.artifacts == other.artifacts
             && self.native_fact_owner == other.native_fact_owner
+            && self.native_completions == other.native_completions
             && self.native_offer_facts == other.native_offer_facts
             && self.native_availability == other.native_availability
             && self.selected == other.selected
@@ -1049,6 +1176,7 @@ impl SelectedCompilerInterfaces<'_> {
             native_offers: Arc::from([]),
             native_fact_owner: None,
             native_offer_facts: Default::default(),
+            native_completions: NativeSelectionCompletions::default(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: IssuedInputNativeDecisions::default(),
         }
@@ -1394,6 +1522,9 @@ impl crate::declaration_context::RequestCompilerInputs {
 
 impl CompilerSourceSupport {
     fn refreshed_native_facts(mut self) -> Result<Self, CompileError> {
+        for completion in self.native_completions.iter() {
+            self.artifacts = self.artifacts.retain_custody(completion.artifacts())?;
+        }
         self.native_fact_owner = Some(
             crate::exact_context::PublicationNativeFacts::maintain(
                 self.native_fact_owner.as_ref(),
@@ -1589,6 +1720,7 @@ impl CompilerSourceSupport {
                 .input_decisions
                 .with_recorded_facts(facts.input_decisions.clone()),
             native_offer_facts: facts.offers.clone(),
+            native_completions: self.native_completions.clone(),
             native_fact_owner: Some(facts),
             // The home census belongs to the demanded rows, not to cold
             // custody or units merely mentioned by another retained row.
@@ -1615,6 +1747,7 @@ impl CompilerSourceSupport {
             native_availability,
             IssuedInputNativeDecisions::default(),
             None,
+            NativeSelectionCompletions::default(),
         )
     }
 
@@ -1625,6 +1758,7 @@ impl CompilerSourceSupport {
         native_availability: crate::declaration_context::RequestNativeAvailability,
         input_decisions: IssuedInputNativeDecisions,
         prior: Option<&Arc<crate::exact_context::PublicationNativeFacts>>,
+        native_completions: NativeSelectionCompletions,
     ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.compiler_support.new",
@@ -1643,6 +1777,7 @@ impl CompilerSourceSupport {
             native_offers,
             native_availability,
             prior,
+            native_completions,
             &mut timing,
         )?;
         timing.finish(true);
@@ -1654,6 +1789,7 @@ impl CompilerSourceSupport {
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
         native_availability: crate::declaration_context::RequestNativeAvailability,
         prior: Option<&Arc<crate::exact_context::PublicationNativeFacts>>,
+        native_completions: NativeSelectionCompletions,
         timing: &mut crate::timing::InvocationTiming,
     ) -> Result<Self, CompileError> {
         let ResolvedCompilerInputs {
@@ -1662,6 +1798,9 @@ impl CompilerSourceSupport {
             mut selected,
             input_decisions,
         } = inputs;
+        let artifacts = native_completions.iter().try_fold(artifacts, |view, completion| {
+            view.retain_custody(completion.artifacts())
+        })?;
         timing.advance("retain_issued_offer_custody");
         let mut offers = Vec::new();
         let mut native_offer_facts = prior.map(|p| p.offers.clone()).unwrap_or_default();
@@ -1725,6 +1864,7 @@ impl CompilerSourceSupport {
             artifacts: retained,
             native_fact_owner: prior.cloned(),
             native_offer_facts,
+            native_completions,
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions,
@@ -1746,8 +1886,9 @@ impl CompilerSourceSupport {
             self.native_availability.clone(),
             decisions.clone(),
             self.native_fact_owner.as_ref(),
+            self.native_completions.clone(),
         )?;
-        support.refreshed_native_facts()
+        support.with_native_completion_refs(&self.native_completions)?.refreshed_native_facts()
     }
 
     fn rebuild_narrowed(
@@ -1764,8 +1905,9 @@ impl CompilerSourceSupport {
             self.native_availability.clone(),
             decisions.clone(),
             self.native_fact_owner.as_ref(),
+            self.native_completions.clone(),
         )?;
-        support.refreshed_native_facts()
+        support.with_native_completion_refs(&self.native_completions)?.refreshed_native_facts()
     }
 
     fn with_additional_decisions(
@@ -1849,6 +1991,7 @@ impl CompilerSourceSupport {
             )?,
             input_decisions,
             None,
+            NativeSelectionCompletions::default(),
         )
     }
 
@@ -2186,6 +2329,7 @@ impl CompilerSourceSupport {
                 native_fact_owner: self.native_fact_owner.clone(),
                 native_offers: offers.into(),
                 native_offer_facts,
+                native_completions: self.native_completions.append(&incoming.native_completions)?,
                 native_availability,
                 selected: Arc::new(selected),
                 input_decisions,
@@ -2483,6 +2627,7 @@ impl CompilerSourceSupport {
             availability,
             self.input_decisions.clone(),
             self.native_fact_owner.as_ref(),
+            self.native_completions.clone(),
         )?;
         timing.advance("carry_input_decisions");
         let result = support.with_additional_decisions(Some(&original.input_decisions));
@@ -2511,6 +2656,32 @@ impl CompilerSourceSupport {
                 result.refreshed_native_facts()
             }
         }
+    }
+
+    pub(crate) fn native_completions(&self) -> &NativeSelectionCompletions {
+        &self.native_completions
+    }
+
+    fn with_native_completion_refs(
+        mut self,
+        incoming: &NativeSelectionCompletions,
+    ) -> Result<Self, CompileError> {
+        let completions = self.native_completions.append(incoming)?;
+        for completion in completions.iter() {
+            self.artifacts = self.artifacts.retain_custody(completion.artifacts())?;
+        }
+        self.native_completions = completions;
+        Ok(self)
+    }
+
+    /// Import only already-issued immutable completion custody. Compiler roles,
+    /// input decisions and availability stay with the receiving owner.
+    pub(crate) fn with_native_completions_from(
+        &self,
+        incoming: &Self,
+    ) -> Result<Self, CompileError> {
+        self.clone()
+            .with_native_completion_refs(&incoming.native_completions)
     }
 
     pub(crate) fn native_offers(&self) -> &[IssuedNativeOffer] {
@@ -2549,6 +2720,10 @@ impl CompilerSourceSupport {
                 .into_rows(),
             None => self.native_availability.clone(),
         };
+        let completions = match fragment {
+            Some(fragment) => self.native_completions.append(fragment.issued_native_completions())?,
+            None => self.native_completions.clone(),
+        };
         let support = Self::new_with_native_facts(
             projection,
             artifacts,
@@ -2556,6 +2731,7 @@ impl CompilerSourceSupport {
             availability,
             decisions.clone(),
             self.native_fact_owner.as_ref(),
+            completions,
         )?;
         let has_unissued_original =
             support
@@ -2591,7 +2767,8 @@ impl CompilerSourceSupport {
                 support.native_availability.clone(),
                 decisions.clone(),
                 support.native_fact_owner.as_ref(),
-            )?;
+                support.native_completions.clone(),
+        )?;
             return resolved.refreshed_native_facts();
         }
         support.refreshed_native_facts()
@@ -2773,6 +2950,7 @@ impl CompilerSourceSupport {
             output.native_availability().clone(),
             output.issued_input_decisions().cloned().unwrap_or_default(),
             output.native_fact_base(),
+            output.issued_native_completions().clone(),
         )
         .and_then(|support| support.with_additional_decisions(output.issued_input_decisions()))
     }
@@ -2800,6 +2978,8 @@ impl CompilerSourceSupport {
                 support.retain_normalized_availability(output.native_availability())
             })
             .and_then(|support| support.with_additional_decisions(output.issued_input_decisions()))
+            .and_then(|support| support.with_native_completion_refs(output.issued_native_completions()))
+            .and_then(|support| support.with_native_completions_from(parent))
     }
 
     /// Issue only the role fragment named by this actual checked stage/source
@@ -2872,6 +3052,7 @@ impl CompilerSourceSupport {
             native_fact_owner: inputs.native_fact_base().cloned(),
             native_offers: offers.into(),
             native_offer_facts,
+            native_completions: inputs.issued_native_completions().clone(),
             native_availability,
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions,
@@ -2923,6 +3104,7 @@ impl CompilerSourceSupport {
             availability,
             decisions,
             self.native_fact_owner.as_ref(),
+            self.native_completions.append(&selection.native_completions())?,
         )
     }
 
@@ -2949,6 +3131,7 @@ impl CompilerSourceSupport {
             native_offers: Arc::clone(&self.native_offers),
             native_fact_owner: self.native_fact_owner.clone(),
             native_offer_facts: self.native_offer_facts.clone(),
+            native_completions: self.native_completions.clone(),
             native_availability: self.native_availability.clone(),
             selected: Arc::new(AdmittedCompilerRoles {
                 rows: selected,
@@ -3003,6 +3186,7 @@ impl CompilerSourceSupport {
             artifacts,
             native_fact_owner: self.native_fact_owner.clone(),
             native_offer_facts,
+            native_completions: self.native_completions.clone(),
             native_offers: offers.into(),
             native_availability: self.native_availability.clone(),
             selected: Arc::new(AdmittedCompilerRoles {
@@ -3082,6 +3266,7 @@ impl CompilerSourceSupport {
             native_offers: Arc::clone(&self.native_offers),
             native_fact_owner: self.native_fact_owner.clone(),
             native_offer_facts: self.native_offer_facts.clone(),
+            native_completions: self.native_completions.clone(),
             selected: Arc::new(AdmittedCompilerRoles {
                 rows: selected,
                 home_units: Arc::clone(&self.selected.home_units),
@@ -3107,6 +3292,7 @@ impl CompilerSourceSupport {
             self.native_availability.clone(),
             decisions,
             self.native_fact_owner.as_ref(),
+            self.native_completions.clone(),
         )
     }
 
@@ -3167,6 +3353,7 @@ impl CompilerSourceSupport {
                     native_offers: Arc::clone(&self.native_offers),
                     native_fact_owner: self.native_fact_owner.clone(),
                     native_offer_facts: self.native_offer_facts.clone(),
+                    native_completions: self.native_completions.clone(),
                     native_availability: self.native_availability.clone(),
                     input_decisions: self.input_decisions.clone(),
                 };
@@ -3284,6 +3471,7 @@ impl CompilerSourceSupport {
             native_fact_owner: Some(Arc::clone(&saved.facts)),
             native_offers: Arc::clone(&saved.offers),
             native_offer_facts: saved.facts.offers.clone(),
+            native_completions: saved.completions.clone(),
             native_availability: saved.availability.clone(),
             selected: Arc::clone(&saved.selected),
             input_decisions: saved.decisions.clone(),
@@ -3438,6 +3626,7 @@ impl CompilerSourceSupport {
             self.native_availability.clone(),
             decisions,
             self.native_fact_owner.as_ref(),
+            self.native_completions.clone(),
         )
     }
 
@@ -3533,6 +3722,7 @@ impl CompilerSourceSupport {
             artifacts,
             native_fact_owner: self.native_fact_owner.clone(),
             native_offer_facts,
+            native_completions: self.native_completions.clone(),
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: decisions,
@@ -3578,6 +3768,7 @@ impl CompilerSourceSupport {
                 .cloned(),
             self.native_availability.clone(),
             self.native_fact_owner.as_ref(),
+            self.native_completions.append(&other.native_completions)?,
             &mut timing,
         )?;
         timing.advance("retain_normalized_availability");
@@ -3885,7 +4076,8 @@ impl CompilerInputProjection {
                     ),
                     Some(entry.descriptor.id),
                 ),
-                _ => (entry.descriptor.id, None),
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => (entry.descriptor.id, None),
+                ArtifactPayload::PackageCode(_) => continue,
             };
             let role = match original_reuse {
                 Some(original) => CompilerInputRole::ReusableOriginal {
@@ -4316,7 +4508,10 @@ impl CompilerInputProjection {
         interface: &'a Arc<ArtifactEntry>,
         original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
     ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
-        if &interface.descriptor.owner != owner || interface.is_native() {
+        if &interface.descriptor.owner != owner
+            || interface.is_native()
+            || matches!(interface.payload, ArtifactPayload::PackageCode(_))
+        {
             return Err(failure("compiler interface role has another owner or kind"));
         }
         match role.original() {

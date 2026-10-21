@@ -154,11 +154,15 @@ pub enum RecoveryArtifactClosure {
     Join(RecoveryJoinRef),
     ModuleInterface(RecoveryModuleInterfaceRef),
     ValueInterface(RecoveryValueInterfaceRef),
+    PackageCode(tidepool_toolchain::certified_products::RecoveryPackageCodeRef),
 }
 
 impl RecoveryArtifactClosure {
     pub(crate) fn descriptor(&self) -> ArtifactDescriptor {
         match self {
+            Self::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference)
+            }
             Self::Home(reference) => ArtifactDescriptor::from_recovery_product(reference),
             Self::Join(reference) => ArtifactDescriptor::from_recovery_join(reference),
             Self::ModuleInterface(reference) => {
@@ -184,6 +188,7 @@ impl RecoveryArtifactClosure {
 
     fn paths(&self) -> (&Path, Option<&Path>) {
         match self {
+            Self::PackageCode(reference) => (&reference.envelope_path, None),
             Self::Home(reference) => (&reference.interface_path, Some(&reference.product_path)),
             Self::Join(reference) => (&reference.interface_path, None),
             Self::ModuleInterface(reference) => (&reference.interface.interface_path, None),
@@ -223,11 +228,37 @@ impl RecoveryArtifactClosure {
                     module_paths(interface, &mut paths);
                 }
             }
+            Self::PackageCode(reference) => {
+                paths.push((C::Product, reference.envelope_path.as_path()));
+                paths.push((
+                    C::ExternalPackageInterface,
+                    reference.defining_interface.path.as_path(),
+                ));
+                paths.extend(
+                    reference
+                        .import_interfaces
+                        .iter()
+                        .map(|interface| (C::ExternalPackageInterface, interface.path.as_path())),
+                );
+            }
             Self::Join(reference) => interface_paths(reference, &mut paths),
             Self::ModuleInterface(reference) => module_paths(reference, &mut paths),
             Self::ValueInterface(reference) => interface_paths(&reference.interface, &mut paths),
         }
         paths
+    }
+
+    pub(crate) fn payload_reference(
+        &self,
+    ) -> tidepool_toolchain::declaration_join::RecoveryPayloadReference {
+        use tidepool_toolchain::declaration_join::RecoveryPayloadReference as P;
+        match self {
+            Self::Home(reference) => P::Original(reference.clone()),
+            Self::ModuleInterface(reference) => P::Canonical(reference.clone()),
+            Self::Join(reference) => P::Join(reference.clone()),
+            Self::ValueInterface(reference) => P::Value(reference.clone()),
+            Self::PackageCode(reference) => P::PackageCode(reference.clone()),
+        }
     }
 
     fn owner(&self) -> ExactModuleIdentity {
@@ -462,6 +493,9 @@ pub(crate) fn materialize_missing_context_artifacts(
             }
             RecoveryPayloadReference::Canonical(reference) => {
                 RecoveryArtifactClosure::ModuleInterface(reference)
+            }
+            RecoveryPayloadReference::PackageCode(reference) => {
+                RecoveryArtifactClosure::PackageCode(reference)
             }
             RecoveryPayloadReference::Join(reference) => RecoveryArtifactClosure::Join(reference),
             RecoveryPayloadReference::Value(reference) => {
