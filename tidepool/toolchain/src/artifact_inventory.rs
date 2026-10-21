@@ -11304,6 +11304,66 @@ mod tests {
         assert_bound_segment_exact_carrier(false);
     }
 
+    // Observation data only: native authority is issued at each call site by
+    // AuthenticatedTargetImports::issue and the production target selector.
+    fn source_target_data(
+        exports: &[(&ArtifactEntry, u32)],
+    ) -> (
+        Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        Vec<crate::certified_products::AcceptedGlobal>,
+    ) {
+        use crate::certified_products::{AcceptedGlobal, ReceiptImportOwner};
+        use tidepool_repr::execution_schema::{
+            testing, Atom, ExprFrame, GlobalDecl, GlobalId, ResultContract, SignatureId, ValueRef,
+        };
+        let mut wire = testing::wire_program();
+        let mut accepted = Vec::new();
+        let mut returned = Vec::new();
+        let mut result_reps = Vec::new();
+        for (entry, ordinal) in exports {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                panic!("actual native fixture")
+            };
+            let definitions =
+                crate::certified_products::original_native_group_definitions(product, *ordinal)
+                    .unwrap();
+            let contract = definitions.export_contracts().next().unwrap().unwrap();
+            let signature = contract.entry_signature.cloned();
+            let entry_signature = signature.as_ref().map(|signature| {
+                let id = SignatureId(wire.signatures.len() as u32);
+                wire.signatures.push(signature.clone());
+                id
+            });
+            returned.push(Atom::Ref(ValueRef::Global(GlobalId(
+                wire.globals.len() as u32
+            ))));
+            result_reps.push(contract.rep);
+            wire.globals.push(GlobalDecl {
+                identity: contract.identity.clone(),
+                rep: contract.rep,
+                entry_signature,
+                required_evaluated: contract.evaluated,
+                required_generation: None,
+            });
+            accepted.push(AcceptedGlobal {
+                identity: contract.identity.clone(),
+                rep: contract.rep,
+                entry_signature: signature,
+                required_evaluated: contract.evaluated,
+                owner: ReceiptImportOwner::Source {
+                    unit: product.owner().unit.clone(),
+                    module: product.owner().module.clone(),
+                    module_version: Some(product.owner().module_version.clone()),
+                    original_ordinal: *ordinal,
+                    binder: contract.identity.clone(),
+                },
+            });
+        }
+        wire.signatures[0].results = ResultContract::Returns(result_reps);
+        wire.expressions.nodes[0] = ExprFrame::Return(returned);
+        (Arc::new(testing::prepare(wire).unwrap()), accepted)
+    }
+
     #[test]
     fn ordinary_target_selection_excludes_unrelated_new_native_groups() {
         let inventory = ArtifactInventory::default();
@@ -11320,18 +11380,35 @@ mod tests {
             &BTreeMap::new(),
         ));
         let imports = [issued_source(&native, 7)];
-        let admitted = inventory
-            .admit_product_artifacts(
+        let physical = inventory
+            .admit_shared_with_demand(
                 &inventory.empty_view(),
-                vec![native.clone(), unrelated],
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                None,
+                vec![native.clone(), unrelated.clone()],
+                NativeArtifactDemand::AllGroups,
             )
-            .unwrap()
-            .into_target()
             .unwrap();
-        assert_eq!(admitted.artifacts.selected_native_groups().len(), 3);
-        let target = admitted.clone().bind_target(None, imports.to_vec());
+        let selection = bound_selection_for_entries(&physical, &[native.clone(), unrelated]);
+        assert_eq!(physical.selected_native_groups().len(), 3);
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let (prepared, accepted) = source_target_data(&[(&native, 7)]);
+        let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+            &prepared,
+            &accepted,
+            &validation.inventory,
+        )
+        .unwrap();
+        let target = inventory
+            .select_native_target(
+                &physical,
+                &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
         let before = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
         let resolved = target.resolve().unwrap();
         let selected = resolved.groups();
@@ -11349,47 +11426,52 @@ mod tests {
             native.descriptor.id
         );
         assert_eq!(selected.first().unwrap().original_ordinal, 7);
-        let mut wrong_imports = imports.to_vec();
-        let crate::certified_products::PendingImportOwner::Source { binder, .. } =
-            &mut wrong_imports[0]
+        let mut wrong = accepted.clone();
+        let crate::certified_products::ReceiptImportOwner::Source { binder, .. } =
+            &mut wrong[0].owner
         else {
-            unreachable!("fixture source import")
+            unreachable!()
         };
         binder.occurrence.push_str("_different");
         assert!(matches!(
-            admitted.clone().bind_target(None, wrong_imports).resolve(),
-            Err(CompileError::ExtractFailed(message))
-                if message == "artifact inventory: certified target native membership"
+            crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &wrong,
+                &validation.inventory
+            ),
+            Err(crate::certified_products::CertificationError::Mismatch(_))
         ));
         assert!(matches!(
-            admitted.clone().bind_target(None, vec![]).resolve(),
-            Err(CompileError::ExtractFailed(message))
-                if message == "artifact inventory: issued native target roots differ from authenticated target"
+            crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &[],
+                &validation.inventory
+            ),
+            Err(crate::certified_products::CertificationError::Mismatch(_))
         ));
-        assert!(matches!(
-            admitted
-                .clone()
-                .bind_target(None, imports.to_vec())
-                .resolve()
-                .and_then(|resolved| {
-                    let empty =
-                        crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])?;
-                    resolved.ensure_original_execution_custody(&empty)
-                }),
-            Err(CompileError::ExtractFailed(message))
-                if message == "artifact inventory: issued target group is outside retained custody"
-        ));
+        assert!(matches!(target.resolve().and_then(|resolved| {
+            let empty = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])?;
+            resolved.ensure_original_execution_custody(&empty)
+        }), Err(CompileError::ExtractFailed(message)) if message == "artifact inventory: issued target group is outside retained custody"));
+        let (empty_prepared, empty_accepted) = source_target_data(&[]);
+        let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+            &empty_prepared,
+            &empty_accepted,
+            &validation.inventory,
+        )
+        .unwrap();
         let empty_target = inventory
-            .admit_product_artifacts(
-                &inventory.empty_view(),
-                vec![native],
-                NativeArtifactDemand::CertifiedTargetImports(&[]),
+            .select_native_target(
+                &physical,
+                &selection,
+                observed,
                 None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
-            .unwrap()
-            .into_target()
-            .unwrap()
-            .bind_target(None, vec![]);
+            .unwrap();
         let before = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
         let empty = empty_target.resolve().unwrap();
         assert!(empty.groups().is_empty());
