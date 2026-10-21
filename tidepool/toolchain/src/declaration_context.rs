@@ -3528,7 +3528,23 @@ impl NativeInputSelection {
                         .ok_or_else(|| {
                             failure("advertised native body lacks authenticated imports")
                         })?;
-                retained = certified_retained_generation_tags(retained, imports.iter())?;
+                retained = certified_retained_generation_tags(
+                    retained,
+                    imports.iter().filter_map(|import| match import {
+                        crate::certified_products::ReceiptImportOwner::Retained {
+                            identity,
+                            generation,
+                        } => Some((identity, *generation)),
+                        crate::certified_products::ReceiptImportOwner::RetainedPackage {
+                            binder,
+                            generation,
+                            ..
+                        } => Some((binder, *generation)),
+                        crate::certified_products::ReceiptImportOwner::Source { .. }
+                        | crate::certified_products::ReceiptImportOwner::Package { .. }
+                        | crate::certified_products::ReceiptImportOwner::OriginalBinding { .. } => None,
+                    }),
+                )?;
             }
         }
         Ok(retained)
@@ -11634,9 +11650,10 @@ fn retained_generation_inputs<'a>(
     imports: impl Iterator<Item = &'a crate::certified_products::PendingImportOwner>,
 ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
     match policy {
-        RetainedGenerationPolicy::PreserveCertifiedDemand => {
-            certified_retained_generation_tags(retained, imports)
-        }
+        RetainedGenerationPolicy::PreserveCertifiedDemand => certified_retained_generation_tags(
+            retained,
+            imports.filter_map(pending_retained_generation_tag),
+        ),
         RetainedGenerationPolicy::PureActivationPreview => {
             if !retained.is_empty() {
                 return Err(failure(
@@ -11648,22 +11665,27 @@ fn retained_generation_inputs<'a>(
     }
 }
 
+fn pending_retained_generation_tag(
+    import: &crate::certified_products::PendingImportOwner,
+) -> Option<(&tidepool_repr::execution_schema::SymbolIdentity, u64)> {
+    use crate::certified_products::PendingImportOwner;
+    match import {
+        PendingImportOwner::Retained {
+            identity,
+            generation,
+        } => Some((identity, *generation)),
+        PendingImportOwner::RetainedPackage {
+            binder, generation, ..
+        } => Some((binder, *generation)),
+        PendingImportOwner::Source { .. } | PendingImportOwner::Package { .. } => None,
+    }
+}
+
 fn certified_retained_generation_tags<'a>(
     mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
-    imports: impl Iterator<Item = &'a crate::certified_products::PendingImportOwner>,
+    imports: impl Iterator<Item = (&'a tidepool_repr::execution_schema::SymbolIdentity, u64)>,
 ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
-    use crate::certified_products::PendingImportOwner;
-    for import in imports {
-        let (identity, generation) = match import {
-            PendingImportOwner::Retained {
-                identity,
-                generation,
-            } => (identity, generation),
-            PendingImportOwner::RetainedPackage {
-                binder, generation, ..
-            } => (binder, generation),
-            PendingImportOwner::Source { .. } | PendingImportOwner::Package { .. } => continue,
-        };
+    for (identity, generation) in imports {
         let identity = tidepool_extract_cmd::SymbolIdentity {
             unit: identity.unit.clone(),
             module: identity.module.clone(),
@@ -11672,8 +11694,8 @@ fn certified_retained_generation_tags<'a>(
             record_parent: identity.record_parent.clone(),
         };
         if retained
-            .insert(identity, *generation)
-            .is_some_and(|old| old != *generation)
+            .insert(identity, generation)
+            .is_some_and(|old| old != generation)
         {
             return Err(failure(
                 "certified native demand has conflicting retained generations",
@@ -17375,19 +17397,37 @@ mod tests {
             generation: 3,
             interface_digest: [4; 32],
         };
-        let tags =
-            certified_retained_generation_tags(BTreeMap::new(), [&retained, &package].into_iter())
-                .unwrap();
+        let tags = certified_retained_generation_tags(
+            BTreeMap::new(),
+            [&retained, &package]
+                .into_iter()
+                .filter_map(pending_retained_generation_tag),
+        )
+        .unwrap();
         assert_eq!(tags.len(), 2);
-        assert!(certified_retained_generation_tags(tags.clone(), [&retained].into_iter()).is_ok());
+        assert!(certified_retained_generation_tags(
+            tags.clone(),
+            [&retained]
+                .into_iter()
+                .filter_map(pending_retained_generation_tag)
+        )
+        .is_ok());
         let conflict = PendingImportOwner::Retained {
             identity: identity.clone(),
             generation: 2,
         };
-        assert!(certified_retained_generation_tags(tags, [&conflict].into_iter()).is_err());
+        assert!(certified_retained_generation_tags(
+            tags,
+            [&conflict]
+                .into_iter()
+                .filter_map(pending_retained_generation_tag)
+        )
+        .is_err());
         assert!(certified_retained_generation_tags(
             BTreeMap::new(),
-            [&retained, &conflict].into_iter(),
+            [&retained, &conflict]
+                .into_iter()
+                .filter_map(pending_retained_generation_tag),
         )
         .is_err());
         let mut distinct = identity;
@@ -17399,7 +17439,9 @@ mod tests {
         assert_eq!(
             certified_retained_generation_tags(
                 BTreeMap::new(),
-                [&retained, &distinct].into_iter(),
+                [&retained, &distinct]
+                    .into_iter()
+                    .filter_map(pending_retained_generation_tag),
             )
             .unwrap()
             .len(),
@@ -24891,7 +24933,7 @@ mod tests {
         assert_eq!(base_native.owner().module_version.0, [7; 32]);
         assert!(matches!(
             crate::certified_products::original_native_group_imports(&base_native, 7).unwrap()[0],
-            crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+            crate::certified_products::ReceiptImportOwner::Retained { generation: 11, .. }
         ));
         let native_descriptor = |request: &ExactCompilationRequest| {
             let bytes = std::fs::read(&request.manifest).unwrap();
@@ -25038,7 +25080,7 @@ mod tests {
                 crate::certified_products::original_native_group_imports(&original, 7).unwrap()
             ));
             assert!(
-                matches!(imports[0], crate::certified_products::PendingImportOwner::Retained { generation: actual, .. } if actual == generation)
+                matches!(imports[0], crate::certified_products::ReceiptImportOwner::Retained { generation: actual, .. } if actual == generation)
             );
             let physical = branch
                 .artifacts
@@ -25089,7 +25131,7 @@ mod tests {
         assert_ne!(selected.owner(), base_native.owner());
         assert!(matches!(
             crate::certified_products::original_native_group_imports(&selected, 7).unwrap()[0],
-            crate::certified_products::PendingImportOwner::Retained { generation: 22, .. }
+            crate::certified_products::ReceiptImportOwner::Retained { generation: 22, .. }
         ));
         {
             let metadata = &replacement_request.transport_metadata;
@@ -25472,7 +25514,7 @@ mod tests {
             }];
             assert!(matches!(
                 crate::certified_products::original_native_group_imports(native, 7).unwrap()[0],
-                crate::certified_products::PendingImportOwner::Retained { generation: 11, .. }
+                crate::certified_products::ReceiptImportOwner::Retained { generation: 11, .. }
             ));
             let validation = PackageInterfaceValidation::default();
             let selection =
