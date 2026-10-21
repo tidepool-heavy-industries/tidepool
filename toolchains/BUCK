@@ -16,10 +16,10 @@ nix_rust_toolchain(
     rustdoc = read_root_config("nix", "rustdoc"),
     clippy = read_root_config("nix", "clippy"),
     clippy_toml = "root//:workspace_clippy",
-    clippy_flags = (["-A" + lint for lint in NATIVE_LINT_ALLOW] +
-                    ["-W" + lint for lint in NATIVE_LINT_WARN] +
-                    ["-D" + lint for lint in NATIVE_LINT_DENY] +
-                    ["-F" + lint for lint in NATIVE_LINT_FORBID]),
+    clippy_allow = NATIVE_LINT_ALLOW,
+    clippy_warn = NATIVE_LINT_WARN,
+    clippy_deny = NATIVE_LINT_DENY,
+    clippy_forbid = NATIVE_LINT_FORBID,
     linker = read_root_config("nix", "cc"),
     visibility = ["PUBLIC"],
 )
