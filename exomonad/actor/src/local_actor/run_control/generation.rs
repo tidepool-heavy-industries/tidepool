@@ -1181,16 +1181,14 @@ impl GenerationRetirementCore {
                         error.to_string(),
                     ));
                 }
-                match capture.blockers() {
-                    Ok(blockers) => blockers,
-                    Err(refusal) => {
-                        secondary.push(cause(
-                            Cause::ReloadAcknowledgementUnconfirmed,
-                            format!("retirement coordinate projection refused: {refusal:?}"),
-                        ));
-                        Vec::new()
-                    }
+                let mut blockers = Vec::new();
+                if let Err(refusal) = capture.append_blockers(&mut blockers) {
+                    secondary.push(cause(
+                        Cause::ReloadAcknowledgementUnconfirmed,
+                        format!("retirement coordinate projection refused: {refusal:?}"),
+                    ));
                 }
+                blockers
             }
             None => Vec::new(),
         };
@@ -1547,10 +1545,18 @@ impl GenerationRetirementCapture {
         &self,
     ) -> Result<Vec<tidepool_bridge_effects::RlBlocker>, GenerationRetirementProjectionRefusal>
     {
+        let mut blockers = Vec::new();
+        self.append_blockers(&mut blockers)?;
+        Ok(blockers)
+    }
+
+    fn append_blockers(
+        &self,
+        blockers: &mut Vec<tidepool_bridge_effects::RlBlocker>,
+    ) -> Result<(), GenerationRetirementProjectionRefusal> {
         use tidepool_bridge_effects::{
             RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
         };
-        let mut blockers = Vec::new();
         for observed in &self.population.resources {
             blockers.push(Blocker::ReloadResourceBlocker(
                 retirement_resource(&observed.identity)?,
@@ -1617,7 +1623,7 @@ impl GenerationRetirementCapture {
                 retirement_compiler_reason(&observed.compiler.close, &observed.compiler.source),
             ));
         }
-        self.work.append_blockers(&mut blockers)?;
+        self.work.append_blockers(blockers)?;
         match self.pending_claims {
             Ok(0) => {}
             Ok(count) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(
@@ -1626,7 +1632,7 @@ impl GenerationRetirementCapture {
             )),
             Err(_) => return Err(GenerationRetirementProjectionRefusal::PendingClaims),
         }
-        Ok(blockers)
+        Ok(())
     }
 }
 

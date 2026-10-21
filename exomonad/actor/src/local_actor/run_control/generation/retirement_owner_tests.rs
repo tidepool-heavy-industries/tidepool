@@ -956,6 +956,16 @@ impl RunControlClient {
                     let GenerationCapturePhysicalClosure::Guarded { actors, .. } =
                         &capture.physical_closure;
                     let member = captured_reservation.as_ref().unwrap().identity();
+                    let mut known = Vec::new();
+                    assert!(matches!(
+                        capture.append_blockers(&mut known),
+                        Err(GenerationRetirementProjectionRefusal::WorkUnavailable)
+                    ));
+                    assert!(known.iter().any(|blocker| matches!(blocker,
+                        tidepool_bridge_effects::RlBlocker::ReloadResourceBlocker(
+                            tidepool_bridge_effects::RlResource::ReloadActorResource(identity), _
+                        ) if *identity == retirement_actor_identity(member).unwrap()
+                    )), "the failed later census must retain the actual observed actor blocker");
                     assert!(actors.contains(&member));
                     assert!(capture
                         .population
