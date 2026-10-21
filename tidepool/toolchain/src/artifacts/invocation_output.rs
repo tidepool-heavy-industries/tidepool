@@ -504,7 +504,7 @@ pub(super) fn extract_turn<'a>(
         artifacts: vec![Artifact::Turn],
         purpose: PhantomData,
     };
-    let bundle = super::extract_and_read(run, root, &layout, &mut |_, _, _| {}, |_, _| {})?;
+    let bundle = super::extract_and_read(run, root, &layout, &mut |_: &str, _, _| {}, |_, _| {})?;
     Ok(TurnAcquisition {
         bundle,
         deployment,
@@ -943,7 +943,10 @@ mod tests {
             std::fs::write(&input, source).unwrap();
             std::fs::write(&template_path, template).unwrap();
             let includes = [scratch.path().to_owned()];
-            let (endpoint, mut command) = crate::toolchain::bind_extract_endpoint().unwrap();
+            let mut command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
+            let endpoint =
+                crate::toolchain::AdmittedCompilerEndpoint::from_bound(command.bind().unwrap())
+                    .unwrap();
             let deployment = endpoint.deployment().clone();
             let offer = crate::artifacts::ModuleCandidateOffer::select_admitted(
                 &endpoint,
@@ -1059,19 +1062,11 @@ mod tests {
             fallback_module_name: "NativePackageTargets",
         };
         let mut executions = 0;
-        let mut closes = Vec::new();
-        let output = crate::artifacts::compile_invocation(
-            &invocation,
-            |stage, _, _| {
+        let output =
+            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
                 executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
-            },
-            &mut |close| closes.push(close),
-        )
-        .expect("actual finite native package output through common admission");
-        assert!(matches!(
-            closes.as_slice(),
-            [tidepool_extract_cmd::CompilerTransactionClose::Clean]
-        ));
+            })
+            .expect("actual finite native package output through common admission");
         assert_eq!(executions, 1);
         let completed = |target: &str| {
             output.targets[target]
@@ -1148,19 +1143,11 @@ mod tests {
             fallback_module_name: "NativeTargets",
         };
         let mut executions = 0;
-        let mut closes = Vec::new();
-        let output = crate::artifacts::compile_invocation(
-            &invocation,
-            |stage, _, _| {
+        let output =
+            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
                 executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
-            },
-            &mut |close| closes.push(close),
-        )
-        .expect("actual runtime compile through the physical output owner");
-        assert!(matches!(
-            closes.as_slice(),
-            [tidepool_extract_cmd::CompilerTransactionClose::Clean]
-        ));
+            })
+            .expect("actual runtime compile through the physical output owner");
         assert_eq!(executions, 1);
         assert_eq!(
             output

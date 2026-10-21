@@ -12214,31 +12214,35 @@ pub(crate) mod test_support {
 
     // The operation owns this observation outside the induced unwind boundary.
     // These tests expect settled compilers; uncertainty is inspected as a failure.
-    pub(crate) fn with_settlement<T>(
-        action: impl FnOnce(&mut dyn FnMut(CompilerTransactionClose)) -> T,
-    ) -> T {
+    pub(crate) fn with_settlement<T, E: std::fmt::Debug>(
+        action: impl FnOnce(&mut dyn FnMut(CompilerTransactionClose)) -> Result<T, E>,
+    ) -> Result<T, E> {
         let observation = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recipient = Arc::clone(&observation);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             action(&mut |close| recipient.lock().unwrap().push(close))
         }));
+        let result = match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
         let closes = observation.lock().unwrap();
-        assert!(
-            !closes.is_empty(),
-            "compiler close was not observed: {closes:?}"
-        );
+        if result.is_ok() {
+            assert!(
+                !closes.is_empty(),
+                "compiler close was not observed: {closes:?}"
+            );
+        }
         assert!(
             closes.iter().all(|close| matches!(
                 close,
                 CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
             )),
-            "compiler close is unconfirmed: {closes:?}"
+            "compiler close is unconfirmed: {closes:?}; action error: {:?}",
+            result.as_ref().err()
         );
         drop(closes);
-        match result {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        result
     }
 
     #[cfg(test)]
@@ -12262,7 +12266,7 @@ pub(crate) mod test_support {
 
         #[test]
         fn settlement_rejects_an_unobserved_close() {
-            let panic = catch_unwind(AssertUnwindSafe(|| with_settlement(|_| ())))
+            let panic = catch_unwind(AssertUnwindSafe(|| with_settlement(|_| Ok::<_, ()>(()))))
                 .expect_err("empty close observations are not settled");
             let text = panic_text(panic);
             assert!(text.contains("compiler close was not observed"), "{text}");
@@ -12277,12 +12281,21 @@ pub(crate) mod test_support {
                     CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
                 ));
             let panic = catch_unwind(AssertUnwindSafe(|| {
-                with_settlement(|recipient| recipient(close))
+                with_settlement(|recipient| {
+                    recipient(close);
+                    Ok::<_, ()>(())
+                })
             }))
             .expect_err("an unconfirmed close is not settled");
             let text = panic_text(panic);
             assert!(text.contains("compiler close is unconfirmed"), "{text}");
             assert!(!text.contains("compiler close was not observed"), "{text}");
+        }
+
+        #[test]
+        fn settlement_preserves_an_early_action_error_without_a_close() {
+            let result = with_settlement(|_| Err::<(), _>("pre-submission refusal"));
+            assert_eq!(result, Err("pre-submission refusal"));
         }
     }
 
