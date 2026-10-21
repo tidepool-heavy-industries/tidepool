@@ -943,6 +943,8 @@ fn recovery_validation_error(
         | CertificationError::UnsupportedVersion { .. }
         | CertificationError::Receipt(_)
         | CertificationError::Mismatch(_)
+        | CertificationError::SourceOutsideCompilerSelection { .. }
+        | CertificationError::RetainedCoreReplacesNativeOwner { .. }
         | CertificationError::DuplicateSourceBinder(_)
         | CertificationError::OriginalGroupConflict(_)
         | CertificationError::OriginalSelectionConflict(_)
