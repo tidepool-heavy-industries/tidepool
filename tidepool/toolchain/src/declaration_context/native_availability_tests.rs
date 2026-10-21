@@ -1849,12 +1849,16 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(b_id, 7)])
     );
+    // Lifetime inspection can read held B9001 code without selecting it. The
+    // target admission below still refuses its unavailable execution permission.
     assert!(admitted
         .native_requirements_from_roots(&[NativeRequirementRoot::Group {
             artifact: b_id,
-            original_ordinal: 9001
+            original_ordinal: 9001,
         }])
-        .is_err());
+        .expect("B9001 body custody remains independently observable")
+        .bindings
+        .is_empty());
 
     assert!(matches!(
         consume(&admitted, &selected, &targets[1], &accepted[1..], &mut validation),
