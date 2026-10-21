@@ -4596,46 +4596,47 @@ mod normalized_dependency_tests {
             selection.interface_only_artifact(&hidden_owner),
             Some(canonical_id)
         );
-        let mut fixed = inventory
-            .bind_segment(
-                &receiving,
-                vec![],
-                &selection,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let fixed = inventory
+            .bind_segment(&receiving, vec![], &selection, &mut validation)
             .unwrap();
-        assert!(!fixed.view.namespace().contains_key(&hidden_id));
+        let cohort = fixed.physical_inputs().physical_cohort().unwrap();
+        let physical = cohort.artifacts();
+        assert!(!physical.namespace().contains_key(&hidden_id));
         assert_ne!(
-            fixed.view.namespace()[&canonical_id],
+            physical.namespace()[&canonical_id],
             parent.namespace()[&canonical_id]
         );
-        let imports = [PendingImportOwner::Source {
-            owner: products[0].owner().clone(),
-            original_ordinal: 7,
-            binder: tidepool_repr::execution_schema::testing::identity(
-                "NormalizedHidden",
-                "entry_7",
-            ),
-        }];
-        let before_bound = fixed.observed_binding_state();
+        let before_physical = physical.capture_graph_selection();
+        let (prepared, accepted) =
+            super::super::tests::source_target_data(&[(&entries[&hidden_id], 7)]);
+        let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+            &prepared,
+            &accepted,
+            &validation.inventory,
+        )
+        .unwrap();
         let error = inventory
-            .admit_bound_target(
-                &mut fixed,
-                &inventory.empty_view(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
-                &selection,
+            .select_native_target(
+                cohort,
+                fixed.source_selection(),
+                observed,
+                None,
+                Some(&inventory.empty_view()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
             .err()
             .expect("a direct private Input demand lacks a root choice or current product");
         assert!(
-            matches!(error, CompileError::ArtifactInventory(ref error)
-            if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
-                original: hidden_id, original_ordinal: 7,
+            matches!(&error, CompileError::ArtifactInventory(error)
+            if error.native_refusal == Some(NativeAdmissionRefusal::RootChoiceMissing {
+                owner: hidden_owner,
             })),
             "a sole private issued candidate cannot bypass root choice: {error:?}"
         );
-        assert_eq!(fixed.observed_binding_state(), before_bound);
+        assert_eq!(physical.capture_graph_selection(), before_physical);
         assert_eq!(receiving.capture_graph_selection(), before_receiving);
     }
 

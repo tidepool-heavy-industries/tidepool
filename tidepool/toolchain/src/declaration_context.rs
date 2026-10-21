@@ -459,6 +459,40 @@ pub(crate) struct OriginalCompilerInputs {
     artifacts: ArtifactView,
     native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
     native_availability: RequestNativeAvailability,
+    physical: Option<Arc<PhysicalValueCaptures>>,
+}
+
+#[derive(Debug)]
+struct PhysicalValueCaptures {
+    facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
+}
+
+/// A live borrow of an actual once-issued output cohort, including its original
+/// value owners before inventory-local canonicalization. Carried inputs cannot
+/// construct this capability.
+#[derive(Clone, Copy)]
+pub(crate) struct PhysicalCohortInputs<'a> {
+    inputs: &'a OriginalCompilerInputs,
+    captures: &'a PhysicalValueCaptures,
+}
+
+impl<'a> PhysicalCohortInputs<'a> {
+    pub(crate) fn artifacts(&self) -> &'a ArtifactView {
+        self.inputs.issued_artifacts()
+    }
+
+    pub(crate) fn permits_visible_value(&self, entry: &ArtifactEntry) -> bool {
+        self.artifacts()
+            .observed_payload(&entry.descriptor.id)
+            .is_some_and(|resident| {
+                resident.has_fact_owner(entry.fact_owner())
+                    || self
+                        .captures
+                        .facts
+                        .get(&entry.descriptor.id)
+                        .is_some_and(|captured| entry.has_fact_owner(captured))
+            })
+    }
 }
 
 impl PartialEq for OriginalCompilerInputs {
@@ -668,6 +702,17 @@ impl CompletedRequestNativeAvailability {
 }
 
 impl OriginalCompilerInputs {
+    pub(crate) fn physical_cohort(&self) -> Result<PhysicalCohortInputs<'_>, CompileError> {
+        let captures = self
+            .physical
+            .as_deref()
+            .ok_or_else(|| failure("target requires its actual physical output cohort"))?;
+        Ok(PhysicalCohortInputs {
+            inputs: self,
+            captures,
+        })
+    }
+
     pub(crate) fn native_fact_base(
         &self,
     ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
@@ -712,6 +757,25 @@ impl OriginalCompilerInputs {
             "products.segment_native_availability",
             "initial_admission",
         );
+        let value_count = entries
+            .iter()
+            .filter(|entry| {
+                entry.descriptor.kind == crate::artifact_inventory::ArtifactKind::ValueInterface
+            })
+            .count();
+        validation
+            .inventory
+            .reserve::<(ArtifactId, crate::artifact_inventory::ArtifactFactsHandle)>(value_count)
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let captures = PhysicalValueCaptures {
+            facts: entries
+                .iter()
+                .filter(|entry| {
+                    entry.descriptor.kind == crate::artifact_inventory::ArtifactKind::ValueInterface
+                })
+                .map(|entry| (entry.descriptor.id, entry.fact_owner().clone()))
+                .collect(),
+        };
         let physical = baseline.inventory().admit_certified_with_demand(
             baseline,
             entries,
@@ -747,6 +811,7 @@ impl OriginalCompilerInputs {
             &inputs.native_offers,
         )?;
         inputs.native_availability = native.availability;
+        inputs.physical = Some(Arc::new(captures));
         timing.finish(true);
         Ok(inputs)
     }
@@ -824,6 +889,7 @@ impl OriginalCompilerInputs {
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
+                physical: None,
                 native_fact_base: Some(Arc::clone(source.native_fact_owner())),
                 native_completions: source.native_completions().clone(),
                 native_availability: source
@@ -851,6 +917,7 @@ impl OriginalCompilerInputs {
         }
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
+            physical: None,
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
             native_completions: source.native_completions().clone(),
             native_availability: source.native_availability().clone(),
@@ -911,6 +978,7 @@ impl OriginalCompilerInputs {
         source: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Self {
         Self {
+            physical: None,
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
             native_completions: source.native_completions().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
@@ -972,6 +1040,7 @@ impl OriginalCompilerInputs {
         }
         let artifacts = retain_native_offers(artifacts, &native_offers)?;
         Ok(Self {
+            physical: None,
             native_fact_base: selection.native_fact_base().cloned(),
             native_completions: selection.native_completions(),
             native_availability,
@@ -1025,6 +1094,7 @@ impl OriginalCompilerInputs {
             }
         };
         Ok(Self {
+            physical: None,
             native_fact_base: self.native_fact_base.clone(),
             native_completions: self.native_completions.clone(),
             native_availability: self
@@ -1050,6 +1120,7 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
+            physical: None,
             native_completions: self.native_completions.append(&other.native_completions)?,
             native_fact_base: self
                 .native_fact_base

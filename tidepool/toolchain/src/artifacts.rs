@@ -4595,13 +4595,14 @@ fn admit_native_target_products(
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
             })?;
-            let physical = originals.physical_inputs().issued_artifacts();
+            let cohort = originals.physical_inputs().physical_cohort()?;
+            let physical = cohort.artifacts();
             let values = originals
                 .selected_value_entries(&certified.value_interfaces)
                 .cloned()
                 .collect::<Vec<_>>();
             physical.inventory().select_native_target(
-                physical,
+                cohort,
                 &certified.source_selection,
                 observed,
                 typed_entry,
@@ -4620,8 +4621,8 @@ fn admit_native_target_products(
                         "ordinary target lacks physical cohort issuance".into(),
                     )
                 })?
-                .issued_artifacts();
-            physical.inventory().select_native_target(
+                .physical_cohort()?;
+            physical.artifacts().inventory().select_native_target(
                 physical,
                 &certified.source_selection,
                 observed,
@@ -6445,7 +6446,7 @@ fn compile_invocation_inner(
                 )
                 .map_err(compiler_evidence_failure)?;
                 let selected_target = physical.inventory().select_native_target(
-                    physical,
+                    physical_inputs.physical_cohort()?,
                     &certified.source_selection,
                     observed,
                     None,
