@@ -9411,7 +9411,8 @@ captureHeldWorldSourceSelection owner facts privateInputs imported (WorldPrefixL
         imports = filter (\((unit,name,_),_) -> Set.notMember (unit,name) selectedKeys) allImports
         relevantImports = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
           | node <- modules,edge <- dependencyModuleImports node]
-          `Set.union` Set.fromList [(qualifier,name,boot) | (_,edges) <- imports,(qualifier,name,boot,_) <- edges]
+          `Set.union` Set.fromList [(qualifier,name,boot) | (_,edges) <- imports
+            ,(qualifier,name,boot,unit) <- edges, (unit,name) `Set.member` selectedKeys]
         relevant resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
           dependencyResolutionBoot resolution) `Set.member`
             (relevantImports `Set.difference` validatedOriginalExactImports validation)
