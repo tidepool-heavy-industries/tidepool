@@ -37,9 +37,10 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         crate::DEFAULT_NURSERY_SIZE,
         Some(library),
     );
+    let initial_context = resident.public_context();
     resident
         .set_actor_execution(
-            resident.public_context(),
+            initial_context,
             EffectRunPolicy::SuspendAll,
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
