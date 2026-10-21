@@ -1376,7 +1376,40 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    let full = inventory.admit_shared(&base, entries.clone()).unwrap();
+    // The request selects B7 before broader custody becomes available. The
+    // ancestor must reuse that actual binding when it imports B7 later.
+    let selected_b = inventory
+        .admit_recovery_selection(
+            &base,
+            vec![entries[1].clone()],
+            &BTreeSet::from([NativeGroupKey {
+                artifact: entries[1].descriptor.id,
+                original_ordinal: 7,
+            }]),
+        )
+        .unwrap();
+    let selected_b7 = selected_b.selected_native_binding_rows().1;
+    let [selected_b7] = selected_b7.as_slice() else {
+        panic!("the input request selects exactly B7");
+    };
+    let selected_b7 = *selected_b7;
+    let full = inventory
+        .admit_shared(&selected_b, entries.clone())
+        .unwrap();
+    let ancestor_group = full
+        .selected_native_binding_rows()
+        .1
+        .into_iter()
+        .find(|group| group.binding.artifact() == entries[0].descriptor.id)
+        .unwrap();
+    assert!(full.binding_dependencies().contains(&(
+        ArtifactBindingNode::Group(ancestor_group),
+        ArtifactBindingNode::Group(selected_b7),
+        ArtifactDependency::NativeGroup {
+            dependent_ordinal: 7,
+            required_ordinal: 7,
+        },
+    )));
     let complete = |index: usize| {
         let canonical =
             ArtifactEntry::canonical(recovered[index].product.module_interface().unwrap().clone())
@@ -1496,7 +1529,17 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         Arc::new(ArtifactEntry::original(producer.sha256(), replacement_b).unwrap());
     assert_ne!(replacement_a.descriptor.id, a_id);
     assert_ne!(replacement_b.descriptor.id, b_id);
-    let b = base.select_roots(vec![b_id]).unwrap();
+    let b = selected_b
+        .select_roots(vec![b_id])
+        .unwrap()
+        .retain_custody(&full.select_roots(vec![b_id]).unwrap())
+        .unwrap();
+    assert_eq!(b.selected_native_binding_rows().1, [selected_b7]);
+    assert!(b
+        .capture_graph_selection()
+        .native_groups
+        .iter()
+        .any(|group| group.binding.artifact() == b_id && group.original_ordinal == 9001));
     let b_projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
     let b_context = {
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
@@ -1545,7 +1588,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .unwrap()
         .groups()
         .collect::<BTreeSet<_>>();
-    assert!(!exact.is_empty());
+    assert_eq!(exact, BTreeSet::from([selected_b7]));
     assert!(exact
         .iter()
         .all(|group| group.binding.artifact() == b_id && group.original_ordinal == 7));
@@ -1666,6 +1709,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     drop(unrelated_offer);
     drop(ancestor_offer);
     drop(full);
+    drop(selected_b);
     drop(base);
     drop(entries);
     drop(recovered);
