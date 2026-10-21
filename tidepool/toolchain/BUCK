@@ -1187,8 +1187,9 @@ tidepool_rust_test_cases(
         "artifact_inventory::package_occurrence_linkage_tests::repeated_slots_share_immutable_bytes_without_losing_multiplicity",
         "artifact_inventory::package_occurrence_linkage_tests::duplicate_envelope_histories_remain_distinct_bindings",
         "artifact_inventory::package_occurrence_linkage_tests::multi_ordinal_home_keeps_per_ordinal_package_roots",
+        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match",
     ],
-    expected_count = 5,
+    expected_count = 6,
     ignored = True,
     jobs = 1,
     timeout = 600,
@@ -1199,6 +1200,7 @@ tidepool_rust_test_cases(
         "artifact_inventory::package_occurrence_linkage_tests::repeated_slots_share_immutable_bytes_without_losing_multiplicity": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::duplicate_envelope_histories_remain_distinct_bindings": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::multi_ordinal_home_keeps_per_ordinal_package_roots": "owned-resident",
+        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match": "owned-resident",
     },
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",

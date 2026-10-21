@@ -442,6 +442,7 @@ fn issue_historical_product(
 }
 
 #[test]
+#[ignore = "decodes retained historical envelopes through the counted owned-resident runner"]
 fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() {
     let manifest = historical_manifest();
     assert_eq!(manifest.pairs.len(), 2, "two authenticated package pairs");
