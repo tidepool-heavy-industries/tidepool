@@ -1360,6 +1360,49 @@ impl PackageInterfaceValidation {
         Ok(())
     }
 
+    pub(crate) fn capture_owned_package_interface(
+        &mut self,
+        path: &Path,
+        expected: &[u8; 32],
+    ) -> Result<Arc<[u8]>, RecoveryArtifactError> {
+        if let Some(captured) = self.captured.get(path) {
+            if captured.sha256 != *expected {
+                return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+            }
+            return Ok(Arc::clone(&captured._bytes));
+        }
+        let bytes: Arc<[u8]> = read_checked(path, expected, PACKAGE_INTERFACE_LIMIT, self)?.into();
+        self.verify_captured(path, path, expected, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// Retain an already-issued immutable interface under its sealed logical
+    /// import name. The token owns the bytes; no ambient path is consulted.
+    fn register_package_interface(
+        &mut self,
+        logical_path: &Path,
+        interface: &crate::certified_products::CertifiedPackageInterface,
+    ) -> Result<(), RecoveryArtifactError> {
+        if !logical_path.is_absolute() {
+            return Err(RecoveryArtifactError::InvalidPackageImports(logical_path.to_path_buf()));
+        }
+        if let Some(previous) = self.captured.get(logical_path) {
+            if previous.sha256 != *interface.sha256()
+                || previous._bytes.as_ref() != interface.bytes().as_ref() {
+                return Err(RecoveryArtifactError::DigestMismatch(logical_path.to_path_buf()));
+            }
+            return Ok(());
+        }
+        self.inventory.reserve::<CapturedPackageInterface>(1).map_err(accounting_charge_error)?;
+        self.inventory.charge(logical_path.as_os_str().as_encoded_bytes().len())
+            .map_err(accounting_charge_error)?;
+        self.captured.insert(logical_path.to_path_buf(), CapturedPackageInterface {
+            _bytes: Arc::clone(interface.bytes()),
+            sha256: *interface.sha256(),
+        });
+        Ok(())
+    }
+
     fn verify_bytes(
         &mut self,
         path: &Path,
@@ -1721,6 +1764,69 @@ pub(crate) fn validate_package_import_evidence_with_validation(
     sidecar_path: &Path,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ValidatedPackageImports, RecoveryArtifactError> {
+    let obligations = decode_package_import_obligations(
+        bytes, unit, module, skinny_iface_sha256, sidecar_path, validation,
+    )?;
+    for (path, seal) in obligations.roots.values() {
+        validation.verify(path, seal)?;
+    }
+    Ok(obligations.into_validated())
+}
+
+/// Structurally checked exact import obligations. Byte custody is validated
+/// separately by the current filesystem observer or immutable capture owner.
+pub(crate) struct PackageImportObligations {
+    roots: BTreeMap<(String, String), (PathBuf, [u8; 32])>,
+    compiler_provided: Vec<CompilerProvidedImport>,
+}
+
+impl PackageImportObligations {
+    pub(crate) fn interface_seals(
+        &self,
+        validation: &PackageInterfaceValidation,
+    ) -> Result<BTreeMap<(String, String), [u8; 32]>, RecoveryArtifactError> {
+        let mut seals = BTreeMap::new();
+        for (owner, (_, seal)) in &self.roots {
+            validation.inventory.reserve::<((String, String), [u8; 32])>(1)
+                .map_err(accounting_charge_error)?;
+            validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()))
+                .map_err(accounting_charge_error)?;
+            seals.insert(owner.clone(), *seal);
+        }
+        Ok(seals)
+    }
+
+    fn into_validated(self) -> ValidatedPackageImports {
+        ValidatedPackageImports {
+            roots: self.roots.into_iter().map(|(owner, (path, seal))|
+                (owner, (path, hex(&seal)))).collect(),
+            compiler_provided: self.compiler_provided,
+        }
+    }
+}
+
+pub(crate) fn validate_package_imports_with_custody(
+    obligations: PackageImportObligations,
+    custody: &crate::certified_products::PackageInterfaceCustody,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<ValidatedPackageImports, RecoveryArtifactError> {
+    for (owner, (path, seal)) in &obligations.roots {
+        let interface = custody.get(owner)
+            .filter(|interface| interface.sha256() == seal)
+            .ok_or_else(|| RecoveryArtifactError::InvalidPackageImports(path.clone()))?;
+        validation.register_package_interface(path, interface)?;
+    }
+    Ok(obligations.into_validated())
+}
+
+pub(crate) fn decode_package_import_obligations(
+    bytes: &[u8],
+    unit: &str,
+    module: &str,
+    skinny_iface_sha256: &[u8; 32],
+    sidecar_path: &Path,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<PackageImportObligations, RecoveryArtifactError> {
     use ciborium::value::Value;
 
     let invalid = || RecoveryArtifactError::InvalidPackageImports(sidecar_path.to_path_buf());
@@ -1804,15 +1910,6 @@ pub(crate) fn validate_package_import_evidence_with_validation(
         {
             return Err(invalid());
         }
-        if selected
-            .insert(
-                (package_unit.to_owned(), package_module.to_owned()),
-                (package_path.to_path_buf(), package_sha256.to_owned()),
-            )
-            .is_some()
-        {
-            return Err(invalid());
-        }
         let mut expected = [0; 32];
         for (index, pair) in package_sha256.as_bytes().chunks_exact(2).enumerate() {
             let digit = |byte: u8| {
@@ -1824,17 +1921,14 @@ pub(crate) fn validate_package_import_evidence_with_validation(
             };
             expected[index] = digit(pair[0]) * 16 + digit(pair[1]);
         }
-        validation
-            .verify(package_path, &expected)
-            .map_err(|error| {
-                if matches!(error, RecoveryArtifactError::InvalidPackageImports(_)) {
-                    invalid()
-                } else {
-                    error
-                }
-            })?;
+        if selected.insert(
+            (package_unit.to_owned(), package_module.to_owned()),
+            (package_path.to_path_buf(), expected),
+        ).is_some() {
+            return Err(invalid());
+        }
     }
-    Ok(ValidatedPackageImports {
+    Ok(PackageImportObligations {
         roots: selected,
         compiler_provided,
     })
