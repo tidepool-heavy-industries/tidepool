@@ -701,8 +701,8 @@ fn restore_native_completion(
     let certified = crate::certified_products::certify_acquired_original_group_rows(
         artifacts, &bindings, validation,
     )?;
-    let products = certified.additional.into_iter().collect::<BTreeMap<_, _>>();
-    if products.len() != bindings.len() || certified.imports.len() != bindings.len() {
+    let certified = certified.rows;
+    if certified.len() != bindings.len() {
         return Err(failure(
             "native completion restoration omitted acquired HOME rows",
         ));
@@ -726,9 +726,10 @@ fn restore_native_completion(
     let mut rows = imbl::OrdMap::new();
     let mut retained = BTreeSet::new();
     for (binding, row) in &facts.rows {
-        let product = products
+        let selected = certified
             .get(binding)
             .ok_or_else(|| failure("completion HOME product is absent"))?;
+        let product = selected.product();
         let acquired = artifacts
             .observed_payload(&binding.binding.artifact())
             .ok_or_else(|| failure("completion HOME payload is absent"))?;
@@ -737,10 +738,7 @@ fn restore_native_completion(
                 "completion HOME producer differs from its issued record",
             ));
         }
-        let actual = certified
-            .imports
-            .get(binding)
-            .ok_or_else(|| failure("completion HOME slot proofs are absent"))?;
+        let actual = selected.imports();
         let definitions = product.group().definitions();
         if row.imports.len() != actual.len() || actual.len() != definitions.globals().len() {
             return Err(failure(
