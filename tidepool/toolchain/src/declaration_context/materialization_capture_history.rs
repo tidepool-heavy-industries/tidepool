@@ -101,6 +101,16 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         .directory()
         .path()
         .to_path_buf()];
+    // The request owns its closed compiler view and physical cache. Publish
+    // that actual support before retiring the request; raw paths and Weak
+    // observations do not retain the files for the next history step.
+    context = Arc::new(
+        context
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(base.compiler_inputs().compiler_source_support())
+            .unwrap(),
+    );
     drop(base);
     let mut avoided_bytes = assert_warm_clone_prepares_without_encoding(
         &context,
@@ -220,6 +230,13 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         issued_row_counts.push(owner.rows.len());
         owners.push(Arc::downgrade(owner));
         directories.push(owner.directory().path().to_path_buf());
+        context = Arc::new(
+            context
+                .as_ref()
+                .clone()
+                .extend_issued_compiler_support(request.compiler_inputs().compiler_source_support())
+                .unwrap(),
+        );
         avoided_bytes += assert_warm_clone_prepares_without_encoding(
             &context,
             &producer,
@@ -708,14 +725,21 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[b.clone()]).unwrap();
-        let selection =
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let output = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        let output = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &physical,
+            vec![b.clone()],
+            &mut validation,
+        )
+        .unwrap();
         assert_eq!(
             output
                 .role_projection()
@@ -843,14 +867,21 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[a.clone()]).unwrap();
-        let selection =
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let output = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        let output = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &physical,
+            vec![a.clone()],
+            &mut validation,
+        )
+        .unwrap();
         assert_eq!(
             output
                 .role_projection()

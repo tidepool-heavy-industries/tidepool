@@ -24668,6 +24668,13 @@ mod tests {
         let owned_root = retained.directory().path().to_path_buf();
         let weak = Arc::downgrade(retained);
         let semantic = first.semantic_sha256;
+        let context = Arc::new(
+            context
+                .as_ref()
+                .clone()
+                .extend_issued_compiler_support(first.compiler_inputs().compiler_source_support())
+                .unwrap(),
+        );
         drop(first);
         std::fs::remove_dir_all(scratch.path().join("first")).unwrap();
         assert!(paths
