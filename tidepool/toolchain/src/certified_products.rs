@@ -9683,9 +9683,12 @@ pub(crate) fn certify_products_with_validation(
     let exact = source.exact();
     // This is a fresh physical observation at the publication boundary, not a
     // reconstruction of correspondence already issued by source admission.
-    if final_evidence.revalidate(final_target_source).is_err() {
-        return Err(CertificationError::StaleEvidence);
-    }
+    final_evidence
+        .revalidate(final_target_source)
+        .map_err(|failure| CertificationError::CompletedSourceEvidence {
+            input: fresh_input_path.to_path_buf(),
+            failure: Box::new(failure),
+        })?;
     if let Some(admission) = authored {
         let owner = admission.owner();
         let rows = final_evidence
@@ -27604,6 +27607,89 @@ None,
             ))
         ));
         assert_eq!(parsed.operation.work_usage().unwrap().1, 0);
+    }
+
+    #[test]
+    fn final_product_admission_preserves_consumed_source_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = "module Fresh where";
+        let input = directory.path().join("Fresh.hs");
+        std::fs::write(&input, source).unwrap();
+        let dependency = directory.path().join("Dependency.hs");
+        let original = "module Dependency where";
+        std::fs::write(&dependency, original).unwrap();
+        let mut worker = evidence(source);
+        worker.sources[0].path = input.clone();
+        worker.modules[0].source = input.clone();
+        worker.sources.push(SourceEvidence {
+            path: dependency.clone(),
+            sha256: hex(&sha(original.as_bytes())),
+        });
+        let raw_evidence = serde_json::to_vec(&worker).unwrap();
+        let body = sidecar();
+        let parsed = ParsedModuleProducts::decode(&body, &empty_package_bundle()).unwrap();
+        let admitted = crate::artifacts::admit_compiler_source(
+            parsed.operation(),
+            &raw_evidence,
+            &input,
+            source,
+        )
+        .unwrap();
+        let mut accepted = receipt(&body, &worker, source);
+        accepted.dependency_witness_sha256 = sha(&raw_evidence);
+        let receipt = CertifiedReceipt {
+            package_products: Vec::new(),
+            source_recipe: WorkerExecutionSource::Ordinary,
+            finalization: fixture_finalization(
+                Some(directory.path()),
+                std::slice::from_ref(&accepted),
+            ),
+            modules: vec![accepted],
+            targets: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        };
+        let certify = || {
+            certify_products(
+                None,
+                &receipt,
+                &parsed,
+                &admitted,
+                directory.path(),
+                b"producer",
+                &[],
+                None,
+            )
+        };
+        certify().unwrap();
+        let changed = "module Dependency where; changed = True";
+        std::fs::write(&dependency, changed).unwrap();
+        let error = certify().err().expect("changed consumed dependency");
+        let expected = crate::cache::DependencyEvidenceFailure::Source {
+            index: 1,
+            reason: crate::cache::SourceWitnessFailure::Changed {
+                expected: hex(&sha(original.as_bytes())),
+                actual: hex(&sha(changed.as_bytes())),
+            },
+        };
+        assert!(
+            matches!(&error, CertificationError::CompletedSourceEvidence { input: actual, failure }
+            if actual == &input && failure.as_ref() == &expected)
+        );
+        let classified = crate::failclass::classify_compile(
+            &crate::CompileError::CompilerEvidence(Box::new(error)),
+        );
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::SourceEvidence {
+                    input: input.clone(),
+                    failure: expected
+                },
+            })
+        );
+        std::fs::write(&dependency, original).unwrap();
+        certify().unwrap();
     }
 
     #[test]
