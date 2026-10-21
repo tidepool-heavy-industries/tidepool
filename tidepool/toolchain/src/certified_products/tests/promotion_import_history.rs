@@ -669,7 +669,11 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 &denied_directory,
                 &denied_request,
             );
-        let denied_evidence = denied_source.evidence_bytes();
+        let mut denied_evidence: crate::cache::DependencyEvidence =
+            serde_json::from_slice(denied_source.evidence_bytes()).unwrap();
+        denied_evidence.cache_safe = false;
+        denied_evidence.selection_complete = false;
+        let denied_evidence = serde_json::to_vec(&denied_evidence).unwrap();
         let denied_exact = denied_request.product_admission(&denied_source);
         let error = certify_products(
             None,
@@ -682,7 +686,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
                         denied_exact.physical_request().unwrap(),
                         &denied_directory.join("Consumer.hs"),
                         &denied_text,
-                        denied_evidence,
+                        &denied_evidence,
                         promoted.operation(),
                     )
                     .unwrap(),

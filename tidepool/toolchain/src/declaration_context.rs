@@ -26980,6 +26980,20 @@ mod tests {
         use crate::cache::ImportQualifier;
         use crate::failclass::{CompileFailureCause, FailureClass, Phase};
 
+        fn import_failure<'a>(
+            mut error: &'a (dyn std::error::Error + 'static),
+        ) -> Option<&'a ExactImportWitnessFailure> {
+            loop {
+                if let Some(failure) = error.downcast_ref::<ExactImportWitnessFailure>() {
+                    return Some(failure);
+                }
+                if let Some(failure) = error.downcast_ref::<Box<ExactImportWitnessFailure>>() {
+                    return Some(failure.as_ref());
+                }
+                error = error.source()?;
+            }
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let (context, _) = metadata_fixture();
         let request = program_request(directory.path(), context.clone());
@@ -27060,10 +27074,7 @@ mod tests {
             assert_eq!(error.to_string(), format!(
                 "extractor contract failure: exact declaration context: exact import witness leaves selected lexical graph: source fixture:Consumer, import fixture:{name}, qualifier {qualifier}, boot {boot}, selected {selected}"
             ));
-            let source = std::error::Error::source(&error)
-                .unwrap()
-                .downcast_ref::<ExactImportWitnessFailure>()
-                .unwrap();
+            let source = import_failure(std::error::Error::source(&error).unwrap()).unwrap();
             assert!(std::ptr::eq(source, failure.as_ref()));
             let envelope = crate::classify_compile(&error);
             assert_eq!(envelope.class, FailureClass::VersionSkew);
@@ -27072,12 +27083,7 @@ mod tests {
             let nested = CompileError::CompilerEvidence(Box::new(
                 crate::certified_products::CertificationError::OriginalClosure(Box::new(error)),
             ));
-            let inner = std::error::Error::source(
-                std::error::Error::source(std::error::Error::source(&nested).unwrap()).unwrap(),
-            )
-            .unwrap()
-            .downcast_ref::<ExactImportWitnessFailure>()
-            .unwrap();
+            let inner = import_failure(&nested).expect("nested refusal retains its typed cause");
             assert_eq!(inner.reason, reason);
             let nested_envelope = crate::classify_compile(&nested);
             assert_eq!(nested_envelope.class, FailureClass::VersionSkew);
