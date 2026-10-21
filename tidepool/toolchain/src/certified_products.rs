@@ -13479,6 +13479,29 @@ pub(crate) mod tests {
     pub(crate) fn recovered_witness_fixtures(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Vec<CertifiedRecoveredOriginal> {
+        let completed = products
+            .iter()
+            .map(|product| {
+                let producer = product
+                    .module_interface()
+                    .expect("canonical fixture issuer")
+                    .producer_sha256();
+                let entry =
+                    crate::artifact_inventory::ArtifactEntry::original(producer, product.clone())
+                        .unwrap();
+                let crate::artifact_inventory::ArtifactPayload::Original(completed) = entry.payload
+                else {
+                    unreachable!()
+                };
+                assert_eq!(completed.product_bytes(), product.product_bytes());
+                assert_eq!(
+                    completed.certification_bytes(),
+                    product.certification_bytes()
+                );
+                completed
+            })
+            .collect::<Vec<_>>();
+        let products = completed.as_slice();
         assert!(
             products
                 .iter()
