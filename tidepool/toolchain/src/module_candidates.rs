@@ -98,7 +98,7 @@ const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
 const RECORD_DIR: &str = "module-candidates-v12";
 const RECORD_MAGIC: &[u8; 8] = b"TPCRE10\n";
-const RECORD_VERSION: u32 = 10;
+const RECORD_VERSION: u32 = 11;
 const HEADER_LIMIT: usize = 64 << 10;
 const PAYLOAD_LIMIT: usize = 128 << 20;
 // A measured 33,955,557-byte ordinary resident display graph fits within one
@@ -581,6 +581,7 @@ struct RecordData {
     #[serde(with = "opaque_bytes::packages")]
     original_certification: Vec<u8>,
     module_interface: Option<crate::recovery_artifacts::RecoveryModuleInterfaceRef>,
+    package_interfaces: Vec<crate::certified_products::RecoveryPackageInterfaceRef>,
     execution_source_sha256: Option<[u8; 32]>,
 }
 
@@ -593,6 +594,7 @@ struct Record {
     evidence: shared_evidence::SharedEvidence,
     module_interface_proof: Option<crate::certified_products::CertifiedModuleInterface>,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    package_interfaces: Option<crate::certified_products::PackageInterfaceCustody>,
 }
 
 /// A deployment record carries the product decoded by its owning loader.
@@ -1363,6 +1365,7 @@ fn eligible_records_with_report(
                 },
                 original_certification: Vec::new(),
                 module_interface: None,
+                package_interfaces: Vec::new(),
                 execution_source_sha256: None,
             },
             certified,
@@ -1455,6 +1458,14 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) -> std::io::Re
             report(None, PublicationDisposition::WriteRejected);
             continue;
         }
+        let Some(custody) = record.package_interfaces.as_ref() else {
+            report(None, PublicationDisposition::ProductOwnerRejected);
+            continue;
+        };
+        record.data.package_interfaces = custody.materialize(&producer_dir,
+            crate::recovery_artifacts::MaterializationMode::Scratch,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default())
+            .map_err(std::io::Error::other)?;
         let bytes = match encode_record_checked(&record) {
             Ok(bytes) => bytes,
             Err(rejection) => {
@@ -1602,6 +1613,7 @@ fn graph_path(root: &Path, digest: &[u8; 32]) -> PathBuf {
 fn validate_original_execution(
     record: &Record,
     graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+    sidecar_custody: &crate::certified_products::PackageInterfaceCustody,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Option<OriginalCandidateExecution> {
     let owner = computed_owner(record);
@@ -1622,6 +1634,8 @@ fn validate_original_execution(
             &record.original_certification,
             &owner,
             &record.package_imports,
+            record.package_interfaces.as_ref()?,
+            sidecar_custody,
             validation,
         )
         .ok()?
@@ -2334,11 +2348,34 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             }
             continue;
         }
+        let canonical = match (&record.module_interface_proof, &record.module_interface) {
+            (Some(interface), _) => interface.clone(),
+            (None, Some(reference)) => match crate::recovery_artifacts::recover_module_interface(
+                &record_dir(endpoint_identity),
+                reference,
+                &mut package_validation,
+            ) {
+                Ok(interface) => interface,
+                Err(_) => {
+                    if omit_or_refuse_candidate(
+                        &origin,
+                        &mut selection_omissions,
+                        &record.unit,
+                        &record.module,
+                        CacheOfferOmission::InvalidRecord,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+            },
+            (None, None) => continue,
+        };
         let iface_sha_array = match record.acquired_artifacts() {
             Some(_) => record.original_owner.skinny_iface_sha256,
             None => Sha256::digest(&record.interface).into(),
         };
-        let package_roots =
+        let package_roots = canonical.validate_package_interfaces(&mut package_validation).and_then(|()|
             crate::recovery_artifacts::validate_package_import_evidence_with_validation(
                 &record.package_imports,
                 &record.unit,
@@ -2346,7 +2383,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 &iface_sha_array,
                 Path::new("module-package-imports.cbor"),
                 &mut package_validation,
-            );
+            ));
         let package_roots = match package_roots {
             Ok(roots) => roots,
             Err(error) => {
@@ -2538,7 +2575,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                 graph
             };
             if record.acquired_artifacts().is_none()
-                && validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
+                && validate_original_execution(&record, Arc::clone(&graph), canonical.package_interfaces(), &mut package_validation)
                     .is_none()
             {
                 if omit_or_refuse_candidate(
@@ -2566,29 +2603,6 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
             }
             continue;
         }
-        let canonical = match (&record.module_interface_proof, &record.module_interface) {
-            (Some(interface), _) => interface.clone(),
-            (None, Some(reference)) => match crate::recovery_artifacts::recover_module_interface(
-                &record_dir(endpoint_identity),
-                reference,
-                &mut package_validation,
-            ) {
-                Ok(interface) => interface,
-                Err(_) => {
-                    if omit_or_refuse_candidate(
-                        &origin,
-                        &mut selection_omissions,
-                        &record.unit,
-                        &record.module,
-                        CacheOfferOmission::InvalidRecord,
-                    ) {
-                        return None;
-                    }
-                    continue;
-                }
-            },
-            (None, None) => continue,
-        };
         let canonical = match record.acquired_artifacts() {
             Some(custody) => canonical.with_catalog_input_custody(Arc::clone(custody)),
             None => canonical,
@@ -2765,6 +2779,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
                         product: record.record.product(product),
                         certification_bytes: record.record.certification_bytes(),
                         module_interface: record.canonical,
+                        package_interfaces: record.record.package_interfaces.as_ref()?.clone(),
                         execution_source: record.execution_source,
                     },
                     &mut package_validation,
@@ -3992,6 +4007,7 @@ pub(crate) mod tests {
                 validate_original_execution(
                     record,
                     graph,
+                    record.module_interface_proof.as_ref().unwrap().package_interfaces(),
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
             };
@@ -4108,6 +4124,7 @@ pub(crate) mod tests {
             evidence: evidence.clone(),
             module_interface_proof: None,
             execution_source: None,
+            package_interfaces: None,
             data: RecordData {
                 evidence: evidence
                     .reference()
@@ -4135,6 +4152,7 @@ pub(crate) mod tests {
                 },
                 original_certification: Vec::new(),
                 module_interface: None,
+                package_interfaces: Vec::new(),
                 execution_source_sha256: None,
             },
         };

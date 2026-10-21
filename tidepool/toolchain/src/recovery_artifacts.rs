@@ -34,6 +34,7 @@ pub struct RecoveryArtifactRef {
     pub certification_path: PathBuf,
     pub certification_sha256: [u8; 32],
     pub product_path: PathBuf,
+    pub package_interfaces: Vec<crate::certified_products::RecoveryPackageInterfaceRef>,
     pub module_interface: Option<RecoveryModuleInterfaceRef>,
     /// Legacy originals retain native/interface authority without GHC execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -701,9 +702,16 @@ pub struct VerifiedRecoveryArtifact {
     product_bytes: Vec<u8>,
     module_interface: crate::certified_products::CertifiedModuleInterface,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    package_interfaces: crate::certified_products::PackageInterfaceCustody,
 }
 
 impl VerifiedRecoveryArtifact {
+    pub(crate) fn module_interface(&self) -> &crate::certified_products::CertifiedModuleInterface {
+        &self.module_interface
+    }
+    pub(crate) fn package_interfaces(&self) -> &crate::certified_products::PackageInterfaceCustody {
+        &self.package_interfaces
+    }
     pub fn interface_path(&self) -> &Path {
         &self.interface_path
     }
@@ -1379,7 +1387,7 @@ impl PackageInterfaceValidation {
 
     /// Retain an already-issued immutable interface under its sealed logical
     /// import name. The token owns the bytes; no ambient path is consulted.
-    fn register_package_interface(
+    pub(crate) fn register_package_interface(
         &mut self,
         logical_path: &Path,
         interface: &crate::certified_products::CertifiedPackageInterface,
@@ -2885,6 +2893,12 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
             }
             let interface_path = home_interface_path(owner);
             let package_imports_path = package_sidecar_path(&interface_path);
+            product.module_interface().ok_or(RecoveryArtifactError::InvalidReference)?
+                .validate_package_interfaces(validation)?;
+            product.original_native().ok_or(RecoveryArtifactError::InvalidReference)?
+                .validate_package_interfaces(validation)
+                .map_err(|error| recovery_validation_error(error,
+                    RecoveryArtifactError::InvalidPackageImports(package_imports_path.clone())))?;
             if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
                 return Err(RecoveryArtifactError::InvalidPackageImports(
                     package_imports_path,
@@ -3074,6 +3088,10 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
                 certification_path,
                 certification_sha256,
                 product_path,
+                package_interfaces: product.original_native()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?
+                    .package_interfaces().materialize(recovery_root, mode, validation)
+                    .map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?,
                 module_interface: Some(interface.materialize(recovery_root, validation, mode)?),
                 execution_source,
             });
@@ -3258,12 +3276,19 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
     )?;
     let certification_path = resolve_owned(recovery_root, &reference.certification_path)
         .map_err(classify_certification_path_error)?;
-    let certification = read_certification(
-        &certification_path,
-        Some(&reference.certification_sha256),
-        &owner,
-        validation,
-    )?;
+    let certification_bytes = read_checked(&certification_path,
+        &reference.certification_sha256, CERTIFICATION_LIMIT, validation)?;
+    let expected = crate::certified_products::home_package_interface_seals(
+        &certification_bytes, &owner, validation,
+    ).map_err(|error| recovery_validation_error(error,
+        RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())))?;
+    let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
+        recovery_root, &reference.package_interfaces, &expected, validation,
+    ).map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?;
+    let certification = crate::certified_products::VerifiedHomeCertification::capture_with_custody(
+        certification_bytes, &owner, &package_interfaces, validation,
+    ).map_err(|error| recovery_validation_error(error,
+        RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone())))?;
     if certification.module_certificate_digest()
         != reference
             .module_interface
@@ -3333,6 +3358,7 @@ pub(crate) fn verify_materialized_ref_with_module_interface(
         certification,
         product_bytes,
         execution_source,
+        package_interfaces,
     })
 }
 

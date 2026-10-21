@@ -156,6 +156,7 @@ impl<'a> PublicationCohort<'a> {
             evidence: shared.clone(),
             module_interface_proof: None,
             execution_source: None,
+            package_interfaces: None,
             data,
         };
         if let Some(original) = certified.iter().find(|original| {
@@ -169,6 +170,7 @@ impl<'a> PublicationCohort<'a> {
                 return false;
             }
             record.module_interface_proof = original.module_interface().cloned();
+            record.package_interfaces = original.original_native().map(|native| native.package_interfaces().clone());
             record.data.original_certification = original.certification_bytes().to_vec();
             record.execution_source = original.execution_source().cloned();
             record.data.execution_source_sha256 =
@@ -348,6 +350,7 @@ pub(super) struct ReadBudget {
     pub(super) exhausted: bool,
     pub(super) evidence_bytes: u64,
     evidence: BTreeMap<String, (u64, SharedEvidence)>,
+    package_validation: crate::recovery_artifacts::PackageInterfaceValidation,
 }
 
 impl ReadBudget {
@@ -442,11 +445,20 @@ pub(super) fn decode_record(
         return None;
     }
     let evidence = budget.resolve(root, &data.evidence)?;
+    let validation = &mut budget.package_validation;
+    let owner = data.original_owner.owner();
+    let expected = crate::certified_products::home_package_interface_seals(
+        &data.original_certification, &owner, validation,
+    ).ok()?;
+    let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
+        root, &data.package_interfaces, &expected, validation,
+    ).ok()?;
     Some(Record {
         data,
         evidence,
         module_interface_proof: None,
         execution_source: None,
+        package_interfaces: Some(package_interfaces),
     })
 }
 

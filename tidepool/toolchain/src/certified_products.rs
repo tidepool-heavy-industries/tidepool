@@ -289,11 +289,14 @@ pub(crate) fn inherited_package_witnesses_with_validation(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
-    let mut selected = BTreeMap::new();
+    let mut selected: BTreeMap<(String,String),PackageInterfaceWitness> = BTreeMap::new();
     for product in products {
         let decoded;
         let packages = match product.original_native() {
-            Some(witness) if witness.matches_original(product) => &witness.packages,
+            Some(witness) if witness.matches_original(product) => {
+                witness.validate_package_interfaces(validation)?;
+                &witness.packages
+            },
             Some(_) => {
                 return Err(CertificationError::Mismatch(
                     "original native witness bytes",
@@ -315,7 +318,7 @@ pub(crate) fn inherited_package_witnesses_with_validation(
         for (owner, interface) in packages {
             verify_package_interface(validation, interface)?;
             match selected.get(owner) {
-                Some(old) if old != interface => {
+                Some(old) if old.sha256 != interface.sha256 => {
                     return Err(CertificationError::Mismatch("inherited package selection"));
                 }
                 Some(_) => continue,
@@ -510,7 +513,7 @@ impl CertifiedSegmentOriginals {
             inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
         for (owner, witness) in &receipt.packages {
             if let Some(previous) = package_availability.get(owner) {
-                if previous != witness {
+                if previous.sha256 != witness.sha256 {
                     return Err(CertificationError::Mismatch(
                         "segment original package selection",
                     ));
@@ -1032,11 +1035,18 @@ pub(crate) struct OriginalNativeWitness {
     sources: Vec<CachedHomeOwner>,
     interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+    package_interfaces: PackageInterfaceCustody,
     native_requirements: CertifiedNativeRequirements,
     inventory: crate::artifact_inventory::NativeInventoryFacts,
 }
 
 impl OriginalNativeWitness {
+    pub(crate) fn package_interfaces(&self) -> &PackageInterfaceCustody {
+        &self.package_interfaces
+    }
+    pub(crate) fn validate_package_interfaces(&self, validation: &mut PackageInterfaceValidation) -> CertResult<()> {
+        self.package_interfaces.bind_witnesses(&self.packages, validation)
+    }
     pub(crate) fn inventory_facts(&self) -> &crate::artifact_inventory::NativeInventoryFacts {
         &self.inventory
     }
@@ -1172,6 +1182,8 @@ fn retain_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     groups: Vec<PendingCertifiedGroup>,
     witness: HomeCertification,
+    interfaces: &PackageInterfaceCustody,
+    validation: &mut PackageInterfaceValidation,
 ) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
     retain_authenticated_original_native(
         product,
@@ -1184,6 +1196,8 @@ fn retain_original_native(
             })
             .collect(),
         witness,
+        interfaces,
+        validation,
     )
 }
 
@@ -1191,6 +1205,8 @@ fn retain_authenticated_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     groups: Vec<AuthenticatedOriginalGroup>,
     witness: HomeCertification,
+    interfaces: &PackageInterfaceCustody,
+    validation: &mut PackageInterfaceValidation,
 ) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
     if product.owner() != &witness.owner
         || groups.iter().any(|group| &group.owner != product.owner())
@@ -1232,6 +1248,10 @@ fn retain_authenticated_original_native(
         native_group_ordinals: native_requirements.group_ordinals.clone(),
         retained_packages: native_requirements.retained_packages.clone(),
     };
+    validation.inventory.reserve::<((String,String),[u8;32])>(witness.packages.len())?;
+    for owner in witness.packages.keys() { validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()))?; }
+    let expected = witness.packages.iter().map(|(owner,witness)| (owner.clone(),witness.sha256)).collect();
+    let package_interfaces = interfaces.select(&expected, validation)?;
     let facts = Arc::new(OriginalNativeWitness {
         owner: witness.owner,
         execution_source_sha256: witness.execution_source_sha256,
@@ -1241,6 +1261,7 @@ fn retain_authenticated_original_native(
         sources: witness.sources.into_values().collect(),
         interface_requirements: witness.interface_requirements,
         packages: witness.packages,
+        package_interfaces,
         native_requirements,
         inventory,
     });
@@ -5657,6 +5678,30 @@ fn check_direct_package_agreement_with_validation(
     Ok(())
 }
 
+fn check_direct_package_agreement_with_custody(
+    sidecar: &[u8],
+    owner: &CachedHomeOwner,
+    packages: &BTreeMap<(String,String), PackageInterfaceWitness>,
+    custody: &PackageInterfaceCustody,
+    sidecar_custody: &PackageInterfaceCustody,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    custody.bind_witnesses(packages, validation)?;
+    let obligations = crate::recovery_artifacts::decode_package_import_obligations(
+        sidecar, &owner.unit, &owner.module, &owner.skinny_iface_sha256,
+        Path::new("module-package-imports.cbor"), validation,
+    ).map_err(package_validation_error)?;
+    let roots = crate::recovery_artifacts::validate_package_imports_with_custody(
+        obligations, sidecar_custody, validation,
+    ).map_err(package_validation_error)?;
+    for (key, (_,digest)) in roots.roots() {
+        if packages.get(key).is_some_and(|witness| &hex(&witness.sha256) != digest) {
+            return Err(CertificationError::Mismatch("direct package/receipt selection"));
+        }
+    }
+    Ok(())
+}
+
 fn certified_source_map(groups: &[PendingCertifiedGroup]) -> CertResult<SourceGroupMap> {
     let mut sources = SourceGroupMap::new();
     for group in groups {
@@ -7169,6 +7214,18 @@ fn verify_home_witness_with_validation(
     Ok(witness)
 }
 
+pub(crate) fn home_package_interface_seals(
+    bytes: &[u8], owner: &CachedHomeOwner, validation: &mut PackageInterfaceValidation,
+) -> CertResult<BTreeMap<(String,String), [u8;32]>> {
+    let witness = decode_home_witness_with_operation(bytes, &validation.inventory)?;
+    if &witness.owner != owner {
+        return Err(CertificationError::Mismatch("home certification owner"));
+    }
+    validation.inventory.reserve::<((String,String),[u8;32])>(witness.packages.len())?;
+    for key in witness.packages.keys() { validation.inventory.charge(key.0.len().saturating_add(key.1.len()))?; }
+    Ok(witness.packages.into_iter().map(|(key,witness)| (key,witness.sha256)).collect())
+}
+
 #[cfg(test)]
 pub(crate) fn bind_home_execution_source(
     bytes: &[u8],
@@ -7197,6 +7254,15 @@ pub(crate) struct VerifiedHomeCertification {
 }
 
 impl VerifiedHomeCertification {
+    pub(crate) fn capture_with_custody(
+        bytes: Vec<u8>, owner: &CachedHomeOwner, custody: &PackageInterfaceCustody,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Self> {
+        let witness = decode_home_witness_with_operation(&bytes, &validation.inventory)?;
+        if &witness.owner != owner { return Err(CertificationError::Mismatch("home certification owner")); }
+        custody.bind_witnesses(&witness.packages, validation)?;
+        Ok(Self { bytes, witness })
+    }
     pub(crate) fn capture(
         bytes: Vec<u8>,
         owner: &CachedHomeOwner,
@@ -7254,13 +7320,17 @@ pub(crate) fn candidate_execution_source_digest_with_validation(
     bytes: &[u8],
     owner: &CachedHomeOwner,
     package_imports: &[u8],
+    custody: &PackageInterfaceCustody,
+    sidecar_custody: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Option<[u8; 32]>> {
-    let witness = verify_home_witness_with_validation(bytes, owner, validation)?;
-    check_direct_package_agreement_with_validation(
+    let witness = VerifiedHomeCertification::capture_with_custody(bytes.to_vec(), owner, custody, validation)?.witness;
+    check_direct_package_agreement_with_custody(
         package_imports,
         owner,
         &witness.packages,
+        custody,
+        sidecar_custody,
         validation,
     )?;
     Ok(witness.execution_source_sha256)
@@ -7487,11 +7557,7 @@ fn capture_inherited_product_with_validation<'a>(
 ) -> CertResult<(RawModuleProduct, &'a HomeCertification)> {
     let artifact = input.artifact;
     let witness = &artifact.certification().witness;
-    // A retained certificate authenticates immutable bytes, never the current
-    // contents of the external package interfaces named by its witnesses.
-    for package in witness.packages.values() {
-        verify_package_interface(validation, package)?;
-    }
+    artifact.package_interfaces().bind_witnesses(&witness.packages, validation)?;
     let requirements = crate::prepared_artifact::production_requirements()
         .map_err(|_| CertificationError::Mismatch("production requirements"))?;
     let product = capture_original_product_bytes_with_validation(
@@ -7501,10 +7567,12 @@ fn capture_inherited_product_with_validation<'a>(
         &requirements,
         validation,
     )?;
-    check_direct_package_agreement_with_validation(
+    check_direct_package_agreement_with_custody(
         artifact.package_imports_bytes(),
         &witness.owner,
         &witness.packages,
+        artifact.package_interfaces(),
+        artifact.module_interface().package_interfaces(),
         validation,
     )?;
     Ok((product, witness))
@@ -8473,9 +8541,10 @@ fn certify_owned_uncaptured_products_with_validation(
                 product.product_bytes(),
                 product.package_imports_bytes(),
                 product.certification_bytes(),
+                product.module_interface().ok_or(CertificationError::Mismatch("original canonical companion"))?.package_interfaces(),
                 &requirements,
                 validation,
-            )
+            ).map(|(product,witness,_)| (product,witness))
         })
         .collect::<CertResult<Vec<_>>>()?;
     certify_inherited_inventory_with_validation(parsed, current_groups, validation)
@@ -8487,9 +8556,10 @@ fn capture_original_product_with_validation(
     product_bytes: &[u8],
     package_imports_bytes: &[u8],
     certification_bytes: &[u8],
+    sidecar_custody: &PackageInterfaceCustody,
     requirements: &tidepool_repr::execution_schema::ProgramRequirements,
     validation: &mut PackageInterfaceValidation,
-) -> CertResult<(RawModuleProduct, HomeCertification)> {
+) -> CertResult<(RawModuleProduct, HomeCertification, PackageInterfaceCustody)> {
     let product = capture_original_product_bytes_with_validation(
         owner,
         interface_bytes,
@@ -8498,13 +8568,16 @@ fn capture_original_product_with_validation(
         validation,
     )?;
     let witness = verify_home_witness_with_validation(certification_bytes, owner, validation)?;
-    check_direct_package_agreement_with_validation(
+    let custody = PackageInterfaceCustody::capture_verified_packages(&witness.packages, validation)?;
+    check_direct_package_agreement_with_custody(
         package_imports_bytes,
         owner,
         &witness.packages,
+        &custody,
+        sidecar_custody,
         validation,
     )?;
-    Ok((product, witness))
+    Ok((product, witness, custody))
 }
 
 fn capture_original_product_bytes_with_validation(
@@ -8590,6 +8663,7 @@ pub(crate) fn certify_recovery_products_with_validation(
         .zip(resolved)
         .map(|((artifact, raw), imports)| {
             let producer_sha256 = artifact.reference().toolchain_identity_sha256;
+            let custody = artifact.package_interfaces().clone();
             let (product, witness) = artifact.into_original()?;
             let requirements = RecoveryOriginalRequirements {
                 owner: witness.owner.clone(),
@@ -8615,7 +8689,7 @@ pub(crate) fn certify_recovery_products_with_validation(
                     imports: imports.into(),
                 })
                 .collect();
-            let product = retain_authenticated_original_native(product, groups, witness)?;
+            let product = retain_authenticated_original_native(product, groups, witness, &custody, validation)?;
             Ok(CertifiedRecoveredOriginal {
                 producer_sha256,
                 product,
@@ -8640,12 +8714,13 @@ pub(crate) fn finalize_original_for_inventory(
             .ok_or(CertificationError::Mismatch("original canonical companion"))?,
     )?;
     let requirements = crate::prepared_artifact::production_requirements()?;
-    let (raw, witness) = capture_original_product_with_validation(
+    let (raw, witness, custody) = capture_original_product_with_validation(
         product.owner(),
         product.interface_bytes(),
         product.product_bytes(),
         product.package_imports_bytes(),
         product.certification_bytes(),
+        product.module_interface().ok_or(CertificationError::Mismatch("original canonical companion"))?.package_interfaces(),
         &requirements,
         validation,
     )?;
@@ -8661,7 +8736,7 @@ pub(crate) fn finalize_original_for_inventory(
             imports: imports.into(),
         })
         .collect();
-    retain_authenticated_original_native(product, groups, witness)
+    retain_authenticated_original_native(product, groups, witness, &custody, validation)
 }
 
 /// The candidate loader owns decoded TPMOD bytes. This issuer authenticates
@@ -8671,6 +8746,7 @@ pub(crate) struct OriginalNativeCandidate {
     pub(crate) product: crate::module_candidates::CandidateProduct,
     pub(crate) certification_bytes: Vec<u8>,
     pub(crate) module_interface: CertifiedModuleInterface,
+    pub(crate) package_interfaces: PackageInterfaceCustody,
     pub(crate) execution_source:
         Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
@@ -8684,6 +8760,7 @@ pub(crate) fn certify_candidate_original_with_validation(
         product,
         certification_bytes,
         module_interface,
+        package_interfaces: custody,
         execution_source,
     } = candidate;
     let (product_bytes, raw) = product.into_parts();
@@ -8695,7 +8772,9 @@ pub(crate) fn certify_candidate_original_with_validation(
     {
         return Err(CertificationError::Mismatch("candidate original bytes"));
     }
-    let witness = verify_home_witness_with_validation(&certification_bytes, &owner, validation)?;
+    let witness = VerifiedHomeCertification::capture_with_custody(
+        certification_bytes.clone(), &owner, &custody, validation,
+    )?.witness;
     if witness.execution_source_sha256 != execution_source.as_ref().map(|graph| graph.digest())
         || execution_source
             .as_ref()
@@ -8705,10 +8784,12 @@ pub(crate) fn certify_candidate_original_with_validation(
             "candidate original execution source",
         ));
     }
-    check_direct_package_agreement_with_validation(
+    check_direct_package_agreement_with_custody(
         module_interface.package_imports_bytes(),
         &owner,
         &witness.packages,
+        &custody,
+        module_interface.package_interfaces(),
         validation,
     )?;
     let binding = validate_module_binding(
@@ -8743,7 +8824,7 @@ pub(crate) fn certify_candidate_original_with_validation(
             .with_execution_source_with_validation(graph, validation)
             .map_err(|_| CertificationError::Mismatch("candidate execution source owner"))?;
     }
-    retain_authenticated_original_native(product, groups, witness)
+    retain_authenticated_original_native(product, groups, witness, &custody, validation)
 }
 
 fn authenticate_original_imports(
@@ -10209,10 +10290,12 @@ pub(crate) fn certify_products_with_validation(
                 "product/iface/source/evidence digest",
             ));
         }
-        check_direct_package_agreement_with_validation(
+        check_direct_package_agreement_with_custody(
             package_bytes,
             &owner,
             &receipt.packages,
+            package_interfaces,
+            package_interfaces,
             validation,
         )?;
         if product.groups.len() != accepted.groups.len() {
@@ -10889,9 +10972,7 @@ pub(crate) fn certify_products_with_validation(
                             Ok(native) => {
                                 // Preserve issuance's current package observation. Immutable
                                 // equality does not authorize a fresh filesystem selection.
-                                for package in native.packages.values() {
-                                    verify_package_interface(validation, package)?;
-                                }
+                                native.validate_package_interfaces(validation)?;
                                 issuance_work.catalog_reuses += 1;
                                 issuance_work.catalog_reused_product_bytes += product_bytes.len() as u64;
                                 // Source identity in the durable certificate alone grants no
@@ -10924,7 +11005,7 @@ pub(crate) fn certify_products_with_validation(
                     Some(graph) => product.with_execution_source_with_validation(Arc::clone(graph), validation).map_err(|_| CertificationError::Mismatch("execution source owner"))?,
                     None => product,
                 };
-                retain_original_native(product, original, witness)
+                retain_original_native(product, original, witness, package_interfaces, validation)
             },
         )
         .collect::<CertResult<Vec<_>>>()?;
@@ -13376,7 +13457,8 @@ pub(crate) mod tests {
         let mut duplicate = native.groups.to_vec();
         duplicate.push(duplicate[0].clone());
         assert!(matches!(
-            retain_authenticated_original_native(original.clone(), duplicate, witness()),
+            retain_authenticated_original_native(original.clone(), duplicate, witness(),
+                native.package_interfaces(), &mut PackageInterfaceValidation::default()),
             Err(CertificationError::Mismatch(
                 "duplicate original native ordinal"
             )),
@@ -13384,7 +13466,8 @@ pub(crate) mod tests {
         let mut wrong_owner = native.groups.to_vec();
         wrong_owner[0].owner.module_version = ModuleVersion([8; 32]);
         assert!(matches!(
-            retain_authenticated_original_native(original.clone(), wrong_owner, witness()),
+            retain_authenticated_original_native(original.clone(), wrong_owner, witness(),
+                native.package_interfaces(), &mut PackageInterfaceValidation::default()),
             Err(CertificationError::Mismatch(
                 "original native witness owner"
             )),
@@ -13395,7 +13478,8 @@ pub(crate) mod tests {
             retain_authenticated_original_native(
                 original.clone(),
                 native.groups.to_vec(),
-                wrong_witness
+                wrong_witness,
+                native.package_interfaces(), &mut PackageInterfaceValidation::default()
             ),
             Err(CertificationError::Mismatch(
                 "original native witness owner"
@@ -22305,6 +22389,7 @@ pub(crate) mod tests {
                 .unwrap(),
                 certification_bytes,
                 module_interface,
+                package_interfaces: fixture.original_native().unwrap().package_interfaces().clone(),
                 execution_source: None,
             }
         };
@@ -27388,7 +27473,9 @@ None,
             retain_original_native(
                 draft.clone(),
                 groups.clone(),
-                decode_home_witness(original.certification_bytes()).unwrap()
+                decode_home_witness(original.certification_bytes()).unwrap(),
+                original.original_native().unwrap().package_interfaces(),
+                &mut PackageInterfaceValidation::default()
             )
             .is_err(),
             "a sealed execution graph cannot be absent from a complete original"
@@ -27397,6 +27484,8 @@ None,
             draft.with_execution_source(Arc::clone(graph)).unwrap(),
             groups,
             witness,
+            original.original_native().unwrap().package_interfaces(),
+            &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
         assert!(complete
@@ -29483,7 +29572,8 @@ None,
         );
         let product = fixture_finalized_product(product, [1; 32]);
         let cold = decode_home_witness(product.certification_bytes()).unwrap();
-        let retained = retain_original_native(product, vec![], cold).unwrap();
+        let custody = PackageInterfaceCustody::capture_verified_packages(&cold.packages, &mut PackageInterfaceValidation::default()).unwrap();
+        let retained = retain_original_native(product, vec![], cold, &custody, &mut PackageInterfaceValidation::default()).unwrap();
         assert_eq!(
             original_interface_requirements(&retained).unwrap(),
             requirements

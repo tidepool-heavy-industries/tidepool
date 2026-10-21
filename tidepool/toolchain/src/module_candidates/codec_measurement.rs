@@ -58,6 +58,7 @@ impl<'de> Deserialize<'de> for Record {
             evidence,
             module_interface_proof: None,
             execution_source: None,
+            package_interfaces: None,
         })
     }
 }
@@ -86,6 +87,7 @@ impl LegacyRecord {
             evidence: evidence.clone(),
             module_interface_proof: None,
             execution_source: None,
+            package_interfaces: None,
             data: RecordData {
                 evidence: evidence.reference().unwrap().clone(),
                 tag: self.tag,
@@ -110,6 +112,7 @@ impl LegacyRecord {
                 },
                 original_certification: Vec::new(),
                 module_interface: None,
+                package_interfaces: Vec::new(),
                 execution_source_sha256: None,
             },
         };
