@@ -244,17 +244,9 @@ fn fixture_with_helper_version(
     (root, helper, publication)
 }
 
-fn restored_graph_roles(
+fn acquire_recovery_inventory(
     context: &ExactDeclarationContext,
-    roles: &[CompilerInputRole],
-) -> Result<
-    (
-        tempfile::TempDir,
-        RecoveredArtifactInventory,
-        ExactDeclarationContext,
-    ),
-    CompileError,
-> {
+) -> (tempfile::TempDir, RecoveredArtifactInventory) {
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
     let mut products = Vec::new();
@@ -292,21 +284,26 @@ fn restored_graph_roles(
         &edges,
     )
     .expect("history recovery: certificate acquisition");
+    (scratch, inventory)
+}
+
+fn restored_graph_roles(
+    context: &ExactDeclarationContext,
+    roles: &[CompilerInputRole],
+) -> Result<ExactDeclarationContext, CompileError> {
+    let (_scratch, inventory) = acquire_recovery_inventory(context);
+    let selection = context.artifact_view().capture_graph_selection();
     let authenticated = inventory
         .context_with_graph_selection(&selection, roles, context.lexical_graph().to_vec())
         .map_err(|error| {
             eprintln!("history recovery stage=graph-role-authentication error={error:?}");
             error
         })?;
-    Ok((scratch, inventory, authenticated))
+    Ok(authenticated)
 }
 
-fn restored(
-    context: &ExactDeclarationContext,
-    roles: &[CompilerInputRole],
-) -> Result<ExactDeclarationContext, CompileError> {
-    // Authenticate the supplied wire before restoring the complete recorded owner.
-    let (_scratch, inventory, _authenticated) = restored_graph_roles(context, roles)?;
+fn restored(context: &ExactDeclarationContext) -> Result<ExactDeclarationContext, CompileError> {
+    let (_scratch, inventory) = acquire_recovery_inventory(context);
     use fvm_ipld_blockstore::Blockstore;
     let store = fvm_ipld_blockstore::MemoryBlockstore::default();
     let mut writer = crate::exact_context::Materializer::new(&store);
@@ -366,15 +363,17 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             .is_some_and(|row| row.permits(7)));
         let expected_publication = original.compiler_input_roles().into_iter()
             .find(CompilerInputRole::is_published_source_original).unwrap();
-        // Legacy role DTOs authenticate a selected graph, not the complete v5
-        // owner: their selected proof set can omit unused available scopes.
+        // Graph-role DTOs describe selected scopes. Calibrate their mutations
+        // on an owner without the unused offer scopes carried by the v5 history.
+        let (wire_root, wire_helper, wire_publication) =
+            fixture_with_helper_version(initial, 1, false);
+        let wire_context = wire_publication.context();
         let wire_roles: Vec<CompilerInputRole> = serde_json::from_slice(
-            &serde_json::to_vec(&original.compiler_input_roles()).unwrap(),
+            &serde_json::to_vec(&wire_context.compiler_input_roles()).unwrap(),
         ).unwrap();
-        let (_wire_scratch, _wire_inventory, wire_owner) =
-            restored_graph_roles(original, &wire_roles).unwrap();
+        let wire_owner = restored_graph_roles(wire_context, &wire_roles).unwrap();
         prop_assert_eq!(wire_owner.artifact_view().capture_graph_selection(),
-            original.artifact_view().capture_graph_selection());
+            wire_context.artifact_view().capture_graph_selection());
         let mut expected_roles = original.compiler_input_roles();
         let mut expected_artifacts = original.artifact_view().artifact_ids();
         let mut expected_lexical = original.lexical_graph().iter()
@@ -533,8 +532,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     observed[2].set(observed[2].get() + 1);
                     let before = context.artifact_view().clone();
                     let roles = context.compiler_input_roles();
-                    context = restored(&context, &roles).unwrap();
+                    context = restored(&context).unwrap();
                     prop_assert_eq!(context.artifact_view(), &before);
+                    prop_assert_eq!(context.compiler_input_roles(), roles);
                     prop_assert_eq!(
                         context.original_instance_environment(),
                         &OriginalInstanceEnvironment::Unknown
@@ -559,17 +559,17 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 }
                 Operation::AlterSelection(partition) => {
                     observed[4].set(observed[4].get() + 1);
-                    let issued_roles = context.compiler_input_roles();
+                    let issued_roles = wire_context.compiler_input_roles();
                     if partition == 6 {
                         let mut altered = issued_roles.clone();
                         let dependency = altered
                             .iter_mut()
-                            .find(|role| role.original() == Some(helper.descriptor.id))
+                            .find(|role| role.original() == Some(wire_helper.descriptor.id))
                             .unwrap();
                         *dependency = CompilerInputRole::InterfaceOnly {
                             interface: dependency.interface(),
                         };
-                        prop_assert!(restored_graph_roles(&context, &altered).is_err());
+                        prop_assert!(restored_graph_roles(wire_context, &altered).is_err());
                         refusals[6].set(refusals[6].get() + 1);
                         continue;
                     }
@@ -586,7 +586,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             let groups = graph["native_groups"].as_array_mut().unwrap();
                             let roots = groups.iter().map(|group|
                                 serde_json::from_value::<NativeGroupBinding>(group.clone()).unwrap())
-                                .filter(|group| group.binding.artifact() == root.descriptor.id
+                                .filter(|group| group.binding.artifact() == wire_root.descriptor.id
                                     && group.original_ordinal == ORDINALS[initial])
                                 .collect::<Vec<_>>();
                             prop_assert_eq!(roots.len(), 1, "mutation names the exact selected Root, independently of helper row order");
@@ -610,13 +610,13 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     }
                     prop_assert_ne!(&roles[published], &issued);
                     let altered: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
-                    prop_assert!(restored_graph_roles(&context, &altered).is_err());
+                    prop_assert!(restored_graph_roles(wire_context, &altered).is_err());
                     refusals[usize::from(partition)]
                         .set(refusals[usize::from(partition)].get() + 1);
                 }
                 Operation::DuplicateSelection => {
                     // Semantic equality does not admit a noncanonical wire selection.
-                    let issued_roles = context.compiler_input_roles();
+                    let issued_roles = wire_context.compiler_input_roles();
                     let published = issued_roles
                         .iter()
                         .position(CompilerInputRole::is_published_source_original)
@@ -629,7 +629,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     bindings.push(bindings[0].clone());
                     let repeated: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
                     prop_assert_eq!(&repeated, &baseline_wire);
-                    prop_assert!(restored_graph_roles(&context, &repeated).is_err());
+                    prop_assert!(restored_graph_roles(wire_context, &repeated).is_err());
                     duplicate_refusals.set(duplicate_refusals.get() + 1);
                 }
             }
