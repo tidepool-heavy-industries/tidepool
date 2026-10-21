@@ -277,12 +277,12 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 .inventory
                 .reserve::<(
                     &crate::certified_products::ReceiptImportOwner,
-                    Arc<DemandCertifiedGroups>,
+                    Vec<&crate::declaration_context::NativePackageObligation>,
                 )>(batch.original_uses().len())
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             for reference in batch.original_uses() {
-                let projected = batch.restrict_uses(std::slice::from_ref(reference))?;
-                reply_groups.insert(reference, Arc::clone(projected.shared_groups()));
+                let obligations = batch.groups().package_obligations_for_use(reference)?;
+                reply_groups.insert(reference, obligations);
             }
         }
         self.validation
@@ -291,10 +291,12 @@ impl<'a> WorldNativeDemandResolver<'a> {
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let replies = reply_groups
             .iter()
-            .map(|(reference, groups)| native_demand::NativeDemandUseReply {
-                original: reference,
-                obligations: groups.package_obligations(),
-            })
+            .map(
+                |(reference, obligations)| native_demand::NativeDemandUseReply {
+                    original: reference,
+                    obligations,
+                },
+            )
             .collect::<Vec<_>>();
         let reply = native_demand::encode_reply(&replies, &self.validation.inventory)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;

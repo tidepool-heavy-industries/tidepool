@@ -2381,6 +2381,53 @@ fn charge_original_use(
 }
 
 impl DemandCertifiedGroups {
+    /// Borrow package obligations along one use's already issued exact edges.
+    /// This observation never constructs a selected row or a new demand owner.
+    pub(crate) fn package_obligations_for_use(
+        &self,
+        reference: &crate::certified_products::ReceiptImportOwner,
+    ) -> Result<Vec<&NativePackageObligation>, CompileError> {
+        if !self.contains_original_use(reference) {
+            return Err(failure(
+                "native package query exceeds its resolved use owner",
+            ));
+        }
+        let root = *self
+            .original_use_roots
+            .get(reference)
+            .ok_or_else(|| failure("native package query exceeds its issued use roots"))?;
+        let budget = NativeDemandBudget(Some(&self.operation));
+        budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(2)?;
+        let mut pending = vec![root];
+        let mut queued = BTreeSet::from([root]);
+        let mut obligations = Vec::new();
+        while let Some(binding) = pending.pop() {
+            budget.checkpoint()?;
+            let row = self
+                .rows
+                .get(&binding)
+                .ok_or_else(|| failure("native package query lost an issued dependency row"))?;
+            let start = self
+                .package_obligations
+                .partition_point(|obligation| obligation.demander < binding);
+            let tail = &self.package_obligations[start..];
+            let end = tail.partition_point(|obligation| obligation.demander == binding);
+            budget.reserve::<&NativePackageObligation>(end)?;
+            obligations.extend(tail[..end].iter());
+            for dependency in &row.dependencies {
+                if !queued.contains(dependency) {
+                    budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(2)?;
+                    queued.insert(*dependency);
+                    pending.push(*dependency);
+                }
+            }
+        }
+        // Preserve the full projection's canonical obligation order using only
+        // references to the existing immutable rows.
+        obligations.sort_unstable();
+        Ok(obligations)
+    }
+
     /// Follow roots recorded by the original choice issuer and their exact
     /// dependency links. The projection never resolves a symbol or permission.
     fn restrict_uses(
@@ -21389,17 +21436,46 @@ mod tests {
         demand: crate::artifact_inventory::NativeArtifactDemand,
         partial: bool,
     ) -> Arc<RequestCompilerInputs> {
+        demanded_native_fixture_with_packages(unrelated, demand, partial, &BTreeMap::new())
+    }
+
+    fn demanded_native_fixture_with_packages(
+        unrelated: usize,
+        demand: crate::artifact_inventory::NativeArtifactDemand,
+        partial: bool,
+        packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
+    ) -> Arc<RequestCompilerInputs> {
         use crate::certified_products::tests::{
             original_groups_fixture_with_interface, recovered_witness_fixtures,
         };
         let producer = [2; 32];
-        let product = |module: &str, groups| {
+        let product = |module: &str,
+                       mut groups: Vec<(
+            u32,
+            Vec<crate::certified_products::PendingImportOwner>,
+        )>| {
+            if let Some(((unit, package_module), witness)) = packages.first_key_value() {
+                for (ordinal, imports) in &mut groups {
+                    imports.push(crate::certified_products::PendingImportOwner::Package {
+                        unit: unit.clone(),
+                        module: package_module.clone(),
+                        binder: tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: unit.clone(),
+                            module: package_module.clone(),
+                            namespace: "value".into(),
+                            occurrence: format!("{module}_{ordinal}"),
+                            record_parent: None,
+                        },
+                        interface_digest: witness.sha256,
+                    });
+                }
+            }
             crate::certified_products::fixture_finalized_product(
                 original_groups_fixture_with_interface(
                     module,
                     groups,
                     1,
-                    &BTreeMap::new(),
+                    packages,
                     module.as_bytes().to_vec(),
                 ),
                 producer,
@@ -21527,6 +21603,178 @@ mod tests {
                 .compiler_inputs(&context, None)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn native_package_use_query_borrows_exact_issued_closure_obligations() {
+        use crate::artifact_inventory::{ArtifactBinding, NativeArtifactDemand};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"actual package interface fixture").unwrap();
+        let packages = BTreeMap::from([(
+            ("package".into(), "Package".into()),
+            crate::certified_products::PackageInterfaceWitness {
+                selected_path: file.path().to_path_buf(),
+                sha256: Sha256::digest(b"actual package interface fixture").into(),
+            },
+        )]);
+        let cold = demanded_native_fixture_with_packages(
+            1,
+            NativeArtifactDemand::AllGroups,
+            false,
+            &packages,
+        );
+        let mut validation = PackageInterfaceValidation::default();
+        let pair = |binding: ArtifactBinding| {
+            Value::Array(vec![
+                Value::Bytes(binding.artifact.0.to_vec()),
+                Value::Bytes(binding.selection.0.to_vec()),
+            ])
+        };
+        let mut uses = Vec::new();
+        for (module, ordinal) in [
+            ("DemandChild", 9),
+            ("DemandParent", 7),
+            ("UnrelatedNative0", 1),
+        ] {
+            let owner = identity("fixture", module);
+            let primary = cold
+                .compiler_source_support()
+                .compiler_primary_input(&owner)
+                .unwrap()
+                .unwrap();
+            let artifact = primary.original().unwrap().artifact;
+            let row = &cold.native_selection.availability.0[&artifact];
+            let ArtifactPayload::Original(product) = &row.original.payload else {
+                unreachable!()
+            };
+            let binder = crate::certified_products::original_available_groups(product)
+                .unwrap()
+                .find(|group| group.original_ordinal() == ordinal)
+                .unwrap()
+                .binders()
+                .iter()
+                .next()
+                .unwrap()
+                .clone();
+            uses.push(Value::Array(vec![
+                text("fixture"),
+                text(module),
+                pair(primary.interface()),
+                pair(primary.original().unwrap()),
+                Value::Array(vec![
+                    text(&binder.unit),
+                    text(&binder.module),
+                    text(&binder.namespace),
+                    text(&binder.occurrence),
+                    binder.record_parent.as_ref().map_or(Value::Null, text),
+                ]),
+            ]));
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![text("TPNATIVEDEMAND1"), Value::Array(uses)]),
+            &mut bytes,
+        )
+        .unwrap();
+        let packet =
+            crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
+                .unwrap();
+        let acquired = cold
+            .resolve_native_demand(&packet, &mut validation)
+            .unwrap();
+        let before = cold.source_support.artifacts().inventory().metrics();
+        let mut narrow = Vec::new();
+        let mut full = Vec::new();
+        for reference in packet.originals() {
+            let borrowed = acquired
+                .groups()
+                .package_obligations_for_use(reference)
+                .unwrap();
+            let projected = acquired
+                .restrict_uses(std::slice::from_ref(reference))
+                .unwrap();
+            assert_eq!(
+                borrowed,
+                projected
+                    .groups()
+                    .package_obligations()
+                    .iter()
+                    .collect::<Vec<_>>()
+            );
+            for obligation in &borrowed {
+                assert!(acquired
+                    .groups()
+                    .package_obligations()
+                    .iter()
+                    .any(|issued| std::ptr::eq(*obligation, issued)));
+            }
+            assert_eq!(
+                borrowed,
+                acquired
+                    .groups()
+                    .package_obligations_for_use(reference)
+                    .unwrap()
+            );
+            narrow.push(borrowed);
+            full.push(projected);
+        }
+        assert_eq!(
+            narrow.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![1, 2, 1]
+        );
+        assert!(std::ptr::eq(
+            narrow[0][0],
+            *narrow[1]
+                .iter()
+                .find(|obligation| obligation.identity.occurrence == "DemandChild_9")
+                .unwrap()
+        ));
+        let full_obligations = full
+            .iter()
+            .map(|projection| {
+                projection
+                    .groups()
+                    .package_obligations()
+                    .iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let encode = |rows: &[Vec<&NativePackageObligation>]| {
+            crate::certified_products::native_demand::encode_reply(
+                &packet
+                    .originals()
+                    .iter()
+                    .zip(rows)
+                    .map(|(original, obligations)| {
+                        crate::certified_products::native_demand::NativeDemandUseReply {
+                            original,
+                            obligations,
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                &validation.inventory,
+            )
+            .unwrap()
+        };
+        assert_eq!(encode(&narrow), encode(&full_obligations));
+        let parent = &full[1];
+        assert!(parent
+            .groups()
+            .package_obligations_for_use(&packet.originals()[2])
+            .is_err());
+        let mut unknown = packet.originals()[0].clone();
+        if let crate::certified_products::ReceiptImportOwner::OriginalBinding { binder, .. } =
+            &mut unknown
+        {
+            binder.occurrence.push_str("_not_issued");
+        }
+        assert!(acquired
+            .groups()
+            .package_obligations_for_use(&unknown)
+            .is_err());
+        let after = cold.source_support.artifacts().inventory().metrics();
+        assert_eq!(after.graph_visits, before.graph_visits);
+        assert_eq!(after.view_queries, before.view_queries);
     }
 
     #[test]

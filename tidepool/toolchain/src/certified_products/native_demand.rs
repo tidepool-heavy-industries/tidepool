@@ -91,7 +91,7 @@ pub(crate) enum NativeDemandRefusalReason {
 
 pub(crate) struct NativeDemandUseReply<'a> {
     pub(crate) original: &'a ReceiptImportOwner,
-    pub(crate) obligations: &'a [crate::declaration_context::NativePackageObligation],
+    pub(crate) obligations: &'a [&'a crate::declaration_context::NativePackageObligation],
 }
 
 pub(crate) fn encode_reply(
@@ -149,7 +149,7 @@ pub(crate) fn encode_reply(
 }
 
 fn encode_obligations(
-    obligations: &[crate::declaration_context::NativePackageObligation],
+    obligations: &[&crate::declaration_context::NativePackageObligation],
     operation: &InventoryOperation,
 ) -> CertResult<Value> {
     operation.reserve::<(&SymbolIdentity, [u8; 32])>(obligations.len())?;
@@ -302,13 +302,14 @@ mod tests {
             identity: package.clone(),
             interface_digest: [8; 32],
         }];
+        let borrowed = obligations.iter().collect::<Vec<_>>();
         let replies = decoded
             .originals()
             .iter()
             .enumerate()
             .map(|(index, original)| NativeDemandUseReply {
                 original,
-                obligations: if index == 0 { &obligations } else { &[] },
+                obligations: if index == 0 { &borrowed } else { &[] },
             })
             .collect::<Vec<_>>();
         let bytes = encode_reply(&replies, &operation).unwrap();
@@ -370,7 +371,7 @@ mod tests {
             encode_reply(
                 &[NativeDemandUseReply {
                     original: replies[0].original,
-                    obligations: &conflicting,
+                    obligations: &conflicting.iter().collect::<Vec<_>>(),
                 }],
                 &operation
             ),
