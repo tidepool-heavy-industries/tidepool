@@ -9246,6 +9246,11 @@ mod module_product_tests {
                     wrong_domain[0] ^= 1;
                     assert!(!identity.matches_source_recipe(&wrong_base, domain));
                     assert!(!identity.matches_source_recipe(base.logical_id(), &wrong_domain));
+                    if mixed && !cancel_after_end {
+                        crate::compiler_world::native_demand::assert_captured_stage_input_refusals(
+                            &checked,
+                        );
+                    }
                     let prepared = prepare_world_cell_program(Arc::clone(&checked))?;
                     Ok::<_, CompileError>((prepared, checked, origin))
                 },
@@ -9276,7 +9281,6 @@ mod module_product_tests {
                 .action
                 .expect("actual World native preparation");
             if mixed && !cancel_after_end {
-                crate::compiler_world::native_demand::assert_captured_stage_input_refusals(&checked);
                 crate::declaration_context::assert_world_repeated_source_refusals(
                     &checked,
                     prepared.outputs[&4]

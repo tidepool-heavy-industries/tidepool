@@ -165,6 +165,8 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
         Arc::clone(&program.validation().inventory),
     );
+    let mut selected_uses = 0;
+    let mut unselected_uses = 0;
     for stage in program.stages() {
         let selected = request
             .checked_stage(program, stage, &validation)
@@ -184,6 +186,51 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
             }
         }
 
+        let scoped = crate::certified_products::OriginalBindingSelection::from_world_stage(
+            Arc::new(selected.clone()),
+            request.acquired_uses.keys(),
+        )
+        .expect("actual request acquisitions authenticate metadata for each emitted stage");
+        for (reference, acquisition) in &request.acquired_uses {
+            let acquired = &request.acquisitions[*acquisition];
+            let (acquired_binding, _) = acquired
+                .groups()
+                .original_use_row(reference)
+                .expect("actual request use retains its issued exact group");
+            let expected =
+                recorded.and_then(|stage| stage.selected_groups.original_use_row(reference));
+            let executable = scoped.executable(reference, selected.operation()).unwrap();
+            match expected {
+                Some((binding, _)) => {
+                    selected_uses += 1;
+                    assert_eq!(
+                        binding, acquired_binding,
+                        "stage choice reuses the actual request's exact issued group"
+                    );
+                    assert_eq!(
+                        executable,
+                        acquired
+                            .groups()
+                            .resolved_original_bindings()
+                            .unwrap()
+                            .get(reference)
+                    );
+                }
+                None => {
+                    unselected_uses += 1;
+                    assert!(
+                        executable.is_none(),
+                        "a request-wide acquisition cannot become another stage's executable use"
+                    );
+                }
+            }
+            let foreign = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            assert!(
+                scoped.executable(reference, &foreign.inventory).is_err(),
+                "foreign operation refuses before observing an empty stage"
+            );
+        }
+
         // Equal observations cannot issue another emitted-stage identity.
         let unknown = Arc::new(stage.as_ref().clone());
         assert!(request
@@ -198,6 +245,11 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
             "refusal preserves the actual stage owner"
         );
     }
+    assert!(
+        selected_uses > 0 && unselected_uses > 0,
+        "mixed producer must exercise both selected and unselected actual stage uses"
+    );
+    eprintln!("actual Original stage ceiling: {selected_uses} selected uses, {unselected_uses} unselected uses");
     let (foreign, refusal) = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
         .expect("same reservation has a distinct initial request acquisition")
         .finish();
