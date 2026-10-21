@@ -6376,7 +6376,10 @@ fn authenticate_source_receipt_metadata<'a>(
     selection: &'a CertifiedSourceSelection,
 ) -> CertResult<&'a CachedHomeOwner> {
     let owner = selection.receipt_source_member(unit, module, module_version)?;
-    if !sources.contains_key(&(owner.clone(), original_ordinal, binder.clone())) {
+    if sources
+        .get(&(owner.clone(), original_ordinal, binder.clone()))
+        .is_none()
+    {
         return Err(source_closure_mismatch(
             "receipt_source_metadata",
             Some(owner),
