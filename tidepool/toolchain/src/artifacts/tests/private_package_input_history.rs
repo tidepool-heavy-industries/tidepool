@@ -303,53 +303,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             && binder == &literal() && *interface_digest == witness.sha256));
 
     let producer = CanonicalProducerIdentity::from_producer_bytes(&PRODUCER).sha256();
-    let private = issued
-        .original_inputs
-        .as_ref()
-        .expect("completed products retain their actual physical inputs")
-        .as_ref()
-        .clone();
-    let view = private.issued_artifacts().clone();
-    let public = Arc::new(
-        ExactDeclarationContext::from_authenticated_interfaces(
-            producer,
-            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
-            crate::artifact_inventory::CompilerInputProjection::default(),
-        )
-        .unwrap(),
-    );
-    let public_hash = public.semantic_sha256();
-    let request = public
-        .prepare_compilation_with_private_input(
-            &directory.path().join("private-inputs"),
-            &PRODUCER,
-            None,
-            Some(private.clone()),
-        )
-        .unwrap();
-    assert!(public.recovery_products().is_empty());
-    assert!(public.lexical_graph().is_empty());
-    assert!(public.compiler_input_roles().is_empty());
-    assert_eq!(request.groups.len(), 1);
-    assert!(matches!(
-        request.groups[0].imports(),
-        [PendingImportOwner::Package { .. }]
-    ));
-    let effective = request.compiler_inputs();
-    let mut target_validation = PackageInterfaceValidation::default();
-    let selection =
-        CertifiedSourceSelection::from_compiler_inputs(effective, &target_validation.inventory)
-            .unwrap();
-    let target_inventory = effective.artifacts().inventory();
-    let fixed = target_inventory
-        .bind_segment(
-            effective.artifacts(),
-            vec![],
-            &selection,
-            &mut target_validation,
-        )
-        .unwrap();
-
     let mut target_wire = testing::wire_program();
     target_wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
     target_wire.expressions.nodes[0] = ExprFrame::Call {
@@ -388,6 +341,171 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             binder: reader(),
         },
     }];
+    let physical = issued
+        .original_inputs
+        .as_ref()
+        .expect("completed products retain their actual physical inputs")
+        .as_ref();
+    assert!(physical
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
+    let completed = issued
+        .source_selection
+        .produced_source_receipt(
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: MODULE.into(),
+            },
+            physical.issued_artifacts(),
+        )
+        .unwrap()
+        .unwrap();
+    let original_id = ArtifactEntry::original(producer, original.clone())
+        .unwrap()
+        .descriptor
+        .id;
+    let own_groups = completed
+        .groups(crate::artifact_inventory::NativeGroupKey {
+            artifact: original_id,
+            original_ordinal: ORDINAL,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(own_groups.len(), 1);
+    let initial_binding = own_groups[0];
+    let mut target_validation = PackageInterfaceValidation::default();
+    let observed = certified_products::AuthenticatedTargetImports::issue(
+        &target,
+        &accepted,
+        &target_validation.inventory,
+    )
+    .unwrap();
+    let initial_target = physical
+        .issued_artifacts()
+        .inventory()
+        .select_native_target(
+            physical.physical_cohort().unwrap(),
+            &issued.source_selection,
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut target_validation,
+        )
+        .unwrap();
+    assert_eq!(
+        initial_target.artifacts().selected_native_binding_rows().1,
+        [initial_binding]
+    );
+    let closure = issued
+        .source_selection
+        .selected_original_closure(initial_target.artifacts())
+        .unwrap();
+    let published =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical)
+            .unwrap()
+            .certify_original_closure(&closure)
+            .unwrap();
+    let private = OriginalCompilerInputs::from_issued_support(&published);
+    let view = private.issued_artifacts().clone();
+    let public = Arc::new(
+        ExactDeclarationContext::from_authenticated_interfaces(
+            producer,
+            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            crate::artifact_inventory::CompilerInputProjection::default(),
+        )
+        .unwrap(),
+    );
+    let public_hash = public.semantic_sha256();
+    let empty_request = public
+        .prepare_compilation_with_private_input(
+            &directory.path().join("empty-private-inputs"),
+            &PRODUCER,
+            None,
+            Some(physical.clone()),
+        )
+        .unwrap();
+    assert!(empty_request.groups.is_empty());
+    let empty_inputs = empty_request.compiler_inputs();
+    let empty_selection =
+        CertifiedSourceSelection::from_compiler_inputs(empty_inputs, &target_validation.inventory)
+            .unwrap();
+    let empty_inventory = empty_inputs.artifacts().inventory();
+    let empty_fixed = empty_inventory
+        .bind_segment(
+            empty_inputs.artifacts(),
+            vec![],
+            &empty_selection,
+            &mut target_validation,
+        )
+        .unwrap();
+    let observed = certified_products::AuthenticatedTargetImports::issue(
+        &target,
+        &accepted,
+        &target_validation.inventory,
+    )
+    .unwrap();
+    let refusal = empty_inventory
+        .select_native_target(
+            empty_fixed.physical_inputs().physical_cohort().unwrap(),
+            empty_fixed.source_selection(),
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut target_validation,
+        )
+        .unwrap_err();
+    assert!(matches!(refusal, CompileError::ArtifactInventory(error)
+        if matches!(error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty { .. }))));
+    let request = public
+        .prepare_compilation_with_private_input(
+            &directory.path().join("private-inputs"),
+            &PRODUCER,
+            None,
+            Some(private.clone()),
+        )
+        .unwrap();
+    assert!(public.recovery_products().is_empty());
+    assert!(public.lexical_graph().is_empty());
+    assert!(public.compiler_input_roles().is_empty());
+    assert_eq!(request.groups.len(), 1);
+    assert!(matches!(
+        request.groups[0].imports(),
+        [PendingImportOwner::Package { .. }]
+    ));
+    let effective = request.compiler_inputs();
+    assert_eq!(
+        effective.artifacts().selected_native_binding_rows().1,
+        [initial_binding]
+    );
+    let choice = effective
+        .compiler_source_support()
+        .checked_native_input_decision(
+            original_id,
+            ArtifactEntry::canonical_artifact_id(original.module_interface().unwrap()),
+            original.owner(),
+        )
+        .unwrap();
+    assert!(
+        matches!(choice, crate::artifact_inventory::InputNativeDecision::IssuedChoices(groups)
+        if groups.get(&ORDINAL) == Some(&initial_binding))
+    );
+    let selection =
+        CertifiedSourceSelection::from_compiler_inputs(effective, &target_validation.inventory)
+            .unwrap();
+    let target_inventory = effective.artifacts().inventory();
+    let fixed = target_inventory
+        .bind_segment(
+            effective.artifacts(),
+            vec![],
+            &selection,
+            &mut target_validation,
+        )
+        .unwrap();
+
     let observed = certified_products::AuthenticatedTargetImports::issue(
         &target,
         &accepted,

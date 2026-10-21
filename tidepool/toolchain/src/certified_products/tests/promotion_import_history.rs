@@ -481,13 +481,48 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
     )
     .unwrap();
-    assert_eq!(
-        initial_output
-            .issued_artifacts()
-            .selected_native_groups()
-            .len(),
-        4
-    );
+    assert!(initial_output
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
+    for (product, ordinals) in [
+        (initial_a, BTreeSet::from([A_ORDINAL, A_ORDINAL + 1])),
+        (initial_b, BTreeSet::from([B_ORDINAL, B_ORDINAL + 1])),
+    ] {
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: product.owner().unit.clone(),
+            module: product.owner().module.clone(),
+        };
+        let receipt = initial
+            .source_selection
+            .produced_source_receipt(&owner, initial_output.issued_artifacts())
+            .unwrap()
+            .unwrap();
+        let artifact = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            product,
+        );
+        let actual = receipt
+            .row()
+            .offers()
+            .flat_map(|offer| offer.proof())
+            .flat_map(|proof| proof.selection.graph_selection().native_groups.iter())
+            .filter(|group| group.binding.artifact() == artifact)
+            .map(|group| group.original_ordinal)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, ordinals);
+        for original_ordinal in ordinals {
+            assert_eq!(
+                receipt
+                    .groups(crate::artifact_inventory::NativeGroupKey {
+                        artifact,
+                        original_ordinal,
+                    })
+                    .count(),
+                1
+            );
+        }
+    }
     let initial_support =
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&initial_output)
             .unwrap();
