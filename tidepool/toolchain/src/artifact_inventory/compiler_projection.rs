@@ -1017,11 +1017,15 @@ pub(crate) fn complete_native_selection(
     sources: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
     output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
     products: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+    links: &crate::certified_products::PackageLinks,
+    target_name: Option<&str>,
     inherited: &NativeSelectionCompletions,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Arc<CompletedNativeSelection>, CompileError> {
-    use crate::certified_products::{SelectedNativeImport, SelectedNativeTargetImport};
-    use tidepool_repr::execution_schema::{DefinitionsView, GlobalDecl};
+    use crate::certified_products::{
+        PackageLink, SelectedNativeImport, SelectedNativeTargetImport,
+    };
+    use tidepool_repr::execution_schema::{DefinitionsView, SymbolIdentity};
 
     if !std::ptr::eq(output.operation().as_ref(), operation) {
         return Err(failure(
@@ -1043,45 +1047,92 @@ pub(crate) fn complete_native_selection(
         .iter()
         .map(|old| Arc::clone(&old.packages))
         .collect::<Vec<_>>();
-    let package_target =
-        |global: &GlobalDecl, seal: &[u8; 32]| -> Result<super::PackageCodeTarget, CompileError> {
-            // The table is the actual completed output's sealed products. A symbol
-            // names an export within that table; it never searches an inventory.
-            let candidates = products
-                .iter()
-                .filter(|product| {
-                    product.defining_interface().sha256() == seal
-                        && product
-                            .code()
-                            .exported_values()
-                            .any(|(symbol, _)| symbol == &global.identity)
-                })
-                .collect::<Vec<_>>();
-            if let Some(product) = candidates.first() {
-                if candidates.iter().any(|other| *other != *product) {
-                    return Err(failure("package slot has competing captured code products"));
-                }
-                return Ok(super::PackageCodeTarget::Planned(product.artifact_id()));
+    let resolve_inherited = |identity: &SymbolIdentity,
+                             seal: &[u8; 32]|
+     -> Result<super::PackageCodeTarget, CompileError> {
+        // `Inherited` names an installed package terminal. It resolves only to
+        // the unique exact binding already held in the inherited graphs for
+        // this slot's identity+seal; absent or ambiguous is a typed refusal,
+        // never a seal+symbol first-match over an ambient inventory.
+        let held = resolve_held_package_binding(identity, seal, &graphs)?;
+        check_product(held.product())?;
+        Ok(super::PackageCodeTarget::Held(held))
+    };
+    // Every occurrence row names one authenticated fresh product by envelope.
+    // The row's owner/defining facts must match that product exactly; the
+    // envelope SHA never substitutes for selection or binding identity.
+    let occurrences = links.occurrences();
+    let mut product_by_envelope = BTreeMap::new();
+    for product in products {
+        product_by_envelope.insert(*product.envelope_sha256(), product);
+    }
+    let mut occurrence_products = Vec::with_capacity(occurrences.len());
+    for occurrence in occurrences {
+        let product = product_by_envelope
+            .get(occurrence.envelope_sha256())
+            .copied()
+            .ok_or_else(|| {
+                failure("package occurrence envelope is absent from completed output")
+            })?;
+        check_product(product)?;
+        let owner = product.code().owner();
+        if owner.unit != occurrence.unit()
+            || owner.module != occurrence.module()
+            || owner.interface_sha256 != *occurrence.defining_interface_sha256()
+            || owner.defining_version_sha256 != *occurrence.defining_version_sha256()
+        {
+            return Err(failure(
+                "package occurrence disagrees with its authenticated product",
+            ));
+        }
+        if occurrence.imports().len() != product.code().globals().len() {
+            return Err(failure(
+                "package occurrence import count differs from its product globals",
+            ));
+        }
+        occurrence_products.push(product);
+    }
+    let plan_artifact_ids = occurrence_products
+        .iter()
+        .map(|product| product.artifact_id())
+        .collect::<Vec<_>>();
+    let resolve_link = |link: &PackageLink,
+                        identity: &SymbolIdentity,
+                        seal: &[u8; 32]|
+     -> Result<super::PackageCodeTarget, CompileError> {
+        match link {
+            PackageLink::Local { occurrence } => {
+                let index = *occurrence as usize;
+                let id = plan_artifact_ids
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| failure("package occurrence link is out of range"))?;
+                Ok(super::PackageCodeTarget::Planned(id))
             }
-            let mut held = BTreeMap::new();
-            for graph in &graphs {
-                for binding in graph.bindings() {
-                    if binding.product().defining_interface().sha256() == seal
-                        && binding.exported_value(&global.identity).is_some()
-                    {
-                        held.insert(binding.binding(), binding);
-                    }
-                }
-            }
-            if held.len() != 1 {
-                return Err(failure(
-                    "package slot lacks one exact acquired code product",
-                ));
-            }
-            Ok(super::PackageCodeTarget::Held(
-                held.into_values().next().expect("one held product"),
-            ))
-        };
+            PackageLink::Inherited => resolve_inherited(identity, seal),
+        }
+    };
+    // Each occurrence becomes one plan; a `Link::Local` child names another
+    // occurrence's exact artifact id, and `Link::Inherited` resolves to the
+    // exact held terminal for that import slot.
+    let mut plans = Vec::with_capacity(occurrences.len());
+    for (occurrence, product) in occurrences.iter().zip(&occurrence_products) {
+        let globals = product.code().globals();
+        let seals = product.import_interfaces();
+        let imports = occurrence
+            .imports()
+            .iter()
+            .enumerate()
+            .map(|(index, link)| resolve_link(link, &globals[index].identity, &seals[index]))
+            .collect::<Result<Vec<_>, _>>()?;
+        operation
+            .reserve::<super::PackageCodePlan>(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        plans.push(super::PackageCodePlan {
+            product: Arc::clone(product),
+            imports,
+        });
+    }
     let mut package_roots = Vec::new();
     operation
         .reserve::<CompletedNativeSourceRow>(sources.groups().count())
@@ -1115,18 +1166,32 @@ pub(crate) fn complete_native_selection(
         }
         row_inputs.push((row, prior));
     }
-    let mut gather = |links: &[SelectedNativeImport],
-                      definitions: DefinitionsView<'_>,
-                      prior: Option<&CompletedNativeSourceRow>|
-     -> Result<(), CompileError> {
-        if links.len() != definitions.globals().len()
-            || prior.is_some_and(|row| row.imports.len() != links.len())
+    // Resolve HOME package slots in row order. Fresh rows consume their exact
+    // `home_roots` links keyed by (unit, module, original ordinal); retained
+    // rows reuse their prior held binding and never consult a digest-to-many
+    // inventory.
+    for (row, prior) in &row_inputs {
+        let imports = row.imports();
+        let definitions = row.group().group().definitions();
+        if imports.len() != definitions.globals().len()
+            || prior.is_some_and(|prior| prior.imports.len() != imports.len())
         {
             return Err(failure(
                 "native completion slot count differs from its physical definitions",
             ));
         }
-        for (index, (link, global)) in links.iter().zip(definitions.globals()).enumerate() {
+        let owner = row.group().owner();
+        let fresh_links = if prior.is_none() {
+            Some(
+                links
+                    .home_links(&owner.unit, &owner.module, row.binding().original_ordinal)
+                    .ok_or_else(|| failure("fresh HOME group lacks package links"))?,
+            )
+        } else {
+            None
+        };
+        let mut fresh_slot = 0usize;
+        for (index, (link, global)) in imports.iter().zip(definitions.globals()).enumerate() {
             if let SelectedNativeImport::Package {
                 identity,
                 interface_digest,
@@ -1139,22 +1204,27 @@ pub(crate) fn complete_native_selection(
                 }
                 let selected = match prior.map(|row| &row.imports[index]) {
                     Some(CompletedNativeImport::Package { binding, .. }) => {
+                        check_product(binding.product())?;
                         super::PackageCodeTarget::Held(binding.clone())
                     }
                     Some(_) => return Err(failure("completed HOME slot changed its import kind")),
-                    None => package_target(global, interface_digest)?,
+                    None => {
+                        let slot = fresh_links
+                            .expect("fresh HOME links")
+                            .get(fresh_slot)
+                            .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
+                        fresh_slot += 1;
+                        resolve_link(slot, identity, interface_digest)?
+                    }
                 };
                 package_roots.push(selected);
             }
         }
-        Ok(())
-    };
-    for (row, prior) in &row_inputs {
-        gather(
-            row.imports(),
-            row.group().group().definitions(),
-            prior.map(|row| row.as_ref()),
-        )?;
+        if let Some(list) = fresh_links {
+            if fresh_slot != list.len() {
+                return Err(failure("fresh HOME package links were not fully consumed"));
+            }
+        }
     }
     let target = sources.target();
     let definitions = target.definitions();
@@ -1163,6 +1233,8 @@ pub(crate) fn complete_native_selection(
             "target completion slots differ from physical definitions",
         ));
     }
+    let target_links = target_name.and_then(|name| links.target_links(name));
+    let mut target_cursor = 0usize;
     for (link, global) in sources
         .target_requirements()
         .iter()
@@ -1178,7 +1250,13 @@ pub(crate) fn complete_native_selection(
                         "target package obligation differs from physical global",
                     ));
                 }
-                package_roots.push(package_target(global, interface_digest)?);
+                let target_links = target_links
+                    .ok_or_else(|| failure("target package slot lacks package links"))?;
+                let slot = target_links
+                    .get(target_cursor)
+                    .ok_or_else(|| failure("target package slot exceeds package links"))?;
+                target_cursor += 1;
+                package_roots.push(resolve_link(slot, identity, interface_digest)?);
             }
             SelectedNativeTargetImport::RetainedCapture {
                 identity,
@@ -1193,48 +1271,10 @@ pub(crate) fn complete_native_selection(
             SelectedNativeTargetImport::Source { .. } => {}
         }
     }
-    let mut plans = Vec::new();
-    let mut pending = package_roots.clone();
-    let mut reached = BTreeSet::new();
-    let mut held_checked = BTreeSet::new();
-    while let Some(target) = pending.pop() {
-        crate::host_work::checkpoint()?;
-        operation
-            .charge(1)
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let id = match target {
-            super::PackageCodeTarget::Planned(id) => id,
-            super::PackageCodeTarget::Held(held) => {
-                if held_checked.insert(held.binding()) {
-                    check_product(held.product())?;
-                    pending.extend(held.imports().map(super::PackageCodeTarget::Held));
-                }
-                continue;
-            }
-        };
-        if !reached.insert(id) {
-            continue;
+    if let Some(target_links) = target_links {
+        if target_cursor != target_links.len() {
+            return Err(failure("target package links were not fully consumed"));
         }
-        let product = products
-            .iter()
-            .find(|product| product.artifact_id() == id)
-            .ok_or_else(|| failure("reached package product is absent from completed output"))?;
-        check_product(product)?;
-        let imports = product
-            .code()
-            .globals()
-            .iter()
-            .zip(product.import_interfaces())
-            .map(|(global, seal)| package_target(global, seal))
-            .collect::<Result<Vec<_>, _>>()?;
-        pending.extend(imports.iter().cloned());
-        operation
-            .reserve::<super::PackageCodePlan>(1)
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        plans.push(super::PackageCodePlan {
-            product: Arc::clone(product),
-            imports,
-        });
     }
     let packages = super::IssuedPackageCodeGraph::issue(
         sources.acquired_artifacts(),
@@ -1385,6 +1425,34 @@ pub(crate) fn complete_native_selection(
         target_imports,
     }))
 }
+
+/// Resolve an `Inherited` package link to the unique exact binding already
+/// held in the inherited graphs for this slot's identity+interface seal.
+/// Absent or more than one exact held binding is a typed refusal; this never
+/// searches fresh products or falls back to a seal+symbol first match.
+fn resolve_held_package_binding(
+    identity: &tidepool_repr::execution_schema::SymbolIdentity,
+    seal: &[u8; 32],
+    graphs: &[Arc<super::IssuedPackageCodeGraph>],
+) -> Result<super::PackageCodeBinding, CompileError> {
+    let mut held = BTreeMap::new();
+    for graph in graphs {
+        for binding in graph.bindings() {
+            if binding.product().defining_interface().sha256() == seal
+                && binding.exported_value(identity).is_some()
+            {
+                held.insert(binding.binding(), binding);
+            }
+        }
+    }
+    if held.len() != 1 {
+        return Err(failure(
+            "package inherited slot lacks one exact acquired binding",
+        ));
+    }
+    Ok(held.into_values().next().expect("one exact held binding"))
+}
+
 /// Matched compiler roles and exact custody selected by their existing issuer.
 /// Required type interfaces do not grant lexical imports or native body demand.
 #[derive(Clone, Debug)]
@@ -9604,5 +9672,44 @@ mod tests {
                 Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original.descriptor.id))
             );
         }
+    }
+
+    #[test]
+    fn inherited_package_link_requires_one_exact_held_binding() {
+        let inventory = ArtifactInventory::default();
+        let view = inventory.empty_view();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let product = crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+            "pkg", "Pkg.Mod", 13,
+        );
+        let identity = product
+            .code()
+            .exported_values()
+            .next()
+            .map(|(identity, _)| identity.clone())
+            .expect("package fixture exports one binder");
+        let seal = *product.defining_interface().sha256();
+        let issue = || {
+            IssuedPackageCodeGraph::issue(
+                &view,
+                vec![PackageCodePlan {
+                    product: Arc::clone(&product),
+                    imports: Vec::new(),
+                }],
+                vec![PackageCodeTarget::Planned(product.artifact_id())],
+                &[],
+                &operation,
+            )
+            .unwrap()
+        };
+        // Zero held bindings refuses.
+        assert!(resolve_held_package_binding(&identity, &seal, &[]).is_err());
+        // One exact held binding resolves.
+        let first = issue();
+        assert!(resolve_held_package_binding(&identity, &seal, &[first.clone()]).is_ok());
+        // Two distinct bodies sharing one identity+seal need P3's producer
+        // histories; the typed refusal for that case is `held.len() != 1`.
+        drop(first);
     }
 }

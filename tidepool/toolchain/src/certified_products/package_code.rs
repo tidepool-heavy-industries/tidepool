@@ -610,6 +610,9 @@ impl CertifiedPackageCodeProduct {
     pub fn product_sha256(&self) -> &[u8; 32] {
         &self.product_sha256
     }
+    pub fn envelope_sha256(&self) -> &[u8; 32] {
+        &self.envelope_sha256
+    }
     pub(crate) fn descriptor(&self) -> &crate::artifact_inventory::ArtifactDescriptor {
         &self.descriptor
     }
