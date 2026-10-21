@@ -11871,6 +11871,21 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &target_source,
             operation,
         );
+        #[cfg(test)]
+        let prior_source_observations = receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+            .filter_map(|global| match &global.owner {
+                crate::certified_products::ReceiptImportOwner::Source {
+                    module_version: None,
+                    ..
+                } => Some(global.owner.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let originals = crate::certified_products::CertifiedSegmentOriginals::issue(
             raw,
             receipt,
@@ -11886,6 +11901,13 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             validation,
         )
         .map_err(compiler_evidence_failure)?;
+        #[cfg(test)]
+        stage_type_anchor_tests::assert_actual_prior_source_inputs(
+            &continuation,
+            &inputs,
+            originals.source_selection(),
+            &prior_source_observations,
+        );
         Ok(WorldProgramSegment {
             package_products: package_products.into(),
             originals,

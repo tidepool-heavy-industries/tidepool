@@ -139,3 +139,169 @@ pub(super) fn assert_actual_type_anchors(
     }
     eprintln!("actual World TYPE anchor controls: stage {}, prior {exercised}, omitted {exercised}, wrong facts {}; current structural checks {current_outputs}", actual.initial.stage().index(), exercised * 2);
 }
+
+/// Exercise prior Source only after the actual physical issuer has succeeded.
+/// Raw observation mutations below do not create a new certificate or choice.
+pub(super) fn assert_actual_prior_source_inputs(
+    continuation: &WorldProgramContinuation,
+    inputs: &DemandedWorldCompilerInputs,
+    selection: &crate::certified_products::CertifiedSourceSelection,
+    observed: &[crate::certified_products::ReceiptImportOwner],
+) {
+    use crate::certified_products::{CertificationError, CertifiedSourceSelection, ReceiptImportOwner};
+
+    let mut exercised = 0;
+    for reference in observed {
+        let ReceiptImportOwner::Source {
+            unit,
+            module,
+            original_ordinal,
+            ..
+        } = reference
+        else {
+            unreachable!("only actual unversioned Source observations are borrowed");
+        };
+        let owner = identity(unit, module);
+        let Some(program) = inputs.program_support.as_ref() else {
+            break;
+        };
+        let Some(receipt) = program
+            .imports
+            .get(&owner)
+            .and_then(|row| row.produced.as_ref())
+        else {
+            continue;
+        };
+        let expected_entry = program
+            .compiler_support
+            .implementation_entry(&owner)
+            .expect("actual produced Source has its held compiler entry");
+        let ArtifactPayload::Original(product) = &expected_entry.payload else {
+            panic!("actual produced Source has its Original payload");
+        };
+        let (entry, ordinal) = selection
+            .target_source_entry(reference)
+            .expect("actual prior unversioned Source resolves after physical issuance");
+        assert_eq!(ordinal, *original_ordinal);
+        assert_eq!(entry.descriptor.id, expected_entry.descriptor.id);
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: ordinal,
+        };
+        let prior = selection
+            .target_prior_produced_group(key, &entry)
+            .unwrap()
+            .expect("actual prior Source retains produced provenance");
+        let expected = receipt.groups(key).collect::<BTreeSet<_>>();
+        assert!(
+            !expected.is_empty(),
+            "actual prior Source owns an available occurrence"
+        );
+        assert_eq!(prior.groups().collect::<BTreeSet<_>>(), expected);
+        assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
+        for binding in expected {
+            assert!(std::ptr::eq(
+                prior
+                    .support(binding)
+                    .expect("prior Source carries exact support"),
+                receipt
+                    .support(key, binding)
+                    .expect("physical receipt owns exact support"),
+            ));
+        }
+
+        let mut wrong_version = reference.clone();
+        let mut version = product.owner().module_version.clone();
+        version.0[0] ^= 1;
+        if let ReceiptImportOwner::Source { module_version, .. } = &mut wrong_version {
+            *module_version = Some(version);
+        }
+        assert!(matches!(
+            selection.target_source_entry(&wrong_version),
+            Err(CertificationError::Mismatch("source module version"))
+        ));
+        let mut wrong_binder = reference.clone();
+        if let ReceiptImportOwner::Source { binder, .. } = &mut wrong_binder {
+            binder.occurrence.push_str("_unissued_binder");
+        }
+        assert!(matches!(
+            selection.target_source_entry(&wrong_binder),
+            Err(CertificationError::Mismatch(
+                "target Source exact native membership"
+            ))
+        ));
+
+        // This is an absent-body ordinal control, not a Partial-offer oracle.
+        let absent = crate::artifact_inventory::NativeGroupKey {
+            original_ordinal: u32::MAX,
+            ..key
+        };
+        assert!(!entry
+            .native_group_ordinals
+            .contains(&absent.original_ordinal));
+        let mut wrong_ordinal = reference.clone();
+        if let ReceiptImportOwner::Source {
+            original_ordinal, ..
+        } = &mut wrong_ordinal
+        {
+            *original_ordinal = absent.original_ordinal;
+        }
+        assert!(matches!(
+            selection.target_source_entry(&wrong_ordinal),
+            Err(CertificationError::Mismatch(
+                "target Source exact native membership"
+            ))
+        ));
+        assert!(!selection.permits_native_group(
+            absent.artifact,
+            product.owner(),
+            absent.original_ordinal
+        ));
+        assert!(selection
+            .target_prior_produced_group(absent, &entry)
+            .unwrap()
+            .unwrap()
+            .groups()
+            .next()
+            .is_none());
+
+        // The same carried compiler support and availability, without the
+        // actual program-source row, cannot manufacture prior-stage origin.
+        let carried = CertifiedSourceSelection::from_compiler_inputs(
+            &continuation.inputs,
+            inputs.initial.operation(),
+        )
+        .expect("ordinary carried selection remains valid");
+        assert!(matches!(
+            carried.target_source_entry(reference),
+            Err(CertificationError::Mismatch(
+                "missing cached source version"
+            ))
+        ));
+        assert!(carried
+            .target_prior_produced_group(key, &entry)
+            .unwrap()
+            .is_none());
+        let initial = CertifiedSourceSelection::from_compiler_inputs(
+            inputs.initial.initial_inputs(),
+            inputs.initial.operation(),
+        )
+        .expect("actual initial request selection remains valid");
+        assert!(initial
+            .target_prior_produced_group(key, &entry)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            selection
+                .target_prior_produced_group(key, &entry)
+                .unwrap()
+                .unwrap()
+                .groups()
+                .collect::<BTreeSet<_>>(),
+            receipt.groups(key).collect::<BTreeSet<_>>()
+        );
+        exercised += 1;
+        break;
+    }
+    eprintln!("actual World prior Source controls: stage {}, prior {exercised}, wrong version {exercised}, wrong binder {exercised}, absent ordinal {exercised}, carried provenance {exercised}", inputs.initial.stage().index());
+}
