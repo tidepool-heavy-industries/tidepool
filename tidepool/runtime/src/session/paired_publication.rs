@@ -72,6 +72,21 @@ pub struct FinalExecutionIntent {
     world: Option<WorldExecutionIntent>,
 }
 
+impl FinalExecutionIntent {
+    pub(super) fn world_native_snapshots(
+        &self,
+    ) -> Option<(
+        &tidepool_codegen::binding_table::BindingScopeSnapshot,
+        &tidepool_codegen::binding_table::BindingScopeSnapshot,
+    )> {
+        self.world.as_ref()?;
+        Some((
+            &self.admitted.source_selection,
+            &self.private.source_selection,
+        ))
+    }
+}
+
 /// The exact published World association and admitted source facts a final
 /// publication must revalidate before installing anything. Cloning shares the
 /// same association, source and lease Arcs; it issues no compiler authority.

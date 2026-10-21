@@ -2693,8 +2693,24 @@ impl PersistentSession {
     /// Value leases include shadowed ancestor generations used by inherited
     /// declaration modules; no heap objects are copied or forced.
     pub fn mint_detached_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
+        self.mint_detached_scope_with_selection(parent, None).ok()
+    }
+
+    pub(super) fn mint_world_execution_scope(
+        &mut self,
+        parent: ScopeId,
+        admitted: &tidepool_codegen::binding_table::BindingScopeSnapshot,
+    ) -> Result<ScopeId, SessionError> {
+        self.mint_detached_scope_with_selection(parent, Some(admitted))
+    }
+
+    fn mint_detached_scope_with_selection(
+        &mut self,
+        parent: ScopeId,
+        admitted: Option<&tidepool_codegen::binding_table::BindingScopeSnapshot>,
+    ) -> Result<ScopeId, SessionError> {
         if !self.scopes.is_live(parent) {
-            return None;
+            return Err(SessionError::DeadScope(parent));
         }
         let root = self.scopes.mint_isolated();
         self.inherit_source_admission(parent, root);
@@ -2703,9 +2719,20 @@ impl PersistentSession {
             lib.seed_scope(root, inherited);
             lib.inherit_source_context(parent, root);
         }
-        self.bindings
-            .seed_detached_scope(&self.scopes, parent, root);
-        Some(root)
+        let seeded = match admitted {
+            Some(admitted) => {
+                self.bindings
+                    .seed_world_execution_scope(&self.scopes, parent, root, admitted)
+            }
+            None => Ok(self
+                .bindings
+                .seed_detached_scope(&self.scopes, parent, root)),
+        };
+        if let Err(error) = seeded {
+            self.retire_scope(root);
+            return Err(SessionError::InvalidPublicBindingPromotion(error));
+        }
+        Ok(root)
     }
 
     /// Keep closure dependencies from an explicitly imported authored entry
@@ -4097,6 +4124,23 @@ impl PersistentSession {
             )
         }
         .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let prepared = match &ticket.intent {
+            super::PublicationIntent::Final(intent) => match intent.world_native_snapshots() {
+                Some((admitted, completed)) => self
+                    .bindings
+                    .prepare_world_execution_selection(
+                        &self.scopes,
+                        ticket.private_scope,
+                        ticket.public_scope,
+                        admitted,
+                        completed,
+                        prepared,
+                    )
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?,
+                None => prepared,
+            },
+            super::PublicationIntent::HostBindings(_) => prepared,
+        };
         let declared_names = ticket
             .declaration
             .as_ref()

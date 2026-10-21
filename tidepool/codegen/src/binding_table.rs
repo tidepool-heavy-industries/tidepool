@@ -334,6 +334,11 @@ struct SourceSelectionView {
     domains: HashTrieMapSync<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
 }
 
+enum SourceSelectionSeed<'a> {
+    Fork,
+    WorldContinuation(&'a SourceSelectionView),
+}
+
 impl SourceSelectionView {
     fn for_scope(scope: ScopeId) -> Self {
         let current = crate::prepared_program::SourceInstanceDomain::for_scope(scope);
@@ -2608,6 +2613,82 @@ impl BindingTable {
         Ok(prepared)
     }
 
+    fn selection_for_promotion(
+        plan: &BindingPromotionPlan,
+        base: &SourceSelectionView,
+    ) -> Result<SourceSelectionView, BindingPromotionError> {
+        let mut selection = base.clone();
+        for (domain, record) in &plan.source_domains {
+            selection.domains.insert_mut(*domain, record.clone());
+        }
+        let mut record = selection
+            .domains
+            .get(&selection.current)
+            .cloned()
+            .ok_or(BindingPromotionError::MissingSourceDomain)?;
+        for (owner, origin) in &plan.source_origins {
+            record.authored.insert_mut(owner.clone(), origin.clone());
+        }
+        selection.domains.insert_mut(selection.current, record);
+        Ok(selection)
+    }
+
+    /// Continue only the exact native environment of an admitted World
+    /// execution. Custody-only publication does not select its retained inputs.
+    pub fn prepare_world_execution_selection(
+        &mut self,
+        tree: &ScopeTree,
+        source: ScopeId,
+        target: ScopeId,
+        admitted: &BindingScopeSnapshot,
+        completed: &BindingScopeSnapshot,
+        mut prepared: PreparedBindingPromotion,
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        let empty = SourceSelectionView::for_scope(target);
+        let target_view = self.source_selection.get(&target).unwrap_or(&empty);
+        if prepared.plan.target != target
+            || self.scope_snapshot(tree, source)? != *completed
+            || target_view != &admitted.selection
+            || completed.selection.current != admitted.selection.current
+        {
+            return Err(BindingPromotionError::ConflictingSourceOrigin);
+        }
+        // Accepted authored publication has already issued its frozen domain
+        // additions. Compose those same facts over the completed execution.
+        let selection = Self::selection_for_promotion(&prepared.plan, &completed.selection)?;
+        let source_custody = self.source_instance_keys_in(tree, source);
+        let target_custody = self.source_instance_keys_in(tree, target);
+        let mut entries = Vec::new();
+        for (domain, record) in selection.domains.iter() {
+            for key in record.selected.iter() {
+                if !source_custody.contains(key)
+                    || (!target_custody.contains(key)
+                        && !prepared.plan.source_instances.contains(key))
+                {
+                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
+                }
+                let instance = self
+                    .source_instances
+                    .get(key)
+                    .ok_or(BindingPromotionError::MissingOrForeignSourceInstance)?;
+                entries.push((*domain, &instance.token));
+            }
+        }
+        crate::prepared_program::NativeDomainSelection::validate(
+            selection.current,
+            |domain| selection.domains.contains_key(domain),
+            selection
+                .domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .map(|origin| origin.domain),
+            entries,
+        )
+        .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)?;
+        prepared.selection = selection;
+        Ok(prepared)
+    }
+
     fn prepare_promotion_install(
         &mut self,
         plan: BindingPromotionPlan,
@@ -2652,23 +2733,12 @@ impl BindingTable {
                     .ok_or(BindingPromotionError::LeaseCountExhausted)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut selection = self
+        let base = self
             .source_selection
             .get(&target)
             .cloned()
             .unwrap_or_else(|| SourceSelectionView::for_scope(target));
-        for (domain, record) in &plan.source_domains {
-            selection.domains.insert_mut(*domain, record.clone());
-        }
-        let mut record = selection
-            .domains
-            .get(&selection.current)
-            .cloned()
-            .expect("current source domain admitted");
-        for (owner, origin) in &plan.source_origins {
-            record.authored.insert_mut(owner.clone(), origin.clone());
-        }
-        selection.domains.insert_mut(selection.current, record);
+        let selection = Self::selection_for_promotion(&plan, &base)?;
 
         let new_promoted = if let Some(existing) = self.promoted.get_mut(&target) {
             existing.reserve(added.len());
@@ -3480,6 +3550,41 @@ impl BindingTable {
         parent: ScopeId,
         child: ScopeId,
     ) -> BindingTipId {
+        self.seed_scope_with_selection(tree, parent, child, SourceSelectionSeed::Fork)
+    }
+
+    /// A private transaction continues the admitted World's exact native
+    /// environment while capturing a fresh value tip and its physical custody.
+    pub fn seed_world_execution_scope(
+        &mut self,
+        tree: &ScopeTree,
+        parent: ScopeId,
+        child: ScopeId,
+        admitted: &BindingScopeSnapshot,
+    ) -> Result<BindingTipId, BindingPromotionError> {
+        if !tree.is_live(child)
+            || child == parent
+            || self.has_revision_scope(child)
+            || self.hidden.contains_key(&child)
+            || self.scope_snapshot(tree, parent)? != *admitted
+        {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        Ok(self.seed_scope_with_selection(
+            tree,
+            parent,
+            child,
+            SourceSelectionSeed::WorldContinuation(&admitted.selection),
+        ))
+    }
+
+    fn seed_scope_with_selection(
+        &mut self,
+        tree: &ScopeTree,
+        parent: ScopeId,
+        child: ScopeId,
+        native: SourceSelectionSeed<'_>,
+    ) -> BindingTipId {
         if let Some(tip) = self.tips.get(&child) {
             return tip.id;
         }
@@ -3511,12 +3616,17 @@ impl BindingTable {
             .get(&parent)
             .cloned()
             .unwrap_or_else(|| SourceSelectionView::for_scope(parent));
-        let (remap, records) = parent_view
-            .fork(id, [parent_view.current])
-            .expect("captured source domain graph is closed");
-        let mut selected = SourceSelectionView {
-            current: remap[&parent_view.current],
-            domains: records.into_iter().collect(),
+        let mut selected = match native {
+            SourceSelectionSeed::Fork => {
+                let (remap, records) = parent_view
+                    .fork(id, [parent_view.current])
+                    .expect("captured source domain graph is closed");
+                SourceSelectionView {
+                    current: remap[&parent_view.current],
+                    domains: records.into_iter().collect(),
+                }
+            }
+            SourceSelectionSeed::WorldContinuation(admitted) => admitted.clone(),
         };
         if let Some(previous) = self.source_selection.remove(&child) {
             let mut record = selected

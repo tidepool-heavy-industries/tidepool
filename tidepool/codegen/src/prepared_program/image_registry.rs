@@ -897,6 +897,205 @@ mod tests {
     }
 
     #[test]
+    fn world_execution_publication_preserves_selected_package_domain_and_custody() {
+        use super::super::{
+            BatchLeaseRequest, BatchProgram, DemandedPackageImage, PreparedMachine,
+            PreparedMachineOptions,
+        };
+        use crate::binding_table::BindingPromotionError;
+        use tidepool_repr::execution_schema::ValueId;
+        let registry = ImageRegistry::new();
+        let package = Arc::new(
+            DemandedPackageImage::prepare(
+                package_code(testing::wire_program(), 0),
+                &[],
+                &Default::default(),
+                &Default::default(),
+                &registry,
+            )
+            .unwrap(),
+        );
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut tree = crate::scope::ScopeTree::new();
+        let public = tree.mint_isolated();
+        let private = tree.mint_isolated();
+        let capture = tree.mint_isolated();
+        let mut table = crate::binding_table::BindingTable::new();
+        let admitted = table.scope_snapshot(&tree, public).unwrap();
+        let domain = table
+            .native_domain_selection_in(&tree, public)
+            .unwrap()
+            .current();
+        table
+            .seed_world_execution_scope(&tree, public, private, &admitted)
+            .unwrap();
+        table.seed_detached_scope(&tree, public, capture);
+        assert_eq!(
+            table
+                .native_domain_selection_in(&tree, private)
+                .unwrap()
+                .current(),
+            domain
+        );
+        assert_ne!(
+            table
+                .native_domain_selection_in(&tree, capture)
+                .unwrap()
+                .current(),
+            domain,
+            "ordinary captures keep their independent domain labels"
+        );
+        let stale_private = table.scope_snapshot(&tree, private).unwrap();
+        let capture_before = table.scope_snapshot(&tree, capture).unwrap();
+        assert!(matches!(
+            table.seed_world_execution_scope(&tree, public, capture, &admitted,),
+            Err(BindingPromotionError::UnverifiableSourceSelection)
+        ));
+        assert_eq!(
+            table.scope_snapshot(&tree, capture).unwrap(),
+            capture_before
+        );
+        let key = super::super::NativeArtifactBinding {
+            artifact: [5; 32],
+            selection: [6; 32],
+        };
+        let installed = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: Arc::clone(package.image()),
+                    imports: vec![],
+                }],
+                vec![BatchLeaseRequest::for_package(
+                    0,
+                    Arc::clone(&package),
+                    key,
+                    domain,
+                    ValueId(0),
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let actual = installed.leases[0].clone();
+        let owned = table
+            .register_source_instances_in_domains(
+                &tree,
+                private,
+                installed.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        let completed = table.scope_snapshot(&tree, private).unwrap();
+        let before = table.scope_snapshot(&tree, public).unwrap();
+        let stale = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+            .unwrap();
+        assert!(matches!(
+            table.prepare_world_execution_selection(
+                &tree,
+                private,
+                public,
+                &admitted,
+                &stale_private,
+                stale,
+            ),
+            Err(BindingPromotionError::ConflictingSourceOrigin)
+        ));
+        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
+        let missing = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &[])
+            .unwrap();
+        assert!(matches!(
+            table.prepare_world_execution_selection(
+                &tree, private, public, &admitted, &completed, missing,
+            ),
+            Err(BindingPromotionError::MissingOrForeignSourceInstance)
+        ));
+        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
+        let custody = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+            .unwrap();
+        table.commit_exact_binding_promotion(custody);
+        assert!(
+            table
+                .native_domain_selection_in(&tree, public)
+                .unwrap()
+                .roots()
+                .is_empty(),
+            "generic custody publication does not select a package instance"
+        );
+        let foreign = table.scope_snapshot(&tree, capture).unwrap();
+        let prepared = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+            .unwrap();
+        assert!(matches!(
+            table.prepare_world_execution_selection(
+                &tree, private, public, &foreign, &completed, prepared,
+            ),
+            Err(BindingPromotionError::ConflictingSourceOrigin)
+        ));
+        assert!(table
+            .native_domain_selection_in(&tree, public)
+            .unwrap()
+            .roots()
+            .is_empty());
+        let prepared = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+            .unwrap();
+        let prepared = table
+            .prepare_world_execution_selection(
+                &tree, private, public, &admitted, &completed, prepared,
+            )
+            .unwrap();
+        table.commit_exact_binding_promotion(prepared);
+        let selected = table.native_domain_selection_in(&tree, public).unwrap();
+        assert_eq!(selected.current(), domain);
+        assert_eq!(
+            selected.roots().len(),
+            1,
+            "one actual selected package root"
+        );
+        let held = selected.roots().values().next().unwrap();
+        assert_eq!(held.instance(), actual.instance());
+        assert_eq!(held.handle(), actual.handle());
+        assert!(
+            table
+                .native_domain_selection_in(&tree, capture)
+                .unwrap()
+                .roots()
+                .is_empty(),
+            "the preexisting capture retains its immutable empty selection"
+        );
+        drop(selected);
+        let published = table.scope_snapshot(&tree, public).unwrap();
+        let stale = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+            .unwrap();
+        assert!(
+            matches!(
+                table.prepare_world_execution_selection(
+                    &tree, private, public, &admitted, &completed, stale,
+                ),
+                Err(BindingPromotionError::ConflictingSourceOrigin)
+            ),
+            "a changed public selection refuses even within the SAME domain"
+        );
+        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), published);
+        assert!(table
+            .drain_scope_with_sources(private)
+            .source_instances
+            .is_empty());
+        for lease in table.drain_scope_with_sources(public).source_instances {
+            assert!(machine.release(lease.handle()));
+        }
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
     fn package_definitions_install_independent_instances_and_execute_through_batch_imports() {
         use super::super::{BatchImport, BatchProgram, PreparedCallOptions, PreparedResult};
         use crate::suspension::RealmId;

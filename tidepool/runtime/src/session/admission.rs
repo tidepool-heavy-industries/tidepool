@@ -4315,9 +4315,8 @@ impl PersistentSession {
                 .transpose()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.lib_mut().seed_scope(public_scope, public_tip);
-            let private_scope = self
-                .mint_detached_scope(public_scope)
-                .ok_or(SessionError::DeadScope(public_scope))?;
+            let private_scope =
+                self.mint_world_execution_scope(public_scope, &world.admitted.source_selection)?;
             super::complete_native_transition(admission)?;
             private_scope
         };
