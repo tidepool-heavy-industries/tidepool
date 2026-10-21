@@ -9389,9 +9389,9 @@ impl SelectedOriginalGroupScope<'_> {
             module: module.to_owned(),
         };
         match self {
-            Self::View(view) => view.has_observed_owner(&owner),
-            Self::Contribution(proof) => proof.has_observed_original_owner(&owner),
-            Self::Acquired { view, .. } => view.has_observed_owner(&owner),
+            Self::View(view) => view.has_home_owner(&owner),
+            Self::Contribution(proof) => proof.has_home_original_owner(&owner),
+            Self::Acquired { view, .. } => view.has_home_owner(&owner),
         }
     }
 }
@@ -25877,6 +25877,161 @@ pub(crate) mod tests {
         ), Err(CertificationError::CapturedModulePayload(
             crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(path),
         )) if path == package_path));
+    }
+
+    #[test]
+    fn scoped_home_owner_query_separates_package_custody_from_home_downgrade() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, ArtifactPayload, IssuedPackageCodeGraph,
+            PackageCodePlan, PackageCodeTarget,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let external_unit = "external-package";
+        let package_path = root.path().join("External.hi");
+        std::fs::write(&package_path, [0x43]).unwrap();
+        let packages = BTreeMap::from([(
+            (external_unit.into(), "External".into()),
+            PackageInterfaceWitness {
+                selected_path: package_path.clone(),
+                sha256: sha(&[0x43]),
+            },
+        )]);
+        let import = PendingImportOwner::Package {
+            unit: external_unit.into(),
+            module: "External".into(),
+            binder: SymbolIdentity {
+                unit: external_unit.into(),
+                ..testing::identity("External", "entry")
+            },
+            interface_digest: sha(&[0x43]),
+        };
+        let consumer = original_groups_fixture_with_interface(
+            "Consumer",
+            vec![(7, vec![import])],
+            7,
+            &packages,
+            b"Consumer interface".to_vec(),
+        );
+        let interface = b"External interface".to_vec();
+        let product_bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: external_unit.into(),
+                module: "External".into(),
+                interface: interface.clone(),
+                groups: vec![],
+            }]);
+        let owner = CachedHomeOwner {
+            unit: external_unit.into(),
+            module: "External".into(),
+            module_version: ModuleVersion([7; 32]),
+            skinny_iface_sha256: sha(&interface),
+            product_sha256: sha(&product_bytes),
+        };
+        let certification = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            &owner.unit,
+            &owner.module,
+            &interface,
+            Vec::new(),
+        );
+        let empty = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            product_bytes,
+            package_bytes,
+            certification,
+        );
+        let consumer = fixture_finalized_product(consumer, [1; 32]);
+        let empty = fixture_finalized_product(empty, [1; 32]);
+        let recovered = recovered_witness_fixtures(&[consumer, empty]);
+        let consumer = &recovered[0].product;
+        let empty = &recovered[1].product;
+
+        let inventory = ArtifactInventory::default();
+        let consumer_entry =
+            Arc::new(ArtifactEntry::original([1; 32], (*consumer).clone()).unwrap());
+        let consumer_view = inventory
+            .admit_shared(&inventory.empty_view(), vec![consumer_entry])
+            .unwrap();
+        // The validator census stays consumer-only, so a refusal below must
+        // come from the scope's HOME-observed query rather than the census.
+        let snapshot = consumer_view.metadata_snapshot();
+        let available = snapshot
+            .artifacts
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+            .collect();
+        let external_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: external_unit.into(),
+            module: "External".into(),
+        };
+
+        // Positive control: real package custody for the external owner must
+        // not manufacture a HOME observation or fire the downgrade guard.
+        let package =
+            CertifiedPackageCodeProduct::package_code_fixture(external_unit, "External", 13);
+        let operation = InventoryOperation::new(Default::default());
+        let graph = IssuedPackageCodeGraph::issue(
+            &consumer_view,
+            vec![PackageCodePlan {
+                product: Arc::clone(&package),
+                imports: Vec::new(),
+            }],
+            vec![PackageCodeTarget::Planned(package.artifact_id())],
+            &[],
+            &operation,
+        )
+        .unwrap();
+        assert!(graph.artifacts().has_observed_owner(&external_owner));
+        assert!(!graph.artifacts().has_home_owner(&external_owner));
+        let with_package = consumer_view.retain_package_code_graph(&graph).unwrap();
+        assert!(with_package.has_observed_owner(&external_owner));
+        assert!(!with_package.has_home_owner(&external_owner));
+        let mut validation = PackageInterfaceValidation::default();
+        let mut checked =
+            OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
+        let rows = checked
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&with_package),
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 1);
+        let (binding, row) = rows.first_key_value().unwrap();
+        assert_eq!(binding.original_ordinal, 7);
+        assert!(row.product().imports().iter().any(|import| matches!(
+            import,
+            PendingImportOwner::Package { unit, .. } if unit == external_unit
+        )));
+
+        // Genuine HOME downgrade refusal: retaining the external owner as a
+        // HOME original makes the scope's HOME-observed query affirm the
+        // guard, while the validator census still lacks the owner.
+        let external_entry = Arc::new(ArtifactEntry::original([1; 32], (*empty).clone()).unwrap());
+        let external_view = inventory
+            .admit_shared(&inventory.empty_view(), vec![external_entry])
+            .unwrap();
+        let with_home = consumer_view.retain_custody(&external_view).unwrap();
+        assert!(with_home.has_observed_owner(&external_owner));
+        assert!(with_home.has_home_owner(&external_owner));
+        let mut validation = PackageInterfaceValidation::default();
+        let mut checked =
+            OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
+        assert!(matches!(
+            checked.certify_selected_scope(
+                SelectedOriginalGroupScope::View(&with_home),
+                &BTreeMap::new(),
+                &mut validation,
+            ),
+            Err(CertificationError::Mismatch(
+                "home owner downgraded to package"
+            ))
+        ));
     }
 
     #[test]

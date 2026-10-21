@@ -620,6 +620,67 @@ impl CertifiedPackageCodeProduct {
         &self.import_interfaces
     }
 
+    /// Authored package payload with real certified-interface structure but
+    /// no completed compiler output. Tests of derived state may build this
+    /// value directly; only `from_native_output` and `restore` grant custody.
+    #[cfg(test)]
+    pub(crate) fn package_code_fixture(unit: &str, module: &str, seed: u8) -> Arc<Self> {
+        let mut wire = tidepool_repr::execution_schema::testing::wire_program();
+        for group in &mut wire.bindings {
+            let tops: &mut [_] = match group {
+                tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                    std::slice::from_mut(top)
+                }
+                tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_mut_slice(),
+            };
+            for top in tops {
+                top.identity.unit = unit.to_owned();
+                top.identity.module = module.to_owned();
+            }
+        }
+        let owner = PackageCodeOwner {
+            unit: unit.to_owned(),
+            module: module.to_owned(),
+            compiler_sha256: [seed; 32],
+            profile_sha256: [seed.wrapping_add(1); 32],
+            interface_sha256: [seed.wrapping_add(2); 32],
+            defining_version_sha256: [seed.wrapping_add(3); 32],
+        };
+        let group = tidepool_repr::execution_schema::testing::projected_group(wire, 11)
+            .expect("authored projected group fixture");
+        let code =
+            PackageGroupCode::admit(owner.clone(), group).expect("authored package code fixture");
+        let envelope_sha256 = [seed.wrapping_add(4); 32];
+        let mut identity = Sha256::new();
+        identity.update(b"tidepool.package-code-product.v1\0");
+        identity.update(envelope_sha256);
+        let product_sha256: [u8; 32] = identity.finalize().into();
+        let descriptor = crate::artifact_inventory::ArtifactDescriptor::package_code(
+            &owner.unit,
+            &owner.module,
+            owner.compiler_sha256,
+            owner.interface_sha256,
+            product_sha256,
+            std::iter::empty(),
+        );
+        let defining_interface = Arc::new(CertifiedPackageInterface {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            sha256: owner.interface_sha256,
+            bytes: Arc::from([]),
+        });
+        Arc::new(Self {
+            code,
+            bytes: Arc::from([]),
+            envelope_sha256,
+            product_sha256,
+            descriptor,
+            import_interfaces: Arc::from([]),
+            defining_interface,
+            import_interface_witnesses: Arc::from([]),
+        })
+    }
+
     /// Only an actual checked output can issue fresh package code. The worker
     /// declaration names captured bytes, while the captured native output supplies compiler
     /// and profile authority and the receipt supplies checked interface seals.

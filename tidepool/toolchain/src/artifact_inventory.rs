@@ -1489,6 +1489,23 @@ pub enum ArtifactKind {
     PackageCode,
 }
 
+impl ArtifactKind {
+    /// Exhaustive classification from the actual payload kind. HOME ownership
+    /// covers a module's own implementation and its joined interface roles;
+    /// PackageCode is package custody that happens to carry the same owner
+    /// identity and is never HOME. Callers must not reconstruct this from
+    /// module spelling, labels, paths, pointer addresses or native readiness.
+    pub(crate) fn is_home_ownership(self) -> bool {
+        match self {
+            ArtifactKind::OriginalModule
+            | ArtifactKind::CanonicalModuleInterface
+            | ArtifactKind::ValueInterface
+            | ArtifactKind::LexicalJoin => true,
+            ArtifactKind::PackageCode => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactDependency {
@@ -5687,12 +5704,31 @@ struct ViewLease {
     admission_roots: imbl::OrdSet<InventoryNodeKey>,
     selection: Arc<ExactSelectionSnapshot>,
     payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
-    // Counts distinct acquired payload IDs, including hidden custody. Several
-    // canonical/native payloads may share one owner independently of selection.
-    acquired_owner_counts: imbl::OrdMap<ExactModuleIdentity, usize>,
+    // Counts distinct acquired payload IDs per owner, including hidden
+    // custody. Several canonical/native payloads may share one owner
+    // independently of selection. `home` is always at most `observed`.
+    acquired_owner_counts: imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts>,
     inventory: ArtifactInventory,
     materialization_sources: imbl::OrdMap<MaterializationCacheId, MaterializationSource>,
     materialization: MaterializationSource,
+}
+
+/// Typed census of one exact owner's retained payload identities. PackageCode
+/// custody contributes to the generic `observed` fact but never to `home`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AcquiredOwnerCounts {
+    observed: usize,
+    home: usize,
+}
+
+impl AcquiredOwnerCounts {
+    pub(crate) fn has_observed(&self) -> bool {
+        self.observed > 0
+    }
+
+    pub(crate) fn has_home(&self) -> bool {
+        self.home > 0
+    }
 }
 
 type MaterializationCache = Mutex<
@@ -5955,34 +5991,65 @@ impl ViewLease {
     fn has_acquired_owner(&self, owner: &ExactModuleIdentity) -> bool {
         #[cfg(test)]
         ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.set(count.get() + 1));
-        self.acquired_owner_counts.contains_key(owner)
+        self.acquired_owner_counts
+            .get(owner)
+            .is_some_and(AcquiredOwnerCounts::has_observed)
+    }
+
+    /// HOME-observed query: some payload for this exact owner is one of the
+    /// module's own implementation roles, not merely package custody.
+    fn has_home_acquired_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        #[cfg(test)]
+        ACQUIRED_OWNER_INDEX_QUERIES.with(|count| count.set(count.get() + 1));
+        self.acquired_owner_counts
+            .get(owner)
+            .is_some_and(AcquiredOwnerCounts::has_home)
     }
 
     fn insert_payload(
         payloads: &mut imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
-        owner_counts: &mut imbl::OrdMap<ExactModuleIdentity, usize>,
+        owner_counts: &mut imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts>,
         id: ArtifactId,
         entry: Arc<ArtifactEntry>,
     ) {
         let owner = entry.descriptor.owner.clone();
+        let kind = entry.payload.artifact_kind();
         if let Some(previous) = payloads.insert(id, entry) {
-            if previous.descriptor.owner == owner {
+            // Replacement by the same retained payload identity changes no
+            // census fact, however many aliases/bindings retain it. A merely
+            // equal owner name is not enough: a different payload of the
+            // other class must reclassify this exact acquisition.
+            if Arc::ptr_eq(&previous, &payloads[&id])
+                || (previous.descriptor.owner == owner && previous.payload == payloads[&id].payload)
+            {
                 return;
             }
-            Self::release_payload_owner(owner_counts, &previous.descriptor.owner);
+            Self::release_payload_owner(
+                owner_counts,
+                &previous.descriptor.owner,
+                previous.payload.artifact_kind(),
+            );
         }
-        *owner_counts.entry(owner).or_insert(0) += 1;
+        let counts = owner_counts.entry(owner).or_default();
+        counts.observed += 1;
+        if kind.is_home_ownership() {
+            counts.home += 1;
+        }
         #[cfg(test)]
         ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(count.get() + 1));
     }
 
     fn release_payload_owner(
-        owner_counts: &mut imbl::OrdMap<ExactModuleIdentity, usize>,
+        owner_counts: &mut imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts>,
         owner: &ExactModuleIdentity,
+        kind: ArtifactKind,
     ) {
-        let count = owner_counts.get_mut(owner).expect("acquired payload owner");
-        *count -= 1;
-        if *count == 0 {
+        let counts = owner_counts.get_mut(owner).expect("acquired payload owner");
+        counts.observed -= 1;
+        if kind.is_home_ownership() {
+            counts.home -= 1;
+        }
+        if counts.observed == 0 {
             owner_counts.remove(owner);
         }
         #[cfg(test)]
@@ -7594,6 +7661,13 @@ impl ArtifactView {
         self.lease.has_acquired_owner(owner)
     }
 
+    /// HOME-specific observation for this exact owner. PackageCode custody
+    /// alone is never affirmative; combine with `has_observed_owner` when the
+    /// question is generic retained observation.
+    pub(crate) fn has_home_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        self.lease.has_home_acquired_owner(owner)
+    }
+
     pub(crate) fn contains_namespace_artifact(&self, id: ArtifactId) -> bool {
         self.lease.selection.namespace.contains_key(&id)
     }
@@ -8419,6 +8493,7 @@ impl ArtifactView {
                 ViewLease::release_payload_owner(
                     &mut lease.acquired_owner_counts,
                     &removed.descriptor.owner,
+                    removed.payload.artifact_kind(),
                 );
             }
         }
@@ -9702,8 +9777,11 @@ mod tests {
         assert!(!retained.lease.payloads.contains_key(&base_id));
         assert_eq!(retained.capture_graph_selection(), expected);
         assert_eq!(
-            retained.lease.acquired_owner_counts.iter()
-                .map(|(owner, count)| (owner.clone(), *count))
+            retained
+                .lease
+                .acquired_owner_counts
+                .iter()
+                .map(|(owner, counts)| (owner.clone(), *counts))
                 .collect::<BTreeMap<_, _>>(),
             acquired_owner_oracle(&retained)
         );
@@ -9718,10 +9796,18 @@ mod tests {
         assert!(!later.lease.payloads.contains_key(&base_id));
     }
 
-    fn acquired_owner_oracle(view: &ArtifactView) -> BTreeMap<ExactModuleIdentity, usize> {
-        let mut counts = BTreeMap::new();
+    /// Independent census: recompute both owner facts from the retained
+    /// payload map without calling any index update routine.
+    fn acquired_owner_oracle(
+        view: &ArtifactView,
+    ) -> BTreeMap<ExactModuleIdentity, AcquiredOwnerCounts> {
+        let mut counts: BTreeMap<ExactModuleIdentity, AcquiredOwnerCounts> = BTreeMap::new();
         for entry in view.lease.payloads.values() {
-            *counts.entry(entry.descriptor.owner.clone()).or_insert(0) += 1;
+            let counts = counts.entry(entry.descriptor.owner.clone()).or_default();
+            counts.observed += 1;
+            if entry.payload.artifact_kind().is_home_ownership() {
+                counts.home += 1;
+            }
         }
         counts
     }
@@ -9874,14 +9960,25 @@ mod tests {
         let broad = inventory
             .admit_shared(&inventory.empty_view(), vec![native, other])
             .unwrap();
-        assert_eq!(broad.lease.acquired_owner_counts.get(&owner), Some(&2));
+        assert_eq!(
+            broad.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 2,
+                home: 2
+            })
+        );
+        assert!(broad.lease.has_home_acquired_owner(&owner));
         let canonical_only = broad.select_roots(vec![canonical]).unwrap();
         assert_eq!(
             canonical_only.lease.acquired_owner_counts.get(&owner),
-            Some(&1)
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
         );
         let without_owner = broad.select_roots(vec![other_id]).unwrap();
         assert!(!without_owner.lease.has_acquired_owner(&owner));
+        assert!(!without_owner.lease.has_home_acquired_owner(&owner));
         let value = acquired_owner_value("HiddenOwner");
         for view in [&broad, &canonical_only] {
             let source = CompilerSourceSupport::empty().retain_custody(view).unwrap();
@@ -9917,19 +10014,29 @@ mod tests {
         assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 1);
         assert_eq!(
             appended.artifacts().lease.acquired_owner_counts.get(&owner),
-            Some(&1)
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
         );
         let sibling = broad.clone();
         drop(broad);
         drop(canonical_only);
-        assert_eq!(sibling.lease.acquired_owner_counts.get(&owner), Some(&2));
+        assert_eq!(
+            sibling.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 2,
+                home: 2
+            })
+        );
+        assert!(sibling.lease.has_home_acquired_owner(&owner));
         assert!(!without_owner.lease.has_acquired_owner(&owner));
         for view in [&sibling, &without_owner, appended.artifacts()] {
             assert_eq!(
                 view.lease
                     .acquired_owner_counts
                     .iter()
-                    .map(|(owner, count)| (owner.clone(), *count))
+                    .map(|(owner, counts)| (owner.clone(), *counts))
                     .collect::<BTreeMap<_, _>>(),
                 acquired_owner_oracle(view)
             );
@@ -9970,13 +10077,16 @@ mod tests {
                 views.push(next);
                 if remove_parent { views.remove(parent); dropped += 1; }
                 for view in &views {
-                    let actual = view.lease.acquired_owner_counts.iter().map(|(owner, count)| (owner.clone(), *count)).collect::<BTreeMap<_, _>>();
+                    let actual = view.lease.acquired_owner_counts.iter().map(|(owner, counts)| (owner.clone(), *counts)).collect::<BTreeMap<_, _>>();
                     proptest::prop_assert_eq!(actual, acquired_owner_oracle(view));
                     let candidate = step % initial;
                     let value = acquired_owner_value(&format!("Initial{candidate}"));
                     let source = CompilerSourceSupport::empty().retain_custody(view).unwrap();
                     let owner = ExactModuleIdentity { unit: "unit".into(), module: format!("Initial{candidate}") };
-                    let acquired = acquired_owner_oracle(view).contains_key(&owner);
+                    let census = acquired_owner_oracle(view);
+                    let acquired = census.get(&owner).is_some_and(AcquiredOwnerCounts::has_observed);
+                    let home = census.get(&owner).is_some_and(AcquiredOwnerCounts::has_home);
+                    proptest::prop_assert_eq!(view.lease.has_home_acquired_owner(&owner), home);
                     let entry = Arc::new(ArtifactEntry::interface(value.interface().clone(), JoinedInterfaceRole::ValueInterface, vec![]));
                     let admission = source.artifacts().inventory().prepare_value_interface_append(&source, vec![entry]).unwrap();
                     proptest::prop_assert_eq!(matches!(admission, ValueInterfaceAdmission::General {
@@ -10023,14 +10133,21 @@ mod tests {
             materialization: Mutex::new(BTreeMap::new()),
         });
         assert!(Arc::ptr_eq(&replaced.lease.payloads[&id], &replacement));
-        assert_eq!(replaced.lease.acquired_owner_counts.get(&owner), Some(&1));
+        assert_eq!(
+            replaced.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+        assert!(replaced.lease.has_home_acquired_owner(&owner));
         assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 0);
         assert_eq!(
             replaced
                 .lease
                 .acquired_owner_counts
                 .iter()
-                .map(|(owner, count)| (owner.clone(), *count))
+                .map(|(owner, counts)| (owner.clone(), *counts))
                 .collect::<BTreeMap<_, _>>(),
             acquired_owner_oracle(&replaced)
         );
@@ -10057,8 +10174,440 @@ mod tests {
         let empty = replaced.select_roots(vec![]).unwrap();
         assert!(!empty.lease.has_acquired_owner(&owner));
         drop(replaced);
-        assert_eq!(first.lease.acquired_owner_counts.get(&owner), Some(&1));
-        assert_eq!(second.lease.acquired_owner_counts.get(&owner), Some(&1));
+        assert_eq!(
+            first.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+        assert_eq!(
+            second.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+    }
+
+    #[test]
+    fn package_custody_observes_owner_without_home_through_real_issuers() {
+        let inventory = ArtifactInventory::default();
+        let native = Arc::new(native_entry("SharedOwner", &[]));
+        let owner = native.descriptor.owner.clone();
+        let home = inventory
+            .admit_shared(&inventory.empty_view(), vec![native])
+            .unwrap();
+        assert!(home.has_observed_owner(&owner));
+        assert!(home.has_home_owner(&owner));
+        let product = crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+            "unit",
+            "SharedOwner",
+            7,
+        );
+        let id = product.artifact_id();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let graph = IssuedPackageCodeGraph::issue(
+            &home,
+            vec![PackageCodePlan {
+                product,
+                imports: Vec::new(),
+            }],
+            vec![PackageCodeTarget::Planned(id)],
+            &[],
+            &operation,
+        )
+        .unwrap();
+        // The issued package graph carries real PackageCode custody for the
+        // same exact owner: generic observation holds, HOME never does.
+        let package_view = graph.artifacts();
+        assert!(package_view.has_observed_owner(&owner));
+        assert!(!package_view.has_home_owner(&owner));
+        assert_eq!(
+            package_view.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 0
+            })
+        );
+        assert_eq!(
+            package_view
+                .lease
+                .acquired_owner_counts
+                .iter()
+                .map(|(owner, counts)| (owner.clone(), *counts))
+                .collect::<BTreeMap<_, _>>(),
+            acquired_owner_oracle(&package_view)
+        );
+        // Joined custody keeps both facts; the index never lets package
+        // custody manufacture a HOME observation.
+        let with_package = home.retain_package_code_graph(&graph).unwrap();
+        assert!(with_package.has_observed_owner(&owner));
+        assert!(with_package.has_home_owner(&owner));
+        assert_eq!(
+            with_package.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 3,
+                home: 2
+            })
+        );
+        assert_eq!(
+            with_package
+                .lease
+                .acquired_owner_counts
+                .iter()
+                .map(|(owner, counts)| (owner.clone(), *counts))
+                .collect::<BTreeMap<_, _>>(),
+            acquired_owner_oracle(&with_package)
+        );
+    }
+
+    #[test]
+    fn typed_owner_index_reclassifies_replacement_and_deduplicates_payload_identity() {
+        let home = Arc::new(entry("SameOwner", &[]));
+        let id = home.descriptor.id;
+        let owner = home.descriptor.owner.clone();
+        let package = crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+            "unit",
+            "SameOwner",
+            9,
+        );
+        let mut package_twin = home.as_ref().clone();
+        package_twin.payload = ArtifactPayload::PackageCode(package);
+        let mut payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>> = imbl::OrdMap::new();
+        let mut counts: imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts> =
+            imbl::OrdMap::new();
+        let census = |payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>| {
+            let mut census: BTreeMap<ExactModuleIdentity, AcquiredOwnerCounts> = BTreeMap::new();
+            for entry in payloads.values() {
+                let counts = census
+                    .entry(entry.descriptor.owner.clone())
+                    .or_insert_with(|| AcquiredOwnerCounts {
+                        observed: 0,
+                        home: 0,
+                    });
+                counts.observed += 1;
+                if entry.payload.artifact_kind().is_home_ownership() {
+                    counts.home += 1;
+                }
+            }
+            census
+        };
+        let assert_matches =
+            |payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+             counts: &imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts>| {
+                let census = census(payloads);
+                let actual = counts
+                    .iter()
+                    .map(|(owner, counts)| (owner.clone(), *counts))
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(actual, census);
+                for (candidate, census_counts) in &census {
+                    assert_eq!(
+                        counts
+                            .get(candidate)
+                            .is_some_and(AcquiredOwnerCounts::has_observed),
+                        census_counts.observed > 0
+                    );
+                    assert_eq!(
+                        counts
+                            .get(candidate)
+                            .is_some_and(AcquiredOwnerCounts::has_home),
+                        census_counts.home > 0
+                    );
+                }
+            };
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::clone(&home));
+        assert_matches(&payloads, &counts);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+        // Replacing with a different payload class under the same owner name
+        // must reclassify; the old owner-name early return lost this fact.
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::new(package_twin));
+        assert_matches(&payloads, &counts);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 0
+            })
+        );
+        // A fresh alias of the identical payload identity is not a new fact.
+        let same_identity = Arc::new((*payloads[&id]).clone());
+        assert!(!Arc::ptr_eq(&payloads[&id], &same_identity));
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, same_identity);
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 0);
+        assert_matches(&payloads, &counts);
+        // Back to HOME, then a second package identity under a new ID.
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::clone(&home));
+        let other_package =
+            crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+                "unit",
+                "SameOwner",
+                11,
+            );
+        let second_id = other_package.artifact_id();
+        ViewLease::insert_payload(
+            &mut payloads,
+            &mut counts,
+            second_id,
+            ArtifactEntry::package_code(other_package).into(),
+        );
+        assert_matches(&payloads, &counts);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 2,
+                home: 1
+            })
+        );
+        // Removing the last HOME payload clears HOME but keeps observation.
+        ViewLease::release_payload_owner(
+            &mut counts,
+            &owner,
+            payloads.remove(&id).unwrap().payload.artifact_kind(),
+        );
+        assert_matches(&payloads, &counts);
+        assert_eq!(
+            counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 0
+            })
+        );
+        // Removing the last payload clears the owner entirely.
+        ViewLease::release_payload_owner(
+            &mut counts,
+            &owner,
+            payloads.remove(&second_id).unwrap().payload.artifact_kind(),
+        );
+        assert_matches(&payloads, &counts);
+        assert!(!counts.contains_key(&owner));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+        #[test]
+        fn typed_owner_index_matches_independent_census_over_replace_merge_remove_histories(
+            history in proptest::collection::vec((0usize..7, 0u8..4, 0usize..3, proptest::bool::ANY), 1..40),
+        ) {
+            let homes = (0..7)
+                .map(|index| Arc::new(entry(&format!("Census{index}"), &[])))
+                .collect::<Vec<_>>();
+            let packages = (0..7)
+                .map(|index| {
+                    Arc::new(ArtifactEntry::package_code(
+                        crate::certified_products::CertifiedPackageCodeProduct::package_code_fixture(
+                            "unit",
+                            &format!("Census{index}"),
+                            31 + index as u8,
+                        ),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let class_swapped = |entry: &Arc<ArtifactEntry>| -> Arc<ArtifactEntry> {
+                let mut swapped = (**entry).clone();
+                if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                    let home = homes
+                        .iter()
+                        .find(|home| home.descriptor.owner == entry.descriptor.owner)
+                        .expect("paired HOME census entry");
+                    let ArtifactPayload::Canonical(interface) = &home.payload else {
+                        unreachable!()
+                    };
+                    swapped.payload = ArtifactPayload::Canonical(interface.clone());
+                } else {
+                    let package = packages
+                        .iter()
+                        .find(|package| package.descriptor.owner == entry.descriptor.owner)
+                        .expect("paired package census entry");
+                    let ArtifactPayload::PackageCode(product) = &package.payload else {
+                        unreachable!()
+                    };
+                    swapped.payload = ArtifactPayload::PackageCode(Arc::clone(product));
+                }
+                Arc::new(swapped)
+            };
+            let census = |payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>| {
+                let mut census: BTreeMap<ExactModuleIdentity, AcquiredOwnerCounts> =
+                    BTreeMap::new();
+                for entry in payloads.values() {
+                    let counts = census
+                        .entry(entry.descriptor.owner.clone())
+                        .or_insert_with(|| AcquiredOwnerCounts {
+                            observed: 0,
+                            home: 0,
+                        });
+                    counts.observed += 1;
+                    if entry.payload.artifact_kind().is_home_ownership() {
+                        counts.home += 1;
+                    }
+                }
+                census
+            };
+            let mut payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>> = imbl::OrdMap::new();
+            let mut counts: imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts> =
+                imbl::OrdMap::new();
+            let mut operations = [0usize; 4];
+            let mut class_replaced = 0usize;
+            for (step, (owner, action, source, remove_partner)) in history.into_iter().enumerate() {
+                operations[action as usize] += 1;
+                let id = |entry: &Arc<ArtifactEntry>| entry.descriptor.id;
+                match action {
+                    0 => {
+                        let entry = if source % 2 == 0 {
+                            Arc::clone(&homes[owner])
+                        } else {
+                            Arc::clone(&packages[owner])
+                        };
+                        if !payloads.contains_key(&id(&entry)) {
+                            ViewLease::insert_payload(
+                                &mut payloads,
+                                &mut counts,
+                                id(&entry),
+                                entry,
+                            );
+                        }
+                    }
+                    1 => {
+                        let keys = payloads.keys().copied().collect::<Vec<_>>();
+                        if let Some(target) = keys.get(step % keys.len().max(1)) {
+                            let current = Arc::clone(&payloads[target]);
+                            let swapped = class_swapped(&current);
+                            ViewLease::insert_payload(
+                                &mut payloads,
+                                &mut counts,
+                                *target,
+                                swapped,
+                            );
+                            class_replaced += 1;
+                        }
+                    }
+                    2 => {
+                        let keys = payloads.keys().copied().collect::<Vec<_>>();
+                        if let Some(target) = keys.get(source % keys.len().max(1)) {
+                            if let Some(removed) = payloads.remove(target) {
+                                ViewLease::release_payload_owner(
+                                    &mut counts,
+                                    &removed.descriptor.owner,
+                                    removed.payload.artifact_kind(),
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        // Union with an independently assembled operand: its
+                        // payload map is built without any index routine.
+                        let mut incoming: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>> =
+                            imbl::OrdMap::new();
+                        for index in 0..3 {
+                            let pick = (owner + index + step) % 7;
+                            let entry = if index % 2 == 0 {
+                                Arc::clone(&homes[pick])
+                            } else {
+                                Arc::clone(&packages[pick])
+                            };
+                            incoming.insert(id(&entry), entry);
+                        }
+                        for (key, entry) in &incoming {
+                            if payloads
+                                .get(key)
+                                .is_none_or(|existing| !Arc::ptr_eq(existing, entry))
+                            {
+                                ViewLease::insert_payload(
+                                    &mut payloads,
+                                    &mut counts,
+                                    *key,
+                                    Arc::clone(entry),
+                                );
+                            }
+                        }
+                    }
+                }
+                if remove_partner {
+                    let keys = payloads.keys().copied().collect::<Vec<_>>();
+                    if let Some(target) = keys.get(source % keys.len().max(1)) {
+                        if let Some(removed) = payloads.remove(target) {
+                            ViewLease::release_payload_owner(
+                                &mut counts,
+                                &removed.descriptor.owner,
+                                removed.payload.artifact_kind(),
+                            );
+                        }
+                    }
+                }
+                let expected = census(&payloads);
+                let actual = counts
+                    .iter()
+                    .map(|(owner, counts)| (owner.clone(), *counts))
+                    .collect::<BTreeMap<_, _>>();
+                proptest::prop_assert_eq!(&actual, &expected);
+                for (candidate, expected_counts) in &expected {
+                    proptest::prop_assert_eq!(
+                        counts
+                            .get(candidate)
+                            .is_some_and(AcquiredOwnerCounts::has_observed),
+                        expected_counts.observed > 0
+                    );
+                    proptest::prop_assert_eq!(
+                        counts
+                            .get(candidate)
+                            .is_some_and(AcquiredOwnerCounts::has_home),
+                        expected_counts.home > 0
+                    );
+                }
+            }
+            // Guarantee observable coverage of every update class in every
+            // case, including after shrinking.
+            if operations[0] == 0 {
+                ViewLease::insert_payload(
+                    &mut payloads,
+                    &mut counts,
+                    homes[0].descriptor.id,
+                    Arc::clone(&homes[0]),
+                );
+            }
+            if class_replaced == 0 {
+                let target = payloads
+                    .keys()
+                    .next()
+                    .copied()
+                    .unwrap_or(homes[0].descriptor.id);
+                let entry = class_swapped(payloads.get(&target).unwrap_or(&homes[0]));
+                ViewLease::insert_payload(&mut payloads, &mut counts, target, entry);
+            }
+            if operations[2] == 0 {
+                let target = payloads
+                    .keys()
+                    .next()
+                    .copied()
+                    .unwrap_or(homes[0].descriptor.id);
+                if let Some(removed) = payloads.remove(&target) {
+                    ViewLease::release_payload_owner(
+                        &mut counts,
+                        &removed.descriptor.owner,
+                        removed.payload.artifact_kind(),
+                    );
+                }
+            }
+            let expected = census(&payloads);
+            let actual = counts
+                .iter()
+                .map(|(owner, counts)| (owner.clone(), *counts))
+                .collect::<BTreeMap<_, _>>();
+            proptest::prop_assert_eq!(&actual, &expected);
+            eprintln!(
+                "typed-census-history insert_replace_remove_union={operations:?} class_replaced={class_replaced} surviving={}",
+                payloads.len()
+            );
+        }
     }
 
     #[test]

@@ -2204,11 +2204,10 @@ impl NativeOfferContribution {
             })
     }
 
-    pub(crate) fn has_observed_original_owner(&self, owner: &ExactModuleIdentity) -> bool {
-        self.offer()
-            .custody_lease()
-            .acquired_owner_counts
-            .contains_key(owner)
+    /// HOME-specific observation through the contribution's custody lease.
+    /// PackageCode custody under the same owner name is not an Original.
+    pub(crate) fn has_home_original_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        self.offer().custody_lease().has_home_acquired_owner(owner)
     }
 
     pub(crate) fn original_group_bindings(
