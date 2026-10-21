@@ -3220,7 +3220,14 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             &mut validation,
         )
         .expect("later target uses the same issuer's previously unselected body");
-    assert!(demanded.artifacts().selected_native_groups().is_empty());
+    assert_eq!(
+        demanded.artifacts().selected_native_groups(),
+        vec![NativeGroupKey {
+            artifact: entry.descriptor.id,
+            original_ordinal: 9001,
+        }],
+        "explicit reusable role exposes only the target's selected ordinal"
+    );
     let groups = demanded.resolve().unwrap().groups().clone();
     let expected = offer
         .issued_group_carriers()
