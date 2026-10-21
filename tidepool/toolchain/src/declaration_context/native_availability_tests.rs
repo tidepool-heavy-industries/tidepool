@@ -2815,7 +2815,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
 }
 
 #[test]
-fn interface_only_full_availability_preserves_roles_and_admits_later_exact_demand() {
+fn interface_only_full_availability_requires_explicit_original_acquisition() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("PrivateFullInterface", 121);
@@ -2829,13 +2829,13 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .unwrap();
     let offer = IssuedNativeOffer::issue(entry.descriptor.id, &full, Some(proof)).unwrap();
     assert!(offer.is_full());
-    let issued = recover_fixture_compiler_support(
+    let reusable_support = recover_fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
         full.clone(),
         [],
     )
     .unwrap();
-    let interfaces = issued
+    let interfaces = reusable_support
         .selected_interfaces()
         .unwrap()
         .support_for_owners(vec![entry.descriptor.owner.clone()])
@@ -3091,8 +3091,8 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .find(|group| group.original_ordinal() == 9001)
         .unwrap();
     let binder = group.binders()[0].clone();
-    // The later compiler explicitly acquires the exact held pair. Full private
-    // availability supplies code; this request's resolver issues the use choice.
+    // The worker observes the exact held pair independently of compiler policy.
+    // Full private availability cannot supply an Original compiler role.
     let namespace = full
         .capture_graph_selection()
         .namespace
@@ -3130,15 +3130,51 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     let packet =
         crate::certified_products::NativeDemandPacket::decode(&demand_bytes, &validation.inventory)
             .unwrap();
-    let acquired = next
+    let refused = next
         .inputs
         .compiler
         .resolve_native_demand(&packet, &mut validation)
-        .expect("explicit exact Original acquisition from Full private availability");
+        .err()
+        .expect("TYPE-only compiler role cannot acquire an Original reference");
+    assert!(
+        matches!(&refused, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::InputDecision {
+                owner, reason: crate::certified_products::InputDecisionRefusal::RoleMismatch,
+            } if owner == &entry.descriptor.owner)),
+        "exact Original packet must refuse at its nominal role boundary: {refused:?}"
+    );
+    assert!(next_inputs
+        .projection()
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(next_inputs.artifacts().selected_native_groups().is_empty());
+    assert_eq!(context.as_ref(), &before);
+
+    // Acquire the separately issued reusable compiler role explicitly. The
+    // private availability above did not supply this role or choose a body.
+    let reusable_context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: reusable_support,
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
+    let acquisition = ExactCompileContext::new(reusable_context)
+        .prepare_compilation(&root.path().join("explicit-original"), PRODUCER)
+        .unwrap();
+    let acquisition_inputs = acquisition.compiler_inputs();
+    let acquired = acquisition
+        .inputs
+        .compiler
+        .resolve_native_demand(&packet, &mut validation)
+        .expect("same exact packet uses the explicitly acquired reusable Original role");
     let bindings = crate::certified_products::OriginalBindingSelection::from_resolved(Arc::clone(
         acquired.groups().resolved_original_bindings().unwrap(),
     ));
-    let product_inputs = ProductCompilerInputs::from_exact(next_inputs)
+    let product_inputs = ProductCompilerInputs::from_exact(acquisition_inputs)
         .with_original_bindings(bindings, &validation.inventory)
         .unwrap();
     let mut acquired_selection =
@@ -3149,7 +3185,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .unwrap();
     let acquired_physical = OriginalCompilerInputs::issue_segment_native_availability(
         &mut acquired_selection,
-        next_inputs.artifacts(),
+        acquisition_inputs.artifacts(),
         Vec::new(),
         &mut validation,
     )
