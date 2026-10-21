@@ -206,6 +206,155 @@ pub(super) struct IssuedNativeBinding {
     source: NativeSourceCause,
 }
 
+/// A reached target occurrence can only select an already issued group.
+pub(super) struct TargetGroupSelection {
+    pub(super) issued: IssuedNativeBinding,
+    pub(super) offer: IssuedNativeOffer,
+    pub(super) entry: Arc<ArtifactEntry>,
+    pub(super) sources: NativeSourceReceipts,
+}
+
+pub(super) fn select_target_group(
+    state: &mut InventoryState,
+    physical: &ArtifactView,
+    selection: &crate::certified_products::CertifiedSourceSelection,
+    reference: &crate::certified_products::ReceiptImportOwner,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+    incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+) -> Result<TargetGroupSelection, CompileError> {
+    use crate::certified_products::{CertifiedNativeGroupSupport, ReceiptImportOwner};
+    let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
+    let (binding, offer, current) = match reference {
+        ReceiptImportOwner::OriginalBinding { .. } => {
+            let chosen = selection.target_original_group(reference, operation)?;
+            (
+                chosen.binding(),
+                chosen.contribution().offer().clone(),
+                false,
+            )
+        }
+        ReceiptImportOwner::Source { .. } => {
+            let (entry, ordinal) = selection.target_source_entry(reference).map_err(evidence)?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("target Source lacks Original payload"));
+            };
+            let key = NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: ordinal,
+            };
+            if let Some(current) = selection.current_product(key, &entry).map_err(evidence)? {
+                let (binding, offer) = completed_target_group(&current, physical)?;
+                (binding, offer, true)
+            } else {
+                let binding = verified_root_choice(selection, key, product.owner(), &entry)?;
+                let support = selection
+                    .native_group_support(key, product.owner(), binding)
+                    .ok_or_else(|| failure("target input group lost its chosen contribution"))?;
+                let CertifiedNativeGroupSupport::Issued(offer) = support else {
+                    return Err(failure("target input group lacks issued availability"));
+                };
+                (binding, offer.clone(), false)
+            }
+        }
+        _ => return Err(failure("target native reference kind")),
+    };
+    retain_target_group(state, physical, binding, offer, current, incoming)
+}
+
+fn completed_target_group<'a>(
+    current: &crate::certified_products::CurrentProductRef<'a>,
+    physical: &'a ArtifactView,
+) -> Result<(NativeGroupBinding, IssuedNativeOffer), CompileError> {
+    let completed = current.completed_for_target(physical)?;
+    let mut bindings = completed.groups();
+    let binding = bindings
+        .next()
+        .ok_or_else(|| failure("target current group was not issued"))?;
+    if bindings.next().is_some() {
+        return Err(failure("target current group has competing own issuers"));
+    }
+    let offer = completed
+        .support(binding)
+        .ok_or_else(|| failure("target current group lost its own contribution"))?
+        .clone();
+    Ok((binding, offer))
+}
+
+pub(super) fn select_target_entry(
+    state: &mut InventoryState,
+    physical: &ArtifactView,
+    selection: &crate::certified_products::CertifiedSourceSelection,
+    entry: &crate::checked_cell::CheckedTypedEntry,
+    incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+) -> Result<TargetGroupSelection, CompileError> {
+    let key = entry.native_group_key();
+    let payload = physical
+        .observed_payload(&key.artifact)
+        .ok_or_else(|| failure("typed target entry lacks its physical product"))?;
+    let current = selection
+        .current_product(key, payload)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+        .ok_or_else(|| failure("typed target entry is outside its physical output cohort"))?;
+    let (binding, offer) = completed_target_group(&current, physical)?;
+    retain_target_group(state, physical, binding, offer, true, incoming)
+}
+
+fn retain_target_group(
+    state: &mut InventoryState,
+    physical: &ArtifactView,
+    binding: NativeGroupBinding,
+    offer: IssuedNativeOffer,
+    current: bool,
+    incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+) -> Result<TargetGroupSelection, CompileError> {
+    let support = NativeSupportRef::checked(
+        state,
+        physical,
+        binding,
+        crate::certified_products::CertifiedNativeGroupSupport::Issued(&offer),
+    )?;
+    let mut issued = support.describe(binding)?;
+    support.acquire(state, physical, incoming, &issued)?;
+    let entry = Arc::clone(
+        support
+            .payloads
+            .get(&binding.binding.artifact())
+            .ok_or_else(|| failure("target group lost its exact payload"))?,
+    );
+    let mut sources = NativeSourceReceipts::default();
+    if current {
+        let NativeOfferSourceReceipt::Solved(frozen) = &offer.0.custody.source_receipt else {
+            return Err(failure(
+                "target current group lost its solved source causes",
+            ));
+        };
+        for (usage, causes) in frozen.entries.iter() {
+            let reached = match usage {
+                NativeSourceUse::Root(group) => {
+                    issued.closure.contains(&InventoryNodeKey::Group(*group))
+                }
+                NativeSourceUse::Edge { parent, child } => {
+                    issued.closure.contains(&InventoryNodeKey::Group(*parent))
+                        && issued.closure.contains(&InventoryNodeKey::Group(*child))
+                }
+            };
+            if reached {
+                for cause in causes.iter() {
+                    sources.insert(*usage, cause.clone());
+                }
+            }
+        }
+        issued.source = NativeSourceCause::Current;
+    }
+    sources.insert(NativeSourceUse::Root(binding), issued.source.clone());
+    Ok(TargetGroupSelection {
+        issued,
+        offer,
+        entry,
+        sources,
+    })
+}
+
 impl IssuedNativeBinding {
     pub(super) fn binding(&self) -> NativeGroupBinding {
         self.binding

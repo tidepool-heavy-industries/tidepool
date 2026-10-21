@@ -4588,49 +4588,31 @@ fn admit_native_target_products(
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
     let target_admission_start = Instant::now();
-    let original_sources = match segment_originals {
-        Some(originals) => originals.original_sources().clone(),
-        None => certified_products::AvailableOriginalSources::authenticate(
-            &certified.recovery_products,
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?,
-    };
-    // Shared original membership already authenticates every current group.
-    // The per-item lookup needs only that immutable index; execution selection
-    // is still admitted below from the checked entry and exact target imports.
-    let imports =
-        certified_products::certify_target_available_owners_from_membership_with_validation(
-            prepared,
-            accepted,
-            &original_sources,
-            &[],
-            &certified.source_selection,
-            package_catalog,
-            validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-    let demand = match typed_entry.as_ref() {
-        Some(entry) => crate::artifact_inventory::NativeArtifactDemand::VerifiedTarget {
-            entry,
-            imports: &imports,
-        },
-        None => crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-    };
-    let admitted_target = match segment_originals {
+    let observed = certified_products::AuthenticatedTargetImports::issue(
+        prepared,
+        accepted,
+        &validation.inventory,
+    )
+    .map_err(compiler_evidence_failure)?;
+    let selected_target = match segment_originals {
         Some(originals) => {
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
             })?;
-            crate::declaration_context::certified_segment_artifact_view_with_validation(
-                producer,
-                originals,
-                cursor.selection,
-                &certified.value_interfaces,
-                cursor.view,
-                demand,
-                validation,
+            let physical = originals.physical_inputs().issued_artifacts();
+            let values = originals
+                .selected_value_entries(&certified.value_interfaces)
+                .cloned()
+                .collect::<Vec<_>>();
+            physical.inventory().select_native_target(
+                physical,
                 &certified.source_selection,
+                observed,
+                typed_entry,
+                Some(cursor.view),
+                &values,
+                package_catalog,
+                validation,
             )?
         }
         None => {
@@ -4643,18 +4625,19 @@ fn admit_native_target_products(
                     )
                 })?
                 .issued_artifacts();
-            physical
-                .inventory()
-                .admit_product_artifacts(
-                    physical,
-                    Vec::new(),
-                    demand,
-                    Some(&certified.source_selection),
-                )?
-                .into_target()?
+            physical.inventory().select_native_target(
+                physical,
+                &certified.source_selection,
+                observed,
+                typed_entry,
+                None,
+                &[],
+                package_catalog,
+                validation,
+            )?
         }
     };
-    let artifact_view = admitted_target.artifacts();
+    let artifact_view = selected_target.artifacts();
     let selected_groups = Arc::new(match segment_cursor.as_ref() {
         Some(cursor) => {
             crate::declaration_context::certify_bound_artifact_view_groups_with_validation(
@@ -4671,17 +4654,11 @@ fn admit_native_target_products(
             validation,
         )?,
     });
-    let package_closure =
-        package_catalog.select(selected_groups.groups(), &imports, &validation.inventory)?;
-    let pending_imports = certified_products::certify_target_owners_with_validation(
-        prepared,
-        accepted,
+    let package_closure = package_catalog.select(
         selected_groups.groups(),
-        &certified.source_selection,
-        &package_closure,
-        validation,
-    )
-    .map_err(compiler_evidence_failure)?;
+        selected_target.imports(),
+        &validation.inventory,
+    )?;
     let package_interfaces = certified_products::certify_target_package_interfaces_with_validation(
         prepared,
         &package_closure,
@@ -4697,8 +4674,7 @@ fn admit_native_target_products(
         1,
     );
     Ok(AdmittedNativeTargetProducts {
-        target: admitted_target
-            .bind_target(typed_entry, pending_imports)
+        target: selected_target
             .with_certified_groups(Arc::clone(&selected_groups))?
             .complete_native_selection(
                 prepared,

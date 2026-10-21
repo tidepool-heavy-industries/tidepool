@@ -436,78 +436,23 @@ impl AdmittedTargetArtifacts {
     pub(crate) fn artifacts(&self) -> &ArtifactView {
         &self.artifacts
     }
-
-    /// Narrow this issuer's already chosen roots to one authenticated target.
-    /// Exact bindings and their historical edges remain those of this owner.
-    pub(crate) fn for_ordinary_target(
-        &self,
-        imports: Vec<crate::certified_products::PendingImportOwner>,
-    ) -> Result<TargetNativeInputs, CompileError> {
-        let ids = self
-            .selection
-            .roots
-            .iter()
-            .map(|group| group.binding.artifact())
-            .collect::<BTreeSet<_>>();
-        let entries = ids
-            .iter()
-            .map(|id| Arc::clone(&self.artifacts.lease.payloads[id]))
-            .collect::<Vec<_>>();
-        let expected = certified_target_source_groups(&entries, &imports)?;
-        let mut admitted = self.clone();
-        admitted.selection.roots = self
-            .selection
-            .roots
-            .iter()
-            .copied()
-            .filter(|group| {
-                expected.contains(&NativeGroupKey {
-                    artifact: group.binding.artifact(),
-                    original_ordinal: group.original_ordinal,
-                })
-            })
-            .collect::<Vec<_>>()
-            .into();
-        if admitted.selection.roots.len() != expected.len() {
-            return Err(failure("ordinary target exceeds its admitted native roots"));
-        }
-        Ok(admitted.bind_target(None, imports))
-    }
-
-    /// Final target observations are moved under the same admission owner.
-    /// Resolution checks their correspondence at the consuming boundary.
-    pub(crate) fn bind_target(
-        self,
-        entry: Option<crate::checked_cell::CheckedTypedEntry>,
-        imports: Vec<crate::certified_products::PendingImportOwner>,
-    ) -> TargetNativeInputs {
-        let target = match entry {
-            Some(entry) => FinalNativeTarget::Checked { entry, imports },
-            None => FinalNativeTarget::Ordinary { imports },
-        };
-        TargetNativeInputs {
-            admitted: self,
-            target,
-        }
-    }
 }
 
+/// One actual target keeps its ordered observation and admitted destinations
+/// together. The private selector constructs both vectors in the same walk.
 #[derive(Debug)]
-enum FinalNativeTarget {
-    Checked {
-        entry: crate::checked_cell::CheckedTypedEntry,
-        imports: Vec<crate::certified_products::PendingImportOwner>,
-    },
-    Ordinary {
-        imports: Vec<crate::certified_products::PendingImportOwner>,
-    },
+struct IssuedTargetSlots {
+    observed: crate::certified_products::AuthenticatedTargetImports,
+    imports: Vec<crate::certified_products::PendingImportOwner>,
+    links: Arc<[crate::certified_products::SelectedNativeTargetImport]>,
 }
 
-/// Prepared final target inputs cannot replace their admitted graph/view.
+/// Exact target occurrences are selected from completed physical proofs.
 #[derive(Debug)]
 pub(crate) struct TargetNativeInputs {
     admitted: AdmittedTargetArtifacts,
-    target: FinalNativeTarget,
+    entry: Option<(crate::checked_cell::CheckedTypedEntry, NativeGroupBinding)>,
+    slots: IssuedTargetSlots,
 }
 
 impl TargetNativeInputs {
@@ -520,46 +465,109 @@ impl TargetNativeInputs {
                 "native group products belong to another target acquisition",
             ));
         }
-        let mut links = Vec::with_capacity(self.imports().len());
-        for import in self.imports() {
+        if self.slots.links.len() != self.slots.observed.target().globals().len()
+            || self.slots.imports.len() != self.slots.links.len()
+        {
+            return Err(failure("target ordered slot census"));
+        }
+        for ((reference, import), link) in self
+            .slots
+            .observed
+            .owners()
+            .iter()
+            .zip(&self.slots.imports)
+            .zip(self.slots.links.iter())
+        {
             crate::host_work::checkpoint()?;
-            use crate::certified_products::{PendingImportOwner, SelectedNativeTargetImport};
-            match import {
-                PendingImportOwner::Source { owner, original_ordinal, binder } => {
-                    // These roots were chosen by this target's admission. A
-                    // historical descendant cannot supply a direct root slot.
-                    let mut matches = self.admitted.selection.roots.iter().filter_map(|binding| {
-                        let row = groups.get(*binding)?;
-                        (row.owner() == owner && binding.original_ordinal == *original_ordinal)
-                            .then_some((*binding, row))
-                    });
-                    let (binding, row) = matches.next()
-                        .ok_or_else(|| failure("target source slot lacks its exact admitted root"))?;
-                    if matches.next().is_some() {
-                        return Err(failure("target source slot has competing admitted roots"));
+            use crate::certified_products::{
+                PendingImportOwner, ReceiptImportOwner, SelectedNativeTargetImport,
+            };
+            match (reference, import, link) {
+                (
+                    ReceiptImportOwner::Source { binder, .. }
+                    | ReceiptImportOwner::OriginalBinding { binder, .. },
+                    PendingImportOwner::Source {
+                        owner,
+                        original_ordinal,
+                        binder: actual,
+                    },
+                    SelectedNativeTargetImport::Source { binding, value },
+                ) => {
+                    let row = groups.get(*binding).ok_or_else(|| {
+                        failure("target slot lacks its exact certified occurrence")
+                    })?;
+                    if actual != binder
+                        || row.owner() != owner
+                        || binding.original_ordinal != *original_ordinal
+                        || !row
+                            .group()
+                            .exported_values()
+                            .any(|(identity, exported)| identity == binder && exported == *value)
+                    {
+                        return Err(failure(
+                            "target slot differs from its exact certified export",
+                        ));
                     }
-                    let value = row.group().exported_values()
-                        .find_map(|(identity, value)| (identity == binder).then_some(value))
-                        .ok_or_else(|| failure("target source slot lacks its authenticated export"))?;
-                    links.push(SelectedNativeTargetImport::Source { binding, value });
                 }
-                PendingImportOwner::Package { binder, interface_digest, .. } => {
-                    links.push(SelectedNativeTargetImport::Package {
-                        identity: binder.clone(), interface_digest: *interface_digest,
-                    });
-                }
-                PendingImportOwner::Retained { identity, generation } => {
-                    links.push(SelectedNativeTargetImport::RetainedCapture {
-                        identity: identity.clone(), generation: *generation,
-                    });
-                }
+                (
+                    ReceiptImportOwner::Package {
+                        binder,
+                        interface_digest,
+                        ..
+                    },
+                    PendingImportOwner::Package {
+                        binder: actual,
+                        interface_digest: seal,
+                        ..
+                    },
+                    SelectedNativeTargetImport::Package {
+                        identity,
+                        interface_digest: linked,
+                    },
+                ) if binder == actual
+                    && binder == identity
+                    && interface_digest == seal
+                    && seal == linked => {}
+                (
+                    ReceiptImportOwner::Retained {
+                        identity,
+                        generation,
+                    },
+                    PendingImportOwner::Retained {
+                        identity: actual,
+                        generation: expected,
+                    },
+                    SelectedNativeTargetImport::RetainedCapture {
+                        identity: linked,
+                        generation: selected,
+                    },
+                ) if identity == actual
+                    && identity == linked
+                    && generation == expected
+                    && expected == selected => {}
+                _ => return Err(failure("target ordered slot owner mismatch")),
             }
         }
+        if let Some((entry, binding)) = &self.entry {
+            let row = groups
+                .get(*binding)
+                .ok_or_else(|| failure("typed entry lacks its exact certified occurrence"))?;
+            if !row
+                .group()
+                .exported_values()
+                .any(|(identity, _)| identity == entry.entry())
+            {
+                return Err(failure(
+                    "typed entry differs from its exact certified export",
+                ));
+            }
+        }
+        let links = Arc::clone(&self.slots.links);
         Ok(CertifiedTargetNativeInputs {
             target: self,
             completed: None,
             groups,
-            links: links.into(),
+            links,
         })
     }
 
@@ -567,68 +575,16 @@ impl TargetNativeInputs {
         self.admitted.artifacts()
     }
     pub(crate) fn entry(&self) -> Option<&crate::checked_cell::CheckedTypedEntry> {
-        match &self.target {
-            FinalNativeTarget::Checked { entry, .. } => Some(entry),
-            FinalNativeTarget::Ordinary { .. } => None,
-        }
+        self.entry.as_ref().map(|(entry, _)| entry)
     }
     pub(crate) fn imports(&self) -> &[crate::certified_products::PendingImportOwner] {
-        match &self.target {
-            FinalNativeTarget::Checked { imports, .. }
-            | FinalNativeTarget::Ordinary { imports } => imports,
-        }
+        &self.slots.imports
     }
     pub(crate) fn resolve(&self) -> Result<ResolvedNativeTarget<'_>, CompileError> {
         let view = self.artifacts();
-        let entry = self.entry();
-        let imports = self.imports();
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let owned = &view.read_projection(&state).nodes;
-        // Both solver paths coissue these exact roots with this immutable view.
-        // A later original execution context is checked separately by its owner.
-        let ids = self
-            .admitted
-            .selection
-            .roots
-            .iter()
-            .map(|group| group.binding.artifact())
-            .collect::<BTreeSet<_>>();
-        let entries = ids
-            .iter()
-            .map(|id| Arc::clone(&view.lease.payloads[id]))
-            .collect::<Vec<_>>();
-        let mut expected = certified_target_source_groups(&entries, imports)?;
-        if let Some(entry) = entry {
-            expected.insert(entry.native_group_key());
-        }
-        let keys = self
-            .admitted
-            .selection
-            .roots
-            .iter()
-            .map(|group| NativeGroupKey {
-                artifact: group.binding.artifact(),
-                original_ordinal: group.original_ordinal,
-            })
-            .collect::<BTreeSet<_>>();
-        if keys != expected || keys.len() != self.admitted.selection.roots.len() {
-            return Err(failure(
-                "issued native target roots differ from authenticated target",
-            ));
-        }
-        let entry_binding = entry.map(|entry| {
-            let key = entry.native_group_key();
-            *self
-                .admitted
-                .selection
-                .roots
-                .iter()
-                .find(|group| {
-                    group.binding.artifact() == key.artifact
-                        && group.original_ordinal == key.original_ordinal
-                })
-                .expect("validated target contains its one typed entry")
-        });
+        let entry_binding = self.entry.as_ref().map(|(_, binding)| *binding);
         let mut source_traversal = NativeSourceTraversal {
             issued: NativeSourceReceiptView::Operation(&self.admitted.selection.sources),
             selected: NativeSourceReceipts::default(),
@@ -683,6 +639,11 @@ impl CertifiedTargetNativeInputs {
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
+        if !std::ptr::eq(self.target.slots.observed.target().as_ref(), prepared) {
+            return Err(failure(
+                "native completion belongs to another prepared target owner",
+            ));
+        }
         let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(self.resolve_sources()?, prepared)?;
         let completed = compiler_projection::complete_native_selection(
             &sources, output, packages, inherited.native_completions(), operation,
@@ -3953,6 +3914,241 @@ impl ArtifactInventory {
                 ArtifactRootIntent::Certified,
             ),
         )
+    }
+
+    /// Select only existing exact occurrences from one physically completed
+    /// output. No target import can issue a group or replace its sealed edges.
+    pub(crate) fn select_native_target(
+        &self,
+        physical: &ArtifactView,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        observed: crate::certified_products::AuthenticatedTargetImports,
+        typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
+        cursor: Option<&ArtifactView>,
+        visible_values: &[Arc<ArtifactEntry>],
+        packages: &impl crate::certified_products::PackageInterfaceLookup,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<TargetNativeInputs, CompileError> {
+        use crate::certified_products::{
+            PendingImportOwner, ReceiptImportOwner, SelectedNativeTargetImport,
+        };
+        if !Arc::ptr_eq(&self.0, &physical.lease.inventory.0)
+            || cursor.is_some_and(|cursor| !Arc::ptr_eq(&self.0, &cursor.lease.inventory.0))
+        {
+            return Err(failure("target belongs to another inventory"));
+        }
+        let operation_owner = Arc::clone(&validation.inventory);
+        let operation = operation_owner.as_ref();
+        let mut allowed = BTreeSet::new();
+        for entry in visible_values {
+            if physical
+                .observed_payload(&entry.descriptor.id)
+                .is_none_or(|issued| issued.as_ref() != entry.as_ref())
+            {
+                return Err(failure(
+                    "target visible value differs from its physical cohort",
+                ));
+            }
+            allowed.insert(entry.descriptor.id);
+        }
+        let namespace_ids = match cursor {
+            Some(cursor) => selection.artifact_ids_for_target(physical, cursor, &allowed),
+            None => selection.artifact_ids_from_entries(physical),
+        }
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let namespace = namespace_ids
+            .into_iter()
+            .map(|id| {
+                physical
+                    .lease
+                    .selection
+                    .namespace
+                    .get(&id)
+                    .copied()
+                    .map(|binding| (id, binding))
+                    .ok_or_else(|| failure("target namespace lost its physical binding"))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut imports = Vec::new();
+        let mut links = Vec::new();
+        let mut roots = BTreeSet::new();
+        let mut incoming = BTreeMap::new();
+        let mut sources = NativeSourceReceipts::default();
+        let mut offers = Vec::new();
+        operation
+            .reserve::<PendingImportOwner>(observed.owners().len())
+            .and_then(|_| operation.reserve::<SelectedNativeTargetImport>(observed.owners().len()))
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        // Package validation can read storage, so complete it before taking the
+        // native inventory lock. Its ordered result stays with this observation.
+        let non_native = observed
+            .owners()
+            .iter()
+            .map(|reference| match reference {
+                ReceiptImportOwner::Retained { .. } | ReceiptImportOwner::Package { .. } => {
+                    selection
+                        .target_non_native_import(reference, packages, validation)
+                        .map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let mut state = self.0.lock().expect("inventory lock");
+        for (reference, non_native) in observed.owners().iter().zip(non_native) {
+            crate::host_work::checkpoint()?;
+            match reference {
+                ReceiptImportOwner::Source { binder, .. }
+                | ReceiptImportOwner::OriginalBinding { binder, .. } => {
+                    let selected = native_availability::select_target_group(
+                        &mut state,
+                        physical,
+                        selection,
+                        reference,
+                        operation,
+                        &mut incoming,
+                    )?;
+                    let binding = selected.issued.binding();
+                    let ArtifactPayload::Original(product) = &selected.entry.payload else {
+                        return Err(failure("selected target slot is not Original"));
+                    };
+                    let definitions = crate::certified_products::original_native_group_definitions(
+                        product,
+                        binding.original_ordinal,
+                    )
+                    .ok_or_else(|| failure("target slot lost its native body"))?;
+                    let mut value = None;
+                    for contract in definitions.export_contracts() {
+                        let contract = contract?;
+                        if contract.identity == binder {
+                            value = Some(contract.value);
+                            break;
+                        }
+                    }
+                    let value = value
+                        .ok_or_else(|| failure("target slot lacks its authenticated export"))?;
+                    imports.push(PendingImportOwner::Source {
+                        owner: product.owner().clone(),
+                        original_ordinal: binding.original_ordinal,
+                        binder: binder.clone(),
+                    });
+                    links.push(SelectedNativeTargetImport::Source { binding, value });
+                    roots.insert(binding);
+                    for (usage, causes) in &selected.sources.0 {
+                        for cause in causes.iter() {
+                            sources.insert(*usage, cause.clone());
+                        }
+                    }
+                    offers.push(selected.offer);
+                }
+                ReceiptImportOwner::Retained {
+                    identity,
+                    generation,
+                } => {
+                    imports.push(non_native.expect("checked retained target slot"));
+                    links.push(SelectedNativeTargetImport::RetainedCapture {
+                        identity: identity.clone(),
+                        generation: *generation,
+                    });
+                }
+                ReceiptImportOwner::Package {
+                    binder,
+                    interface_digest,
+                    ..
+                } => {
+                    imports.push(non_native.expect("checked package target slot"));
+                    links.push(SelectedNativeTargetImport::Package {
+                        identity: binder.clone(),
+                        interface_digest: *interface_digest,
+                    });
+                }
+            }
+        }
+        let entry = typed_entry
+            .map(|entry| {
+                let selected = native_availability::select_target_entry(
+                    &mut state,
+                    physical,
+                    selection,
+                    &entry,
+                    &mut incoming,
+                )?;
+                let binding = selected.issued.binding();
+                roots.insert(binding);
+                for (usage, causes) in &selected.sources.0 {
+                    for cause in causes.iter() {
+                        sources.insert(*usage, cause.clone());
+                    }
+                }
+                offers.push(selected.offer);
+                Ok((entry, binding))
+            })
+            .transpose()?;
+        let exact_roots = roots
+            .iter()
+            .copied()
+            .map(InventoryNodeKey::Group)
+            .collect::<Vec<_>>();
+        let (reached, _) =
+            admitted_closure_with_operation(&state, exact_roots.iter().copied(), Some(operation))?;
+        if let Some(cursor) = cursor {
+            let previous = &cursor.read_projection(&state).nodes;
+            for node in &reached {
+                if previous.contains(node) {
+                    continue;
+                }
+                let payload = incoming
+                    .get(&node.artifact())
+                    .or_else(|| physical.observed_payload(&node.artifact()))
+                    .ok_or_else(|| failure("target closure lost its actual payload custody"))?;
+                if payload.descriptor.kind == ArtifactKind::ValueInterface
+                    && !allowed.contains(&payload.descriptor.id)
+                    && !cursor.contains_namespace_artifact(payload.descriptor.id)
+                {
+                    return Err(failure("target reaches a future value interface"));
+                }
+            }
+        }
+        let mut parents = vec![Arc::clone(&physical.lease)];
+        if let Some(cursor) = cursor {
+            if !Arc::ptr_eq(&physical.lease, &cursor.lease) {
+                parents.push(Arc::clone(&cursor.lease));
+            }
+        }
+        let snapshot =
+            selection_snapshot_for_lease(&state, &namespace, &exact_roots, &[], &parents);
+        drop(state);
+        let mut artifacts = ArtifactView::new(ViewDraft {
+            roots: exact_roots,
+            selection: snapshot,
+            inventory: self.clone(),
+            parents,
+            issuing_payloads: incoming,
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        let mut materializations = Vec::new();
+        for offer in offers {
+            offer
+                .custody_lease()
+                .collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        }
+        artifacts.attach_projected_materializations(&materializations);
+        Ok(TargetNativeInputs {
+            admitted: AdmittedTargetArtifacts {
+                artifacts,
+                selection: IssuedTargetNativeSelection {
+                    sources,
+                    roots: roots.into_iter().collect::<Vec<_>>().into(),
+                },
+            },
+            entry,
+            slots: IssuedTargetSlots {
+                observed,
+                imports,
+                links: links.into(),
+            },
+        })
     }
 
     pub(crate) fn bind_segment(

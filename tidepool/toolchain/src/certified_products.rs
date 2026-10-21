@@ -4204,6 +4204,17 @@ impl CertifiedSourceSelection {
         self.artifact_ids_with_owners(entries, Some(native), Some((parent, allowed_values)))
     }
 
+    pub(crate) fn artifact_ids_for_target(
+        &self,
+        entries: &impl crate::artifact_inventory::ArtifactEntryMap<
+            crate::artifact_inventory::ArtifactId,
+        >,
+        parent: &crate::artifact_inventory::ArtifactView,
+        allowed_values: &BTreeSet<crate::artifact_inventory::ArtifactId>,
+    ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
+        self.artifact_ids_with_owners(entries, None, Some((parent, allowed_values)))
+    }
+
     fn artifact_ids_with_owners(
         &self,
         entries: &impl crate::artifact_inventory::ArtifactEntryMap<
@@ -5876,15 +5887,6 @@ impl OriginalBindingSelection {
         let evidence = |detail| {
             crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(detail)))
         };
-        if self
-            .executable(reference, operation)
-            .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?
-            .is_none()
-        {
-            return Err(evidence(
-                "target Original exceeds its exact executable selection",
-            ));
-        }
         let selected = match &self.execution {
             OriginalBindingExecution::WorldStage(_) => {
                 let (binding, _) = self
@@ -5896,8 +5898,19 @@ impl OriginalBindingSelection {
                     .issued_row(binding.binding.artifact())
                     .and_then(|row| row.exact_group_support(binding))
             }
-            OriginalBindingExecution::Acquired(_) => self.available_group(reference, operation)?,
-            OriginalBindingExecution::MetadataOnly => None,
+            OriginalBindingExecution::Acquired(_) => {
+                if self.executable(reference, operation)
+                    .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?.is_none()
+                {
+                    return Err(evidence("target Original exceeds its exact executable selection"));
+                }
+                self.available_group(reference, operation)?
+            }
+            OriginalBindingExecution::MetadataOnly => {
+                self.metadata_references(operation)
+                    .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
+                None
+            }
         }
         .ok_or_else(|| evidence("target Original lacks its chosen contribution"))?;
         let ReceiptImportOwner::OriginalBinding {
