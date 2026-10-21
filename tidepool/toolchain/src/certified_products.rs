@@ -2073,7 +2073,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded ordinary `TPCERT11` tuple with exact owner rows shared
+/// Decode the worker's bounded ordinary `TPCERT12` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -2444,11 +2444,11 @@ fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 11 {
+    if version != 12 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 11,
+            expected: 12,
         });
     }
     if header.len() != 3 {
@@ -31726,7 +31726,7 @@ None,
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 9,
-                expected: 11
+                expected: 12
             })
         ));
         let mut trailing = encoded;
@@ -32339,7 +32339,7 @@ None,
     fn receipt_payload_mut(value: &mut Value) -> &mut Vec<Value> {
         let header = value.as_array_mut().unwrap();
         assert_eq!(header[0], value_text("TPCERT"));
-        assert_eq!(header[1], Value::Integer(11.into()));
+        assert_eq!(header[1], Value::Integer(12.into()));
         header[2].as_array_mut().unwrap()
     }
 
@@ -32352,7 +32352,7 @@ None,
     fn segment_item_receipt(receipt: &SegmentItemReceipt) -> Value {
         value_array([
             value_text("TPCERT"),
-            Value::Integer(11.into()),
+            Value::Integer(12.into()),
             value_array([
                 value_text("segment-item"),
                 value_array(receipt.globals.iter().map(value_global)),
@@ -32476,7 +32476,7 @@ None,
         ]));
         let payload =
             value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
-        value_array([value_text("TPCERT"), Value::Integer(11.into()), payload])
+        value_array([value_text("TPCERT"), Value::Integer(12.into()), payload])
     }
 
     fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
@@ -32944,7 +32944,7 @@ None,
         ]), &global.identity), Err(CertificationError::Receipt("retained package owner removed"))));
         let mut encoded_global = value_global(&global);
         encoded_global.as_array_mut().unwrap()[4] = legacy;
-        let item = value_array([value_text("TPCERT"), Value::Integer(11.into()), value_array([
+        let item = value_array([value_text("TPCERT"), Value::Integer(12.into()), value_array([
             value_text("segment-item"), value_array([encoded_global]), value_array([]), value_array([]),
         ])]);
         assert!(matches!(decode_segment_item_with_operation(&receipt_bytes(&item),
@@ -33400,7 +33400,7 @@ None,
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 11,
+                    expected: 12,
                     ..
                 })
             ));
