@@ -15223,8 +15223,7 @@ fn certify_artifact_view_groups(
         )
         .map_err(|error| compiler_evidence_failure(error.into()))?;
     let selected = selected_bindings.iter().copied().collect::<BTreeSet<_>>();
-    let mut current = Vec::new();
-    let mut current_positions = BTreeMap::new();
+    let mut candidate_keys = BTreeSet::new();
     for (group, key) in candidates.into_iter().flat_map(|issued| {
         issued.iter().map(move |group| {
             (
@@ -15239,20 +15238,19 @@ fn certify_artifact_view_groups(
         if metadata.selected_native_groups.contains(&key) {
             if available
                 .get(&key.artifact)
-                .is_none_or(|product| product.owner() != group.owner())
+                .is_none_or(|product| !group.matches_original(product))
             {
                 return Err(failure(
                     "selected candidate differs from its original issuer",
                 ));
             }
-            // A physical current row is unique even when several selected
-            // scoped aliases later share it.
-            if current_positions.insert(key, current.len()).is_some() {
+            if !candidate_keys.insert(key) {
                 return Err(failure("duplicate current original ordinal"));
             }
-            current.push(group.clone());
         }
     }
+    let mut current = Vec::new();
+    let mut current_positions = BTreeMap::new();
     let mut inherit =
         |key: NativeGroupKey, group: &PendingCertifiedGroup| -> Result<(), CompileError> {
             crate::host_work::checkpoint()?;
