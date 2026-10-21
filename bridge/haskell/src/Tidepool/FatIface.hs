@@ -67,8 +67,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.IntSet as IntSet
 import qualified Data.Set as Set
-import System.IO (hPutStrLn, stderr)
-import System.Environment (lookupEnv)
+import Tidepool.Logging (LogValue(..), logTrace, readLogger)
 
 -- | Exact recovery keeps absence distinct from an unreadable interface.
 -- Missing definitions never become optimizer-unfolding executable bodies.
@@ -234,11 +233,9 @@ loadModuleExtraDecls hscEnv modl = do
   case result of
     Right outcome -> return outcome
     Left e -> do
-      ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
-      case ifaceDbg of
-        Just _ -> hPutStrLn stderr $
-          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception: " ++ show e
-        Nothing -> pure ()
+      logger <- readLogger "tidepool.compiler.fat-iface"
+      logTrace logger "module.exception"
+        [("module", LogText (showSDocUnsafe (ppr modl))), ("detail", LogText (show e))]
       return (FatIfaceLoadFailureOutcome (show e))
 
 -- | Read an already-resolved defining identity, including hidden package
@@ -298,25 +295,21 @@ readCapturedDefiningInterface env owner = do
 
 loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDeclsUnsafe hscEnv modl = do
-  ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
+  logger <- readLogger "tidepool.compiler.fat-iface"
   let doc = text "tidepool fat-iface lookup"
   -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact.
   ifaceResult <- readExactInterface hscEnv modl
   case ifaceResult of
     Left reason -> do
-      case ifaceDbg of
-        Just _ -> hPutStrLn stderr $
-          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file: "
-            ++ renderExactInterfaceFailure reason
-        Nothing -> pure ()
+      logTrace logger "module.interface-read-refused"
+        [ ("module", LogText (showSDocUnsafe (ppr modl)))
+        , ("detail", LogText (renderExactInterfaceFailure reason)) ]
       return (FatIfaceLoadFailureOutcome (renderExactInterfaceFailure reason))
     Right (iface, _) ->
       case mi_extra_decls iface of
         Nothing -> do
-          case ifaceDbg of
-            Just _ -> hPutStrLn stderr $
-              "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": no mi_extra_decls"
-            Nothing -> pure ()
+          logTrace logger "module.extra-declarations-absent"
+            [("module", LogText (showSDocUnsafe (ppr modl)))]
           return FatIfaceNoExtraDeclarations
         Just ifaceBinds -> do
           coreHash <- computeFingerprint putNameLiterally ifaceBinds
@@ -326,10 +319,9 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             typeEnvRef <- liftIO $ newIORef emptyTypeEnv
             initIfaceLcl modl doc NotBoot $
               tcTopIfaceBindings typeEnvRef ifaceBinds
-          case ifaceDbg of
-            Just _ -> hPutStrLn stderr $
-              "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
-            Nothing -> pure ()
+          logTrace logger "module.extra-declarations-loaded"
+            [ ("module", LogText (showSDocUnsafe (ppr modl)))
+            , ("bindings", LogInteger (fromIntegral (length coreBinds))) ]
           let (groups, names, dependencies, privateDependencies, componentOf, components) =
                 indexOriginalBindings version coreBinds
           return (FatIfaceBindings version groups names dependencies privateDependencies componentOf components)

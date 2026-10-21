@@ -342,6 +342,23 @@ impl CompilerTraceProfile {
         ]
     }
 
+    /// Explicit diagnostic profiles enable structured worker logging. An
+    /// inherited `TIDEPOOL_LOG` remains authoritative so callers can request a
+    /// quieter or more specific level without another switch.
+    pub fn apply_logging_environment(self, command: &mut std::process::Command) {
+        command.envs(self.environment());
+        if std::env::var_os("TIDEPOOL_LOG").is_none() {
+            command.env("TIDEPOOL_LOG", self.default_log_level());
+        }
+    }
+
+    pub fn default_log_level(self) -> &'static str {
+        match self {
+            Self::Minimal => "off",
+            Self::Full => "trace",
+        }
+    }
+
     fn raw_detail(self) -> &'static str {
         match self {
             Self::Minimal => "off",
@@ -3542,11 +3559,23 @@ fn is_raw_compiler_detail(line: &str) -> bool {
     )
 }
 
+fn is_structured_compiler_log(line: &str) -> bool {
+    line.trim_start().starts_with("tidepool-log ")
+}
+
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     for line in String::from_utf8_lossy(stderr).lines() {
         let line = line.trim();
         if crate::diagnostics::is_machine_stderr_line(line) {
-            if is_raw_compiler_detail(line) {
+            if is_structured_compiler_log(line) {
+                tracing::debug!(
+                    target: "tidepool_extract_cmd::compiler_log",
+                    run_id,
+                    %compile_request,
+                    line,
+                    "compiler trace"
+                );
+            } else if is_raw_compiler_detail(line) {
                 tracing::debug!(
                     target: RAW_COMPILER_DETAIL_TARGET,
                     run_id,
@@ -4270,7 +4299,7 @@ impl Worker {
             std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
             std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
         )?;
-        command.envs(profile.environment());
+        profile.apply_logging_environment(&mut command);
         command.arg("--worker-loop-v2");
         if matches!(
             build_products_namespace.transport,
