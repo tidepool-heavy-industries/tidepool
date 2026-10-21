@@ -1331,6 +1331,53 @@ impl<'a> ContinuationNativeInputs<'a> {
     }
 }
 
+/// Current output can reuse a completed binding only after its reached fresh
+/// Source closure satisfies this actual stage's exact Original uses. Inherited
+/// Source children keep their sealed graph and do not become new direct uses.
+pub(crate) fn validate_current_stage_native_inputs<'a>(
+    current: &crate::certified_products::CurrentProductRef<'a>,
+    entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<ArtifactId>,
+) -> Result<(), CompileError> {
+    let budget = NativeDemandBudget(current.operation());
+    budget.reserve::<crate::certified_products::CurrentProductRef<'a>>(1)?;
+    let mut pending = vec![*current];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        crate::host_work::checkpoint()?;
+        if visited.contains(&current.key()) {
+            continue;
+        }
+        budget.reserve::<(NativeGroupKey, [usize; 4])>(1)?;
+        visited.insert(current.key());
+        for reference in current
+            .nominal_imports()
+            .map_err(compiler_evidence_failure)?
+        {
+            crate::host_work::checkpoint()?;
+            budget.checkpoint()?;
+            match reference {
+                crate::certified_products::ReceiptImportOwner::OriginalBinding { .. } => current
+                    .require_actual_stage_original_use(reference)
+                    .map_err(compiler_evidence_failure)?,
+                crate::certified_products::ReceiptImportOwner::Source { .. } => {
+                    if let Some(child) = current
+                        .current_source_child(reference, entries)
+                        .map_err(compiler_evidence_failure)?
+                    {
+                        if !visited.contains(&child.key()) {
+                            budget
+                                .reserve::<crate::certified_products::CurrentProductRef<'a>>(1)?;
+                            pending.push(child);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Exact completed products and dependency choices come from the same receipt.
 /// Only its NewProduct rows can authorize issuing complete native availability.
 struct CompletedRequestNativeProducts<'a> {
