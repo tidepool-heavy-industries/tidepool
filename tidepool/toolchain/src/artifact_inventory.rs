@@ -13672,7 +13672,7 @@ mod tests {
             .issued_artifacts()
             .capture_graph_selection();
 
-        assert!({
+        let refused = {
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
             let observed = crate::certified_products::AuthenticatedTargetImports::issue(
@@ -13692,8 +13692,9 @@ mod tests {
                 &mut validation,
             )
         }
-        .map(|admitted| admitted.artifacts().clone())
-        .is_err());
+        .unwrap_err();
+        assert!(matches!(refused, CompileError::ExtractFailed(message)
+            if message == "artifact inventory: target reaches a future value interface"));
         assert_eq!(
             fixed
                 .physical_inputs()
