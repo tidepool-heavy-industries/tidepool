@@ -5965,164 +5965,24 @@ pub(super) mod tests {
 
     #[test]
     fn certified_target_and_reachable_groups_install_with_source_leases() {
-        use tidepool_codegen::prepared_program::GroupInventory;
-        use tidepool_repr::execution_schema::{ImportOwner, ModuleVersion};
-        let groups = [
-            certified_source_group("a", 2, "b"),
-            certified_source_group("b", 7, "a"),
-            certified_source_group("unused", 12, "unused"),
-        ];
-        let source_evidence = certified_source_evidence(&groups);
-        let root = SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", "a"),
-        };
-        let registry = ImageRegistry::new();
-        let demand = GroupInventory::new(&groups)
-            .unwrap()
-            .seal([root.clone()])
-            .unwrap();
-        let mut wire = testing::wire_program();
-        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
-        wire.expressions.nodes[0] =
-            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
-        wire.globals.push(GlobalDecl {
-            identity: root.binder.clone(),
-            rep: RuntimeRep::LiftedRef,
-            entry_signature: None,
-            required_evaluated: false,
-            required_generation: None,
-        });
-        let target_prepared = testing::prepare(wire).unwrap();
-        let owner = ImportOwner::Source {
-            version: root.version.clone(),
-            binder: root.binder.clone(),
-        };
-        let target =
-            || scoped_single_domain_target(target_prepared.clone(), &registry, vec![owner.clone()]);
-        let unmatched_owners = || ScopedTargetImage {
-            sources: NativeSourceCustody::default(),
-            base: ImageTarget::compile(target_prepared.clone(), &registry).unwrap(),
-            plan: target().plan.clone(),
-            owners: Arc::from(Vec::new()),
-            demanded: Vec::new(),
-        };
-        let (mut engine, bootstrap) =
-            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
-        let before = engine.residency();
-        let mut wrong_source_evidence = source_evidence.clone();
-        wrong_source_evidence
-            .get_mut(&root)
-            .unwrap()
-            .0
-            .product_sha256 = [99; 32];
-        assert!(matches!(
-            engine.install_certified_turn(
-                ScopedTargetImage {
-                    demanded: (demand.compile(&registry).unwrap())
-                        .into_iter()
-                        .map(SelectedNativeImage::unqualified)
-                        .collect(),
-                    ..target()
-                },
-                &wrong_source_evidence,
-                &[],
-                &BTreeMap::new(),
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            ),
-            Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
-        ));
-        assert_eq!(engine.residency(), before);
-        assert!(matches!(
-            engine.install_certified_turn(
-                ScopedTargetImage {
-                    demanded: (demand.compile(&registry).unwrap())
-                        .into_iter()
-                        .map(SelectedNativeImage::unqualified)
-                        .collect(),
-                    ..unmatched_owners()
-                },
-                &source_evidence,
-                &[],
-                &BTreeMap::new(),
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            ),
-            Err(PreparedRuntimeError::CertifiedTargetOwners)
-        ));
-        assert_eq!(engine.residency(), before);
-        let with_unused = GroupInventory::new(&groups)
-            .unwrap()
-            .seal([
-                root.clone(),
-                SourceBinder {
-                    version: ModuleVersion([1; 32]),
-                    binder: testing::identity("Fixture", "unused"),
-                },
-            ])
-            .unwrap();
-        assert!(matches!(
-            engine.install_certified_turn(
-                ScopedTargetImage {
-                    demanded: (with_unused.compile(&registry).unwrap())
-                        .into_iter()
-                        .map(SelectedNativeImage::unqualified)
-                        .collect(),
-                    ..target()
-                },
-                &source_evidence,
-                &[],
-                &BTreeMap::new(),
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            ),
-            Err(PreparedRuntimeError::UnreachableCertifiedGroup)
-        ));
-        assert_eq!(engine.residency(), before);
-        let mut installed = engine
-            .install_certified_turn(
-                ScopedTargetImage {
-                    demanded: (demand.compile(&registry).unwrap())
-                        .into_iter()
-                        .map(SelectedNativeImage::unqualified)
-                        .collect(),
-                    ..target()
-                },
-                &source_evidence,
-                &[],
-                &BTreeMap::new(),
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            )
-            .unwrap();
-        assert_eq!(installed.groups.len(), 2);
-        assert_eq!(installed.leases.len(), 2);
-        assert!(!engine.programs.contains_key(&installed.target));
-        let installed_target = installed.target;
-        let installed_groups = installed.groups.clone();
-        let installed_leases = std::mem::take(&mut installed.leases);
-        assert_eq!(engine.commit_certified_turn(installed), installed_target);
-        assert_eq!(engine.programs[&installed_target].entry, Some(ValueId(0)));
-        assert!(installed_groups
-            .iter()
-            .all(|id| engine.programs[id].entry.is_none()));
-        let selected = installed_leases
-            .iter()
-            .find_map(|lease| match lease {
-                NativeInstanceLease::Home(home) if home.binder() == &root => Some(home),
-                NativeInstanceLease::Home(_) | NativeInstanceLease::Package(_) => None,
-            })
-            .unwrap();
+        let targets = compile_source_publication_fixture();
+        let mut session = super::super::PersistentSession::new(None, 1024 * 1024);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = source.scope();
+        let (program, keys, _placement) = install_source_publication_fixture(&mut session, scope);
+        let original = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope);
+        assert_eq!(original.len(), keys.len());
+        let engine = session.prepared_mut().unwrap();
+        let entry = engine.programs[&program]
+            .entry
+            .expect("actual target is callable");
         let result = engine
             .machine
             .run_entry_retained(
-                installed_target,
-                ValueId(0),
+                program,
+                entry,
                 &[],
                 PreparedCallOptions {
                     observation_budget: 0,
@@ -6132,129 +5992,58 @@ pub(super) mod tests {
             )
             .unwrap();
         let [PreparedResult::Managed(returned)] = result.values.as_slice() else {
-            panic!("target must return a certified source closure");
+            panic!("real target must return its native source value");
         };
-        assert_eq!(returned.rep(), selected.handle().rep());
-        assert!(engine
-            .machine
-            .handle_is_evaluated(selected.handle())
-            .is_ok());
         assert!(engine.machine.release(*returned));
-        let inherited = BTreeMap::from([(
-            ScopedSourceBinder {
-                domain: SourceInstanceDomain::single(),
-                source: root.clone(),
-            },
-            selected.clone(),
-        )]);
-        let reused = engine
-            .install_certified_turn(
-                target(),
-                &source_evidence,
-                &[],
-                &inherited,
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            )
-            .unwrap();
-        assert!(reused.groups.is_empty());
-        assert!(reused.leases.is_empty());
-        assert_ne!(reused.target, installed_target);
-        let reused_target = reused.target;
-        assert_eq!(engine.commit_certified_turn(reused), reused_target);
-        assert!(Arc::ptr_eq(
-            &engine.programs[&installed_target].definitions,
-            &engine.programs[&reused_target].definitions,
-        ));
-        assert!(engine.unpin(reused_target));
-        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
-        let source_scope = scopes.mint_isolated();
-        let capture_scope = scopes.mint_isolated();
-        let mut bindings = BindingTable::new();
-        let keys = bindings
-            .register_source_instances_in(&scopes, source_scope, installed_leases)
-            .unwrap();
-        assert_eq!(keys.len(), 2);
-        assert_eq!(bindings.source_instances_in(&scopes, source_scope).len(), 2);
-        bindings.seed_detached_scope(&scopes, source_scope, capture_scope);
-        assert_eq!(
-            bindings.source_instances_in(&scopes, capture_scope).len(),
-            2
-        );
-        assert!(engine.unpin(installed_target));
-        assert_eq!(scopes.retire(source_scope), vec![source_scope]);
-        assert!(bindings
-            .drain_scope_with_sources(source_scope)
-            .source_instances
-            .is_empty());
-        engine.quiesce_and_collect_now().unwrap();
-        assert_eq!(engine.residency().programs, 3);
-        assert_eq!(
-            bindings.source_instances_in(&scopes, capture_scope).len(),
-            2
-        );
-        assert_eq!(scopes.retire(capture_scope), vec![capture_scope]);
-        let retired = bindings
-            .drain_scope_with_sources(capture_scope)
-            .source_instances;
-        assert_eq!(retired.len(), 2);
-        for lease in retired {
-            assert!(engine.release(lease.handle()));
+        let (reused, added, _reused_placement) =
+            install_runtime_fixture_in(&mut session, scope, targets, "result");
+        assert!(added.is_empty());
+        let after = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope);
+        assert_eq!(after.len(), original.len());
+        for lease in &original {
+            assert!(after
+                .iter()
+                .any(|other| other.instance() == lease.instance()
+                    && other.value() == lease.value()
+                    && other.handle() == lease.handle()));
         }
-        engine.quiesce_and_collect_now().unwrap();
-        assert_eq!(engine.residency().programs, 1);
-        let before_abort = (
-            engine.residency(),
-            engine.code_export_count(),
-            engine.programs.len(),
-            engine.sites.len(),
-            engine.constructor_replies.len(),
-        );
-        let mut aborted = engine
-            .install_certified_turn(
-                ScopedTargetImage {
-                    demanded: (demand.compile(&registry).unwrap())
-                        .into_iter()
-                        .map(SelectedNativeImage::unqualified)
-                        .collect(),
-                    ..target()
-                },
-                &source_evidence,
-                &[],
-                &BTreeMap::new(),
-                &HashMap::new(),
-                &bindings,
-                &HashMap::new(),
-            )
-            .unwrap();
-        let dead_scope = scopes.mint_isolated();
-        assert_eq!(scopes.retire(dead_scope), vec![dead_scope]);
-        let rejected_tokens = std::mem::take(&mut aborted.leases);
-        let returned = bindings
-            .register_source_instances_in(&scopes, dead_scope, rejected_tokens)
-            .unwrap_err();
-        assert_eq!(returned.len(), 2);
-        assert!(bindings
-            .source_instances_in(&scopes, source_scope)
-            .is_empty());
-        assert!(bindings
-            .source_instances_in(&scopes, capture_scope)
-            .is_empty());
-        assert!(!engine.programs.contains_key(&aborted.target));
-        assert_eq!(engine.code_export_count(), before_abort.1);
-        engine.abort_certified_turn(aborted, returned).unwrap();
+        let capture = session.mint_detached_scope(scope).unwrap();
+        let _capture_placement = session.prepared_lexical_scope_lease(capture).unwrap();
         assert_eq!(
-            (
-                engine.residency(),
-                engine.code_export_count(),
-                engine.programs.len(),
-                engine.sites.len(),
-                engine.constructor_replies.len(),
-            ),
-            before_abort,
+            session
+                .bindings()
+                .source_instance_keys_in(session.scope_tree(), capture),
+            session
+                .bindings()
+                .source_instance_keys_in(session.scope_tree(), scope)
         );
-        assert!(engine.unpin(bootstrap));
+        assert!(session.prepared_mut().unwrap().unpin(program));
+        assert!(session.prepared_mut().unwrap().unpin(reused));
+        assert_eq!(session.retire_scope(scope).roots_released, 0);
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        for lease in &original {
+            assert_eq!(
+                session
+                    .prepared()
+                    .unwrap()
+                    .prepared_handle_of(lease.handle().raw()),
+                Some(lease.handle())
+            );
+        }
+        assert_eq!(session.retire_scope(capture).roots_released, keys.len());
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.residency().unwrap().programs, 0);
+        assert_eq!(session.persistent_roots_count(), 0);
     }
 
     pub(in crate::session) fn authored_domain_fixture() -> &'static crate::RuntimePreparedTargets {
