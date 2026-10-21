@@ -1790,20 +1790,16 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let completed =
+        let output =
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut selection,
                 &base,
                 Vec::new(),
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
-            .unwrap()
-            .issued_artifacts()
-            .clone();
-        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &selection, &completed,
-        )
-        .unwrap();
+            .unwrap();
+        let completed = output.issued_artifacts().clone();
+        assert!(output.physical_cohort().is_ok());
         let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
         let mut rows = Rows::default();
         let empty = View {
@@ -1946,8 +1942,17 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                     &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                 )
                 .unwrap();
+            assert!(
+                matches!(inputs.physical_cohort(), Err(CompileError::ExtractFailed(message))
+                if message == "exact declaration context: target requires its actual physical output cohort")
+            );
             let receiving_inventory = inputs.artifacts().inventory();
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            // The next target emits no products. Empty and opted-in input
+            // choices remain distinct through the actual empty-cohort issuer.
+            let physical = receiving_inventory
+                .bind_segment(inputs.artifacts(), vec![], &continuation, &mut validation)
+                .unwrap();
             let root_entry = catalog.originals.first().expect("actual history root");
             let (prepared, accepted) =
                 super::tests::source_target_data(&[(root_entry.as_ref(), 3)]);
@@ -1958,8 +1963,8 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
             let target = receiving_inventory.select_native_target(
-                inputs.artifacts(),
-                &continuation,
+                physical.physical_inputs().physical_cohort().unwrap(),
+                physical.source_selection(),
                 observed,
                 None,
                 Some(inputs.artifacts()),

@@ -10641,7 +10641,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -10812,7 +10812,7 @@ mod tests {
         .unwrap();
         let target = inventory
             .select_native_target(
-                &physical,
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -10889,7 +10889,7 @@ mod tests {
         .unwrap();
         let empty_target = inventory
             .select_native_target(
-                &physical,
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 &selection,
                 observed,
                 None,
@@ -11039,12 +11039,62 @@ mod tests {
         for index in order.into_iter().skip(1) {
             prefix = prefix.merge_fixture_selections(&issued[index]).unwrap();
         }
-        let mut selection = bound_selection_for_entries(&prefix, &[native.clone(), child.clone()]);
-        let requirement = NativeOriginalRequirement::from_selected_view(id, selected)
-            .unwrap()
+        let lexical = vec![
+            crate::declaration_join::ExactLexicalNode {
+                owner: native.descriptor.owner.clone(),
+                imports: vec![child.descriptor.owner.clone()],
+            },
+            crate::declaration_join::ExactLexicalNode {
+                owner: child.descriptor.owner.clone(),
+                imports: vec![],
+            },
+        ];
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()]).unwrap();
+        // Issue the chosen source through its actual request owner before
+        // joining the broader prefix's independent execution histories.
+        let chosen_context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                producer_sha256,
+                selected,
+                projection,
+                lexical.clone(),
+                native.descriptor.owner.clone(),
+                &[],
+            )
+            .unwrap(),
+        );
+        let request_directory = tempfile::tempdir().unwrap();
+        let chosen_request = chosen_context
+            .prepare_compilation(request_directory.path(), producer)
             .unwrap();
-        selection
-            .with_new_product_dependencies(&prefix.metadata_snapshot(), &[requirement])
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let source_selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                chosen_request.compiler_inputs(),
+                &validation.inventory,
+            )
+            .unwrap();
+        assert!(source_selection
+            .continuation_input(&native.descriptor.owner)
+            .unwrap()
+            .is_some());
+        assert!(source_selection
+            .new_product_native_requirements()
+            .next()
+            .is_none());
+        assert!(matches!(chosen_request.compiler_inputs().physical_cohort(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "exact declaration context: target requires its actual physical output cohort"));
+        // This target has no new outputs. Its real empty physical cohort consumes
+        // the chosen carried request while retaining the broader prefix custody.
+        let fixed = inventory
+            .bind_segment(
+                &prefix,
+                vec![],
+                &source_selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
         let expected = selected
             .capture_graph_selection()
@@ -11063,8 +11113,8 @@ mod tests {
             .unwrap();
             let target = inventory
                 .select_native_target(
-                    &prefix,
-                    &selection,
+                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&prefix),
@@ -11098,51 +11148,6 @@ mod tests {
                 matches!(prefix.select_roots(vec![id]), Err(CompileError::ArtifactInventory(error))
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
             );
-            let lexical = vec![
-                crate::declaration_join::ExactLexicalNode {
-                    owner: native.descriptor.owner.clone(),
-                    imports: vec![child.descriptor.owner.clone()],
-                },
-                crate::declaration_join::ExactLexicalNode {
-                    owner: child.descriptor.owner.clone(),
-                    imports: vec![],
-                },
-            ];
-            let projection =
-                CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
-                    .unwrap();
-            // Issue the chosen source through its actual request owner before
-            // joining the broader prefix's independent execution histories.
-            let chosen_context = Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
-                    producer_sha256,
-                    selected,
-                    projection,
-                    lexical.clone(),
-                    native.descriptor.owner.clone(),
-                    &[],
-                )
-                .unwrap(),
-            );
-            let request_directory = tempfile::tempdir().unwrap();
-            let chosen_request = chosen_context
-                .prepare_compilation(request_directory.path(), producer)
-                .unwrap();
-            let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-            let source_selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                    chosen_request.compiler_inputs(),
-                    &validation.inventory,
-                )
-                .unwrap();
-            assert!(source_selection
-                .continuation_input(&native.descriptor.owner)
-                .unwrap()
-                .is_some());
-            assert!(source_selection
-                .new_product_native_requirements()
-                .next()
-                .is_none());
             let before_source_context = inventory.metrics().issued_scope_nodes;
             let context =
                 crate::declaration_context::ExactDeclarationContext::from_source_selection(
@@ -11570,7 +11575,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -11698,7 +11703,7 @@ mod tests {
                 )
                 .unwrap();
                 owner.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -11777,7 +11782,7 @@ mod tests {
                 )
                 .unwrap();
                 owner.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -11960,7 +11965,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12071,7 +12076,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12895,7 +12900,7 @@ mod tests {
                 .unwrap();
                 let target = inventory
                     .select_native_target(
-                        physical,
+                        fixed.physical_inputs().physical_cohort().unwrap(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -13011,7 +13016,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -13040,7 +13045,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -13075,7 +13080,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -13195,7 +13200,7 @@ mod tests {
         .unwrap();
         let target = inventory
             .select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -13219,7 +13224,7 @@ mod tests {
         .unwrap();
         assert!(inventory
             .select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -13293,7 +13298,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                fixed.physical_inputs().physical_cohort().unwrap(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -15337,7 +15342,7 @@ mod tests {
                     )
                     .unwrap();
                     inventory.select_native_target(
-                        fixed.physical_inputs().issued_artifacts(),
+                        fixed.physical_inputs().physical_cohort().unwrap(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -15400,7 +15405,7 @@ mod tests {
                     )
                     .unwrap();
                     cold.select_native_target(
-                        fixed.physical_inputs().issued_artifacts(),
+                        fixed.physical_inputs().physical_cohort().unwrap(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -16788,7 +16793,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -17600,7 +17605,7 @@ mod tests {
                     )
                     .unwrap();
                     recovered_inventory.select_native_target(
-                        bound.physical_inputs().issued_artifacts(),
+                        bound.physical_inputs().physical_cohort().unwrap(),
                         bound.source_selection(),
                         observed,
                         None,
@@ -17623,7 +17628,7 @@ mod tests {
                 let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let (prepared, accepted) = source_target_data(&[(&helper, 7)]);
                 let observed = crate::certified_products::AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
-                recovered_inventory.select_native_target(bound.physical_inputs().issued_artifacts(), bound.source_selection(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
+                recovered_inventory.select_native_target(bound.physical_inputs().physical_cohort().unwrap(), bound.source_selection(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
                 }.map(|admitted| admitted.artifacts().clone()), Err(CompileError::ArtifactInventory(error))
                                    if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
                                        original: helper.descriptor.id,
@@ -17692,7 +17697,7 @@ mod tests {
                     )
                     .unwrap();
                     chosen.inventory().select_native_target(
-                        chosen_bound.physical_inputs().issued_artifacts(),
+                        chosen_bound.physical_inputs().physical_cohort().unwrap(),
                         chosen_bound.source_selection(),
                         observed,
                         None,
@@ -18601,7 +18606,7 @@ mod tests {
                     )
                     .unwrap();
                     issuer.select_native_target(
-                        fixed.physical_inputs().issued_artifacts(),
+                        fixed.physical_inputs().physical_cohort().unwrap(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -18725,7 +18730,7 @@ mod tests {
                 )
                 .unwrap();
                 issuer.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -18915,6 +18920,9 @@ mod tests {
             .prepare_compilation(request_directory.path(), producer)
             .unwrap();
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        assert!(matches!(request.compiler_inputs().physical_cohort(),
+            Err(CompileError::ExtractFailed(message))
+                if message == "exact declaration context: target requires its actual physical output cohort"));
         let certified = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             request.compiler_inputs(),
             &validation.inventory,
@@ -18958,6 +18966,11 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(observed, expected);
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            // The target emits no new products; cold custody is consumed only
+            // after the ordinary empty-cohort issuer completes this request.
+            let fixed = inventory
+                .bind_segment(view, vec![], &certified, &mut validation)
+                .unwrap();
             let (prepared, accepted) = source_target_data(&[(&native, 7)]);
             let observed = crate::certified_products::AuthenticatedTargetImports::issue(
                 &prepared,
@@ -18967,8 +18980,8 @@ mod tests {
             .unwrap();
             let selected = inventory
                 .select_native_target(
-                    view,
-                    &certified,
+                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.source_selection(),
                     observed,
                     None,
                     Some(view),
