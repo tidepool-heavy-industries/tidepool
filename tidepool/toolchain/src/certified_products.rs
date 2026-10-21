@@ -2693,7 +2693,7 @@ fn verify_package_interface(
         .map_err(package_validation_error)
 }
 
-fn package_validation_error(
+pub(crate) fn package_validation_error(
     error: crate::recovery_artifacts::RecoveryArtifactError,
 ) -> CertificationError {
     match error {

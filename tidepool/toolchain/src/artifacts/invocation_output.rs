@@ -16,6 +16,7 @@ enum Artifact {
     YieldSites(Option<String>),
     ModuleProducts,
     ModulePackageImports,
+    CertifiedProducts,
     PortableReceipt,
     Dependencies,
 }
@@ -29,6 +30,7 @@ impl Artifact {
             Self::YieldSites(None) => "asks.json".into(),
             Self::ModuleProducts => "module-products.cbor".into(),
             Self::ModulePackageImports => "module-package-imports.cbor".into(),
+            Self::CertifiedProducts => "certified-products.cbor".into(),
             Self::PortableReceipt => "portable-output.mode".into(),
             Self::Dependencies => "dependencies.json".into(),
         }
@@ -48,7 +50,11 @@ impl InvocationOutputLayout<NativeOutput> {
     pub(crate) fn new(targets: &[&str]) -> Result<Self, CompileError> {
         Self::for_members(
             targets,
-            [Artifact::ModuleProducts, Artifact::ModulePackageImports],
+            [
+                Artifact::ModuleProducts,
+                Artifact::ModulePackageImports,
+                Artifact::CertifiedProducts,
+            ],
         )
     }
 }
@@ -56,7 +62,7 @@ impl InvocationOutputLayout<NativeOutput> {
 impl InvocationOutputLayout<OriginalOutput> {
     /// Original product sidecars are acquired by their one semantic issuer.
     pub(crate) fn original(targets: &[&str]) -> Result<Self, CompileError> {
-        Self::for_members(targets, [])
+        Self::for_members(targets, [Artifact::CertifiedProducts])
     }
 }
 
@@ -344,9 +350,7 @@ impl<'a> CapturedNativeOutput<'a> {
                     self.bytes(relative)?,
                 )
                 .map_err(|error| {
-                    compiler_evidence_failure(
-                        certified_products::CertificationError::CapturedModulePayload(error),
-                    )
+                    compiler_evidence_failure(certified_products::package_validation_error(error))
                 })?;
         }
         Ok(())
@@ -387,13 +391,19 @@ impl<P> CompletedNativeOutputBundle<P> {
         &self,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<(), CompileError> {
+        validation
+            .record_captured_bytes(
+                &self.output.root.join("certified-products.cbor"),
+                self.bundle.get(&Artifact::CertifiedProducts),
+            )
+            .map_err(|error| {
+                compiler_evidence_failure(certified_products::package_validation_error(error))
+            })?;
         for (relative, bytes) in &self.output.files {
             validation
                 .record_captured_bytes(&self.output.root.join(relative), bytes)
                 .map_err(|error| {
-                    compiler_evidence_failure(
-                        certified_products::CertificationError::CapturedModulePayload(error),
-                    )
+                    compiler_evidence_failure(certified_products::package_validation_error(error))
                 })?;
         }
         Ok(())
@@ -469,15 +479,14 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
             "invalid native issuing output root".into(),
         ));
     }
-    let receipt_bytes =
-        super::CompilerSidecar::CertifiedProducts.read(&root, bundle.operation())?;
+    let receipt_bytes = bundle.get(&Artifact::CertifiedProducts);
     if receipt_bytes.is_empty() {
         return Err(CompileError::ExtractFailed(
             "native output product certificate unavailable".into(),
         ));
     }
     let receipt = certified_products::decode_receipt_with_operation(
-        &receipt_bytes,
+        receipt_bytes,
         Some(&root),
         bundle.operation(),
     )
@@ -488,22 +497,13 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
         .map_err(|error| compiler_evidence_failure(error.into()))?;
     bundle
         .operation()
-        .reserve::<(PathBuf, Arc<[u8]>)>(1)
-        .map_err(|error| compiler_evidence_failure(error.into()))?;
-    bundle
-        .operation()
         .charge(
             root.as_os_str()
                 .len()
-                .saturating_add(issuing_root.as_os_str().len())
-                .saturating_add("certified-products.cbor".len())
-                .saturating_add(receipt_bytes.len()),
+                .saturating_add(issuing_root.as_os_str().len()),
         )
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let mut files = BTreeMap::from([(
-        PathBuf::from("certified-products.cbor"),
-        receipt_bytes.into(),
-    )]);
+    let mut files = BTreeMap::new();
     for path in receipt
         .package_products
         .iter()
@@ -596,10 +596,15 @@ mod portable_tests {
             .unwrap();
         assert_eq!(
             observed,
-            ["meta.cbor", "__prepared.prepared.cbor", "asks.json"]
+            [
+                "meta.cbor",
+                "__prepared.prepared.cbor",
+                "asks.json",
+                "certified-products.cbor"
+            ]
         );
         assert_eq!(bundle.targets().len(), 1);
-        assert_eq!(bundle.bytes_len(), 3);
+        assert_eq!(bundle.bytes_len(), 4);
     }
 
     #[test]
@@ -698,6 +703,7 @@ mod tests {
                     "asks.json",
                     "module-products.cbor",
                     "module-package-imports.cbor",
+                    "certified-products.cbor",
                 ],
             ),
             (
@@ -710,6 +716,7 @@ mod tests {
                     "first.asks.json",
                     "module-products.cbor",
                     "module-package-imports.cbor",
+                    "certified-products.cbor",
                 ],
             ),
         ] {
@@ -784,6 +791,7 @@ mod tests {
             "asks.json",
             "module-products.cbor",
             "module-package-imports.cbor",
+            "certified-products.cbor",
         ];
         physical_outputs(root.path(), &names);
         let layout = InvocationOutputLayout::new(&["result"]).unwrap();
