@@ -20197,6 +20197,7 @@ pub(crate) mod tests {
                     value_text("compiler-original")
                 );
             }
+            let inventory = request.compiler_inputs().artifacts().inventory();
             let mut validation = PackageInterfaceValidation::default();
             let selection = CertifiedSourceSelection::from_compiler_inputs(
                 request.compiler_inputs(),
@@ -20633,6 +20634,16 @@ pub(crate) mod tests {
                         &mut validation,
                     )
                     .unwrap();
+                if matches!(mode, "full" | "current") {
+                    // Full transports body availability; the initial request
+                    // deliberately chose no executable root for this owner.
+                    assert!(next
+                        .compiler_inputs()
+                        .compiler_source_support()
+                        .recorded_input_decisions()[&entry.descriptor.owner]
+                        .groups
+                        .is_empty());
+                }
                 let before_targets = physical
                     .physical_inputs()
                     .issued_artifacts()
@@ -20665,8 +20676,7 @@ pub(crate) mod tests {
                         )
                         .map(|selected| selected.artifacts().selected_native_groups());
                     eprintln!("native_availability_handoff_consumer mode={mode} broaden={broaden} ordinal={ordinal} outcome={outcome:?}");
-                    let allowed =
-                        matches!(mode, "full" | "current") || (mode == "partial" && ordinal == 7);
+                    let allowed = mode == "partial" && ordinal == 7;
                     if allowed {
                         let mut groups =
                             next.compiler_inputs().artifacts().selected_native_groups();
@@ -20677,6 +20687,18 @@ pub(crate) mod tests {
                         match outcome {
                             Ok(actual) => assert_eq!(actual, groups),
                             Err(error) => unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={error:?}")),
+                        }
+                    } else if matches!(mode, "full" | "current") {
+                        if !matches!(
+                            &outcome,
+                            Err(crate::CompileError::ArtifactInventory(error))
+                                if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                                    artifact: entry.descriptor.id, original_ordinal: ordinal,
+                                } && matches!(&error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                                    owner, original_ordinal,
+                                }) if owner == &entry.descriptor.owner && *original_ordinal == ordinal)
+                        ) {
+                            unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected empty initial choice actual={outcome:?}"));
                         }
                     } else if !matches!(
                         &outcome,
@@ -22845,19 +22867,17 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
+            let missing_error = partial_inventory
+                .bind_segment(&partial, missing, &missing_selection, &mut validation)
+                .err()
+                .expect("the omitted dependency has no selected Source owner");
             assert!(matches!(
-                partial_inventory.bind_segment(
-                    &partial,
-                    missing,
-                    &missing_selection,
-                    &mut validation,
-                ),
-                Err(crate::CompileError::ArtifactInventory(error))
-                    if matches!(error.failure,
-                        crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
-                            dependency: crate::artifact_inventory::ArtifactDependency::NativeGroup { dependent_ordinal: 8, required_ordinal: 9 }, ..
-                        })
-            ));
+                &missing_error,
+                crate::CompileError::CompilerEvidence(error)
+                    if matches!(error.as_ref(), CertificationError::Mismatch(
+                        "source outside compiler selection"
+                    ))
+            ), "the absent dependency must refuse before physical group completion: {missing_error:?}");
         }
     }
 
