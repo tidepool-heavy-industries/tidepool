@@ -8890,6 +8890,72 @@ mod module_product_tests {
             settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
             CompilerTransactionOrigin,
         };
+        // Retain existing exact-binding diagnostics only for a failed real history.
+        struct NativeHistoryTrace {
+            rows: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+            next_span: std::sync::atomic::AtomicU64,
+        }
+        impl tracing::Subscriber for NativeHistoryTrace {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                matches!(
+                    metadata.target(),
+                    "tidepool::artifact_inventory::ambiguity_trace"
+                        | "tidepool::certified_products::source_closure_trace"
+                )
+            }
+            fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+                Some(tracing::metadata::LevelFilter::DEBUG)
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(
+                    self.next_span
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                )
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Fields(String);
+                impl std::fmt::Write for Fields {
+                    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+                        let mut remaining = 8192usize.saturating_sub(self.0.len()).min(text.len());
+                        while !text.is_char_boundary(remaining) {
+                            remaining -= 1;
+                        }
+                        self.0.push_str(&text[..remaining]);
+                        Ok(())
+                    }
+                }
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write;
+                        let _ = write!(self, " {}={value:?}", field.name());
+                    }
+                }
+                if !self.enabled(event.metadata()) {
+                    return;
+                }
+                let mut fields = Fields(event.metadata().target().to_owned());
+                event.record(&mut fields);
+                let mut rows = self.rows.lock().unwrap();
+                if rows.len() == 128 {
+                    rows.pop_front();
+                }
+                rows.push_back(fields.0);
+            }
+        }
+        let native_trace = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let dispatcher = tracing::Dispatch::new(NativeHistoryTrace {
+            rows: Arc::clone(&native_trace),
+            next_span: std::sync::atomic::AtomicU64::new(1),
+        });
+        let _trace_guard = tracing::dispatcher::set_default(&dispatcher);
         let initial = if mixed {
             let producer = PathBuf::from(
                 std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
@@ -9186,6 +9252,9 @@ mod module_product_tests {
             );
             assert_eq!(observed_close.as_ref(), Some(settled.close()));
             if let Err(error) = settled.action() {
+                for row in native_trace.lock().unwrap().iter() {
+                    eprintln!("native history trace: {row}");
+                }
                 panic!(
                         "actual World native preparation failed (mixed={mixed}, declaration_only={declaration_only}, cancel={cancel_after_end}): {error:?}; compiler close: {:?}",
                         settled.close()
