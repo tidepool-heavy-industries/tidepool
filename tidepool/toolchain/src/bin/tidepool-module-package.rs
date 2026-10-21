@@ -63,21 +63,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !source.is_absolute() || !source_root.is_absolute() || !output_root.is_absolute() {
         return Err("source, source root and output root must be absolute paths".into());
     }
-    // These four inputs are the calling build action's declared compiler pair
-    // and package closure. No inherited resident or cache selection survives.
-    let compiler = [
-        "TIDEPOOL_EXTRACT",
-        "TIDEPOOL_EXTRACT_WORKER",
-        "TIDEPOOL_COMPILER_DEPLOYMENT",
-        "TIDEPOOL_GHC_LIBDIR",
-    ]
-    .into_iter()
-    .map(|name| {
-        std::env::var_os(name)
-            .map(|value| (name, value))
-            .ok_or_else(|| format!("module package build requires {name}"))
-    })
-    .collect::<Result<Vec<_>, _>>()?;
     let mut scratch = tempfile::tempdir_in(std::env::current_dir()?)?;
     if matches!(mode, Mode::Inspect) {
         scratch.disable_cleanup(true);
@@ -87,6 +72,75 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output_root.display()
         );
     }
+    prepare_environment(scratch.path())?;
+    std::env::set_current_dir(scratch.path())?;
+    let targets = args.targets.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        match mode {
+            Mode::Build => {
+                let package = tidepool_toolchain::artifacts::build_deployment_module_package(
+                    &source,
+                    &targets,
+                    &source_root,
+                    scratch.path(),
+                    &output_root,
+                )?;
+                println!("{}", package.catalog_identity());
+            }
+            Mode::Inspect => {
+                let report = tidepool_toolchain::artifacts::inspect_deployment_module_package(
+                    &source,
+                    &targets,
+                    &source_root,
+                    scratch.path(),
+                    &output_root,
+                )?;
+                println!("{}", report.display());
+            }
+            Mode::Entry => {
+                if targets != ["__prepared"] {
+                    return Err("production entry requires exactly --target __prepared".into());
+                }
+                tidepool_toolchain::artifacts::build_production_entry(
+                    &source,
+                    &source_root,
+                    scratch.path(),
+                    &output_root,
+                )?;
+                println!("{}", output_root.join("entry.json").display());
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        scratch.disable_cleanup(true);
+        eprintln!(
+            "native producer retains failed scratch {} and output {}",
+            scratch.path().display(),
+            output_root.display()
+        );
+    }
+    result
+}
+
+fn prepare_environment(scratch: &std::path::Path) -> Result<(), String> {
+    // The native producer retains its declared compiler and the endpoint issued
+    // by its owning frontend. Binding authenticates the endpoint before use.
+    let compiler = [
+        "TIDEPOOL_EXTRACT",
+        "TIDEPOOL_EXTRACT_WORKER",
+        "TIDEPOOL_COMPILER_DEPLOYMENT",
+        "TIDEPOOL_GHC_LIBDIR",
+        tidepool_extract_cmd::DAEMON_SOCKET_ENV,
+        tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV,
+    ]
+    .into_iter()
+    .map(|name| {
+        std::env::var_os(name)
+            .map(|value| (name, value))
+            .ok_or_else(|| format!("module package build requires {name}"))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
     // This binary owns the process and has not started any threads.
     unsafe {
         let inherited = std::env::vars_os()
@@ -102,44 +156,93 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::env::remove_var("GHC_PACKAGE_PATH");
         std::env::remove_var("GHCRTS");
         std::env::set_var("GHC_ENVIRONMENT", "-");
-        std::env::set_var("TMPDIR", scratch.path());
-        std::env::set_var("XDG_CACHE_HOME", scratch.path().join("cache"));
-    }
-    std::env::set_current_dir(scratch.path())?;
-    let targets = args.targets.iter().map(String::as_str).collect::<Vec<_>>();
-    match mode {
-        Mode::Build => {
-            let package = tidepool_toolchain::artifacts::build_deployment_module_package(
-                &source,
-                &targets,
-                &source_root,
-                scratch.path(),
-                &output_root,
-            )?;
-            println!("{}", package.catalog_identity());
-        }
-        Mode::Inspect => {
-            let report = tidepool_toolchain::artifacts::inspect_deployment_module_package(
-                &source,
-                &targets,
-                &source_root,
-                scratch.path(),
-                &output_root,
-            )?;
-            println!("{}", report.display());
-        }
-        Mode::Entry => {
-            if targets != ["__prepared"] {
-                return Err("production entry requires exactly --target __prepared".into());
-            }
-            tidepool_toolchain::artifacts::build_production_entry(
-                &source,
-                &source_root,
-                scratch.path(),
-                &output_root,
-            )?;
-            println!("{}", output_root.join("entry.json").display());
-        }
+        std::env::set_var("TMPDIR", scratch);
+        std::env::set_var("XDG_CACHE_HOME", scratch.join("cache"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    const SELECTED: [(&str, &str); 6] = [
+        ("TIDEPOOL_EXTRACT", "/declared/frontend"),
+        ("TIDEPOOL_EXTRACT_WORKER", "/declared/worker"),
+        ("TIDEPOOL_COMPILER_DEPLOYMENT", "/declared/deployment"),
+        ("TIDEPOOL_GHC_LIBDIR", "/declared/ghc"),
+        (
+            tidepool_extract_cmd::DAEMON_SOCKET_ENV,
+            "/owned/compiler.sock",
+        ),
+        (
+            tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV,
+            "owned-endpoint",
+        ),
+    ];
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "isolated subprocess exercises the native CLI environment owner"
+    )]
+    fn owned_endpoint_survives_sanitization_and_requires_both_coordinates() {
+        for missing in [None, Some(SELECTED[4].0), Some(SELECTED[5].0)] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::compiler_environment_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .envs(SELECTED)
+                .env("TIDEPOOL_COMPILER_MODULES", "/ambient/catalog")
+                .env("TIDEPOOL_EXTRACT_NO_DAEMON", "1")
+                .env("TIDEPOOL_CACHE_DIR", "/ambient/cache")
+                .env("GHC_PACKAGE_PATH", "/ambient/packages")
+                .env("GHCRTS", "-N8")
+                .env_remove("MODULE_COMPILER_INPUT_MISSING");
+            if let Some(name) = missing {
+                command
+                    .env_remove(name)
+                    .env("MODULE_COMPILER_INPUT_MISSING", name);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        }
+    }
+
+    #[test]
+    #[ignore = "private subprocess entry for process-global environment mutation"]
+    fn compiler_environment_child() {
+        let scratch = tempfile::tempdir().unwrap();
+        if let Ok(name) = std::env::var("MODULE_COMPILER_INPUT_MISSING") {
+            assert!(super::prepare_environment(scratch.path())
+                .unwrap_err()
+                .contains(&name));
+            return;
+        }
+        super::prepare_environment(scratch.path()).unwrap();
+        for (name, value) in SELECTED {
+            assert_eq!(std::env::var(name).unwrap(), value);
+        }
+        for name in [
+            "TIDEPOOL_COMPILER_MODULES",
+            "TIDEPOOL_EXTRACT_NO_DAEMON",
+            "TIDEPOOL_CACHE_DIR",
+            "GHC_PACKAGE_PATH",
+            "GHCRTS",
+        ] {
+            assert!(std::env::var_os(name).is_none(), "ambient {name} survived");
+        }
+        assert_eq!(std::env::var("GHC_ENVIRONMENT").unwrap(), "-");
+        assert_eq!(
+            std::path::PathBuf::from(std::env::var_os("TMPDIR").unwrap()),
+            scratch.path()
+        );
+    }
 }
