@@ -2239,6 +2239,9 @@ pub(crate) fn index_native_requirements(
             ArtifactDependency::Interface => {
                 return Err(failure("interface edge in native group witness"));
             }
+            ArtifactDependency::PackageCodeImport { .. } => {
+                return Err(failure("package edge in native group witness"));
+            }
         };
         indexed
             .entry(ordinal)
@@ -22046,7 +22049,8 @@ mod package_code {
         };
             for id in &required {
                 for (index, target) in plans[id].imports.iter().enumerate() {
-                    validate_import(*id, &plans[id].product, index, &product_for(target)?)?;
+                    let target = product_for(target)?;
+                    validate_import(*id, &plans[id].product, index, target.as_ref())?;
                 }
             }
             let mut acquired = parent.clone();
