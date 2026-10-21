@@ -1310,10 +1310,10 @@ impl CellProgramItem {
             .as_ref()
             .map(|value| value.turn.as_ref())
     }
-    pub fn native_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
+    pub fn native_products(&self) -> Option<&Arc<crate::artifacts::SealedTurnProducts>> {
         self.native_observations
             .as_ref()
-            .map(|value| value.products.as_ref())
+            .map(|value| &value.products)
     }
 }
 

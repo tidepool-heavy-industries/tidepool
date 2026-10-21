@@ -3606,6 +3606,32 @@ impl CompiledArtifacts {
 }
 
 impl SealedTurnProducts {
+    /// The execution context belongs to this completed output, including its
+    /// issued native custody independently of the original compilation inputs.
+    pub fn original_execution_context(
+        &self,
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original_execution().map(Arc::clone)
+    }
+
+    pub fn published_source_original_selection(
+        &self,
+        revision: &str,
+        public_root: &crate::declaration_context::ExactModuleIdentity,
+    ) -> Result<Arc<crate::declaration_context::PublishedSourceOriginalSelection>, CompileError>
+    {
+        let original = self.original_compile_input.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed(
+                "published source output lacks original input authority".into(),
+            )
+        })?;
+        self.original_execution()?.issue_published_source_original(
+            revision,
+            original.original_input_identity(),
+            public_root,
+        )
+    }
+
     pub fn native_source_products(&self) -> Result<ResolvedNativeSourceProducts<'_>, CompileError> {
         let resolved = self.target.resolve_sources()?;
         resolved.ensure_original_execution_custody(self.original_execution()?)?;

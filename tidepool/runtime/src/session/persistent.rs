@@ -2189,6 +2189,11 @@ impl PersistentSession {
         })
     }
 
+    pub(super) fn invalidate_compile_view_in(&self, scope: ScopeId) {
+        let replaced = self.compile_views.lock().remove(&scope);
+        drop(replaced);
+    }
+
     fn scoped_compile_view_in(&self, scope: ScopeId) -> Option<Arc<CachedCompileView>> {
         if !self.scopes.is_live(scope) {
             return None;
