@@ -422,11 +422,31 @@ impl PartialEq for IssuedNativeSelectionCompletion {
 }
 impl Eq for IssuedNativeSelectionCompletion {}
 
+/// The final target's ordered slots and its selected dependency completion are
+/// coissued from the same resolved physical target. Context custody may retain
+/// the dependency completion without granting another target these slots.
+#[derive(Debug)]
+pub struct CompletedNativeSelection {
+    completion: Arc<IssuedNativeSelectionCompletion>,
+    target_imports: Arc<[CompletedNativeImport]>,
+}
+impl CompletedNativeSelection {
+    pub fn completion(&self) -> &Arc<IssuedNativeSelectionCompletion> {
+        &self.completion
+    }
+    pub fn target_imports(&self) -> &[CompletedNativeImport] {
+        &self.target_imports
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NativeSelectionCompletions(imbl::Vector<Arc<IssuedNativeSelectionCompletion>>);
 impl NativeSelectionCompletions {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<IssuedNativeSelectionCompletion>> {
         self.0.iter()
+    }
+    fn one(completion: Arc<IssuedNativeSelectionCompletion>) -> Self {
+        Self(imbl::Vector::unit(completion))
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -463,6 +483,274 @@ impl PartialEq for NativeSelectionCompletions {
 }
 impl Eq for NativeSelectionCompletions {}
 
+/// Complete only this acquired target closure. Available unused HOME groups
+/// and unused captured package products do not become executable roots.
+pub(crate) fn complete_native_selection(
+    sources: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
+    products: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+    inherited: &NativeSelectionCompletions,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<Arc<CompletedNativeSelection>, CompileError> {
+    use crate::certified_products::SelectedNativeImport;
+    use tidepool_repr::execution_schema::{DefinitionsView, GlobalDecl};
+
+    let graphs = inherited
+        .iter()
+        .map(|old| Arc::clone(&old.packages))
+        .collect::<Vec<_>>();
+    let package_target =
+        |global: &GlobalDecl, seal: &[u8; 32]| -> Result<super::PackageCodeTarget, CompileError> {
+            // The table is the actual completed output's sealed products. A symbol
+            // names an export within that table; it never searches an inventory.
+            let candidates = products
+                .iter()
+                .filter(|product| {
+                    product.defining_interface().sha256() == seal
+                        && product
+                            .code()
+                            .exported_values()
+                            .any(|(symbol, _)| symbol == &global.identity)
+                })
+                .collect::<Vec<_>>();
+            if let Some(product) = candidates.first() {
+                if candidates.iter().any(|other| *other != *product) {
+                    return Err(failure("package slot has competing captured code products"));
+                }
+                return Ok(super::PackageCodeTarget::Fresh(
+                    ArtifactEntry::package_code(Arc::clone(product))
+                        .descriptor
+                        .id,
+                ));
+            }
+            let mut held = BTreeMap::new();
+            for graph in &graphs {
+                for binding in graph.bindings() {
+                    if binding.product().defining_interface().sha256() == seal
+                        && binding.exported_value(&global.identity).is_some()
+                    {
+                        held.insert(binding.binding(), binding);
+                    }
+                }
+            }
+            if held.len() != 1 {
+                return Err(failure(
+                    "package slot lacks one exact acquired code product",
+                ));
+            }
+            Ok(super::PackageCodeTarget::Held(
+                held.into_values().next().expect("one held product"),
+            ))
+        };
+    let mut package_roots = Vec::new();
+    let mut row_inputs = Vec::new();
+    for row in sources.groups() {
+        let mut prior = None;
+        for completed in inherited.iter() {
+            if let Some(old) = completed.rows.get(&row.binding()) {
+                if !old.product.same_issuance(row.group()) {
+                    return Err(failure("completed HOME row changed its exact product"));
+                }
+                if prior
+                    .as_ref()
+                    .is_some_and(|prior: &&Arc<CompletedNativeSourceRow>| {
+                        prior.imports != old.imports
+                    })
+                {
+                    return Err(failure("completed HOME row has competing exact slot links"));
+                }
+                prior = Some(old);
+            }
+        }
+        row_inputs.push((row, prior));
+    }
+    let mut gather = |links: &[SelectedNativeImport],
+                      definitions: DefinitionsView<'_>,
+                      prior: Option<&CompletedNativeSourceRow>|
+     -> Result<(), CompileError> {
+        if links.len() != definitions.globals().len()
+            || prior.is_some_and(|row| row.imports.len() != links.len())
+        {
+            return Err(failure(
+                "native completion slot count differs from its physical definitions",
+            ));
+        }
+        for (index, (link, global)) in links.iter().zip(definitions.globals()).enumerate() {
+            if let SelectedNativeImport::Package {
+                identity,
+                interface_digest,
+            } = link
+            {
+                if identity != &global.identity {
+                    return Err(failure(
+                        "package obligation differs from its physical global",
+                    ));
+                }
+                let selected = match prior.map(|row| &row.imports[index]) {
+                    Some(CompletedNativeImport::Package { binding, .. }) => {
+                        super::PackageCodeTarget::Held(binding.clone())
+                    }
+                    Some(_) => return Err(failure("completed HOME slot changed its import kind")),
+                    None => package_target(global, interface_digest)?,
+                };
+                package_roots.push(selected);
+            }
+        }
+        Ok(())
+    };
+    for (row, prior) in &row_inputs {
+        gather(
+            row.imports(),
+            row.group().group().definitions(),
+            prior.map(|row| row.as_ref()),
+        )?;
+    }
+    gather(
+        sources.target_link_requirements()?,
+        sources.target().definitions(),
+        None,
+    )?;
+    let mut plans = Vec::new();
+    let mut pending = package_roots.clone();
+    let mut reached = BTreeSet::new();
+    while let Some(target) = pending.pop() {
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let super::PackageCodeTarget::Fresh(id) = target else {
+            continue;
+        };
+        if !reached.insert(id) {
+            continue;
+        }
+        let product = products
+            .iter()
+            .find(|product| {
+                ArtifactEntry::package_code(Arc::clone(product))
+                    .descriptor
+                    .id
+                    == id
+            })
+            .ok_or_else(|| failure("reached package product is absent from completed output"))?;
+        let imports = product
+            .code()
+            .globals()
+            .iter()
+            .zip(product.import_interfaces())
+            .map(|(global, seal)| package_target(global, seal))
+            .collect::<Result<Vec<_>, _>>()?;
+        pending.extend(imports.iter().cloned());
+        plans.push(super::PackageCodePlan {
+            product: Arc::clone(product),
+            imports,
+        });
+    }
+    let packages = super::IssuedPackageCodeGraph::issue(
+        sources.acquired_artifacts(),
+        plans,
+        package_roots,
+        &graphs,
+        operation,
+    )?;
+    let mut roots = packages.roots().iter();
+    let selected_groups = sources
+        .groups()
+        .map(|row| row.binding())
+        .collect::<BTreeSet<_>>();
+    let mut retained = BTreeSet::new();
+    let mut close = |links: &[SelectedNativeImport],
+                     definitions: DefinitionsView<'_>|
+     -> Result<Arc<[CompletedNativeImport]>, CompileError> {
+        links
+            .iter()
+            .zip(definitions.globals())
+            .map(|(link, global)| match link {
+                SelectedNativeImport::Source { binding, value } => {
+                    if !selected_groups.contains(binding) {
+                        return Err(failure("native completion omitted an exact source child"));
+                    }
+                    Ok(CompletedNativeImport::Source {
+                        binding: *binding,
+                        value: *value,
+                    })
+                }
+                SelectedNativeImport::Retained {
+                    binding,
+                    identity,
+                    generation,
+                } => {
+                    retained.insert(super::NativeBindingRequirement {
+                        artifact_id: binding.artifact,
+                        identity: identity.clone(),
+                        generation: *generation,
+                    });
+                    Ok(CompletedNativeImport::Retained {
+                        binding: *binding,
+                        identity: identity.clone(),
+                        generation: *generation,
+                    })
+                }
+                SelectedNativeImport::Package {
+                    interface_digest, ..
+                } => {
+                    let binding = packages
+                        .get(
+                            *roots
+                                .next()
+                                .ok_or_else(|| failure("completed package root is absent"))?,
+                        )
+                        .ok_or_else(|| failure("completed package root lacks its acquired row"))?;
+                    let value = binding.resolve_export(
+                        global,
+                        definitions.signatures(),
+                        interface_digest,
+                    )?;
+                    Ok(CompletedNativeImport::Package { binding, value })
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Into::into)
+    };
+    let mut rows = imbl::OrdMap::new();
+    for (row, prior) in row_inputs {
+        let imports = close(row.imports(), row.group().group().definitions())?;
+        if prior.is_some_and(|prior| prior.imports != imports) {
+            return Err(failure(
+                "native completion rebound a previously completed HOME row",
+            ));
+        }
+        rows.insert(
+            row.binding(),
+            Arc::new(CompletedNativeSourceRow {
+                binding: row.binding(),
+                product: Arc::new(row.group().clone()),
+                imports,
+            }),
+        );
+    }
+    let target_imports = close(
+        sources.target_link_requirements()?,
+        sources.target().definitions(),
+    )?;
+    drop(close);
+    if roots.next().is_some() {
+        return Err(failure(
+            "completed package graph has unconsumed target slots",
+        ));
+    }
+    let artifacts = sources
+        .acquired_artifacts()
+        .retain_custody(packages.artifacts())?;
+    Ok(Arc::new(CompletedNativeSelection {
+        completion: Arc::new(IssuedNativeSelectionCompletion {
+            artifacts,
+            rows,
+            packages,
+            retained: retained.into_iter().collect::<Vec<_>>().into(),
+        }),
+        target_imports,
+    }))
+}
 /// Matched compiler roles and exact custody selected by their existing issuer.
 /// Required type interfaces do not grant lexical imports or native body demand.
 #[derive(Clone, Debug)]
@@ -2676,6 +2964,15 @@ impl CompilerSourceSupport {
 
     /// Import only already-issued immutable completion custody. Compiler roles,
     /// input decisions and availability stay with the receiving owner.
+    pub(crate) fn with_native_selection_completion(
+        &self,
+        completed: &CompletedNativeSelection,
+    ) -> Result<Self, CompileError> {
+        self.clone().with_native_completion_refs(&NativeSelectionCompletions::one(
+            Arc::clone(completed.completion()),
+        ))
+    }
+
     pub(crate) fn with_native_completions_from(
         &self,
         incoming: &Self,
