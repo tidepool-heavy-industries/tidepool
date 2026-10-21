@@ -1599,7 +1599,7 @@ tidepool_rust_test_cases(
         "certified_products::tests::original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners",
         "certified_products::tests::original_native_index_matches_linear_scan_for_generated_sparse_groups",
         "certified_products::tests::original_native_witness_reuses_nonempty_cycle_and_checks_selected_closure",
-        "certified_products::tests::original_native_witness_checks_package_drift_and_zero_group_downgrade",
+        "certified_products::tests::original_native_witness_retains_package_custody_and_refuses_zero_group_downgrade",
         "certified_products::tests::repeated_retained_core_promotion_preserves_exact_original_membership",
         "certified_products::tests::nonempty_exact_source_recipe_preserves_original_versions_and_selected_subsets",
         "artifact_inventory::tests::native_requirement_index_refuses_interface_edges",
