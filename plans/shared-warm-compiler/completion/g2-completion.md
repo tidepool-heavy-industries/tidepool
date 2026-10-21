@@ -35,6 +35,12 @@ World admission additionally checks that owner against held World facts.
 Observation-only configuration cannot mint native certificates: select an
 explicit portable operation or refuse. Do not infer provenance from a label.
 
+Native build actions use the declared, action-owned compiler service as well.
+Their endpoint binder requires that actual owned service and cannot fall back
+to direct compilation. Portable fixtures retain their isolated direct path.
+The action owns service settlement and retains primary failure separately from
+uncertain cleanup; a timeout must not be reported as confirmed settlement.
+
 Assign full binder identities before filtering. Preserve completed HOME
 components, structural signatures, representations, literals, constructors and
 site evidence. NativeReply's exact package obligations and seals constrain the
@@ -109,6 +115,14 @@ HOME and Package have exhaustive lease evidence; packages never masquerade as
 CachedHomeOwner/SourceBinder. Runtime keeps acquired product/binding proofs in
 existing ProgramFacts; codegen consumes validated scalar facts.
 
+Immutable HOME image preparation takes certified code and literal contracts,
+without requiring a runtime instance identity. Proving a selected closure has
+no live captures is separate from compiling its images. Only that closed
+selection and the current operation's admitted source can assign source custody
+to a newly created instance; reused instances keep their original ProgramFacts.
+Keep the same prepared-program owner through these stages instead of copying
+its full graph to establish an association.
+
 Extend existing BindingTable selection/custody, batch attachments/registration,
 rollback, capture and retirement. No parallel instance registry. Installer I
 and public notebook B are distinct domains. Repeated and sibling demand in the
@@ -127,6 +141,9 @@ PackageCode has an explicit artifact kind. Non-native is not synonymous with
 interface. Package products are not compiler-namespace conflict owners; two
 package groups in the same module are valid. Issue ordered package dependency
 edges through the existing inventory owner and validate exact exports.
+The package graph owns only its reached package payloads and proof ancestry.
+The enclosing completion explicitly combines those with its HOME custody;
+constructing a package graph must not retain the entire parent selection.
 
 Finish matched TPCERT11, TPHOMEOWNERS6, request29 and exchange framing, plus
 required snapshot version cutovers. No silent defaults or legacy adapters.
@@ -137,16 +154,23 @@ Preserve user source and memory; rebuild compiler products with real producers.
 | Owner | Primary responsibility | Adjacent review |
 |---|---|---|
 | Root | Shared contracts, stage/completion scaffolding, joined review, consolidation, G2 | Wrong-owner paths; needless reconstruction; honest tests |
-| E / engine_completion | Common native output/provenance; H demand callback/writer | Finite startup path; interface seal consumption; strict cutover |
-| N / native_offer_scope_repair | Initial/prefix composition; latent exact requirements; completion/World successor | Zero-name cells; cold reacquisition; stable inherited bindings |
+| E / engine_completion | H demand callback/writer and selected package-interface custody | TYPE-only witnesses; finite/item writer parity; strict cutover |
+| common_native_output | Native physical output owner, finite/Turn layouts and required-owned build endpoint | Actual producer controls; primary-error retention; no raw sealing fallback |
+| N / native_offer_scope_repair | Completion transforms and required v7 snapshot restoration | Zero-name cells; cold reacquisition; stable inherited bindings |
 | Q / audit_native_selection | Package graph/binding issuer; ordered edges; kinds/storage/recovery | Namespace separation; real positive round trip; forbidden alternate issuers |
 | W / review_world_lifetime_architecture | Common codegen custody, exact domain keys, leases, attachments, BindingTable | Rollback/retirement; structural export contracts; stale cache APIs |
 | L / audit_reload_ownership | Closed recipe, runtime link/adoption, sealed-output consumers, fallback deletion | Atomic tips; captured-A refusal; caller-loss visibility |
 | T / audit_warm_lifecycle | Production histories, fixture repair and G2 qualification | Independent oracles; source/public scope distinction; counted execution |
-| X / compiler_demand_transport | Direct CLI/raw-worker capability refusal; joined exchange controls | Original deadline; semantic refusal vs malformed transport; input custody |
+| X / compiler_demand_transport | Atomic World prefix carry and stage/prior-target composition | Both ordered-link checks; unchanged namespace; actual mixed histories |
+| original_reference_boundary | Coupled authenticated metadata and executable Original selection | Exact nominal references; foreign-owner refusals; latent HOME/recovery follow-up |
+| native_build_service | Declared native build service and retained action evidence | Portable isolation; settlement uncertainty; dependency fanout |
 
-N owns compiler_projection support transforms, World continuation and HOME-slot
-completion associations. Q owns artifact inventory, cold validation and
+N owns compiler_projection support transforms and HOME-slot completion
+associations. X owns World continuation and its artifact cursor; root owns the
+stage-input contract replacing broad receipt-demand reconstruction. The Original
+reference worker coordinates its prerequisite selection owner with that contract;
+latent HOME/recovery changes require a separately reviewed complete producer and
+consumer migration. Q owns artifact inventory, cold validation and
 declaration_context materialization/recovery sections, coordinating edits with N.
 W owns codegen demand/BindingTable/batch contracts; L owns runtime preparation,
 selection, snapshots and publication. E owns H CompilerRequest/CompilerProducts;
@@ -156,7 +180,10 @@ Root freezes constructor signatures with owners before editing their hot files.
 Each owner preserves existing WIP, compiles production and cfg consumers early,
 executes focused nonzero cases, reports exact base/tip and evidence, and sends
 review-ready/blocker/settled events. Reuse warm checkouts under admitted resource
-limits. Independent branches are not joined acceptance. No new speculative wave.
+limits. Independent branches are not joined acceptance.
+Bounded aesthetic improvements may proceed alongside this work after tracing
+their production consumers and reviewing effects on ownership, work, failure
+behavior and API simplicity. They do not substitute for the joined G2 history.
 
 ## Integration sequence and decisive evidence
 
