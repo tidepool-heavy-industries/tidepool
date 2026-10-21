@@ -120,17 +120,25 @@ contract removes.
 ### Occurrence coordinate and lifetime
 
 - The **envelope SHA** (`sha256(encodePackageGroup ...)`, the retained filename
-  and `PackageProductOutput.sha256`) is the producer-visible immutable payload
-  identity within one completed output. It is unique per distinct encoded
-  package body but is **not** a selection/binding identity: the same envelope
-  can be certified under different ordered import seals and therefore yield
+  and `PackageProductOutput.sha256`) is the immutable payload identity used for
+  byte deduplication. It is unique per distinct encoded package body but is
+  **not** an occurrence, selection or binding identity: the same envelope can
+  be certified under different ordered import seals and therefore yield
   different `ArtifactId`s.
-- An **occurrence row** is a receipt-scoped record
-  `{ envelope_sha256, unit, module, defining_interface_sha256,
-  defining_version_sha256, imports }`. Rows are ordered by `envelope_sha256`.
-- `Link = Local { envelope_sha256 }` (an exact fresh occurrence in this same
-  output) or `Inherited` (an exact already-issued occurrence; see below).
-- A local occurrence reference is valid only under the authenticated output
+- An **`OccurrenceId`** is a producer-local `u32` assigned by the writer,
+  receipt-scoped and stable within one manifest (equal to the row's position in
+  `occurrences`). It is distinct from envelope SHA, product SHA, `ArtifactId`
+  and `ArtifactBinding`. Every link and every target/HOME root resolves through
+  an `OccurrenceId`, never through an envelope or payload-map lookup.
+- An **occurrence row** is
+  `{ id, envelope_sha256, unit, module, defining_interface_sha256,
+  defining_version_sha256, imports }`. Rows are ordered by `id`. Two rows may
+  share one `envelope_sha256` only when their ordered import histories differ;
+  their identity remains their distinct `id`.
+- `Link = Local { occurrence: OccurrenceId }` (an exact fresh occurrence in
+  this same output) or `Inherited` (an exact already-issued occurrence; see
+  below).
+- A local `OccurrenceId` reference is valid only under the authenticated output
   that issued the manifest. The manifest never becomes durable authority;
   runtime binding authority stays with `IssuedPackageCodeGraph` /
   `ScopeProofV3`. `Link::Inherited` is a demand marker, never an
@@ -142,9 +150,9 @@ contract removes.
 
 | History | What differs | What the contract does |
 |---|---|---|
-| Two targets, same symbol/seal, different bodies | Same defining interface seal; different envelope SHA | Distinct `OccurrenceRow`s by envelope SHA; each target's `target_roots` names its own `Local` |
-| Transitive A -> B with a competing B | A's ordered child slot points at one B, another target supplies the other B | A's `imports` names B's exact envelope SHA; the other B stays custody but is never selected |
-| Same payload under two child histories | Same envelope SHA, different ordered import seals (or same seals, different child bodies) | Refused at the `PackageCodePlan` key (`ArtifactId`) unless per-projection scopes make them distinct; see residual gates |
+| Two targets, same symbol/seal, different bodies | Same defining interface seal; different envelope SHA | Distinct `OccurrenceRow`s; each target's `target_roots` names its row by `OccurrenceId` |
+| Transitive A -> B with a competing B | A's ordered child slot points at one B, another target supplies the other B | A's `imports` names B's `OccurrenceId`; the other B stays custody but is never selected |
+| Same payload under two child histories | Same envelope SHA; two distinct rows with different ordered `imports` | Two `OccurrenceRow`s share `envelope_sha256` but have distinct `id`s; links stay unambiguous. If their ordered import seals differ they yield distinct `ArtifactId`s and issue as two plans; if they collapse to one `ArtifactId`, `issue` refuses `ConflictingPlan` (typed), never a silent merge |
 
 ### Wire and version
 
@@ -169,7 +177,7 @@ contract removes.
 ```text
 PackageLinks {
   version: u8 = 1,
-  occurrences: [OccurrenceRow],              # ordered by envelope_sha256
+  occurrences: [OccurrenceRow],              # ordered by id == position
   target_roots: Map<String, [Link]>,         # key = CertifiedReceipt.targets key;
                                              # one Link per non-HOME package
                                              # global in that target's program
@@ -179,7 +187,8 @@ PackageLinks {
                                              # that group's program order
 }
 OccurrenceRow {
-  envelope_sha256: [u8;32],
+  id: u32,                                   # == position in `occurrences`
+  envelope_sha256: [u8;32],                  # shared payload; not the row key
   unit: String, module: String,
   defining_interface_sha256: [u8;32],
   defining_version_sha256: [u8;32],
@@ -187,19 +196,24 @@ OccurrenceRow {
 }
 ```
 
-`occurrences` holds every fresh package product in this output, emitted beside
-the existing flattened `package_products` list (same dedup by envelope SHA),
-not as a replacement. The `imports`, `target_roots` and `home_roots` lists are
-the single paired value that writers encode and Rust decodes; there is no
-independent zip or lookup that callers must keep in agreement. A `Link::Local`
-targets an `envelope_sha256` present in `occurrences`; a `Link::Inherited`
-carries no digest and must never be resolved by search.
+`occurrences` holds one row per producer-issued occurrence in this output,
+including repeated rows when one envelope is selected under different ordered
+children; it is emitted beside the flattened `package_products` list (which
+keeps its existing envelope-SHA dedup). The `imports`, `target_roots` and
+`home_roots` lists are the single paired value that writers encode and Rust
+decodes; there is no independent zip or lookup. A `Link::Local` carries an
+`OccurrenceId` that must index a row in `occurrences`; `Link::Inherited` carries
+no digest and must never be resolved by search.
 
 ### Producer rules
 
 - Build links inside `retainPreparedPackageTargets` from each
   `PreparedPackageTarget.packageTargetGroups` **before** the `concatMap` at
   `CompilerProducts.hs:514`, where the ordered groups are still paired.
+- Assign each fresh `ProjectedPackageGroup` a stable `OccurrenceId` in
+  deterministic emission order (target order, then group order within each
+  target), distinct from the byte-dedup key. The same encoded body may get one
+  row per distinct ordered-child history; never key rows by envelope SHA.
 - Target slot order is the package globals of `packageTargetProgram` in program
   order (the non-HOME globals computed at `CompilerRequest.hs:849-855`), not an
   arbitrary map order.
@@ -218,17 +232,20 @@ carries no digest and must never be resolved by search.
 
 ### Decoder checks (typed refusals at one boundary)
 
-1. Manifest present at the new version; every `Link::Local` envelope SHA is
-   present in `occurrences` (out-of-range/missing = refusal).
-2. `occurrences` envelope SHAs equal the authenticated `package_products`
-   envelope SHAs (crossed-scope/foreign occurrence = refusal).
+1. Manifest present at the new version; every `Link::Local.occurrence` is in
+   `[0, occurrences.len())` and row ids are exactly `0..n-1` with no duplicates
+   (out-of-range/missing/duplicate id = refusal).
+2. Every row's `envelope_sha256` is present in the authenticated
+   `package_products` (crossed-scope/foreign occurrence = refusal). Duplicate
+   `envelope_sha256` across rows is allowed only with distinct ordered
+   `imports`; byte-identical rows are a producer-defect refusal.
 3. `occurrences[i].imports.len() == product.code().globals().len()`;
    `target_roots[k].len()` equals that target's package requirement count;
    `home_roots[k].len()` equals that HOME group's package global count.
-4. Occurrence owner, defining interface and defining version must equal the
-   authenticated product owner, `defining_interface()` and defining version; a
-   Local ref whose envelope matches but whose owner or defining seal disagrees
-   is a crossed-scope refusal.
+4. Row `id` is its position; owner, defining interface and defining version must
+   equal the authenticated product owner, `defining_interface()` and defining
+   version; a Local ref whose row envelope matches but whose owner or defining
+   seal disagrees is a crossed-scope refusal.
 5. `Link::Inherited` resolves only to the exact held binding already carried in
    the inherited completions for that slot; retained HOME rows pass their prior
    imports through unchanged. Absent or more than one exact held binding is a
@@ -244,13 +261,18 @@ carries no digest and must never be resolved by search.
 ### Install and recovery
 
 - The decoder turns each `OccurrenceRow` into
-  `PackageCodePlan { product, imports: [PackageCodeTarget] }` where
-  `Link::Local` becomes `PackageCodeTarget::Planned(product.artifact_id())` and
-  `Link::Inherited` becomes `PackageCodeTarget::Held(exact_binding)`.
+  `PackageCodePlan { product, imports: [PackageCodeTarget] }`: it matches the
+  row's `envelope_sha256` to the fresh `CertifiedPackageCodeProduct` with that
+  envelope, `Link::Local(i)` becomes
+  `PackageCodeTarget::Planned(plan[i].artifact_id())`, and `Link::Inherited`
+  becomes `PackageCodeTarget::Held(exact_binding)`.
   `IssuedPackageCodeGraph::issue` (`artifact_inventory.rs:22961`) still owns
-  selection, reuse and `ScopeProofV3` issuance. The seal+symbol
-  `package_target` search (`compiler_projection.rs:1046-1080`) and its
-  competing-product failure are deleted with their callers.
+  selection, reuse and `ScopeProofV3` issuance. Two rows sharing an envelope
+  yield distinct plans when their ordered import seals differ (distinct
+  `ArtifactId`); if they produce one `ArtifactId` with different imports,
+  `issue` refuses `ConflictingPlan`. The seal+symbol `package_target` search
+  (`compiler_projection.rs:1046-1080`) and its competing-product failure are
+  deleted with their callers.
 - Recovery reborrows exact rows through `from_issued`
   (`artifact_inventory.rs:23310`); it never reconstructs a plan from a
   latest-head inventory or a `(seal, symbol)` lookup.
@@ -276,11 +298,14 @@ carries no digest and must never be resolved by search.
 ### Explicit residual gates for S/P review
 
 - `PackageCodePlan` remains keyed by `ArtifactId` (`artifact_inventory.rs:22814`,
-  issue at `artifact_inventory.rs:22961`). Equal payload with different ordered
-  children in one `issue` call is still `ConflictingPlan`. Per-projection
-  issuance scopes are expected to avoid this; if one real projection needs two
-  such occurrences, P stops and brings the graph-owner extension to S/P review
-  before widening the key.
+  issue at `artifact_inventory.rs:22961`). The producer-local `OccurrenceId`
+  keeps slot and child-history selection exact but does not widen the graph
+  key: equal payload with different ordered children resolves to one
+  `ArtifactId` only when their ordered import seals also agree, and that case
+  is still `ConflictingPlan`. Per-projection issuance scopes are expected to
+  avoid it; if one real projection needs two such occurrences under one
+  envelope with equal import seals, P stops and brings the graph-owner
+  extension to S/P review before widening the key.
 - The exact `Link::Inherited` representation (whether a fresh occurrence may
   import an inherited terminal at all, or inherited subtrees always pass
   through a retained parent row) is confirmed by P1's trace against the
