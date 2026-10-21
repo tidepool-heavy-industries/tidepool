@@ -114,7 +114,7 @@ impl CertifiedPackageCodeInterface {
         unit: &str,
         module: &str,
         witness: &PackageInterfaceWitness,
-        operation: &InventoryOperation,
+        validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Arc<Self>> {
         let relative = witness
             .selected_path
@@ -134,14 +134,18 @@ impl CertifiedPackageCodeInterface {
         let bytes = program
             .bytes(relative)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        operation.charge(bytes.len())?;
-        if sha(bytes) != witness.sha256 {
-            return Err(CertificationError::Mismatch(
-                "package interface captured digest",
-            ));
-        }
-        operation.reserve::<Self>(1)?;
-        operation.charge(unit.len().saturating_add(module.len()))?;
+        validation
+            .verify_captured(
+                &witness.selected_path,
+                &program.physical_directory().join(relative),
+                &witness.sha256,
+                bytes,
+            )
+            .map_err(package_validation_error)?;
+        validation.inventory.reserve::<Self>(1)?;
+        validation
+            .inventory
+            .charge(unit.len().saturating_add(module.len()))?;
         Ok(Arc::new(Self {
             unit: unit.to_owned(),
             module: module.to_owned(),
@@ -391,15 +395,8 @@ impl CertifiedPackageCodeProduct {
             &owner.unit,
             &owner.module,
             interface,
-            &operation,
+            validation,
         )?;
-        validation
-            .verify_captured(
-                &interface.selected_path,
-                &interface.sha256,
-                defining_interface.bytes(),
-            )
-            .map_err(package_validation_error)?;
         operation.reserve::<[u8; 32]>(code.globals().len())?;
         operation.reserve::<Arc<CertifiedPackageCodeInterface>>(code.globals().len())?;
         let mut import_interface_witnesses = Vec::with_capacity(code.globals().len());
@@ -434,11 +431,8 @@ impl CertifiedPackageCodeProduct {
                 &global.identity.unit,
                 &global.identity.module,
                 witness,
-                &operation,
+                validation,
             )?;
-            validation
-                .verify_captured(&witness.selected_path, &witness.sha256, captured.bytes())
-                .map_err(package_validation_error)?;
             import_interface_witnesses.push(captured);
             import_interfaces.push(witness.sha256);
         }
