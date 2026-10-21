@@ -1320,6 +1320,181 @@ mod tests {
 
     #[test]
     #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+    fn finite_canonical_package_interfaces_survive_output_release_and_recovery() {
+        use crate::recovery_artifacts::{
+            MaterializationMode, PackageInterfaceValidation, RecoveryArtifactError,
+        };
+
+        let source = tempfile::tempdir().unwrap();
+        let includes = [source.path().to_owned()];
+        let output = crate::artifacts::test_support::compile_invocation(
+            &crate::artifacts::CompileInvocation {
+                source: include_str!(
+                    "../../tests/fixtures/invocation-output/NativePackageTargets.hs"
+                ),
+                targets: &["first"],
+                include: &includes,
+                fallback_module_name: "NativePackageTargets",
+            },
+            |_, _, _| {},
+        )
+        .expect("actual canonical package owner through the finite compiler front door");
+        let producer = output
+            .module_inventory
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|module| module.module == "NativePackageTargets" && !module.boot)
+            .expect("actual generated source observation")
+            .source
+            .parent()
+            .unwrap()
+            .to_owned();
+        let canonical = output
+            .recovery_products
+            .iter()
+            .find(|product| product.owner().module == "NativePackageTargets")
+            .and_then(|product| product.module_interface())
+            .expect("actual canonical interface paired to its Original")
+            .clone();
+        assert!(
+            !canonical.package_interfaces().is_empty(),
+            "the actual source must require package interfaces"
+        );
+        assert!(
+            canonical.requirements().is_empty(),
+            "the fixture has no HOME type dependencies"
+        );
+        let tokens = canonical
+            .package_interfaces()
+            .iter()
+            .map(|(owner, token)| {
+                (
+                    owner.clone(),
+                    *token.sha256(),
+                    Arc::downgrade(token.bytes()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected_certificate = canonical.certificate_bytes().to_vec();
+        drop(output);
+        if producer.exists() {
+            assert!(producer.join("NativePackageTargets.hs").is_file());
+            assert!(producer.join("certified-products.cbor").is_file());
+            std::fs::remove_dir_all(&producer).unwrap();
+        }
+        assert!(
+            !producer.exists(),
+            "the compiler output directory must be unavailable"
+        );
+        assert!(tokens.iter().all(|(_, _, bytes)| bytes.upgrade().is_some()));
+
+        let retained = tempfile::tempdir().unwrap();
+        let io_before = crate::recovery_artifacts::package_interface_io();
+        let reference = crate::recovery_artifacts::materialize_module_interface(
+            retained.path(),
+            &canonical,
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Durable,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::recovery_artifacts::package_interface_io(),
+            io_before,
+            "canonical materialization consumes held bytes without reopening ambient package paths"
+        );
+        assert_eq!(reference.package_interfaces.len(), tokens.len());
+        for (owner, seal, _) in &tokens {
+            assert!(reference.package_interfaces.iter().any(|reference| (
+                &reference.unit,
+                &reference.module
+            ) == (&owner.0, &owner.1)
+                && &reference.sha256 == seal));
+        }
+        drop(canonical);
+        assert!(
+            tokens.iter().all(|(_, _, bytes)| bytes.upgrade().is_none()),
+            "durable references do not retain the original compiler's byte owners"
+        );
+
+        let recovered = crate::recovery_artifacts::recover_module_interface(
+            retained.path(),
+            &reference,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(recovered.certificate_bytes(), expected_certificate);
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: recovered.unit().to_owned(),
+            module: recovered.module().to_owned(),
+        };
+        let producer_sha256 = recovered.producer_sha256();
+        let entry = Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
+            recovered.clone(),
+        ));
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        assert!(view.capture_graph_selection().native_groups.is_empty());
+        let type_files = tempfile::tempdir().unwrap();
+        let io_before = crate::recovery_artifacts::package_interface_io();
+        crate::recovery_artifacts::materialize_selected_interface(
+            type_files.path(),
+            &owner,
+            entry,
+            producer_sha256,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::recovery_artifacts::package_interface_io(),
+            io_before,
+            "later TYPE demand uses restored package byte custody"
+        );
+
+        let mut missing_reference = reference.clone();
+        missing_reference.package_interfaces.pop();
+        assert!(!recovered.matches_recovery_reference(&missing_reference));
+        assert!(matches!(
+            crate::recovery_artifacts::recover_module_interface(
+                retained.path(),
+                &missing_reference,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+        let mut wrong_reference = reference.clone();
+        wrong_reference.package_interfaces[0].sha256[0] ^= 1;
+        assert!(!recovered.matches_recovery_reference(&wrong_reference));
+        assert!(matches!(
+            crate::recovery_artifacts::recover_module_interface(
+                retained.path(),
+                &wrong_reference,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+
+        let package_path = retained.path().join(&reference.package_interfaces[0].path);
+        let bytes = std::fs::read(&package_path).unwrap();
+        std::fs::remove_file(&package_path).unwrap();
+        assert!(
+            matches!(crate::recovery_artifacts::recover_module_interface(
+            retained.path(), &reference, &mut PackageInterfaceValidation::default(),
+        ), Err(RecoveryArtifactError::Unavailable(path)) if path == package_path)
+        );
+        std::fs::write(&package_path, b"corrupt package interface").unwrap();
+        assert!(
+            matches!(crate::recovery_artifacts::recover_module_interface(
+            retained.path(), &reference, &mut PackageInterfaceValidation::default(),
+        ), Err(RecoveryArtifactError::DigestMismatch(path)) if path == package_path)
+        );
+        std::fs::write(&package_path, bytes).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
     fn runtime_targets_complete_through_physical_output_with_native_products() {
         let root = tempfile::tempdir().unwrap();
         let includes = [root.path().to_owned()];

@@ -2061,6 +2061,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool-toolchain":
             finite_tests = ["artifacts::invocation_output::tests::" + name for name in (
                 "finite_package_targets_reuse_exact_bindings_without_crossing_target_slots",
+                "finite_canonical_package_interfaces_survive_output_release_and_recovery",
                 "runtime_targets_complete_through_physical_output_with_native_products",
                 "admitted_turn_uses_inline_sites_and_keeps_declarations_without_programs",
             )]
@@ -2072,8 +2073,8 @@ tidepool_buildscript_run(
                 '    name = "toolchain_finite_output_tests",',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [", render_strings(finite_tests, 8), "    ],",
-                "    expected_count = 3,", "    ignored = True,",
-                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1860000,",
+                "    expected_count = 4,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 2460000,",
                 "    case_compiler_modes = {" + ", ".join(
                     json.dumps(test) + ': "owned-resident"' for test in finite_tests
                 ) + "},",
