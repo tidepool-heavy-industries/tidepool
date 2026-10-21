@@ -20902,15 +20902,16 @@ pub(crate) mod request_tests {
     async fn public_module_world_hot_queries_skip_retained_history_preparation() {
         with_test_compiler_owner(|preparation_client| async move {
             use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
-            let (session, mut context, source, _root) = host_mount_fixture_with_effects(
+            let (session, mut context, mut source, _root) = host_mount_fixture_with_effects(
                 |_| {}, &[tidepool_mcp::introspection_decl()], "'[Introspection]",
             );
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
             let (captured, owner) = world_query_test_source_files_with_support(
-                &[vec![("WorldQuestion.hs", "module WorldQuestion where\nknown :: Int\nknown = 7\n")]],
+                &[vec![("WorldQuestion.hs", include_str!("fixtures/compiler-world-question.hs"))]],
                 &source.base_include,
             );
+            source.workbench_imports.extend_text("WorldQuestion (queryEcho)");
             context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
             workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
@@ -20961,66 +20962,107 @@ pub(crate) mod request_tests {
                     let PreparedCell { mut items, dependencies } = prepared;
                     assert_eq!(checked.items.len(), 1);
                     assert_eq!(items.len(), 1);
-                    let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
+                    let mut step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
                         ordinal: 1, total: 1, source: cell,
                     }, items.remove(0)).await.unwrap();
-                    let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
-                        panic!("actual currentScopeView effect must suspend");
-                    };
-                    let boundary = workbench_runner_for_test(&frontend)
-                        .capture_boundary(
-                            frontend_context.clone(),
-                            (*outcome).into(),
-                            frontend_context.placement.resource_scope,
-                        )
-                        .await
-                        .unwrap();
-                    let ResidentActorBoundary::CompilerQuery {
-                        continuation,
-                        query,
-                    } = boundary
-                    else {
-                        panic!("real currentScopeView boundary");
-                    };
-                    assert!(matches!(
-                        query,
-                        super::compiler_query::CompilerQuery::CurrentScopeView
-                    ));
-                    let resumed = frontend
-                        .resume_compiler_query(frontend_context.clone(), continuation, query)
-                        .await
-                        .expect("capture the actual query view before public-module inspection");
-                    let step = frontend
-                        .settle_item(frontend_context.clone(), *fragment, resumed)
-                        .await
-                        .unwrap();
-                    let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
-                        panic!("the same authored item must next suspend on public-module info");
-                    };
-                    let boundary = workbench_runner_for_test(&frontend)
-                        .capture_boundary(
-                            frontend_context.clone(),
-                            (*outcome).into(),
-                            frontend_context.placement.resource_scope,
-                        )
-                        .await
-                        .unwrap();
-                    let ResidentActorBoundary::Introspection {
-                        continuation,
-                        query,
-                        kind,
-                    } = boundary
-                    else {
-                        panic!("real structured inspection boundary");
-                    };
-                    assert_eq!(
-                        query.scope,
-                        tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into())
-                    );
-                    assert!(matches!(kind, StructuredInspectionKind::Info));
-                    let resumed = frontend
-                        .resume_structured_introspection(frontend_context.clone(), continuation, query, kind)
-                        .await;
+                    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                    enum QueryEffect {
+                        View,
+                        Info,
+                        Bindings,
+                        RowFit,
+                        Expression,
+                        Search,
+                    }
+                    use QueryEffect::*;
+                    let expected_queries = [
+                        View, Info, Bindings, RowFit, Expression, Search, Bindings, View,
+                    ];
+                    let mut final_response = None;
+                    for (index, expected) in expected_queries.iter().enumerate() {
+                        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+                            panic!("the authored item must suspend for {expected:?}");
+                        };
+                        let boundary = workbench_runner_for_test(&frontend)
+                            .capture_boundary(
+                                frontend_context.clone(),
+                                (*outcome).into(),
+                                frontend_context.placement.resource_scope,
+                            )
+                            .await
+                            .unwrap();
+                        let resumed = match boundary {
+                            ResidentActorBoundary::CompilerQuery {
+                                continuation,
+                                query,
+                            } => {
+                                use super::compiler_query::CompilerQuery;
+                                assert!(
+                                    matches!(
+                                        (*expected, &query),
+                                        (View, CompilerQuery::CurrentScopeView)
+                                            | (RowFit, CompilerQuery::RowFit { .. })
+                                            | (Expression, CompilerQuery::TypeOfExpression { .. })
+                                            | (Search, CompilerQuery::TypeSearch { .. })
+                                    ),
+                                    "wrong actual query at {index}: {query:?}"
+                                );
+                                frontend
+                                    .resume_compiler_query(frontend_context.clone(), continuation, query)
+                                    .await
+                            }
+                            ResidentActorBoundary::WorldScopeBindings {
+                                continuation,
+                                expected: expected_scope,
+                            } => {
+                                assert_eq!(*expected, Bindings);
+                                frontend
+                                    .resume_world_scope_bindings(
+                                        frontend_context.clone(),
+                                        continuation,
+                                        expected_scope,
+                                    )
+                                    .await
+                            }
+                            ResidentActorBoundary::Introspection {
+                                continuation,
+                                query,
+                                kind,
+                            } => {
+                                assert_eq!(*expected, Info);
+                                assert_eq!(
+                                    query.scope,
+                                    tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into())
+                                );
+                                assert!(matches!(kind, StructuredInspectionKind::Info));
+                                frontend
+                                    .resume_structured_introspection(
+                                        frontend_context.clone(),
+                                        continuation,
+                                        query,
+                                        kind,
+                                    )
+                                    .await
+                            }
+                            other => panic!(
+                                "wrong actual boundary for {expected:?}: {}",
+                                other.operation()
+                            ),
+                        };
+                        if index + 1 == expected_queries.len() {
+                            final_response = Some((fragment, resumed));
+                            break;
+                        }
+                        step = frontend
+                            .settle_item(
+                                frontend_context.clone(),
+                                *fragment,
+                                resumed.expect("real query must resume its authored continuation"),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    let (fragment, resumed) = final_response.expect("all actual query effects were observed");
                     if valid_answer {
                         let outcome = resumed.expect("the strict answer guard must accept the actual world answer");
                         let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
@@ -24255,12 +24297,12 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires the dedicated rooted generation retirement execution group"]
-    async fn actual_retirement_lost_body_delivery_retains_unconfirmed_publication() {
+    async fn captured_a_publication_refusal_survives_lost_body_delivery() {
         with_test_compiler_owner(|client| async move {
             quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
                 client, Some(crate::ActorPersistencePolicy::Ephemeral),
                 Some(PublicationFailureControl::RetirementNativeOwnerLoss(
-                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerPublishedDeliveryLost,
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerCapturedSourceRefusalDeliveryLost,
                 )),
             ).await;
         }).await;

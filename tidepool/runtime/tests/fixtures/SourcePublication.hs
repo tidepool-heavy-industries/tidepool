@@ -1,15 +1,13 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 module SourcePublication where
 
-data Node = Node Node
+import qualified SourcePublicationHome as Home
 
-{-# NOINLINE first #-}
-first :: Node
-first = Node second
+first :: Home.Node
+first = Home.first
 
-{-# NOINLINE second #-}
-second :: Node
-second = Node first
+second :: Home.Node
+second = Home.second
 
-result :: Node
-result = first
+result :: Home.Node
+result = Home.first

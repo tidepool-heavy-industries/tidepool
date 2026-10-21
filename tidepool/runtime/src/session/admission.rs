@@ -3358,7 +3358,7 @@ impl PersistentSession {
             }
             let mut imports = self.lib().workbench_imports_in(scope);
             imports.extend(&staged.turn.workbench_imports);
-            let import_specs = imports.into_specs();
+            let import_lines = imports.source_lines();
             let prior = state.snapshot.clone();
             let interfaces = prior.interfaces.clone();
             let native_imports = prior.native_imports.clone();
@@ -3399,7 +3399,7 @@ impl PersistentSession {
                         item,
                         prepared.projection.receipt(),
                         prepared.projection.context(),
-                        import_specs,
+                        import_lines,
                         delta
                             .iter()
                             .map(|(name, binding)| (name.as_str(), binding.as_ref().map(|binding| {

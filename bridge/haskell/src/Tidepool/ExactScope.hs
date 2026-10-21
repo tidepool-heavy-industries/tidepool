@@ -54,7 +54,7 @@ module Tidepool.ExactScope
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
   , WorldObservationProfile(..), WorldObservationScaffold, worldLexicalObservation
   , worldObservationProfile, worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
-  , worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
+  , worldLexicalImportLines, worldLexicalDeclaration, worldDeclarationInterface
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs
   , worldSuccessorFacts, worldSuccessorChangedAliases, decodeWorldSources, readWorldStringMap
@@ -73,7 +73,7 @@ import qualified Crypto.Hash.SHA256 as SHA
 import qualified Crypto.Hash as Crypto
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.Char (isHexDigit)
+import Data.Char (isHexDigit, isSpace)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', writeIORef)
 import Data.List (isPrefixOf, foldl')
 import Data.Maybe (isJust, isNothing)
@@ -2375,8 +2375,10 @@ data WorldDeclarationSurface = WorldDeclarationSurface ScopeInterfaceInput [Decl
 worldInputsLexicalSurface :: WorldInputFacts -> WorldLexicalSurface
 worldInputsLexicalSurface = ownedWorldInputsLexicalSurface
 
-worldLexicalImports :: WorldLexicalSurface -> [String]
-worldLexicalImports (WorldLexicalSurface imports _ _ _) = imports
+-- Complete source statements, already rendered by the publication owner.
+-- Template specifications without the import keyword are a distinct syntax.
+worldLexicalImportLines :: WorldLexicalSurface -> [String]
+worldLexicalImportLines (WorldLexicalSurface imports _ _ _) = imports
 
 worldLexicalDeclaration :: WorldLexicalSurface -> Maybe WorldDeclarationSurface
 worldLexicalDeclaration (WorldLexicalSurface _ declaration _ _) = declaration
@@ -3549,6 +3551,7 @@ readWorldLexicalSurface frontier root primary = do
       magic <- decodeStringCanonical
       unless (magic == "TPCWLEX2") (fail "unsupported compiler world lexical surface")
       imports <- importSpecs body
+      unless (all completeImport imports) (fail "published compiler imports require complete import lines")
       selected <- peekTokenType >>= \case
         TypeNull -> decodeNull >> pure Nothing
         _ -> do
@@ -3588,6 +3591,9 @@ readWorldLexicalSurface frontier root primary = do
       spec <- T.unpack <$> worldBindingText
       when (any (`elem` ['\0','\n']) spec) (fail "invalid published compiler import specification")
       pure spec
+    completeImport value = case splitAt 6 value of
+      ("import",first:rest) -> isSpace first && any (not . isSpace) rest
+      _ -> False
     requestTypes :: Decoder s (RequestHelperRecipe,RequestTypeSignatures)
     requestTypes = do
       worldArray 2

@@ -15,6 +15,8 @@ pub(crate) use startup::{
 };
 mod generation;
 #[cfg(test)]
+pub(crate) use generation::assert_confirmed_publication_notifies_once;
+#[cfg(test)]
 pub(crate) use generation::assert_source_registration_retirement_projection;
 #[cfg(test)]
 pub(crate) use generation::GenerationCompilerOwner;

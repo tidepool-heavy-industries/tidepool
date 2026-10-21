@@ -109,6 +109,38 @@ impl GenerationRetirementPublicationOwner {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn assert_confirmed_publication_notifies_once(
+    outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+) {
+    use preparation::PublicationNotificationObservation as Observation;
+    let Ok(ActorGenerationCommit::Published { generation, .. }) = outcome else {
+        panic!("notification control requires the actual confirmed publisher result");
+    };
+    let lifecycle =
+        crate::LifecycleHandle::start(generation.context().actor, crate::RetainedActorExit::new())
+            .await
+            .unwrap();
+    let mut owner = GenerationRetirementPublicationOwner::Pending {
+        lifecycle: lifecycle.clone(),
+        control: None,
+    };
+    assert_eq!(owner.observe(outcome), Observation::Accepted);
+    lifecycle.assert_publication_notification_attempts(1);
+    lifecycle.stop_owner_for_test().await;
+    // A new send to this same, confirmed-stopped recipient refuses. The
+    // original observation must retain its accepted transfer without replay.
+    let mut fresh = GenerationRetirementPublicationOwner::Pending {
+        lifecycle: lifecycle.clone(),
+        control: None,
+    };
+    assert_eq!(fresh.observe(outcome), Observation::Refused);
+    lifecycle.assert_publication_notification_attempts(2);
+    assert_eq!(owner.observe(outcome), Observation::Accepted);
+    assert_eq!(owner.observe(outcome), Observation::Accepted);
+    lifecycle.assert_publication_notification_attempts(2);
+}
+
 /// The canonical reservation owns one affine core and its transient driver.
 /// Native owner loss moves the core unchanged before disposing the driver.
 pub(super) struct GenerationRetirementRecord {
@@ -664,7 +696,7 @@ impl RunControlNativeCleanup {
 impl GenerationRetirementReplyMetadata {
     fn receipt(
         &self,
-        state: tidepool_bridge_effects::RlRetirementState,
+        state: Option<tidepool_bridge_effects::RlRetirementState>,
         blockers: Vec<tidepool_bridge_effects::RlBlocker>,
         primary: Option<tidepool_bridge_effects::RlCause>,
         secondary: Vec<tidepool_bridge_effects::RlCause>,
@@ -689,10 +721,10 @@ impl GenerationRetirementReplyMetadata {
     }
 
     fn unavailable(&self, detail: &str) -> GenerationRetirementResult {
-        use tidepool_bridge_effects::{RlCause, RlCauseKind, RlRetirementStage, RlRetirementState};
+        use tidepool_bridge_effects::{RlCause, RlCauseKind};
         self.receipt(
-            RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadSourcePublication),
-            vec![tidepool_bridge_effects::RlBlocker::ReloadUnclassifiedSourceWork(1)],
+            None,
+            Vec::new(),
             Some(RlCause {
                 kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
                 detail: detail.into(),
@@ -1081,7 +1113,7 @@ impl GenerationRetirementCore {
             let receipt = match completion {
                 GenerationRetirementCompletion::DefaultRefused { receipt, .. } => receipt.clone(),
                 GenerationRetirementCompletion::BPublished { .. } => metadata.receipt(
-                    State::ReloadBPublished(metadata.report.changed_modules.clone(), Vec::new()),
+                    Some(State::ReloadBPublished(metadata.report.changed_modules.clone(), Vec::new())),
                     Vec::new(),
                     None,
                     Vec::new(),
@@ -1092,7 +1124,7 @@ impl GenerationRetirementCore {
                     diagnostic_refusals,
                     diagnostic,
                 } => metadata.receipt(
-                    State::ReloadAReopened,
+                    Some(State::ReloadAReopened),
                     Vec::new(),
                     Some(cause(
                         Cause::ReloadPublicationFailed,
@@ -1146,7 +1178,7 @@ impl GenerationRetirementCore {
             } => (Some(cutoff), Some(custody)),
             GenerationRetirementPhase::ReservationFailed(error) => {
                 return metadata.receipt(
-                    State::ReloadRetirementFenced(Stage::ReloadCandidateSettlement),
+                    None,
                     Vec::new(),
                     Some(cause(
                         Cause::ReloadCandidateSettlementFailed,
@@ -1159,7 +1191,7 @@ impl GenerationRetirementCore {
         };
         if let Some(GenerationPublicationCustody::SourceRestoredPending { .. }) = custody {
             return metadata.receipt(
-                State::ReloadAReopened, Vec::new(), None,
+                Some(State::ReloadAReopened), Vec::new(), None,
                 vec![cause(Cause::ReloadAcknowledgementUnconfirmed, "original source is restored; actual publication obligations and diagnostic evidence remain retained".into())],
             );
         }
@@ -1181,18 +1213,16 @@ impl GenerationRetirementCore {
                         error.to_string(),
                     ));
                 }
-                match capture.blockers() {
-                    Ok(blockers) => blockers,
-                    Err(refusal) => {
-                        secondary.push(cause(
-                            Cause::ReloadAcknowledgementUnconfirmed,
-                            format!("retirement coordinate projection refused: {refusal:?}"),
-                        ));
-                        vec![tidepool_bridge_effects::RlBlocker::ReloadUnclassifiedSourceWork(1)]
-                    }
+                let mut blockers = Vec::new();
+                if let Err(refusal) = capture.append_blockers(&mut blockers) {
+                    secondary.push(cause(
+                        Cause::ReloadAcknowledgementUnconfirmed,
+                        format!("retirement coordinate projection refused: {refusal:?}"),
+                    ));
                 }
+                blockers
             }
-            None => vec![tidepool_bridge_effects::RlBlocker::ReloadUnclassifiedSourceWork(1)],
+            None => Vec::new(),
         };
         if let Some(GenerationRetirementCutoffPhase::RetirementFailed { error, .. }) = cutoff {
             secondary.push(cause(
@@ -1220,9 +1250,27 @@ impl GenerationRetirementCore {
             ),
         };
         let state = if custody.is_some_and(GenerationPublicationCustody::published) {
-            State::ReloadBPublished(metadata.report.changed_modules.clone(), Vec::new())
+            Some(State::ReloadBPublished(
+                metadata.report.changed_modules.clone(),
+                Vec::new(),
+            ))
         } else {
-            State::ReloadRetirementFenced(Stage::ReloadSourcePublication)
+            cutoff.and_then(|cutoff| {
+                let fence = match cutoff {
+                    GenerationRetirementCutoffPhase::AwaitCapture { fence, .. }
+                    | GenerationRetirementCutoffPhase::Captured { fence, .. }
+                    | GenerationRetirementCutoffPhase::Unconfirmed { fence, .. }
+                    | GenerationRetirementCutoffPhase::RetirementFailed { fence, .. } => fence,
+                    GenerationRetirementCutoffPhase::NotStarted
+                    | GenerationRetirementCutoffPhase::Refused(_)
+                    | GenerationRetirementCutoffPhase::RetirementInProgress { .. }
+                    | GenerationRetirementCutoffPhase::Retired { .. } => return None,
+                };
+                fence
+                    .pending_claims()
+                    .ok()
+                    .map(|_| State::ReloadRetirementFenced(Stage::ReloadSourcePublication))
+            })
         };
         metadata.receipt(state, blockers, Some(primary), secondary)
     }
@@ -1459,6 +1507,7 @@ enum GenerationRetirementProjectionRefusal {
     WatchIdentity,
     OperationCoordinate,
     PendingClaims,
+    WorkUnavailable,
     FrozenReloadReportMissing,
     OperationMissing,
 }
@@ -1528,10 +1577,18 @@ impl GenerationRetirementCapture {
         &self,
     ) -> Result<Vec<tidepool_bridge_effects::RlBlocker>, GenerationRetirementProjectionRefusal>
     {
+        let mut blockers = Vec::new();
+        self.append_blockers(&mut blockers)?;
+        Ok(blockers)
+    }
+
+    fn append_blockers(
+        &self,
+        blockers: &mut Vec<tidepool_bridge_effects::RlBlocker>,
+    ) -> Result<(), GenerationRetirementProjectionRefusal> {
         use tidepool_bridge_effects::{
             RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
         };
-        let mut blockers = Vec::new();
         for observed in &self.population.resources {
             blockers.push(Blocker::ReloadResourceBlocker(
                 retirement_resource(&observed.identity)?,
@@ -1598,16 +1655,16 @@ impl GenerationRetirementCapture {
                 retirement_compiler_reason(&observed.compiler.close, &observed.compiler.source),
             ));
         }
-        self.work.append_blockers(&mut blockers)?;
+        self.work.append_blockers(blockers)?;
         match self.pending_claims {
             Ok(0) => {}
             Ok(count) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(
                 i64::try_from(count)
                     .map_err(|_| GenerationRetirementProjectionRefusal::PendingClaims)?,
             )),
-            Err(_) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+            Err(_) => return Err(GenerationRetirementProjectionRefusal::PendingClaims),
         }
-        Ok(blockers)
+        Ok(())
     }
 }
 
@@ -1621,7 +1678,9 @@ impl GenerationRetirementWork {
             RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
         };
         match self {
-            Self::Unavailable => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+            Self::Unavailable => {
+                return Err(GenerationRetirementProjectionRefusal::WorkUnavailable)
+            }
             Self::Observed(work) => {
                 for observed in &work.invocations {
                     let actor = retirement_actor_identity(observed.actor)?;
@@ -2075,7 +2134,7 @@ fn reconcile_unstarted(
             "generation retirement refused because admitted dependent work remains",
         ) {
             Ok(source_settlement) => {
-                receipt.state = tidepool_bridge_effects::RlRetirementState::ReloadAReopened;
+                receipt.state = Some(tidepool_bridge_effects::RlRetirementState::ReloadAReopened);
                 let receipt = Arc::new(receipt);
                 let evidence = Arc::new(
                     crate::resident_actor::RetirementDiagnosticEvidence::default_refusal(&receipt),
@@ -2953,7 +3012,10 @@ impl RunState {
             preparation::PublicationTransfer::channel(actor, observer.clone(), myself.clone());
         #[cfg(test)]
         let writer = if lose_delivery {
-            writer.lose_delivery_after_completion_for_test()
+            let expected = reserved
+                .expected_generation()
+                .ok_or(GenerationPublicationDispatchFailure::AttemptChanged)?;
+            writer.lose_delivery_after_completion_for_test(expected.scope().scope())
         } else {
             writer
         };
@@ -3267,9 +3329,9 @@ impl RunState {
                 previous: report.previous.clone(),
                 candidate: report.candidate.clone(),
                 operation: Some(retirement_operation(operation_id)?),
-                state: RlRetirementState::ReloadRetirementFenced(
+                state: Some(RlRetirementState::ReloadRetirementFenced(
                     RlRetirementStage::ReloadCandidateSettlement,
-                ),
+                )),
                 blockers: capture.blockers()?,
                 outcomes: Vec::new(),
                 surface: report.surface.clone(),
@@ -4372,7 +4434,7 @@ pub(crate) enum GenerationRetirementNativeControl {
     PublicationBodyRefusal,
     WorkerLiveRefusal,
     WorkerNativeLossAfterBody,
-    WorkerPublishedDeliveryLost,
+    WorkerCapturedSourceRefusalDeliveryLost,
     BeforeSend,
     QueuedBeforeReceive,
     KillAfterReserve,

@@ -1,6 +1,6 @@
 //! Finite source publication and later cells use the actual B source owner.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tidepool_codegen::prepared_program::{
     NativeBindingKey, NativeInstanceLease, SourceInstanceDomain,
 };
@@ -222,6 +222,30 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         .collect::<Vec<_>>();
     let finite_root = root.path().join("finite");
     std::fs::create_dir(&finite_root).unwrap();
+    assert_ne!(
+        std::env::var("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS").as_deref(),
+        Ok("off"),
+        "the actual producer-removal control requires compiler diagnostic capture"
+    );
+    let artifact_root = PathBuf::from(
+        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .expect("the rooted case owns its compiler diagnostic output"),
+    );
+    let transaction_root = artifact_root.join("compiler-transactions");
+    let compiler_directories = || -> BTreeSet<PathBuf> {
+        match std::fs::read_dir(&transaction_root) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    assert!(entry.file_type().unwrap().is_dir());
+                    entry.path()
+                })
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(error) => panic!("observe this case's actual compiler outputs: {error}"),
+        }
+    };
+    let before_finite = compiler_directories();
     let entry = tidepool_testing::with_settlement(|settlement| {
         run_turn(
             TurnRequest {
@@ -241,6 +265,25 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         )
     })
     .expect("compile the real finite native source through the paired output owner");
+    let produced = compiler_directories()
+        .difference(&before_finite)
+        .filter(|directory| directory.join("turn.cbor").try_exists().unwrap())
+        .cloned()
+        .collect::<Vec<_>>();
+    let [producer_output] = produced.as_slice() else {
+        panic!("one actual finite turn producer output, observed {produced:?}");
+    };
+    let producer_output = producer_output.clone();
+    let producer_record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(producer_output.join("transaction.json")).unwrap())
+            .unwrap();
+    assert_eq!(producer_record["phase"], "compiler_completed");
+    assert_eq!(producer_record["compiler_process_success"], true);
+    assert_eq!(
+        producer_record["original_directory"].as_str(),
+        producer_output.to_str()
+    );
+    assert_ne!(producer_output, finite_root);
     let prepared = crate::session::PreparedSourceEntry::prepare(
         Arc::new(compiled(entry)),
         Arc::new(tidepool_codegen::prepared_program::ImageRegistry::new()),
@@ -399,6 +442,63 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     let after_expression = observed_package_cafs(&mut resident, public_b);
     assert!(assert_unchanged_public_caf(&after_expression, forced_key, first_caf).evaluated);
 
+    // The finite run has already sealed its acquired immutable products. Remove
+    // its actual disposable compiler output, independently of the session root.
+    assert!(producer_output.join("turn.cbor").try_exists().unwrap());
+    let retained_diagnostics = artifact_root.join("finite-producer-diagnostics");
+    std::fs::create_dir(&retained_diagnostics).unwrap();
+    let retained_record = retained_diagnostics.join("transaction.json");
+    assert!(!producer_record["files"].as_array().unwrap().is_empty());
+    std::fs::write(
+        &retained_record,
+        serde_json::to_vec_pretty(&producer_record).unwrap(),
+    )
+    .unwrap();
+    for name in [
+        "compiler-request.bin",
+        "compiler-cwd.bin",
+        "compiler.stderr",
+        "consumed-sources.json",
+    ] {
+        let source = producer_output.join(name);
+        if source.try_exists().unwrap() {
+            std::fs::copy(source, retained_diagnostics.join(name)).unwrap();
+        }
+    }
+    let consumed_sources = producer_output.join("consumed-sources");
+    if consumed_sources.try_exists().unwrap() {
+        let retained_sources = retained_diagnostics.join("consumed-sources");
+        std::fs::create_dir(&retained_sources).unwrap();
+        for entry in std::fs::read_dir(consumed_sources).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            std::fs::copy(entry.path(), retained_sources.join(entry.file_name())).unwrap();
+        }
+    }
+    std::fs::remove_dir_all(&producer_output).unwrap();
+    assert!(!producer_output.try_exists().unwrap());
+    std::fs::write(
+        artifact_root.join("finite-producer-removal.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": 1,
+            "removed_output": producer_output,
+            "completed_producer_record": retained_record,
+            "output_absent": true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // This ordinary closure binding retains an earlier B value and its exact
+    // package dependency. Request capture/mount is a separate companion gate.
+    public_package_binding(
+        &mut resident,
+        &recipe,
+        "packageCallback",
+        "packageCallback <- do\n  let captured = P.fst packageSecond\n  pure (\\(n :: Int) -> captured + if PackageProbe.packageProbe n > 0 then 1 else 0)",
+        None,
+    );
+
     // The optional warm association owns no replacement for the cold Tip
     // context. Rebuild through that actual context before demanding code again.
     let context = resident
@@ -470,7 +570,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         &mut resident,
         &recipe,
         "packageAfterCutoff",
-        "P.fst packageSecond + if PackageProbe.packageProbe 2 > 0 && PackageProbe.packageLater 37 == 23 then 1 else 0",
+        "packageCallback 2 + if PackageProbe.packageLater 37 == 23 then 0 else 1000",
         44,
     );
     let callback_selection = public_package_cell(
@@ -520,6 +620,17 @@ fn public_package_cell(
     expression: &str,
     expected: i64,
 ) -> Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection> {
+    let source = format!("{name} <- pure (({expression}), T.pack (P.show ({expression})))");
+    public_package_binding(resident, recipe, name, &source, Some(expected))
+}
+
+fn public_package_binding(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    name: &str,
+    source: &str,
+    expected: Option<i64>,
+) -> Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection> {
     let public = resident.public_context();
     let execution = begin_fixture_execution(resident);
     let private = execution.private_scope();
@@ -529,9 +640,8 @@ fn public_package_cell(
             ..public
         })
         .unwrap();
-    let source = format!("{name} <- pure (({expression}), T.pack (P.show ({expression})))");
     let (bound, compiled, reservation) =
-        compile_checked_binding(resident, recipe, &source, execution.clone());
+        compile_checked_binding(resident, recipe, source, execution.clone());
     let selection = compiled
         .certification
         .as_ref()
@@ -556,10 +666,13 @@ fn public_package_cell(
     let ResidentOutcome::Completed { result, .. } = completed else {
         panic!("the checked public-B package cell must execute")
     };
-    assert_eq!(
-        result.to_json(),
-        serde_json::json!([expected, expected.to_string()])
-    );
+    assert_eq!(binder.name, name);
+    if let Some(expected) = expected {
+        assert_eq!(
+            result.to_json(),
+            serde_json::json!([expected, expected.to_string()])
+        );
+    }
     publish_checked_fixture(resident, &execution, 1);
     resident.set_run_context(public).unwrap();
     drop(compiled);

@@ -111,11 +111,12 @@ retirementSummary (ReloadRetirementReceipt previous candidate operation state bl
   where
     revision (SourceRevision identity _ _) = identity
     stateSummary = case state of
-      ReloadAReopened -> "Source " <> revision previous <> " reopened; candidate " <> revision candidate
+      Nothing -> "Reload source outcome was not observed; inspect the retained operation before retry."
+      Just ReloadAReopened -> "Source " <> revision previous <> " reopened; candidate " <> revision candidate
         <> " was not published; stopped resources remain stopped."
-      ReloadRetirementFenced stage ->
+      Just (ReloadRetirementFenced stage) ->
         "Reload remains fenced at " <> stageSummary stage <> "; reconcile before retry."
-      ReloadBPublished _ warnings -> "Published source " <> revision candidate <> surfaceSummary diff
+      Just (ReloadBPublished _ warnings) -> "Published source " <> revision candidate <> surfaceSummary diff
         <> " Notebook reset; re-import modules and recreate notebook bindings before use."
         <> sections "Warnings" warnings
     surfaceSummary (ReloadSurfaceDiff added removed changed) =

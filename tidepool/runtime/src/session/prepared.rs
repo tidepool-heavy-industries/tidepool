@@ -5485,24 +5485,36 @@ pub(super) mod tests {
 
     pub(in crate::session) fn compile_source_publication_fixture(
     ) -> &'static crate::RuntimePreparedTargets {
-        static TARGETS: std::sync::OnceLock<crate::RuntimePreparedTargets> =
+        static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, crate::RuntimePreparedTargets)> =
             std::sync::OnceLock::new();
-        TARGETS.get_or_init(|| {
-            tidepool_testing::eval_harness::require_extract();
-            tidepool_testing::with_settlement(|settlement| {
-                crate::compile_runtime_targets(
-                    &tidepool_toolchain::artifacts::CompileInvocation {
-                        source: include_str!("../../tests/fixtures/SourcePublication.hs"),
-                        targets: &["result", "first", "second"],
-                        include: &[tidepool_testing::eval_harness::prelude_path()],
-                        fallback_module_name: "SourcePublication",
-                    },
-                    |_, _, _| {},
-                    settlement,
+        &FIXTURE
+            .get_or_init(|| {
+                tidepool_testing::eval_harness::require_extract();
+                let source = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    source.path().join("SourcePublicationHome.hs"),
+                    include_str!("../../tests/fixtures/SourcePublicationHome.hs"),
                 )
+                .unwrap();
+                let targets = tidepool_testing::with_settlement(|settlement| {
+                    crate::compile_runtime_targets(
+                        &tidepool_toolchain::artifacts::CompileInvocation {
+                            source: include_str!("../../tests/fixtures/SourcePublication.hs"),
+                            targets: &["result", "first", "second"],
+                            include: &[
+                                source.path().to_path_buf(),
+                                tidepool_testing::eval_harness::prelude_path(),
+                            ],
+                            fallback_module_name: "SourcePublication",
+                        },
+                        |_, _, _| {},
+                        settlement,
+                    )
+                })
+                .expect("compile the actual source publication producer");
+                (source, targets)
             })
-            .expect("compile the actual source publication producer")
-        })
+            .1
     }
 
     pub(in crate::session) fn install_source_publication_fixture(

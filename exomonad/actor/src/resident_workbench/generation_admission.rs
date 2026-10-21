@@ -2645,8 +2645,8 @@ mod tests {
         fixture.source.claim().unwrap();
     }
 
-    #[test]
-    fn publisher_replacement_visibility_waits_for_ack_before_selection_and_source() {
+    #[tokio::test]
+    async fn publisher_replacement_visibility_waits_for_ack_before_selection_and_source() {
         let fixture = PublicationFixture::after_confirmed_c();
         // D is a real new canonical scope, not bootstrap C's already-owned fence.
         assert!(!fixture
@@ -2663,11 +2663,12 @@ mod tests {
             .install(fixture.generation.clone()));
         // Visibility records actual D while the actual ACK owner has not completed.
         fixture.assert_candidate_unavailable();
+        let outcome = owner.complete(Ok(super::super::ActorGenerationCommit::Published {
+            generation: fixture.generation.clone(),
+            cancellation_pending: false,
+        }));
         assert!(matches!(
-            owner.complete(Ok(super::super::ActorGenerationCommit::Published {
-                generation: fixture.generation.clone(),
-                cancellation_pending: false,
-            })),
+            &outcome,
             Ok(super::super::ActorGenerationCommit::Published { .. })
         ));
         assert!(Arc::ptr_eq(
@@ -2675,6 +2676,7 @@ mod tests {
             &fixture.generation
         ));
         drop(retained_d.claim().unwrap());
+        crate::local_actor::run_control::assert_confirmed_publication_notifies_once(&outcome).await;
     }
 
     #[test]
@@ -3431,8 +3433,8 @@ mod tests {
             directory
                 .assert_retirement_owner_loss_without_attempt(directory_task)
                 .await;
-        } else if control == crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerPublishedDeliveryLost {
-            directory.assert_generation_publication_delivery_lost(
+        } else if control == crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerCapturedSourceRefusalDeliveryLost {
+            directory.assert_captured_source_refusal_delivery_lost(
                 directory_task, preparation, state, expected, publication, target,
                 kernel.lifecycle().clone(),
             ).await;

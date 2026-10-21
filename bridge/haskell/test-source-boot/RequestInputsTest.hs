@@ -64,7 +64,7 @@ import GHC.Unit.Module (mkModule, mkModuleName)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedCellWithFlags, BoundBinder(..)
+import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, prologueImports, analyzeOrderedCellWithFlags, BoundBinder(..)
   , CellSourcePlan(..), CellAnalysisItem(..), TurnKind(..), StmtBinders(..), cellInferenceSegments
   , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
 import Tidepool.DependencyEvidence
@@ -83,7 +83,7 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, optionalInputByteLimit, commitWorldInputRetention
-  , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration
+  , worldInputsLexicalSurface, worldLexicalImportLines, worldLexicalDeclaration
   , WorldObservationProfile(..), worldLexicalObservation, worldObservationProfile
   , worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
   , worldInputsSources, worldSourceDomainSha256
@@ -93,6 +93,7 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
   , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
   , preparedCompilationWorldInputs, prepareCompilationOriginals)
+import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
@@ -537,10 +538,10 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     _ -> fail "genuine primary control lost its actual row owner"
   unless (all (worldHasSelectedSource original) selectedOwners)
     (fail "genuine Context source owners lost their exact acquired association")
-  unless (null (worldLexicalImports (worldInputsLexicalSurface original))
+  unless (null (worldLexicalImportLines (worldInputsLexicalSurface original))
       && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface original)))
     (fail "empty published lexical selection was inferred from other acquired interfaces")
-  let orderedImports = ["qualified Data.List as L","Data.Map ()","Data.Set hiding (map)"]
+  let orderedImports = ["import qualified Data.List as L","import qualified Data.Map as Empty ()","import Data.Set hiding (map)"]
       importsBody = encode (TList [TString "TPCWLEX2",TList (map text orderedImports),TNull,TNull])
   importsRoot <- worldFixtureCID importsBody
   importsPairs <- reachable [primary,emptyBinding,importsRoot]
@@ -548,10 +549,32 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   imported <- readPacket "world-v5-ordered-lexical" (packet 5
     (restorationWithLexical 5 context primary emptyBinding importsRoot)
     primary importsPairs base [] acquisition emptyBinding)
-  unless (worldLexicalImports (worldInputsLexicalSurface imported) == orderedImports
+  unless (worldLexicalImportLines (worldInputsLexicalSurface imported) == orderedImports
       && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface imported))
       && worldInputsIdentityBytes imported /= worldInputsIdentityBytes original)
     (fail "world product lost ordered import qualification, explicit empty selection or lexical identity")
+  let rawImportsBody = encode (TList [TString "TPCWLEX2",TList [text "qualified Data.List as L"],TNull,TNull])
+  rawImportsRoot <- worldFixtureCID rawImportsBody
+  rawImportsPairs <- reachable [primary,emptyBinding,rawImportsRoot] ((rawImportsRoot,rawImportsBody):blockPairs)
+  requireCorrupt (Just "published compiler imports require complete import lines") "world-raw-import-spec"
+    (packet 5 (restorationWithLexical 5 context primary emptyBinding rawImportsRoot)
+      primary rawImportsPairs base [] acquisition emptyBinding)
+  -- Exercise the decoded syntax through the same GHC checked pipeline used by
+  -- observations, rather than only comparing a serialized list of strings.
+  let importLines = worldLexicalImportLines (worldInputsLexicalSurface imported)
+      probePath = work </> "WorldLexicalProbe.hs"
+      writeProbe expression = writeFile probePath (unlines
+        (["module WorldLexicalProbe where"] ++ importLines ++ ["value = " ++ expression]))
+      checkProbe = void (runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile
+        Nothing probePath [work] Nothing)
+  writeProbe "L.reverse ([1,2] :: [Int])"
+  checkProbe
+  writeProbe "Empty.empty"
+  emptyImport <- try checkProbe :: IO (Either SomeException ())
+  case emptyImport of
+    Left failure | Just _ <- sourceFailureDiagnostics failure -> pure ()
+    Left failure -> throwIO failure
+    Right () -> fail "explicit empty import made an unselected package name available"
   let observationFragment = "module WorldObservation where\nobservation = let value = value in value\n"
       observationTerm profile native = TList [profile,text observationFragment,TList (map text orderedImports),native]
       observationPacket value = do
@@ -598,7 +621,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   unless (worldInputsIdentityBytes (worldSuccessorFacts next) == worldInputsIdentityBytes imported
       && worldInputsCompilerIdentity (worldSuccessorFacts next) == worldInputsCompilerIdentity imported
       && worldInputsRetainedCharge (worldSuccessorFacts next) == worldInputsRetainedCharge imported
-      && worldLexicalImports (worldInputsLexicalSurface (worldSuccessorFacts next)) == orderedImports
+      && worldLexicalImportLines (worldInputsLexicalSurface (worldSuccessorFacts next)) == orderedImports
       && Set.null (worldSuccessorChangedAliases next))
     (fail "successor lexical facts/charge differ from independent full cold admission")
   reverted <- readSuccessor "lexical-revert" (worldSuccessorFacts next) (successor product [(lexical,maybe (error "genuine lexical block absent") id (lookup lexical blockPairs))])
@@ -636,6 +659,11 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         primary changedPairs base [] acquisition emptyBinding)
   withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
+    let template = "module LexicalCell where\n{{CELL_IMPORTS}}\n{{CELL_DECLS}}\ncell = do { {{CELL_BODY}} }\n"
+    lexicalPlan <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment) template (unlines importLines))
+      >>= either (liftIO . fail . show) pure
+    unless (length (prologueImports (cellPlanPrologue lexicalPlan)) == length orderedImports)
+      (liftIO (fail "cell lexical parser lost complete published import statements"))
     owner <- liftIO newExactInputOwner
     (admitted,types) <- liftIO (readWorldSourceInputs owner environment original selectedOwners) >>= either (liftIO . fail) pure
     unless (Map.keysSet admitted == Set.fromList selectedOwners

@@ -522,6 +522,9 @@ impl LifecycleHandle {
         &self,
         generation: Arc<crate::resident_workbench::ActorGeneration>,
     ) -> super::GenerationPublicationNotification {
+        #[cfg(test)]
+        self.publication_notification_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.address.cast(LifecycleCommand::Resident(Box::new(
             ResidentCommand::GenerationPublished(generation),
         ))) {

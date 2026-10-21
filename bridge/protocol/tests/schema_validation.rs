@@ -477,6 +477,10 @@ fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
     };
     assert_eq!(fields.len(), 10);
     assert_eq!(
+        fields[3].ty,
+        HsType::maybe(HsType::Named("ReloadRetirementState"))
+    );
+    assert_eq!(
         fields.last().unwrap().ty,
         HsType::Named("ReloadOperationalSettlement")
     );

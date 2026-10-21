@@ -1420,6 +1420,12 @@ def facade_test_cases(binary):
         ("facade_reload_frozen_source_test", [
             "actor_host::coherent_reload_acceptance_tests::staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_cancellation_test", [
+            "actor_host::coherent_reload_acceptance_tests::cancelled_staged_reload_preserves_a_for_a_later_default_reload",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_caller_loss_test", [
+            "actor_host::coherent_reload_acceptance_tests::staged_reload_retains_confirmed_b_when_the_caller_reply_is_lost",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_reload_force_refusal_test", [
             "actor_host::coherent_reload_acceptance_tests::unsupported_force_preserves_the_original_generation_for_a_later_default_reload",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
@@ -1835,6 +1841,21 @@ tidepool_buildscript_run(
                     runtime_arguments(host_env, host_resources, host_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                end_history = "session::resident::activation_input_tests::compiler_end_history::physical_cell_response_without_end_ack_refuses_publication"
+                end_env, end_resources, end_worker = compiler_service_test_inputs(
+                    package_name, "runtime_compiler_end_history_test"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_compiler_end_history_test",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([end_history], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(end_history) + ': "owned-resident"},',
+                    runtime_arguments(end_env, end_resources, end_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 package_history = "session::resident::activation_input_tests::finite_source_world_history::finite_source_original_feeds_public_world_cells_after_prior_cutoff"
                 package_env, package_resources, package_worker = compiler_service_test_inputs(
                     package_name, "runtime_package_source_history_test"
@@ -1894,7 +1915,7 @@ tidepool_buildscript_run(
                 )
                 retirement_tests = [
                     "resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff",
-                    "resident_workbench::request_tests::actual_retirement_lost_body_delivery_retains_unconfirmed_publication",
+                    "resident_workbench::request_tests::captured_a_publication_refusal_survives_lost_body_delivery",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
@@ -1970,7 +1991,7 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
-                delivery_loss_control = "resident_workbench::request_tests::actual_retirement_lost_body_delivery_retains_unconfirmed_publication"
+                delivery_loss_control = "resident_workbench::request_tests::captured_a_publication_refusal_survives_lost_body_delivery"
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
                     '    name = "actor_generation_retirement_delivery_loss_tests",',
@@ -2130,7 +2151,7 @@ tidepool_buildscript_run(
                 '    name = "toolchain_retained_entry_refusal_test",',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [" + json.dumps(retained_case) + "],",
-                "    expected_count = 1,", "    ignored = True,",
+                "    expected_count = 1,",
                 "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                 '    case_compiler_modes = {' + json.dumps(retained_case) + ': "owned-resident"},',
                 runtime_arguments(env, resources, worker),

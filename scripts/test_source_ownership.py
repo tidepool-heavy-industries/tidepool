@@ -97,6 +97,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
     ('tidepool-runtime', frozenset({
         'tidepool/runtime/src/retained_core_receive_tests.rs',
         'tidepool/runtime/src/typed_receive_test_support.rs',
+        'tidepool/runtime/src/session/activation_input_tests/compiler_end_history.rs',
         'tidepool/runtime/src/session/activation_input_tests/finite_source_world_history.rs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',

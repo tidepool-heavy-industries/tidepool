@@ -1,81 +1,112 @@
-# Joined discovery and notebook gates
+# Joined compiler/runtime verification gates
 
-Actual private-input receipts remain rooted at `644c769540`.
-N, R and W source tranches are now joined; their combined execution is under qualification.
-Component counts below remain attached to their measured revisions.
-Use the existing warm receiving checkout; do not provision a cold lane.
-Record its actual clean OID before admission and keep each output directory fresh.
-These named wrappers already select the cases, count and owned-resident resources;
-do not append another `--exact` or substitute the generic library wrapper.
+Source-disposition checkpoint: `1bc62389107534661207cc6ca1cd413a768117c5`, on
+`integration/compiler-query-warm-final`. The executed compiler/custody cohort
+below remains exact `b856a75d5c`; later source changes do not inherit its results.
+Integrated source is not executed acceptance. This ledger separates compiler/custody checks,
+predecessor results and held ordinary-workflow gates. The
+[G2 contract](../g2-completion.md) owns acceptance; the
+[compiler map](../../../../docs/compiler-work-map.md) owns current dataflow.
 
-| Gate | Canonical command | Required observation | Current evidence |
-|---|---|---|---|
-| Semantic discovery, exact 1 | `swarm-build just test-native //exomonad/host:facade_introspection_service_test --output-dir /srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/verification-runs/all-five-01 --retain-artifacts` | Actual published example; exact structured symbol/type/source fields; all five effects; absent canonical name and malformed identity; same binding/view before and after queries; real ordinary `readFile` result; actual publication then consumed stale pin refusal | Source joined through `5965b14bd3` and `0983041060`; shared prepared fixture compiled. No hosted all-five passing execution. |
-| Answer settlement fence, exact 1 | `swarm-build just test-native //exomonad/actor:actor_world_status_test --output-dir /srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/verification-runs/status-fence-01 --retain-artifacts` | Real scoped query completion, genuine intervening publication, shared final validator returns ScopeChanged, retained type metadata unchanged | Last executed `51216eb9d6`: 0/1, first literal query failed parser/noquote before publication. Precise diagnostics and status error propagation are now joined as `41d112c96c`, `b7e70d0aec`, `2f0cf83e87`; no repaired execution yet. |
-| Rooted notebook contract, exact 4 | `swarm-build just test-native //exomonad/actor:actor_notebook_contract_tests --output-dir /srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/verification-runs/notebook-four-01 --retain-artifacts` | Parked A does not block B acknowledgement/control; malformed reload releases its invocation; unavailable reload preserves independent cells; unavailable generation does not recapture source or discard bindings | Last executed `51216eb9d6`: 0/4 at first reads with empty helper-source ownership. Genuine retained source owner repair `e1b568d838` is joined/compiled, not replayed. |
-| Public-module owner/hot controls, exact 2 | `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --output-dir /srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/verification-runs/public-query-two-01 --retain-artifacts` | Exact public answer/pin, wrong-name exception/no publication, source-domain invalidation, hot counters, closed-source refusal | Last executed `51216eb9d6`: 1/2. Positive/wrong-name/history/cost reached, final exact closed-source assertion failed. This does not qualify scoped all-five discovery. |
+## Current joined compiler/custody qualification
 
-The output names above are reserved examples, not existing passing receipts.
-If a path has been used, select a new numbered root; never erase/reuse evidence.
-Named targets declare compiler deployment, frontend, worker, retained service-source
-configuration and original source acquisition/retirement. Capture the runner's
-actual executable hashes, selected/executed counts, source OID and cleanup result.
-Read stream paths from their receipts and verify their recorded bytes/hash.
-These service-resource runs do not replace one exact frozen-bundle qualification.
+`engine_completion` owns this bounded qualification at exact `b856a75d5c` in
+`/srv/swarm/checkouts/tidepool-demand-products-20261020`. Its
+[run plan](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-run-plan.json)
+retains complete command arrays, exact selectors, expected counts and output
+paths. Expected counts below are selection obligations, not executed counts.
+The [terminal observation](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-observation.json)
+records 19 executed/passed tests: finite 5, components 12, snapshot 1 and Haskell
+sidecar 1, all exit 0. It retains per-case report and launch-input hashes. The
+Haskell binary hash was measured after execution on unchanged source/output;
+its Tasty result is not owned-service cleanup evidence. No World, installer or
+actual catalog acceptance follows from this cohort.
 
-## Parcel and dependency frontier
+| Gate | Exact command or plan entry | Recorded disposition |
+|---|---|---|
+| Production and cfg(test) consumers | `swarm-build just check tidepool-toolchain tidepool-runtime exomonad-actor` | Passed: exit 0, 837 local actions, Build `d85a2fec-150c-4104-a586-be3c06106364`. [Log](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-check-01.log). Compilation executed no tests. |
+| Finite output/custody, expected 5 | Run-plan `commands.finite`: `swarm-build just test-native //tidepool/toolchain:toolchain_finite_output_tests` with the recorded fresh output root | Passed: selected 5, executed 5, passed 5, exit 0, Build `791de4d4-7f61-4ef8-a3e4-b08ee8f7c041`. [Log](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-finite-01.log); [counted reports](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-finite-01/). All five record confirmed process/compiler cleanup and complete diagnostics. Actual package-only closure/owner assertions ran. No World/catalog/installer acceptance follows. |
+| HOME/interop/completion/publication, expected 12 | Run-plan `commands.components`: exact library selectors, expected count 12, serial jobs | Passed: executed/passed 12, exit 0, Build `c086ea56-3257-4198-bec8-27fe1c1fb906`. HOME 4, interop 1, completion row index 2, publication/refusal 5, including the revised late-HOME refusal. Process cleanup confirmed; compiler cleanup not observed for these data consumers. [Log](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-components-01.log). |
+| Runtime snapshot refusal, expected 1 | Run-plan `commands.snapshot`: exact `snapshot_readers_refuse_previous_package_custody_format` | Passed: executed/passed 1, exit 0, Build `efdab6bf-072d-4eca-9536-95041d9d3656`. Process cleanup confirmed; compiler cleanup not observed. [Log](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-snapshot-01.log). |
+| Haskell paired output, expected 1 | Run-plan `commands.hsidecar`: `//bridge/haskell:source_boot_product_reuse_test`, pattern `finite native output separates package products with captured interfaces` | Passed: executed/passed 1, exit 0, Build `ba88cb9c-5174-43a7-9005-4dc26c8d519b`. Tasty case wall 2.32 s; retained binary/hash in the terminal observation. No owned-service cleanup claim. [Log](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-custody-b856-hsidecar-01.log). |
+| Actual native catalog | `native_build_service` owns resource admission and the production command | No terminal catalog-production receipt. Resource/reporting changes after `b856` require their own execution; the 19 passing cases do not qualify them. |
 
-| Parcel | Joined / receiving disposition |
+Do not provision a cold lane or duplicate these runs from documentation work.
+Update a row only from its terminal report: source OID, actual executable/resource
+hashes, selected/executed counts, exit status, logs and separate cleanup evidence.
+The plan's output names must not be reused; a new run needs a fresh root.
+
+## Predecessor evidence, not joined acceptance
+
+The [c75 observation manifest](/srv/swarm/evidence/inanna/canonical-completion-products-20261020/package-interface-custody-c75-joined-observation.json)
+belongs to exact `c75b761909b35948a009c304e424cf357a752960`, despite “joined” in
+the filename. It records standalone predecessor compilation and execution:
+
+| Observation | Scope and limit |
 |---|---|
-| GHC actual Name/namespace and dotted operators | Root `8aaba35566` and `83122c096e`; actual component selector controls pass, old-source counterfactual fails semantically. No duplicate Rust resolver or origin-proof wire. |
-| Private source/END/current-view checks | Actual all-five handlers use `query_scoped_world` → `run_admitted_world_scope_inspection`; final answer install remains on the shared source/current checker. No caller result restamping. |
-| Retirement DTOs | Actor/Preparation and SourceBinding schema, Rust bridge codec and actual GHC ReloadCodec/presenter controls have separate 3/3 receipts. Replacement settlement schema `80a13b9a14` removes unpublished `BPublishedAUnsettled` and appends nonempty owner-issued operational obligations; official mirrors/consumer qualification are pending P. Observation DTOs do not qualify default reload ownership. |
-| Public default reload | P `bfcaf3d6b5` actor/host production/cfg/snapshot compilation passes 36 actions. Actual public default gate is 0/1: startup fails before Reload with CandidateOriginalInterfaceMismatch, cleanup Confirmed; R is tracing retained evidence. Earlier actual SourceSlot control passes 1/1. These results do not establish public default success/refusal/caller-loss behavior; that gate remains open. Four-notebook unavailable-reload cases cannot substitute. |
-| Exact native support | Actual `initial-rejection-644c`: two executed, two passed, command exit 0. The JSON history covers unused input, used input, authored wrong-payload rejection without publishing a binding, input retirement and unchanged public state. The separate case refuses crossed/retired owners. The corrected oracle distinguishes initial rejection from failure after an effect response. W `2ef2026a96` five-consumer exact-binding migration is source-reviewed and joined. Root `0b75498fe2` production/cfg compilation passed 11 actions. Five focused controls executed: four pass; request-owned materialization control fails at the checked joined-interface package-sidecar checksum. W is tracing fixture issuance; no checksum guard is relaxed. |
-| Haskell World reuse | R same-program SourceOriginal repair is joined with precise source/import/boot controls. Root `210f1edbc6` production/cfg check passed 11 actions; actual mixed history ran 0/1, now refusing native BindingAmbiguity with compiler close Clean. A separate actual run at joined W root `0b75498fe2` repeats the same native BindingAmbiguity (0/1, close Clean). Root/N are checking the custody-only publication fallback that reconstructs a group choice from carrier plus ordinal. H is replacing invalid cross-operation lookup-evidence merging with the existing canonical source-proof issuer. Neither complete mixed nor SOURCE history passes yet. |
-| Host-binding finite-route deletion | L's actual checked-source carry repair `850ddbcb72` is joined in P's candidate and compiled. The three actual host controls advance to distinct declaration-binding substitution, missing target lease and missing native receiver failures. L/root are tracing these production boundaries; none is a passing host control. |
-| Native planner | N `9b3ece03a5` merged at root `bba8a4c578`. Production/cfg compilation and 23/23 focused cases passed at the candidate; independent review verified every report/stream and executable hash. Joined N+R compilation passes at `210f1edbc6`. Extra source-only reuse probe `517cf8` remains separate/unqualified. No whole actor-history acceptance follows. |
-| Runner evidence safety | `8c4f456b83` / `75c500c87d` are already joined as root `21f67a0a7c` / `7bcfb4d00f`: reused/concurrent roots refuse before reports mutate, and property wrappers follow issued stream paths with byte/hash checks. Root additionally carries explicit diagnostic environment forwarding. No merge remains pending and no native Rust execution claim follows from the 186 Python passes. |
+| `swarm-build just check tidepool-toolchain`, exit 0, 1024 actions | Production/cfg(test) compilation at `c75`; no joined runtime/actor acceptance. Build `84ae6aed-6f1a-4092-82c7-63df7dd6e0ee`. |
+| HOME 3 plus Rust/Python selection interop 1: selected 4, executed 4, passed 4, exit 0 | The manifest retains each counted report and executable/resource evidence. The later `b856` cohort above additionally executes the revised late-HOME refusal and indexed completion histories. |
+| Python catalog controls: executed/passed 34, exit 0 | Qualification-script checks, not actual native catalog production. |
+| Optional publication control | Proves the production-used helper's outcome policy. It does not prove an actual completed compile survives injected candidate-publication failure; that consumer fault-injection boundary remains unqualified. |
 
-The actual input receipts are under
-`/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/initial-rejection-644c/`.
-Both record exit 0, one executed and passed case each, compiler cleanup confirmed,
-and diagnostic evidence incomplete. The JSON variants are internal history
-assertions, not additional separately counted cases. The earlier `value-type-demand-24d8`
-failure is retained alongside this corrected-oracle run.
-Preserve failed observations and corrected procedure/fixture premises separately.
-Do not transfer earlier component counts onto the current root.
+Earlier actual private-input receipts remain at
+[`initial-rejection-644c`](/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/initial-rejection-644c/):
+two separately counted cases executed/passed, exit 0, one case per receipt,
+compiler cleanup confirmed and diagnostics incomplete. They cover used/unused
+JSON input, initial wrong-payload rejection without publication, retirement,
+crossed/retired owners and unchanged public state. They do not execute the
+current bundle. Internal JSON variants are not additional counted tests.
+
+Cold checking and producer removal are separate observations. The earlier
+canonical cold test's producer-removal argument used a synthetic source token's
+parent rather than the actual scoped producer root; that portion is invalid.
+`package_envelope_identity` owns the actual-root observation correction. Preserve
+the valid cold result separately; no repaired removal result is recorded here.
+
+## Held discovery and notebook gates
+
+`closed_recipe_pairing` owns the ordinary joined history; `audit_reload_ownership`
+owns public reload. These named targets declare the compiler deployment and
+owned-resident resources. Each command below uses
+`swarm-build just test-native LABEL --output-dir FRESH_ABSOLUTE_DIR --retain-artifacts`.
+Use a new private evidence directory and the target's existing selection; do not
+append another `--exact` or substitute an uncounted generic wrapper.
+
+| Gate / label | Required observation | Current limit |
+|---|---|---|
+| Discovery, expected 1: `//exomonad/host:facade_introspection_service_test` | All five structured effects, exact semantic fields, read-only state, real `readFile`, actual publication then stale-pin refusal | Held; no hosted all-five pass on `b856`. Earlier source/fixture compilation is not execution. |
+| Answer settlement, expected 1: `//exomonad/actor:actor_world_status_test` | A real answer completes, publication intervenes, final validator refuses ScopeChanged | Held. Prior `51216eb9d6` failed during literal-query parsing before publication; no current settlement result follows. |
+| Notebook contract, expected 4: `//exomonad/actor:actor_notebook_contract_tests` | Parked A allows B control; malformed/unavailable reload releases invocation and preserves independent cells/bindings | Held. Prior `51216eb9d6` failed during initial source ownership; that old failure is not a current-source result. |
+| Public-module queries, expected 2: `//exomonad/actor:actor_compiler_world_queries_test` | Exact answer/pin, wrong-name refusal, source invalidation, hot counters, closed-source refusal | Canonical source `9c18cceebc` adds actual rowFit/typeOfExpression/typeSearch effects. Execution remains held; the `b856` cohort predates this change and does not execute these actor cases. |
+| Finite source → World, expected 1: `//tidepool/runtime:runtime_package_source_history_test` | Remove the observed actual producer output, preserve completed products, execute public B through A cutoff and retained callback | Finite-removal/retained-callable source is canonical as `5097c09cd7`; historical parent publication/recovery controls are canonical through `fb34ffe421`. No executed history receipt is recorded here. Request capture/mount remains a separate companion case. |
+| Default reload | Real staged B despite draft C; success/refusal; captured-A refusal; caller loss after typed publication leaves B callable | Held for integrated replay. Earlier startup failures before Reload and separate SourceSlot controls cannot establish this workflow. |
+| Uncertain END, receiving expected 1: `//tidepool/runtime:runtime_compiler_end_history_test` | Genuine prepare before physically withheld END acknowledgement; typed Unconfirmed, no execution/publication, exact daemon resumed | Source-ready `d9ba2b7c7c` is unexecuted. [History ledger](/srv/swarm/evidence/inanna/g2-history-tests-20261020/qualification-ledger.json) retains its selector and required cleanup evidence; source review does not prove settlement. |
+| Eviction | Actual cold owner eviction and recovery through the ordinary history | Held for measured resource/budget selection and source extension. Retained-cache configuration alone is not evidence of actual eviction. |
 
 ## Remaining route disposition
 
-The claimed actor effect/status tests contain no `run_admitted_inspections`,
-`inspect_actor_batch`, `inspect_compile_view`, BrowseBounded/ViewIdentity, or
-constant-only dispatch acceptance. Runtime finite APIs still exist. In particular,
-`validate_rendered_module` validates generated declaration modules and captures
-their visible value types through `run_inspections_strict`.
+The current closed installer retains a validated product/image recipe and scoped
+instance authority. Captured/open installation still reaches scoped resolution
+and the older package `code_exports` route. The common installer and once-only
+issuance changes remain feature work; do not describe these consumers as unified.
+Common installer candidate `c043` has production compilation evidence only;
+cfg(test) fixture migration and once-only issuance remain WIP. That feature
+compilation does not qualify canonical installation or the held histories.
+World native-demand stage batches are retained but segment certification still
+reconstructs demand from receipts. Nominal metadata membership grants no native
+demand. See the compiler map for the owning callers.
 
-Direct external declaration staging/definition callers found in the bounded trace
-are test-only. Root `ResidentSession::bind_prepared` now separates closed Turn
-and Host installation: checked private overlays use their completion, and reserved
-Host bindings use ordinary binding insertion without declaration recompilation.
-The remaining Turn arm still calls `bind_replacing_decls_in`, whose retraction
-can reach the finite validator. Its remaining resident/test consumers must be
-migrated or explicitly classified; query migration alone does not establish
-repository-wide compiler-route exclusivity.
-
-The prior activation `sessionInput` and fresh command-job trace avoided declaration
-collision before mount; that was not evidence of a startup bypass. The new
-service-owned host-binding tests must establish the replacement behavior after
-L's actual World fixture setup succeeds. Migrate/delete remaining finite define/
-stage/retract/query test APIs through actual producers. This remains runtime
-migration work, not a build-consumer exemption or completed deletion.
+Finite preparation/validation APIs remain. Query migration and removal of unused
+raw Joined materialization APIs do not establish compiler-route exclusivity.
+Property and component cases complement the real finite → installer → public
+World journey; their counts cannot replace it.
 
 ## G2 boundary
 
-The gates above cover only part of G2. A fresh Persona launch still requires
-ordinary/mixed/source-defined cells and used/unused private inputs; actual default
-reload success/refusal and caller-loss retention; selected spec/tools and initial
-memory/context; exact frozen bundle; and bounded real DeepSeek multi-turn smoke
-using those same bytes. Force/recovery remain mandatory later campaign work.
-Do not invent command selectors for these remaining consumers: their owners must
-nominate the actual declared bundle/runtime entry and retained evidence first.
+No complete G2 acceptance is recorded at `1bc6238910`. Ordinary/mixed/source-defined
+cells, private inputs, discovery, default reload and caller-loss retention still
+need joined evidence. Freeze one matched bundle, verify the selected Persona
+spec/tools/initial memory, then run bounded real DeepSeek turns through those
+same bytes. Full force/fork/callback/process-recovery matrices belong to G3;
+unsupported operations must refuse explicitly. Neither a successful compilation
+nor component execution is frozen release or deployment evidence.
