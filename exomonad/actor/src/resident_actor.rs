@@ -9007,16 +9007,19 @@ where
         Ok(())
     }
 
-    async fn settle_interactive_publication(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
+    fn settle_interactive_publication<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
         prepared: PreparedInteractivePublication,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.publish_application_surface(kernel, context, prepared.owner, prepared.bootstrap)
-            .await?;
-        self.commit_interactive_installation(kernel, context, prepared.installation)
-            .await
+    ) -> futures_util::future::BoxFuture<'a, Result<(), ResidentActorWorkbenchError>> {
+        let future = async move {
+            self.publish_application_surface(kernel, context, prepared.owner, prepared.bootstrap)
+                .await?;
+            self.commit_interactive_installation(kernel, context, prepared.installation)
+                .await
+        };
+        Box::pin(future)
     }
 
     async fn check_application_readiness(
