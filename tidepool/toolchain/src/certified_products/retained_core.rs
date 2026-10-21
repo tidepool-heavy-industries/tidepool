@@ -527,7 +527,7 @@ mod tests {
                 unit,
                 module,
                 interface,
-                original,
+                original: original_binding,
                 binder,
             } = &mut variant
             else {
@@ -538,8 +538,8 @@ mod tests {
                 1 => module.push_str("Other"),
                 2 => interface.artifact.0[0] ^= 1,
                 3 => interface.selection.0[0] ^= 1,
-                4 => original.artifact.0[0] ^= 1,
-                5 => original.selection.0[0] ^= 1,
+                4 => original_binding.artifact.0[0] ^= 1,
+                5 => original_binding.selection.0[0] ^= 1,
                 6 => binder.unit.push_str("-other"),
                 7 => binder.module.push_str("Other"),
                 8 => binder.namespace = "type".into(),
