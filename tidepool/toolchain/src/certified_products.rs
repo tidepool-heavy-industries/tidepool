@@ -15291,18 +15291,21 @@ pub(crate) mod tests {
         assert_eq!(binding.binding.artifact(), original.descriptor.id);
         assert_eq!(binding.original_ordinal, 7);
         let current = BTreeMap::from([(*binding, row)]);
-        assert!(
-            checked
-                .certify_selected_scope(
-                    SelectedOriginalGroupScope::View(&broad),
-                    &current,
-                    &mut validation
-                )
-                .unwrap()
-                .rows
-                .len()
-                == rows.len()
+        let repeated = checked
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &current,
+                &mut validation,
+            )
+            .unwrap()
+            .rows;
+        assert_eq!(
+            repeated.keys().collect::<Vec<_>>(),
+            rows.keys().collect::<Vec<_>>()
         );
+        for (binding, repeated_row) in &repeated {
+            assert!(repeated_row.product().same_issuance(current[binding]));
+        }
         assert!(matches!(
             checked.certify_selected_scope(
                 SelectedOriginalGroupScope::View(&foreign),
@@ -15312,6 +15315,16 @@ pub(crate) mod tests {
             Err(CertificationError::Mismatch(
                 "current group outside selected binding closure"
             ))
+        ));
+        let mut wrong_owner = row.clone();
+        wrong_owner.owner.unit = "foreign".into();
+        assert!(matches!(
+            checked.certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &BTreeMap::from([(*binding, &wrong_owner)]),
+                &mut validation
+            ),
+            Err(CertificationError::Mismatch("shared original home groups"))
         ));
         let mut changed = row.clone();
         changed.imports = vec![PendingImportOwner::Retained {
@@ -15411,18 +15424,21 @@ pub(crate) mod tests {
             .iter()
             .map(|(binding, row)| (*binding, row.product().as_ref()))
             .collect();
-        assert!(
-            checker
-                .certify_selected_scope(
-                    SelectedOriginalGroupScope::View(&broad),
-                    &baseline,
-                    &mut validation
-                )
-                .unwrap()
-                .rows
-                .len()
-                == rows.len()
+        let repeated = checker
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::View(&broad),
+                &baseline,
+                &mut validation,
+            )
+            .unwrap()
+            .rows;
+        assert_eq!(
+            repeated.keys().collect::<Vec<_>>(),
+            rows.keys().collect::<Vec<_>>()
         );
+        for (binding, repeated_row) in &repeated {
+            assert!(repeated_row.product().same_issuance(baseline[binding]));
+        }
         let wrong = other
             .original_group_bindings(&validation.inventory)
             .unwrap()[0];
