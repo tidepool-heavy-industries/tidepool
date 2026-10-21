@@ -209,7 +209,7 @@ fn issue_original_with_extra_group(
         finalization,
         source_recipe: WorkerExecutionSource::Ordinary,
     };
-    certified_products::certify_products(
+    let mut certified = certified_products::certify_products(
         None,
         &packet,
         &parsed,
@@ -225,7 +225,15 @@ fn issue_original_with_extra_group(
         &[root.to_path_buf()],
         None,
     )
-    .unwrap()
+    .unwrap();
+    crate::declaration_context::issue_certified_product_native_availability(
+        CanonicalProducerIdentity::from_producer_bytes(&PRODUCER).sha256(),
+        &mut certified,
+        None,
+        &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
+    )
+    .unwrap();
+    certified
 }
 
 fn select_original_groups(
@@ -440,14 +448,18 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert_eq!(offered_group.binding.artifact(), expected_original);
     assert_eq!(offered_group.original_ordinal, ORDINAL);
     assert_eq!(offered_carrier.artifact, expected_original);
-    let public_selection = CertifiedSourceSelection::from_compiler_inputs(
-        public_inputs,
-        &InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
+    let mut public_validation = PackageInterfaceValidation::default();
+    let public_selection =
+        CertifiedSourceSelection::from_compiler_inputs(public_inputs, &public_validation.inventory)
+            .unwrap();
     let inventory = public_inputs.artifacts().inventory();
     let mut bound = inventory
-        .bind_segment(public_inputs.artifacts(), Vec::new(), &public_selection)
+        .bind_segment(
+            public_inputs.artifacts(),
+            Vec::new(),
+            &public_selection,
+            &mut public_validation,
+        )
         .unwrap();
     let public_before = public_inputs.artifacts().clone();
     let public_original_hash = public_original.semantic_sha256();

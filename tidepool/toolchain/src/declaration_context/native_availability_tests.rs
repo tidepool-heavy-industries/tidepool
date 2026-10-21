@@ -1519,7 +1519,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .dependency_support(key, recovered[0].product.owner())
         .is_none());
     drop(owned_receipt);
-    let validation = PackageInterfaceValidation::default();
+    let mut validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         &inputs,
         &validation.inventory,
@@ -1653,10 +1653,11 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     ));
     let consume = |view: &ArtifactView,
                    selection: &crate::certified_products::CertifiedSourceSelection,
-                   imports: &[crate::certified_products::PendingImportOwner]| {
+                   imports: &[crate::certified_products::PendingImportOwner],
+                   validation: &mut PackageInterfaceValidation| {
         let mut fixed = view
             .inventory()
-            .bind_segment(view, vec![], selection)
+            .bind_segment(view, vec![], selection, validation)
             .expect("bind the actual receipt owner before body demand");
         let demanded = view.inventory().admit_bound_target(
             &mut fixed,
@@ -1674,7 +1675,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     };
     let mut failed_then_retried = admitted
         .inventory()
-        .bind_segment(&admitted, vec![], &selected)
+        .bind_segment(&admitted, vec![], &selected, &mut validation)
         .unwrap();
     let fixed_before = failed_then_retried.observed_binding_state();
     let cursor_before = admitted.capture_graph_selection();
@@ -1745,8 +1746,13 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .unwrap(),
         exact
     );
-    let groups = consume(&admitted, &selected, std::slice::from_ref(&demand))
-        .expect("the issued B receipt authorizes its exact group7");
+    let groups = consume(
+        &admitted,
+        &selected,
+        std::slice::from_ref(&demand),
+        &mut validation,
+    )
+    .expect("the issued B receipt authorizes its exact group7");
     assert_eq!(groups, exact);
     assert_eq!(
         groups
@@ -1763,7 +1769,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .is_err());
 
     assert!(matches!(
-        consume(&admitted, &selected, std::slice::from_ref(&denied_demand)),
+        consume(&admitted, &selected, std::slice::from_ref(&denied_demand), &mut validation),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
             crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
                 artifact, original_ordinal: 9001,
@@ -1836,6 +1842,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         &selected_view,
         &request_selection,
         std::slice::from_ref(&demand),
+        &mut validation,
     )
     .unwrap();
     assert_eq!(requested_groups, exact);
@@ -1848,7 +1855,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     );
     assert!(!request.native_selection.availability.0[&b_id].permits(9001));
     assert!(matches!(
-        consume(&selected_view, &request_selection, &[denied_demand]),
+        consume(&selected_view, &request_selection, &[denied_demand], &mut validation),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
             crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
                 artifact, original_ordinal: 9001,
@@ -2602,7 +2609,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             original_ordinal: 7,
             binder: binding.identity.clone(),
         }];
-        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
             &validation.inventory,
@@ -2611,7 +2618,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         let source = inputs.artifacts();
         let mut fixed = source
             .inventory()
-            .bind_segment(source, vec![], &selection)
+            .bind_segment(source, vec![], &selection, &mut validation)
             .unwrap();
         let target = source
             .inventory()
@@ -2811,7 +2818,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         held_graph,
         "private body metadata would incorrectly preserve this replay root if used as compiler policy"
     );
-    let validation = PackageInterfaceValidation::default();
+    let mut validation = PackageInterfaceValidation::default();
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         inputs,
         &validation.inventory,
@@ -2931,7 +2938,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     let mut fixed = inputs
         .artifacts()
         .inventory()
-        .bind_segment(&inputs.artifacts(), vec![], &selection)
+        .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
         .unwrap();
     let imports = [source_import(&native, 9001)];
     let demanded = inputs
@@ -4209,7 +4216,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 .iter()
                 .all(|role| role.original().is_none()));
             assert!(inputs.artifacts().selected_native_groups().is_empty());
-            let validation = PackageInterfaceValidation::default();
+            let mut validation = PackageInterfaceValidation::default();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
@@ -4219,7 +4226,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             let mut fixed = inputs
                 .artifacts()
                 .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection)
+                .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
                 .unwrap();
             let imports = [source_import(&native, 9001)];
             let demanded = inputs.artifacts().inventory().admit_bound_target(
@@ -6795,7 +6802,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             )
             .unwrap();
         let inputs = request.compiler_inputs();
-        let validation = PackageInterfaceValidation::default();
+        let mut validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
             &validation.inventory,
@@ -6805,7 +6812,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             let mut fixed = inputs
                 .artifacts()
                 .inventory()
-                .bind_segment(inputs.artifacts(), vec![], &selection)
+                .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
                 .unwrap();
             let imports = [source_import(&native, demanded)];
             let admitted = inputs.artifacts().inventory().admit_bound_target(
@@ -6830,7 +6837,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         let mut fixed = inputs
             .artifacts()
             .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selection)
+            .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
             .unwrap();
         let imports = [source_import(&unrelated, 7)];
         let denied = inputs.artifacts().inventory().admit_bound_target(
@@ -7129,7 +7136,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 .all(|role| !interface_only || role.original().is_none()));
             if interface_only {
                 let inputs = request.compiler_inputs();
-                let validation = PackageInterfaceValidation::default();
+                let mut validation = PackageInterfaceValidation::default();
                 let selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         inputs,
@@ -7148,7 +7155,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     let mut fixed = inputs
                         .artifacts()
                         .inventory()
-                        .bind_segment(&inputs.artifacts(), vec![], &selection)
+                        .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
                         .unwrap();
                     let imports = [source_import(native, 9001)];
                     let demanded = inputs
@@ -10156,17 +10163,21 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
                     )
                     .unwrap();
                 let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-                let selection =
+                let mut validation = PackageInterfaceValidation::default();
+                let mut selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
                         &artifacts.metadata_snapshot(),
-                        &tidepool_repr::execution_schema::InventoryOperation::new(
-                            Default::default(),
-                        ),
+                        &validation.inventory,
                     )
                     .unwrap();
-                let output =
-                    OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+                let output = OriginalCompilerInputs::issue_segment_native_availability(
+                    &mut selection,
+                    &artifacts,
+                    Vec::new(),
+                    &mut validation,
+                )
+                .unwrap();
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
                     .unwrap()
             })
@@ -10189,17 +10200,19 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     let inputs = request.compiler_inputs();
     let projection = inputs.projection().clone();
     let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-        &projection,
-        &inputs.artifacts().metadata_snapshot(),
-        &operation,
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        inputs, &operation,
     )
     .unwrap();
     let view = inputs.artifacts().clone();
-    let continuation = ContinuationNativeInputs::from_selection(&selection, &projection).unwrap();
-    let completed = continuation.complete_products(&view).unwrap();
-    assert_eq!(completed.entries.len(), 1);
-    let entry = Arc::clone(&completed.entries[0]);
+    assert!(selection.complete_native_entries(&view).unwrap().is_empty());
+    let entry = view
+        .metadata_snapshot()
+        .artifacts
+        .values()
+        .find(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+        .cloned()
+        .unwrap();
     let id = entry.descriptor.id;
     let entry_owner = Arc::downgrade(&entry);
     assert!(Arc::ptr_eq(
@@ -10207,11 +10220,24 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
         &view.metadata_snapshot().artifacts[&id]
     ));
 
+    let raw_selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &view.metadata_snapshot(),
+            &operation,
+        )
+        .unwrap();
     assert!(matches!(
-        selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
+        raw_selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
         Err(crate::certified_products::CertificationError::MissingRetainedCustody { artifact })
             if artifact == id
     ));
+    assert!(matches!(
+        OriginalCompilerInputs::from_selection(&raw_selection, &view),
+        Err(CompileError::ExtractFailed(detail))
+            if detail.contains("current native products lack physical cohort issuance")
+    ));
+    drop(raw_selection);
 
     // Equal payloads in a separately issued scope do not supply this request's binding.
     let foreign_inventory = ArtifactInventory::default();
@@ -10250,13 +10276,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     );
     assert_eq!(*entry, reference);
     let calls = original_entry_construction_calls();
-    let issued = OriginalCompilerInputs::issue_completed_native_availability(
-        &view,
-        &projection,
-        producer.sha256(),
-        completed,
-    )
-    .unwrap();
+    let issued = OriginalCompilerInputs::from_selection(&selection, &view).unwrap();
     assert_eq!(original_entry_construction_calls() - calls, 0);
     assert!(Arc::ptr_eq(
         &entry,
@@ -10282,12 +10302,6 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
         .iter()
         .all(|edge| issued.artifacts.binding_dependencies().contains(edge)));
 
-    let wrong = continuation.complete_products(&view).unwrap();
-    assert!(
-        matches!(OriginalCompilerInputs::issue_completed_native_availability(
-        &view, &projection, [255; 32], wrong,
-    ), Err(CompileError::ExtractFailed(detail)) if detail.contains("native product has another canonical producer"))
-    );
     let fresh_output_calls = original_entry_construction_calls();
     (|| -> Result<OriginalCompilerInputs, CompileError> {
         let fixture_products: &[CertifiedRecoveryProduct] = &[native.clone()];
@@ -10304,14 +10318,20 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
         )?;
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let selection =
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &artifacts.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .map_err(compiler_evidence_failure)?;
-        OriginalCompilerInputs::from_selection(&selection, &artifacts)
+        OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &artifacts,
+            Vec::new(),
+            &mut validation,
+        )
     })()
     .unwrap();
     assert!(
@@ -10326,7 +10346,6 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     drop(foreign_entry);
     drop(foreign);
     drop(foreign_inventory);
-    drop(continuation);
     drop(selection);
     drop(projection);
     drop(view);

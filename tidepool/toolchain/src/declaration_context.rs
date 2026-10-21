@@ -20005,7 +20005,7 @@ mod tests {
         let inputs = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&Arc::new(context.clone()), None)
             .unwrap();
-        let validation = PackageInterfaceValidation::default();
+        let mut validation = PackageInterfaceValidation::default();
         let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             &inputs,
             &validation.inventory,
@@ -20014,7 +20014,7 @@ mod tests {
         let mut fixed = inputs
             .artifacts()
             .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selected)
+            .bind_segment(inputs.artifacts(), vec![], &selected, &mut validation)
             .unwrap();
         let target = inputs
             .artifacts()
@@ -20241,16 +20241,17 @@ mod tests {
             let actual = ProtectedScaffoldRequirements::default()
                 .compiler_inputs(acquired, None)
                 .unwrap();
+            let mut validation = PackageInterfaceValidation::default();
             let selected =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &actual,
-                    &PackageInterfaceValidation::default().inventory,
+                    &validation.inventory,
                 )
                 .unwrap();
             let mut segment = actual
                 .artifacts()
                 .inventory()
-                .bind_segment(actual.artifacts(), vec![], &selected)
+                .bind_segment(actual.artifacts(), vec![], &selected, &mut validation)
                 .unwrap();
             let demanded = actual
                 .artifacts()
@@ -24960,7 +24961,7 @@ mod tests {
                 original_ordinal: 7,
                 binder: binding.identity.clone(),
             }];
-            let validation = PackageInterfaceValidation::default();
+            let mut validation = PackageInterfaceValidation::default();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
@@ -24970,7 +24971,7 @@ mod tests {
             let mut fixed = inputs
                 .artifacts()
                 .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection)
+                .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
                 .unwrap();
             let target = inputs.artifacts().inventory().admit_bound_target(
                 &mut fixed,
@@ -25611,7 +25612,7 @@ mod tests {
                 crate::certified_products::original_native_group_imports(native, 7).unwrap()[0],
                 crate::certified_products::ReceiptImportOwner::Retained { generation: 11, .. }
             ));
-            let validation = PackageInterfaceValidation::default();
+            let mut validation = PackageInterfaceValidation::default();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
@@ -25621,7 +25622,7 @@ mod tests {
             let mut fixed = inputs
                 .artifacts()
                 .inventory()
-                .bind_segment(&inputs.artifacts(), vec![], &selection)
+                .bind_segment(&inputs.artifacts(), vec![], &selection, &mut validation)
                 .unwrap();
             let target = inputs
                 .artifacts()
@@ -29714,7 +29715,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let validation = PackageInterfaceValidation::default();
+        let mut validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
             &validation.inventory,
@@ -29723,7 +29724,7 @@ mod tests {
         let mut fixed = inputs
             .artifacts()
             .inventory()
-            .bind_segment(inputs.artifacts(), vec![], &selection)
+            .bind_segment(inputs.artifacts(), vec![], &selection, &mut validation)
             .unwrap();
         let before_demand = std::fs::read_dir(directory.path())
             .unwrap()
