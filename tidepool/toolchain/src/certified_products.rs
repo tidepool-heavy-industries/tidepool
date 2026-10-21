@@ -1545,6 +1545,12 @@ pub struct ArtifactIdentityMismatch {
     pub observed_original: Option<crate::artifact_inventory::ArtifactId>,
     pub observed_canonical: Option<crate::artifact_inventory::ArtifactId>,
     pub observed_kind: Option<crate::artifact_inventory::ArtifactKind>,
+    pub expected_unit: Option<String>,
+    pub expected_module: Option<String>,
+    pub observed_owner_unit: Option<String>,
+    pub observed_owner_module: Option<String>,
+    pub observed_binder_unit: Option<String>,
+    pub observed_binder_module: Option<String>,
 }
 
 impl ArtifactIdentityMismatch {
@@ -1556,6 +1562,12 @@ impl ArtifactIdentityMismatch {
             observed_original: None,
             observed_canonical: None,
             observed_kind: None,
+            expected_unit: None,
+            expected_module: None,
+            observed_owner_unit: None,
+            observed_owner_module: None,
+            observed_binder_unit: None,
+            observed_binder_module: None,
         }
     }
 }
@@ -1568,6 +1580,7 @@ pub enum ArtifactIdentityStage {
     NonOriginalPayload,
     MissingModuleMapCanonical,
     MissingInterfacePayload,
+    NominalOwnerDiffers,
     NominalMembershipDiffers,
     ModuleInterfaceDiffers,
 }
@@ -6306,6 +6319,9 @@ fn authenticate_original_binding_membership(
                 observed_original: primary.original().map(|binding| binding.artifact),
                 observed_canonical: Some(primary.interface().artifact),
                 observed_kind: None,
+                ..ArtifactIdentityMismatch::refused(
+                    ArtifactIdentityStage::RequestedIdentityDiffers,
+                )
             },
         )));
     }
@@ -6372,21 +6388,35 @@ pub(crate) fn original_reference_payload_member<'a>(
     else {
         return Err(refuse(InputDecisionRefusal::NativeOwnerMismatch));
     };
-    if product.owner().unit != *unit
-        || product.owner().module != *module
-        || binder.unit != *unit
-        || binder.module != *module
-        || original_entry.descriptor.id != original.artifact
+    // The binder names the symbol's defining site, which for re-exports is the
+    // defining module (for example ghc-internal:GHC.Internal.Base behind a
+    // Tidepool.Prelude export), not the module identity that requested the
+    // binding. Membership itself is proven below by exact binder identity in
+    // the product's issued witness groups.
+    let mismatch = if product.owner().unit != *unit || product.owner().module != *module {
+        Some(ArtifactIdentityStage::NominalOwnerDiffers)
+    } else if original_entry.descriptor.id != original.artifact
         || interface_entry.descriptor.id != interface.artifact
     {
+        Some(ArtifactIdentityStage::NominalMembershipDiffers)
+    } else {
+        None
+    };
+    if let Some(stage) = mismatch {
         return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
             ArtifactIdentityMismatch {
-                stage: ArtifactIdentityStage::NominalMembershipDiffers,
+                stage,
                 expected_original: Some(original.artifact),
                 expected_canonical: Some(interface.artifact),
                 observed_original: Some(original_entry.descriptor.id),
                 observed_canonical: Some(interface_entry.descriptor.id),
                 observed_kind: Some(original_entry.payload.artifact_kind()),
+                expected_unit: Some(unit.clone()),
+                expected_module: Some(module.clone()),
+                observed_owner_unit: Some(product.owner().unit.clone()),
+                observed_owner_module: Some(product.owner().module.clone()),
+                observed_binder_unit: Some(binder.unit.clone()),
+                observed_binder_module: Some(binder.module.clone()),
             },
         )));
     }
@@ -6405,6 +6435,9 @@ pub(crate) fn original_reference_payload_member<'a>(
                 observed_original: Some(original_entry.descriptor.id),
                 observed_canonical: Some(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical)),
                 observed_kind: None,
+                ..ArtifactIdentityMismatch::refused(
+                    ArtifactIdentityStage::ModuleInterfaceDiffers,
+                )
             },
         )));
     }

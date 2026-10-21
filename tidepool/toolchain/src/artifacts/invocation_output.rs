@@ -1368,6 +1368,28 @@ mod tests {
             .unwrap()
             .with_native_selection_completion(&second)
             .unwrap();
+        // The enriched support is immediately consumable: its mandatory fact
+        // owner pairs the completion-enriched views without a caller refresh.
+        let enriched_facts = later.native_fact_owner();
+        assert_eq!(
+            enriched_facts
+                .offers
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            later.native_offer_observations().unwrap(),
+            "maintained facts carry the enriched offer facts"
+        );
+        assert_eq!(
+            enriched_facts.input_decisions,
+            later.recorded_input_decisions().clone()
+        );
+        // Repeated identical enrichment is a no-op on the closed owner.
+        let repeated = later.with_native_completions_from(&later).unwrap();
+        assert!(Arc::ptr_eq(
+            repeated.native_fact_owner(),
+            later.native_fact_owner()
+        ));
         let package_ids = first_packages
             .keys()
             .chain(second_packages.keys())

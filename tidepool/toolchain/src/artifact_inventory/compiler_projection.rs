@@ -1402,9 +1402,10 @@ pub(crate) struct CompilerSourceSupport {
 
 /// Assembly-only state for one compiler support. Incomplete assembly never
 /// escapes this module: every usable [`CompilerSourceSupport`] is produced by
-/// [`SupportDraft::close`], which folds completion custody, re-pairs selected
-/// rows against the final acquired entries and maintains the native fact
-/// owner. The prior fact owner is carried only as the maintenance input.
+/// [`SupportDraft::close`]. Every accumulated completion already names custody
+/// retained in the draft's `artifacts`; constructors merge completion custody
+/// before the draft exists and `close` never re-folds it. The prior fact owner
+/// is carried only as the maintenance input.
 struct SupportDraft {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -1418,12 +1419,14 @@ struct SupportDraft {
 }
 
 impl SupportDraft {
-    /// The only constructor of a usable compiler support. Performs every
-    /// custody merge once and maintains the mandatory native fact owner.
+    /// The only constructor of a usable compiler support. Re-pairs selected
+    /// rows against the final acquired entries and maintains the mandatory
+    /// native fact owner. Completion custody is already retained in
+    /// `artifacts` and is never re-merged here.
     fn close(self) -> Result<CompilerSourceSupport, CompileError> {
         let SupportDraft {
             projection,
-            mut artifacts,
+            artifacts,
             native_fact_owner,
             native_offers,
             native_completions,
@@ -1432,9 +1435,6 @@ impl SupportDraft {
             mut selected,
             input_decisions,
         } = self;
-        for completion in native_completions.iter() {
-            artifacts = artifacts.retain_custody(completion.artifacts())?;
-        }
         let mut repaired = None;
         for (owner, row) in selected.rows.iter() {
             crate::host_work::checkpoint()?;
@@ -2776,23 +2776,26 @@ impl CompilerSourceSupport {
             operation,
         )?;
         charge(operation.reserve::<IssuedNativeOffer>(offers.len()))?;
-        Ok(Arc::new(Self {
-            projection: demand.projection().clone(),
-            artifacts,
-            native_offers: offers.into_values().collect::<Vec<_>>().into(),
-            native_availability: availability.clone(),
-            input_decisions: self
-                .input_decisions
-                .with_recorded_facts(facts.input_decisions.clone()),
-            native_offer_facts: facts.offers.clone(),
-            native_completions: self.native_completions.clone(),
-            native_fact_owner: facts,
-            // The home census belongs to the demanded rows, not to cold
-            // custody or units merely mentioned by another retained row.
-            selected: Arc::new(AdmittedCompilerRoles::from_admitted(
-                selected.into_iter().collect(),
-            )),
-        }))
+        Ok(Arc::new(
+            SupportDraft {
+                projection: demand.projection().clone(),
+                artifacts,
+                native_offers: offers.into_values().collect::<Vec<_>>().into(),
+                native_availability: availability.clone(),
+                input_decisions: self
+                    .input_decisions
+                    .with_recorded_facts(facts.input_decisions.clone()),
+                native_offer_facts: facts.offers.clone(),
+                native_completions: self.native_completions.clone(),
+                native_fact_owner: Some(facts),
+                // The home census belongs to the demanded rows, not to cold
+                // custody or units merely mentioned by another retained row.
+                selected: Arc::new(AdmittedCompilerRoles::from_admitted(
+                    selected.into_iter().collect(),
+                )),
+            }
+            .close()?,
+        ))
     }
 
     /// Compose independently issued initial native choices with this actual
@@ -3510,6 +3513,15 @@ impl CompilerSourceSupport {
             }),
             &new_offers,
         )?;
+        // The draft invariant owns completion custody in its artifacts before
+        // the draft exists; self's completions stay retained through the
+        // append, and incoming completions merge here exactly once.
+        let artifacts = incoming
+            .native_completions
+            .iter()
+            .try_fold(artifacts, |view, completion| {
+                view.retain_custody(completion.artifacts())
+            })?;
         for (owner, _) in incoming.selected.iter() {
             let row = selected.rows.get_mut(owner).expect("incoming admitted row");
             let interface = &artifacts.lease.payloads[&row.interface.0.artifact];
@@ -3548,7 +3560,9 @@ impl CompilerSourceSupport {
                 native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),
                 native_offers: offers.into(),
                 native_offer_facts,
-                native_completions: self.native_completions.append(&incoming.native_completions)?,
+                native_completions: self
+                    .native_completions
+                    .append(&incoming.native_completions)?,
                 native_availability,
                 selected: Arc::new(selected),
                 input_decisions,
@@ -3811,6 +3825,9 @@ impl CompilerSourceSupport {
                     observed_original: Some(entry.descriptor.id),
                     observed_canonical: Some(admitted.interface.1.descriptor.id),
                     observed_kind: None,
+                    ..ArtifactIdentityMismatch::refused(
+                        ArtifactIdentityStage::RequestedIdentityDiffers,
+                    )
                 },
             ));
         }
@@ -3823,6 +3840,9 @@ impl CompilerSourceSupport {
                     observed_original: Some(entry.descriptor.id),
                     observed_canonical: Some(admitted.interface.1.descriptor.id),
                     observed_kind: Some(entry.payload.artifact_kind()),
+                    ..ArtifactIdentityMismatch::refused(
+                        ArtifactIdentityStage::NonOriginalPayload,
+                    )
                 },
             ));
         };
@@ -4399,9 +4419,17 @@ impl CompilerSourceSupport {
                 offers.push(offer.clone());
             }
         }
+        // Completion custody joins the acquired artifacts before the draft
+        // exists; `close` never re-folds it.
+        let artifacts = inputs
+            .issued_native_completions()
+            .iter()
+            .try_fold(artifacts.clone(), |view, completion| {
+                view.retain_custody(completion.artifacts())
+            })?;
         SupportDraft {
             projection,
-            artifacts: artifacts.clone(),
+            artifacts,
             native_fact_owner: inputs.native_fact_base().cloned(),
             native_offers: offers.into(),
             native_offer_facts,
@@ -4457,7 +4485,8 @@ impl CompilerSourceSupport {
             availability,
             decisions,
             Some(&self.native_fact_owner),
-            self.native_completions.append(&selection.native_completions())?,
+            self.native_completions
+                .append(&selection.native_completions())?,
         )
     }
 
@@ -4835,17 +4864,18 @@ impl CompilerSourceSupport {
                 "publication native owner differs from its issued selection",
             ));
         }
-        Ok(Self {
+        Ok(SupportDraft {
             projection: saved.projection.clone(),
             artifacts: saved.artifacts.clone(),
-            native_fact_owner: Arc::clone(&saved.facts),
+            native_fact_owner: Some(Arc::clone(&saved.facts)),
             native_offers: Arc::clone(&saved.offers),
             native_offer_facts: saved.facts.offers.clone(),
             native_completions: saved.completions.clone(),
             native_availability: saved.availability.clone(),
             selected: Arc::clone(&saved.selected),
             input_decisions: saved.decisions.clone(),
-        })
+        }
+        .close()?)
     }
 
     pub(crate) fn select_publication_graph(
@@ -7536,6 +7566,81 @@ mod tests {
             crate::exact_context::take_native_fact_work(),
             crate::exact_context::NativeFactWork::default()
         );
+    }
+
+    #[test]
+    fn completion_equivalent_wrapper_replacement_closes_all_views() {
+        let entries = decision_affinity_entries();
+        // A sibling inventory holds equal-by-content but pointer-distinct
+        // outer wrappers around the same issued authority.
+        let replacement = entries
+            .iter()
+            .map(|entry| Arc::new(entry.as_ref().clone()))
+            .collect::<Vec<_>>();
+        for (issued, clone) in entries.iter().zip(&replacement) {
+            assert!(
+                !Arc::ptr_eq(issued, clone),
+                "fixture must mint pointer-distinct outer wrappers"
+            );
+        }
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        let source =
+            CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+        let sibling = ArtifactInventory::default();
+        let sibling_view = sibling
+            .admit_shared(&sibling.empty_view(), replacement)
+            .unwrap();
+        let rebuilt = source
+            .rebuild(
+                projection,
+                sibling_view,
+                source.native_offers.iter().cloned(),
+            )
+            .unwrap();
+        for (_, row) in rebuilt.selected.iter() {
+            for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                assert!(
+                    Arc::ptr_eq(
+                        entry,
+                        rebuilt
+                            .artifacts
+                            .lease
+                            .payloads
+                            .get(&binding.artifact)
+                            .expect("final acquired wrapper")
+                    ),
+                    "closed support rows reference the final acquired wrappers"
+                );
+            }
+        }
+        // The maintained facts are exactly the maps of the closed views; a
+        // caller reads the returned support directly, with no refresh step.
+        let maintained = crate::exact_context::PublicationNativeFacts::maintain(
+            None,
+            crate::exact_context::PublicationNativeMaps {
+                roles: rebuilt.projection.recorded_roles.clone(),
+                offers: rebuilt.native_offer_facts.clone(),
+                native_availability: rebuilt.native_availability.persistent_facts().clone(),
+                input_decisions: rebuilt.input_decisions.facts.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            maintained.commitment(),
+            rebuilt.native_fact_owner().commitment()
+        );
+        // Repeated identical enrichment reuses the exact closed state instead
+        // of re-merging custody or reminting the fact owner.
+        let repeated = rebuilt.with_native_completions_from(&rebuilt).unwrap();
+        assert!(Arc::ptr_eq(
+            repeated.native_fact_owner(),
+            rebuilt.native_fact_owner()
+        ));
+        assert_eq!(repeated.native_completions(), rebuilt.native_completions());
     }
 
     #[test]

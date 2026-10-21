@@ -1482,6 +1482,9 @@ impl NativeTransportAvailability {
                             observed_original: Some(self.original_artifact_id()),
                             observed_canonical: Some(self.canonical),
                             observed_kind: None,
+                            ..crate::certified_products::ArtifactIdentityMismatch::refused(
+                                crate::certified_products::ArtifactIdentityStage::RequestedIdentityDiffers,
+                            )
                         },
                     ),
                 },
