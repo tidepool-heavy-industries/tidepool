@@ -22806,8 +22806,10 @@ pub(crate) mod tests {
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                     )
                     .unwrap();
-                let before = bound.observed_binding_state();
+                let physical = bound.physical_inputs().issued_artifacts();
+                let before_physical = physical.capture_graph_selection();
                 let before_view = input_view.capture_graph_selection();
+                let before = inventory.metrics();
                 let observations =
                     source_target_observations(&[(dependency, key.original_ordinal)]);
                 let prepared = prepared_target_fixture(&observations);
@@ -22819,7 +22821,7 @@ pub(crate) mod tests {
                 .unwrap();
                 let error = inventory
                     .select_native_target(
-                        bound.physical_inputs().issued_artifacts(),
+                        physical,
                         &input_selection,
                         observed,
                         None,
@@ -22839,8 +22841,13 @@ pub(crate) mod tests {
                     })),
                     "actual Input refusal must preserve its native admission cause: {error:?}"
                 );
-                assert_eq!(bound.observed_binding_state(), before);
+                assert_eq!(physical.capture_graph_selection(), before_physical);
                 assert_eq!(input_view.capture_graph_selection(), before_view);
+                let after = inventory.metrics();
+                assert_eq!(
+                    (after.nodes, after.issued_scope_nodes),
+                    (before.nodes, before.issued_scope_nodes)
+                );
             }
         }
     }
@@ -23611,6 +23618,7 @@ pub(crate) mod tests {
         assert!(narrowed_rows.group(independent_binding).is_ok());
         assert!(narrowed_rows.group(other_binding).is_err());
 
+        assert_eq!(inventory.metrics().issued_scope_nodes, before);
         let joined = admitted_view
             .merge_fixture_selections(independent.artifacts())
             .unwrap();
@@ -23623,7 +23631,6 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(joined_owner.groups().len(), 2);
-        assert_eq!(inventory.metrics().issued_scope_nodes, before);
     }
 
     #[test]

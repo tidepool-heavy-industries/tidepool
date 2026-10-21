@@ -716,7 +716,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
                 let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
                     .all(|group| original.artifact_view().contains_issued_native_group(*group));
-                let selected = context.published_source_original_selections_for_target(&groups, &imports).unwrap();
+                let selected = context.published_source_original_selections_for_target(&groups, target.imports()).unwrap();
                 prop_assert_eq!(selected.len(), usize::from(issued_groups),
                     "target policy follows exact issuer-owned dependency groups: {:?}", groups);
             }
