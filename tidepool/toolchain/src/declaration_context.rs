@@ -2381,6 +2381,23 @@ fn charge_original_use(
 }
 
 impl DemandCertifiedGroups {
+    pub(crate) fn resolved_original_bindings(
+        &self,
+    ) -> Option<&Arc<crate::certified_products::ResolvedOriginalBindings>> {
+        self.resolved_originals.as_ref()
+    }
+
+    pub(crate) fn original_use_row(
+        &self,
+        reference: &crate::certified_products::ReceiptImportOwner,
+    ) -> Option<(
+        crate::artifact_inventory::NativeGroupBinding,
+        &SelectedNativeGroupRow,
+    )> {
+        let binding = *self.original_use_roots.get(reference)?;
+        Some((binding, self.rows.get(&binding)?))
+    }
+
     /// Borrow package obligations along one use's already issued exact edges.
     /// This observation never constructs a selected row or a new demand owner.
     pub(crate) fn package_obligations_for_use(
@@ -3542,7 +3559,9 @@ impl NativeInputSelection {
                         } => Some((binder, *generation)),
                         crate::certified_products::ReceiptImportOwner::Source { .. }
                         | crate::certified_products::ReceiptImportOwner::Package { .. }
-                        | crate::certified_products::ReceiptImportOwner::OriginalBinding { .. } => None,
+                        | crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                            ..
+                        } => None,
                     }),
                 )?;
             }
@@ -8380,7 +8399,7 @@ impl<'a> ProductInputFacts<'a> {
 /// Projected World input facts retained by the actual segment source issuer.
 /// Certification and item native selection borrow this same demanded owner.
 pub(crate) struct DemandedWorldCompilerInputs {
-    initial: crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+    initial: Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>,
     demand: DemandNativeInputs,
     groups: Arc<DemandCertifiedGroups>,
     original_bindings: crate::certified_products::OriginalBindingSelection,
@@ -10377,6 +10396,11 @@ impl WorldProgramContinuation {
         let initial =
             self.request
                 .checked_stage(decoded.program, &decoded.binding.stage, validation)?;
+        initial
+            .operation()
+            .reserve::<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>(1)
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let initial = Arc::new(initial);
         if self.next_stage != initial.stage().index() {
             return Err(failure(
                 "World stage inputs lack their actual immediate predecessor",
@@ -10432,19 +10456,12 @@ impl WorldProgramContinuation {
             .flat_map(|group| &group.globals)
             .chain(receipt.targets.values().flatten())
             .map(|global| &global.owner);
-        let original_bindings = match &groups.resolved_originals {
-            Some(resolved) => crate::certified_products::OriginalBindingSelection::from_resolved(
-                Arc::clone(resolved),
-            )
-            .with_metadata(metadata),
-            None => crate::certified_products::OriginalBindingSelection::issue(
-                initial.initial_inputs().shared_compiler_source_support(),
-                Arc::clone(&operation),
+        let original_bindings =
+            crate::certified_products::OriginalBindingSelection::from_world_stage(
+                Arc::clone(&initial),
                 metadata,
-                None,
-            ),
-        }
-        .map_err(compiler_evidence_failure)?;
+            )
+            .map_err(compiler_evidence_failure)?;
         let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
             decoded.program,
             &decoded.binding.stage,

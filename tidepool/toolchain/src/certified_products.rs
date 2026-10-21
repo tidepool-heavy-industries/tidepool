@@ -5119,7 +5119,14 @@ impl ResolvedOriginalBindings {
 #[derive(Clone, Debug)]
 pub(crate) struct OriginalBindingSelection {
     authenticated: Arc<AuthenticatedOriginalBindings>,
-    resolved: Option<Arc<ResolvedOriginalBindings>>,
+    execution: OriginalBindingExecution,
+}
+
+#[derive(Clone, Debug)]
+enum OriginalBindingExecution {
+    MetadataOnly,
+    Acquired(Arc<ResolvedOriginalBindings>),
+    WorldStage(Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>),
 }
 
 impl OriginalBindingSelection {
@@ -5156,15 +5163,48 @@ impl OriginalBindingSelection {
         }
         Ok(Self {
             authenticated,
-            resolved,
+            execution: resolved.map_or(
+                OriginalBindingExecution::MetadataOnly,
+                OriginalBindingExecution::Acquired,
+            ),
         })
     }
 
     pub(crate) fn from_resolved(resolved: Arc<ResolvedOriginalBindings>) -> Self {
         Self {
             authenticated: Arc::clone(resolved.authenticated()),
-            resolved: Some(resolved),
+            execution: OriginalBindingExecution::Acquired(resolved),
         }
+    }
+
+    pub(crate) fn from_world_stage<'a>(
+        stage: Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>,
+        references: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+    ) -> CertResult<Self> {
+        let resolved = stage
+            .selection()
+            .and_then(|selection| selection.selected_groups().resolved_original_bindings());
+        let mut selection = match resolved {
+            Some(resolved) => {
+                if !resolved.belongs_to(
+                    &stage.initial_inputs().shared_compiler_source_support(),
+                    stage.operation(),
+                ) {
+                    return Err(CertificationError::Mismatch(
+                        "World Original selection has another acquisition",
+                    ));
+                }
+                Self::from_resolved(Arc::clone(resolved)).with_metadata(references)?
+            }
+            None => Self::issue(
+                stage.initial_inputs().shared_compiler_source_support(),
+                Arc::clone(stage.operation()),
+                references,
+                None,
+            )?,
+        };
+        selection.execution = OriginalBindingExecution::WorldStage(stage);
+        Ok(selection)
     }
 
     pub(crate) fn with_metadata<'a>(
@@ -5190,7 +5230,7 @@ impl OriginalBindingSelection {
         // its already checked executable subset.
         Ok(Self {
             authenticated: self.authenticated.merge(&additional)?,
-            resolved: self.resolved.clone(),
+            execution: self.execution.clone(),
         })
     }
 
@@ -5223,9 +5263,44 @@ impl OriginalBindingSelection {
                 "Original execution belongs to another inventory operation",
             ));
         }
+        let resolved = match &self.execution {
+            OriginalBindingExecution::MetadataOnly => None,
+            OriginalBindingExecution::Acquired(resolved) => Some(resolved),
+            OriginalBindingExecution::WorldStage(stage) => stage
+                .selection()
+                .and_then(|selection| selection.selected_groups().resolved_original_bindings()),
+        };
         Ok(self
             .metadata(reference)
-            .and_then(|_| self.resolved.as_ref()?.get(reference)))
+            .and_then(|_| resolved?.get(reference)))
+    }
+
+    fn executable_group(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> CertResult<
+        Option<(
+            crate::artifact_inventory::NativeGroupBinding,
+            &crate::declaration_context::SelectedNativeGroupRow,
+        )>,
+    > {
+        // Validate the operation before observing metadata or an empty stage.
+        if self.executable(reference, operation)?.is_none() {
+            return Ok(None);
+        }
+        match &self.execution {
+            OriginalBindingExecution::WorldStage(stage) => stage
+                .selection()
+                .and_then(|selection| selection.selected_groups().original_use_row(reference))
+                .map(Some)
+                .ok_or(CertificationError::Mismatch(
+                    "World Original use lost its exact selected group",
+                )),
+            OriginalBindingExecution::MetadataOnly | OriginalBindingExecution::Acquired(_) => {
+                Ok(None)
+            }
+        }
     }
 }
 

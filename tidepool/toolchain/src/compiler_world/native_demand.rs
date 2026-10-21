@@ -25,10 +25,22 @@ pub(crate) struct WorldNativeDemandStage {
 /// Initial native permission for one actually emitted stage. The complete
 /// request retains each resolved demand owner; the advancing source prefix is
 /// deliberately not a replacement acquisition for these historical choices.
+#[derive(Clone)]
 pub(crate) struct CheckedWorldStageNativeInputs {
     request: Arc<WorldNativeDemandCompletion>,
     stage: Arc<CheckedWorldCellStage>,
     offset: u64,
+}
+
+impl std::fmt::Debug for CheckedWorldStageNativeInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CheckedWorldStageNativeInputs")
+            .field("stage", &self.stage.index())
+            .field("first_ordinal", &self.offset)
+            .field("has_initial_selection", &self.selection().is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CheckedWorldStageNativeInputs {
