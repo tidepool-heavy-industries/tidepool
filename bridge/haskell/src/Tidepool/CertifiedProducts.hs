@@ -6,7 +6,7 @@ module Tidepool.CertifiedProducts
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
   , encodeCertifiedItemProductsWithInputs
   , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
-  , resolvePackageGlobal, homeInterfaceUsageOwners, readyNativeProductSourceSha256 ) where
+  , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256 ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -14,7 +14,7 @@ import Codec.CBOR.Encoding
   , encodeWord64 )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try)
-import Control.Monad (forM, when)
+import Control.Monad (foldM, forM, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
@@ -42,6 +42,8 @@ import GHC.Types.Avail (availNames)
 import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Data.Maybe (MaybeErr(..))
 import Numeric (showHex)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
 
 import Tidepool.ExecutionSource (WorkerExecutionSource, encodeWorkerExecutionSource)
 import Tidepool.DependencyEvidence
@@ -69,7 +71,7 @@ import Tidepool.FinalizedModule (homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
 import Tidepool.Timing (readTimingEnabled, emitCount)
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactSha256)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
 
 data CertifiedProductKind = OrdinaryProductFacts | SegmentOriginalFacts
 
@@ -247,13 +249,14 @@ encodeCertifiedOriginalProducts
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
 encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
-  encodeCertifiedOriginalProductsWithPrior Nothing Nothing [] Map.empty Map.empty kind retained emittedSeals reconciled env sourceRecipe
-    interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+  fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
+    encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty Map.empty kind retained emittedSeals reconciled env sourceRecipe
+      interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
 
 -- Prior facts come from this same issuer's completed stage. They add imported
 -- group coordinates and retained type seals, never newly emitted module rows.
 encodeCertifiedOriginalProductsWithPrior
-  :: Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts
+  :: FilePath -> Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts
   -> [(FilePath,BS.ByteString)] -> Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes)
   -> Map.Map SymbolIdentity WorldOriginalReference -> CertifiedProductKind
   -> Map.Map (String,String) CanonicalInterfaceProof
@@ -263,8 +266,22 @@ encodeCertifiedOriginalProductsWithPrior
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
-  -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
-encodeCertifiedOriginalProductsWithPrior prior originalInterfaces packageProducts capturedPackages currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+  -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext, [(FilePath,BS.ByteString)]))
+encodeCertifiedOriginalProductsWithPrior outDir = encodeCertifiedOriginalProductsWithCapture (Just outDir)
+
+encodeCertifiedOriginalProductsWithCapture
+  :: Maybe FilePath -> Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts
+  -> [(FilePath,BS.ByteString)] -> Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes)
+  -> Map.Map SymbolIdentity WorldOriginalReference -> CertifiedProductKind
+  -> Map.Map (String,String) CanonicalInterfaceProof
+  -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
+  -> ReconciledOriginalProducts
+  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  -> [(String, WireProgram)]
+  -> DependencyEvidence -> BS.ByteString -> BS.ByteString
+  -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext, [(FilePath,BS.ByteString)]))
+encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolveGlobal, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -412,21 +429,32 @@ encodeCertifiedOriginalProductsWithPrior prior originalInterfaces packageProduct
         pure (target, sequence globals)
       certifyLocalPackageExports env resolvePackage packageRef (map snd targets)
       observedPackages <- readIORef packageRef
-      let packageWitnesses = observedPackages ++
+      let selectedPackages = observedPackages ++
             [(unit,name,path,T.pack (artifactSha256 body))
             | ((unit,name),(path,body)) <- Map.toAscList capturedPackages]
-      let packages = Map.fromListWith Set.union
+      owned <- case outputRoot of
+        Nothing -> pure (Right (selectedPackages,[]))
+        Just root -> fmap (fmap (\(captures,writes) ->
+          ([(unit,name,path,T.pack (artifactSha256 body))
+            | ((unit,name),(path,body)) <- Map.toAscList captures],writes))) $
+          captureSelectedPackageWitnesses root capturedPackages selectedPackages
+      let (packageWitnesses,packageInterfaceWrites) = either (const ([],[])) id owned
+          packages = Map.fromListWith Set.union
             [ ((unit, name), Set.singleton (path, sha))
             | (unit, name, path, sha) <- packageWitnesses ]
       (requests, loads, catalogs) <- resolutionCounts
       let references = Map.fromListWith (+)
             [((path, sha), 1) | (_, _, path, sha) <- packageWitnesses]
-      validated <- forM (Map.toAscList references) $ \((path, sha), count) -> do
-        readBack <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
-        pure $ case readBack of
-          Left _ -> (False, 0, 0)
-          Right bytes -> let size = fromIntegral (BS.length bytes)
-            in (digest bytes == sha, size, size * count)
+      validated <- case outputRoot of
+        -- Production custody was checked against the actual token at capture.
+        -- The DATA encoder retains its independent path validation boundary.
+        Just _ -> pure []
+        Nothing -> forM (Map.toAscList references) $ \((path, sha), count) -> do
+          readBack <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
+          pure $ case readBack of
+            Left _ -> (False, 0, 0)
+            Right bytes -> let size = fromIntegral (BS.length bytes)
+              in (digest bytes == sha, size, size * count)
       let packagesValid = and [valid | (valid, _, _) <- validated]
       emitCount timing "certified_package_global_requests" requests
       emitCount timing "certified_package_owner_loads" loads
@@ -434,7 +462,10 @@ encodeCertifiedOriginalProductsWithPrior prior originalInterfaces packageProduct
       emitCount timing "certified_package_owner_revalidations" (fromIntegral (Map.size references))
       emitCount timing "certified_package_revalidation_bytes" (sum [size | (_, size, _) <- validated])
       emitCount timing "certified_package_reference_bytes" (sum [size | (_, _, size) <- validated])
-      let failures = [errorText | (_, _, Left errorText) <- modules]
+      emitCount timing "certified_package_captured_interface_bytes"
+        (sum [fromIntegral (BS.length bytes) | (_,bytes) <- packageInterfaceWrites])
+      let failures = either (:[]) (const []) owned
+            ++ [errorText | (_, _, Left errorText) <- modules]
             ++ [errorText | (_, Left errorText) <- targetRows]
             ++ ["package interface changed during certification" | not packagesValid]
             ++ ["package owner selected more than one interface" |
@@ -513,7 +544,7 @@ encodeCertifiedOriginalProductsWithPrior prior originalInterfaces packageProduct
               then Left "prior native package owner changed its captured interface"
               else Right ()
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
-            Right (certificateBytes,versions,context)
+            Right (certificateBytes,versions,context,packageInterfaceWrites)
   where
     internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
       -> (Map.Map GlobalWitness Word, Word)
@@ -801,6 +832,49 @@ packageOwner resolvePackage packageRef identity generation = do
         symbolModule identity, packagePath witness, sha) :)
       pure (Right (PackageOwner
         (symbolUnit identity) (symbolModule identity) sha generation))
+
+-- Capture only witnesses actually selected by this certification. Existing
+-- tokens already own their bytes; digest-keyed sharing avoids rereading or
+-- copying the same interface for multiple module references.
+captureSelectedPackageWitnesses
+  :: FilePath -> Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes)
+  -> [PackageWitness]
+  -> IO (Either String (Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes),[(FilePath,BS.ByteString)]))
+captureSelectedPackageWitnesses outDir captured witnesses = do
+  let selected = Map.fromListWith Set.union
+        [((unit,name),Set.singleton (path,seal)) | (unit,name,path,seal) <- witnesses]
+      initial = Map.fromList [(T.pack (artifactSha256 body),body) | (_,body) <- Map.elems captured]
+      conflicts = Map.intersectionWith (\options (_,body) ->
+        any ((/= T.pack (artifactSha256 body)) . snd) (Set.toList options)) selected captured
+  if or (Map.elems conflicts) || any ((/= 1) . Set.size) (Map.elems selected)
+    then pure (Left "package owner selected more than one interface")
+    else do
+      result <- foldM capture (Right (Map.empty,initial)) (Map.toAscList selected)
+      case result of
+        Left reason -> pure (Left reason)
+        Right (rows,bodies) -> do
+          let path seal = outDir </> "package-interfaces" </> T.unpack seal ++ ".hi"
+              used = Map.restrictKeys bodies (Set.fromList (Map.elems rows))
+              writes = [(path seal,artifactBytes body) | (seal,body) <- Map.toAscList used]
+          when (not (null writes)) $ createDirectoryIfMissing True (outDir </> "package-interfaces")
+          mapM_ (uncurry BS.writeFile) writes
+          pure (Right (Map.map (\seal -> (path seal,bodies Map.! seal)) rows,writes))
+  where
+    capture failure@(Left _) _ = pure failure
+    capture (Right (rows,bodies)) (owner,options) = do
+      let (source,seal) = Set.findMin options
+      found <- case Map.lookup seal bodies of
+        Just body -> pure (Right body)
+        Nothing -> do
+          bytes <- try (BS.readFile source) :: IO (Either IOException BS.ByteString)
+          pure $ case bytes of
+            Left _ -> Left "selected package interface is unavailable during capture"
+            Right value -> let body = captureArtifactBytes value in
+              if T.pack (artifactSha256 body) == seal then Right body
+              else Left "selected package interface changed during capture"
+      pure $ do
+        body <- found
+        Right (Map.insert owner seal rows,Map.insert seal body bodies)
 
 type PackageGlobalResolver = SymbolIdentity -> IO (Either String (Id, PackageImportRoot))
 type PackageWitnessResolver = SymbolIdentity -> IO (Either String PackageImportRoot)

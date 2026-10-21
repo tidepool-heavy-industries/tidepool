@@ -529,8 +529,7 @@ retainPreparedPackageTargets provenance targets captures context = do
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
             ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
           | (owner,body) <- Map.toAscList captures]
-        writes = Map.toAscList (Map.fromList (encodings ++
-          [(path,artifactBytes body) | (path,body) <- Map.elems interfaces]))
+        writes = Map.toAscList (Map.fromList encodings)
     pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces}
 
 withWorldStageInputs :: Maybe WorldStageInputs -> PreparedProductContext -> PreparedProductContext
@@ -1258,7 +1257,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         BS.writeFile (outDir </> "execution-source.cbor") bytes
         pure [(outDir </> "execution-source.cbor",bytes)]
       _ -> pure []
-    (retainedVersions,targetContext,certificateBytes) <- timeDetailPhase timing "module_products" "certify" $ do
+    (retainedVersions,targetContext,certificateBytes,packageInterfaceWrites) <- timeDetailPhase timing "module_products" "certify" $ do
       let emittedSeals = Map.fromList
             [((unit,name),(version,T.pack (shaHex iface),T.pack (shaHex native),T.pack (shaHex packages)))
             | product <- freshProducts
@@ -1279,15 +1278,15 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
           priorContext = case previousContext of
             Nothing -> Nothing
             Just (StagedOriginalProducts previous _ _ _ _) -> certifiedTargetContext previous
-      certified <- encodeCertifiedOriginalProductsWithPrior priorContext (Just originalInterfaces)
+      certified <- encodeCertifiedOriginalProductsWithPrior outDir priorContext (Just originalInterfaces)
         [(path,SHA256.hash bytes) | (path,bytes) <- packageWrites, takeDirectory path == "package-products"]
         capturedPackages (pprOriginalReferences prepared) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe selectedInterfaces finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
       case certified of
-        Right (bytes,versions,context) -> do
-          pure (versions,case kind of OrdinaryProductFacts -> Nothing; SegmentOriginalFacts -> Just context,bytes)
+        Right (bytes,versions,context,writes) -> do
+          pure (versions,case kind of OrdinaryProductFacts -> Nothing; SegmentOriginalFacts -> Just context,bytes,writes)
         Left reason -> do
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           fail ("native product certification failed: " ++ reason)
@@ -1330,6 +1329,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     outputSeals <- either fail pure $ freshOutputSealsFromWrites
       (finalizedOutputs
         ++ inventoryOutputs
+        ++ packageInterfaceWrites
         ++ [(outDir </> path,bytes) | (path,bytes) <- packageWrites]
         ++ [(outDir </> "dependencies.json",dependencyBytes)]
         ++ executionOutput

@@ -13,7 +13,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
 import System.IO (stderr)
-import Control.Monad ((>=>), forM_, unless, void)
+import Control.Monad ((>=>), forM, forM_, unless, void)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Term (Term(..), decodeTerm)
+import qualified Data.ByteString.Lazy as BL
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -28,8 +31,8 @@ import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import SourceBootFixtureSupport (hasIntResultLiteral, withScratch, captureDiagnostics
   , withRootedCompilerEnvironment, withQuietStdout)
-import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, Permissions(..))
-import System.FilePath ((</>), takeFileName)
+import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, removeFile, Permissions(..))
+import System.FilePath ((</>), takeFileName, takeDirectory)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
   ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory, writeCertifiedProductsKeepingWithOriginals )
@@ -42,6 +45,8 @@ import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..)
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
+import Tidepool.CertifiedProducts (captureSelectedPackageWitnesses)
+import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do
@@ -602,12 +607,10 @@ nativeOutputProvenanceChecks = withScratch $ \work -> do
 -- Finite installers and World stages consume this same native output owner.
 -- A real list operation requires a separately prepared package implementation.
 nativePackageOutputChecks :: IO ()
-nativePackageOutputChecks = withScratch $ \work -> do
-  let source = work </> "NativePackageTarget.hs"
-  writeFile source (unlines
-    [ "module NativePackageTarget where", "import Data.List (reverse)"
-    , "{-# NOINLINE __result #-}", "__result :: [Int] -> [Int]", "__result = reverse" ])
-  args <- case workerRequestFromArgv (workerArgv [Input source,Include work,Target "__result",OutputDir work]) of
+nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) -> withScratch $ \work -> do
+  let source = work </> name ++ ".hs"
+  writeFile source (unlines sourceLines)
+  args <- case workerRequestFromArgv (workerArgv ([Input source,Include work,OutputDir work] ++ map Target names)) of
     Right (Just request) -> pure request
     other -> fail ("invalid native package fixture: " ++ show other)
   withRootedCompilerEnvironment work $ withQuietStdout $
@@ -616,11 +619,11 @@ nativePackageOutputChecks = withScratch $ \work -> do
         completion <- compilePreparedRequest request (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source
         let prepared = preparedCompilationResult completion
         interfaces <- newPreparedOriginalInterfaceArtifacts prepared work
-        output <- prepareArtifactsWithIntent interfaces work completion ["__result"] [] Map.empty []
+        output <- prepareArtifactsWithIntent interfaces work completion names [] Map.empty []
         case output of
           PortableOutputs _ -> fail "native package fixture selected portable output"
           NativeOutputs artifacts products -> do
-            unless (length artifacts == 1) (fail "native package fixture lost its target")
+            unless (length artifacts == length names) (fail "native package fixture lost its targets")
             forM_ artifacts $ \artifact -> unless
               (not (any ((== "reverse") . symbolOccurrence)
                 [identity | group <- programBindings (paProgram artifact)
@@ -629,8 +632,10 @@ nativePackageOutputChecks = withScratch $ \work -> do
             void (writePreparedArtifacts work artifacts)
             void (writeCertifiedProductsKeepingWithOriginals [work] interfaces work prepared (Just products)
               [(paTarget artifact,paProgram artifact) | artifact <- artifacts])
-            paths <- listDirectory (work </> "package-products")
-            unless (not (null paths)) (fail "native writer emitted no package products")
+            hasCode <- doesDirectoryExist (work </> "package-products")
+            paths <- if hasCode then listDirectory (work </> "package-products") else pure []
+            unless (not (null paths) == wantsCode)
+              (fail "native writer confused TYPE support with executable package products")
             certificate <- BS.readFile (work </> "certified-products.cbor")
             forM_ paths $ \path -> do
               bytes <- BS.readFile (work </> "package-products" </> path)
@@ -640,3 +645,57 @@ nativePackageOutputChecks = withScratch $ \work -> do
                 (fail "native certificate omitted an emitted package product")
             captured <- listDirectory (work </> "package-interfaces")
             unless (not (null captured)) (fail "native writer omitted captured package interfaces")
+            packageRows <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
+              Right (rest,TList [TString "TPCERT",TInt 11,TList
+                [TString "ordinary",_,_,TList rows,_,_,_,_,_]]) | BL.null rest -> pure rows
+              _ -> fail "native writer emitted a malformed package witness table"
+            witnesses <- forM packageRows $ \row -> case row of
+              TList [TString unit,TString name,TString path,TString seal] -> do
+                unless (takeDirectory (Text.unpack path) == work </> "package-interfaces")
+                  (fail "selected package witness escaped its completed output")
+                body <- captureArtifactBytes <$> BS.readFile (Text.unpack path)
+                unless (Text.pack (artifactSha256 body) == seal)
+                  (fail "selected package witness differs from its captured bytes")
+                pure (unit,name,Text.unpack path,seal,body)
+              _ -> fail "native writer emitted a malformed selected package witness"
+            unless (any (\(_,name,_,_,_) -> name == "GHC.Types") witnesses)
+              (fail "native package fixture lost its TYPE-only GHC.Types witness")
+            unless (Set.fromList captured == Set.fromList
+                [Text.unpack seal ++ ".hi" | (_,_,_,seal,_) <- witnesses])
+              (fail "native package interfaces were duplicated or omitted from the witness table")
+            case witnesses of
+              (unit,name,_,seal,body):_ -> do
+                let sourceCopy = work </> "captured-package-source.hi"
+                    owner = (unit,name)
+                    selected = [(unit,name,sourceCopy,seal)]
+                    token = Map.singleton owner (sourceCopy,body)
+                BS.writeFile sourceCopy (artifactBytes body)
+                removeFile sourceCopy
+                retained <- captureSelectedPackageWitnesses (work </> "retained-package-check") token (selected ++ selected)
+                  >>= either fail pure
+                unless (Map.size (fst retained) == 1 && length (snd retained) == 1)
+                  (fail "selected package token was not shared across duplicate references")
+                let refuse label result = case result of
+                      Left _ -> pure ()
+                      Right _ -> fail (label ++ " accepted invalid selected package custody")
+                captureSelectedPackageWitnesses (work </> "missing-package-check") Map.empty selected
+                  >>= refuse "missing interface"
+                BS.writeFile sourceCopy (artifactBytes body)
+                captureSelectedPackageWitnesses (work </> "forged-package-check") Map.empty
+                  [(unit,name,sourceCopy,Text.replicate 64 "0")]
+                  >>= refuse "forged seal"
+                captureSelectedPackageWitnesses (work </> "conflicting-package-check") token
+                  (selected ++ [(unit,name,sourceCopy,Text.replicate 64 "0")])
+                  >>= refuse "conflicting owner"
+              [] -> fail "native output omitted all selected package witnesses"
+
+  where
+    cases =
+      [("NativePackageTarget",
+        ["module NativePackageTarget where", "import Data.List (reverse)"
+        ,"{-# NOINLINE __result #-}", "__result :: [Int] -> [Int]", "__result = reverse"],
+        ["__result"],True)
+      ,("NativeTypeSupport",
+        ["{-# LANGUAGE NoImplicitPrelude #-}", "module NativeTypeSupport where"
+        ,"data Token = First | Second", "first = First", "second = Second"],
+        ["first","second"],False)]
