@@ -6367,27 +6367,7 @@ fn authenticate_original_binding_membership(
                     }
                 }
                 let (original_id, original_entry) = located
-                    .ok_or_else(|| {
-                        eprintln!(
-                            "DEBUG defining lookup miss owner={defining:?} retained={:?}",
-                            source
-                                .artifacts()
-                                .descriptors()
-                                .iter()
-                                .filter(|descriptor| {
-                                    descriptor.owner.unit.contains("ghc")
-                                        || descriptor.owner.module.contains("GHC")
-                                        || descriptor.owner.module.contains("Base")
-                                })
-                                .map(|descriptor| (
-                                    descriptor.owner.clone(),
-                                    descriptor.kind,
-                                    descriptor.id
-                                ))
-                                .collect::<Vec<_>>()
-                        );
-                        refuse_defining(InputDecisionRefusal::RoleMismatch)
-                    })?;
+                    .ok_or_else(|| refuse_defining(InputDecisionRefusal::RoleMismatch))?;
                 let crate::artifact_inventory::ArtifactPayload::Original(defining_product) =
                     &original_entry.payload
                 else {
