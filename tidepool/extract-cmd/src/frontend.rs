@@ -104,6 +104,12 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
     )?;
     let mut request = daemon::prepare_worker_request(args)?.request;
+    if request.requires_native_demand() {
+        return Err(FrontendError::Usage(
+            "World preparation requires native demand exchange capability in an explicit compiler transaction"
+                .to_owned(),
+        ));
+    }
     let mut build_products = daemon::BuildProductsNamespace::direct()?;
     let cwd = std::env::current_dir().map_err(FrontendError::Io)?;
     let diagnostics = build_products.place(&cwd, &mut request);

@@ -521,15 +521,9 @@ fn preflight_epoch(root: &Path) -> [u8; 32] {
     identity[72..104].try_into().unwrap()
 }
 
-#[test]
-fn world_preparation_on_eof_endpoint_refuses_before_worker_work() {
+fn world_prepare_command(root: &Path) -> ExtractCmd {
     use std::sync::Arc;
     use tidepool_extract_cmd::{WorldCellPrepareRequest, WorldCellRecipe, WorldRealizationRef};
-    let _environment = Environment::set();
-    let scratch = tempfile::tempdir().unwrap();
-    let fixture = fixture(scratch.path());
-    let root = scratch.path().join("one-shot");
-    setup(&root, &fixture, 20);
     let mut command =
         ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(root.join("launcher")));
     // Valid transport-only data cannot confer the missing exchange capability.
@@ -551,6 +545,17 @@ fn world_preparation_on_eof_endpoint_refuses_before_worker_work() {
             output: root.join("prepared"),
         })
         .unwrap();
+    command
+}
+
+#[test]
+fn world_preparation_on_eof_endpoint_refuses_before_worker_work() {
+    let _environment = Environment::set();
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = fixture(scratch.path());
+    let root = scratch.path().join("one-shot");
+    setup(&root, &fixture, 20);
+    let command = world_prepare_command(&root);
     let error = command
         .bind_direct()
         .unwrap()
@@ -561,5 +566,51 @@ fn world_preparation_on_eof_endpoint_refuses_before_worker_work() {
     assert!(
         !root.join("worker-pids").exists(),
         "capability refusal started native worker work"
+    );
+}
+
+#[test]
+fn direct_cli_refuses_world_before_worker_work_and_preserves_explicit_portable_output() {
+    let _environment = Environment::set();
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = fixture(scratch.path());
+    let root = scratch.path().join("cli");
+    let mut portable = setup(&root, &fixture, 27);
+    portable.portable_output();
+    let world = world_prepare_command(&root);
+    let invoke = |request: &ExtractCmd| {
+        Command::new(FRONTEND)
+            .env("TIDEPOOL_EXTRACT_WORKER", root.join("worker"))
+            .args(request.worker_argv())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let refused = invoke(&world);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("World preparation requires native demand exchange capability"));
+    assert!(
+        !root.join("worker-probed").exists(),
+        "World refusal probed its worker"
+    );
+    assert!(
+        !root.join("cli-request").exists(),
+        "World refusal executed its worker"
+    );
+    let completed = invoke(&portable);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    assert_eq!(completed.stdout, b"portable-direct-complete\n");
+    assert_eq!(
+        fs::read(root.join("cli-request")).unwrap(),
+        portable.worker_argv()[1].as_os_str().as_bytes()
+    );
+    assert_eq!(
+        fs::read(root.join("worker-probed")).unwrap(),
+        b"request protocol"
     );
 }

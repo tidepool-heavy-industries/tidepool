@@ -25,6 +25,9 @@ fn main() {
     }
     let phase = std::fs::read(directory.join("phase")).unwrap()[0];
     if std::env::args().any(|arg| arg == "--print-worker-request-flag") {
+        if phase == 27 {
+            std::fs::write(directory.join("worker-probed"), b"request protocol").unwrap();
+        }
         print!(
             "{}",
             std::fs::read_to_string(directory.join("request-flag")).unwrap()
@@ -33,6 +36,17 @@ fn main() {
     }
     if std::env::args().any(|arg| arg == "--compiler-endpoint-v1") {
         direct_endpoint(directory, phase);
+        return;
+    }
+    if phase == 27 {
+        let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(
+            arguments[0],
+            std::fs::read_to_string(directory.join("request-flag")).unwrap()
+        );
+        std::fs::write(directory.join("cli-request"), &arguments[1]).unwrap();
+        println!("portable-direct-complete");
         return;
     }
     let first_worker = std::fs::OpenOptions::new()
