@@ -19746,6 +19746,222 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn retained_original_membership_tracks_changed_input_basis_in_one_operation() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
+
+        let first_product = full_native_fixture("MembershipPrefix", vec![(8, vec![])], 7);
+        let added_product = full_native_fixture("Scientific", vec![(26, vec![])], 9);
+        let entry = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
+            Arc::new(
+                ArtifactEntry::original(
+                    product.module_interface().unwrap().producer_sha256(),
+                    product.clone(),
+                )
+                .unwrap(),
+            )
+        };
+        let inventory = ArtifactInventory::default();
+        let first_view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![entry(&first_product)],
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let first_metadata = CompilerInputProjection::default()
+            .project_metadata(first_view.metadata_snapshot())
+            .unwrap();
+        let first_basis = first_metadata.original_source_membership_basis();
+        let retained = RetainedOriginalSources::default();
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let original = retained
+            .admit(
+                &first_basis,
+                std::slice::from_ref(&first_product),
+                &operation,
+            )
+            .unwrap();
+        let expected_first = BTreeSet::from([(
+            first_product.owner().clone(),
+            8,
+            testing::identity("MembershipPrefix", "entry_8"),
+        )]);
+        assert_eq!(
+            original
+                .sources
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_first
+        );
+        assert!(Arc::ptr_eq(
+            &original,
+            &retained
+                .admit(
+                    &first_basis,
+                    std::slice::from_ref(&first_product),
+                    &operation,
+                )
+                .unwrap()
+        ));
+        let products = [first_product.clone(), added_product.clone()];
+        assert!(
+            matches!(retained.admit(&first_basis, &products, &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::UnexpectedOwner(added_product.owner().clone()))
+        );
+
+        let next_view = inventory
+            .admit_recovery_selection(&first_view, vec![entry(&added_product)], &BTreeSet::new())
+            .unwrap();
+        let next_metadata = CompilerInputProjection::default()
+            .project_metadata(next_view.metadata_snapshot())
+            .unwrap();
+        let next_basis = next_metadata.original_source_membership_basis();
+        assert!(!first_basis.same_owner(&next_basis));
+        let invalid = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            added_product.owner().clone(),
+            added_product.interface_bytes().to_vec(),
+            added_product.product_bytes().to_vec(),
+            added_product.package_imports_bytes().to_vec(),
+            added_product.certification_bytes().to_vec(),
+        );
+        assert!(matches!(
+            retained.admit(
+                &next_basis,
+                &[first_product.clone(), invalid.clone()],
+                &operation
+            ),
+            Err(CertificationError::Mismatch(
+                "available original native witness"
+            ))
+        ));
+        assert!(
+            Arc::ptr_eq(
+                &original,
+                &retained
+                    .admit(
+                        &first_basis,
+                        std::slice::from_ref(&first_product),
+                        &operation,
+                    )
+                    .unwrap()
+            ),
+            "failed authentication of another basis preserves the prior slot"
+        );
+        let expanded = retained.admit(&next_basis, &products, &operation).unwrap();
+        assert!(!Arc::ptr_eq(&original, &expanded));
+        let expected_next = expected_first
+            .iter()
+            .cloned()
+            .chain([(
+                added_product.owner().clone(),
+                26,
+                testing::identity("Scientific", "entry_26"),
+            )])
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            expanded
+                .sources
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_next
+        );
+        assert!(Arc::ptr_eq(
+            &expanded,
+            &retained.admit(&next_basis, &products, &operation).unwrap()
+        ));
+        assert!(
+            matches!(retained.admit(&next_basis, std::slice::from_ref(&first_product), &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::MissingOwner(added_product.owner().clone()))
+        );
+        assert!(
+            matches!(retained.admit(&next_basis, &[first_product.clone(), invalid], &operation),
+            Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::OriginalBytes(added_product.owner().clone()))
+        );
+        assert!(Arc::ptr_eq(
+            &expanded,
+            &retained.admit(&next_basis, &products, &operation).unwrap()
+        ));
+        let selected = first_product
+            .original_native()
+            .unwrap()
+            .groups
+            .iter()
+            .map(|group| {
+                group
+                    .admitted(first_product.original_native().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            original
+                .overlay(&selected, &operation)
+                .unwrap()
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_first,
+            "the old returned membership remains exact and usable after basis growth"
+        );
+        let next_owner = Arc::downgrade(&next_metadata.retained);
+        drop(next_metadata);
+        drop(next_view);
+        assert!(
+            next_owner.upgrade().is_none(),
+            "cache basis identity must not retain old metadata custody"
+        );
+
+        let reopened_inventory = ArtifactInventory::default();
+        let reopened_view = reopened_inventory
+            .admit_recovery_selection(
+                &reopened_inventory.empty_view(),
+                products.iter().map(entry).collect(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let reopened_metadata = CompilerInputProjection::default()
+            .project_metadata(reopened_view.metadata_snapshot())
+            .unwrap();
+        let reopened_basis = reopened_metadata.original_source_membership_basis();
+        assert!(!next_basis.same_owner(&reopened_basis));
+        let reopened = retained
+            .admit(&reopened_basis, &products, &operation)
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&expanded, &reopened),
+            "a new real owner cannot hit an expired weak basis"
+        );
+        assert_eq!(
+            reopened
+                .sources
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_next
+        );
+        assert!(Arc::ptr_eq(
+            &reopened,
+            &retained
+                .admit(&reopened_basis, &products, &operation)
+                .unwrap()
+        ));
+        assert_eq!(
+            original
+                .sources
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_first
+        );
+    }
+
+    #[test]
     fn retained_original_membership_charges_independently_recovered_bytes() {
         let product = full_native_fixture("RecoveredMembership", vec![(8, vec![])], 7);
         let inventory = crate::artifact_inventory::ArtifactInventory::default();
