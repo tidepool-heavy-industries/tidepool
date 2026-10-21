@@ -148,10 +148,7 @@ fn hydrate_context_roots(
         .iter()
         .map(|binding| binding.artifact)
         .collect::<BTreeSet<_>>();
-    let mut products = Vec::new();
-    let mut interfaces = Vec::new();
-    let mut joins = Vec::new();
-    let mut values = Vec::new();
+    let mut references = Vec::new();
     let mut descriptors = Vec::new();
     for id in artifacts {
         let artifact = graph
@@ -159,29 +156,17 @@ fn hydrate_context_roots(
             .map_err(|error| recovery::graph_error(&owner.path, error))?
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         descriptors.push(artifact.descriptor());
-        match artifact.as_ref() {
-            recovery::RecoveryArtifactClosure::Home(reference) => products.push(reference.clone()),
-            recovery::RecoveryArtifactClosure::ModuleInterface(reference) => {
-                interfaces.push(reference.clone())
-            }
-            recovery::RecoveryArtifactClosure::Join(reference) => joins.push(reference.clone()),
-            recovery::RecoveryArtifactClosure::ValueInterface(reference) => {
-                values.push(reference.clone())
-            }
-        }
+        references.push(artifact.payload_reference());
     }
     let mut stage = owner
         .hydration
         .lock()
         .acquisition
-        .stage_inputs(&products, &interfaces, &joins, &values)
+        .stage_payloads(&references)
         .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
     let inventory = stage
-        .capture_bound(
-            &products,
-            &interfaces,
-            &joins,
-            &values,
+        .capture_payloads_bound(
+            &references,
             &descriptors,
             &bindings.into_iter().collect::<Vec<_>>(),
             &edges.into_iter().collect::<Vec<_>>(),
@@ -1079,6 +1064,9 @@ mod lazy_tests {
             for descriptor in &descriptors {
                 let artifact = state.graph.artifact(descriptor.id).unwrap().unwrap();
                 match artifact.as_ref() {
+                    recovery::RecoveryArtifactClosure::PackageCode(_) => {
+                        panic!("source hydration fixture contains package code")
+                    }
                     recovery::RecoveryArtifactClosure::Home(reference) => {
                         products.push(reference.clone())
                     }

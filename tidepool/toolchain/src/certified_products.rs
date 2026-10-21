@@ -17,7 +17,7 @@ use tidepool_repr::execution_schema::{
 };
 
 mod package_code;
-pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct};
+pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageCodeInterfaceRef};
 pub(crate) mod native_demand;
 pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
@@ -2693,7 +2693,7 @@ fn verify_package_interface(
         .map_err(package_validation_error)
 }
 
-fn package_validation_error(
+pub(crate) fn package_validation_error(
     error: crate::recovery_artifacts::RecoveryArtifactError,
 ) -> CertificationError {
     match error {
@@ -3274,6 +3274,13 @@ impl CertifiedSourceSelection {
     /// input choice. This cannot construct a native role or availability.
     pub(crate) fn empty_product_output() -> Self {
         Self::new_product_ingress()
+    }
+
+    pub(crate) fn native_completions(&self) -> crate::artifact_inventory::NativeSelectionCompletions {
+        match &self.input_origin {
+            CertifiedInputOrigin::Continuation(source) => source.native_completions().clone(),
+            CertifiedInputOrigin::NewProducts => Default::default(),
+        }
     }
 
     pub(crate) fn continuation_input(
@@ -5073,13 +5080,9 @@ fn resolve_receipt_owner_with_validation(
                     reason: InputDecisionRefusal::MissingContinuationOwner,
                 })?;
             let ordinal = *ordinal;
-            // The item receipt must still agree with this selected continuation.
-            selected.receipt_source_owner(
-                &owner.unit,
-                &owner.module,
-                Some(&native.module_version),
-                ordinal,
-            )?;
+            // This exact pair/symbol was already permitted by the retained
+            // initial input owner. Prefix products can change the current
+            // module policy without replacing that historical selection.
             let resolved = sources
                 .get(&(native.clone(), ordinal, binder.clone()))
                 .ok_or_else(|| {
@@ -5416,6 +5419,18 @@ fn validate_package_owner(
     packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
+    let witness = package_owner_witness(unit, module, binder, interface_digest, sources, packages)?;
+    verify_package_interface(validation, witness)
+}
+
+fn package_owner_witness<'a>(
+    unit: &str,
+    module: &str,
+    binder: &SymbolIdentity,
+    interface_digest: &[u8; 32],
+    sources: &SourceGroupMap,
+    packages: &'a impl PackageInterfaceLookup,
+) -> CertResult<&'a PackageInterfaceWitness> {
     if sources.contains_module(unit, module) {
         return Err(CertificationError::Mismatch(
             "home owner downgraded to package",
@@ -5430,7 +5445,7 @@ fn validate_package_owner(
     if witness.sha256 != *interface_digest || !witness.selected_path.is_absolute() {
         return Err(CertificationError::Mismatch("package interface witness"));
     }
-    verify_package_interface(validation, witness)
+    Ok(witness)
 }
 
 #[cfg(test)]
@@ -7701,6 +7716,18 @@ pub enum SelectedNativeImport {
     },
 }
 
+/// One ordered final-target slot. A direct live capture is a requirement for
+/// the ordinary BindingEntry consumer, not an issued native dependency edge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectedNativeTargetImport {
+    Source {
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+    RetainedCapture { identity: SymbolIdentity, generation: u64 },
+    Package { identity: SymbolIdentity, interface_digest: [u8; 32] },
+}
+
 pub(crate) struct SelectedScopeCertification {
     pub(crate) additional: Vec<(
         crate::artifact_inventory::NativeGroupBinding,
@@ -9522,7 +9549,7 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::ArtifactPayload::Original(product) => {
                             product.module_interface().cloned()
                         }
-                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) => None,
+                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => None,
                     })
                     .collect()
             });
@@ -19918,12 +19945,23 @@ pub(crate) mod tests {
         let issued_groups = crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
             &target, None, &mut validation,
         ).unwrap();
+        let issued_groups = Arc::new(issued_groups);
+        let capture_identity = testing::identity("Values", "value");
+        let mixed_target = admitted_target.for_ordinary_target(vec![
+            source(&g, 7),
+            PendingImportOwner::Retained { identity: capture_identity.clone(), generation: 4 },
+        ]).unwrap().with_certified_groups(Arc::clone(&issued_groups)).unwrap();
+        let mixed = mixed_target.resolve_sources().unwrap();
+        assert!(matches!(mixed.target_requirements(), [
+            SelectedNativeTargetImport::Source { binding, .. },
+            SelectedNativeTargetImport::RetainedCapture { identity, generation: 4 },
+        ] if *binding == fresh_g && identity == &capture_identity));
         let certified_target = admitted_target.bind_target(None, imports.to_vec())
-            .with_certified_groups(Arc::new(issued_groups)).unwrap();
+            .with_certified_groups(issued_groups).unwrap();
         let linked_target = certified_target.resolve_sources().unwrap();
-        assert!(matches!(linked_target.target_link_requirements().unwrap(), [
-            SelectedNativeImport::Source { binding: first, .. },
-            SelectedNativeImport::Source { binding: second, .. },
+        assert!(matches!(linked_target.target_requirements(), [
+            SelectedNativeTargetImport::Source { binding: first, .. },
+            SelectedNativeTargetImport::Source { binding: second, .. },
         ] if *first == fresh_g && *second == fresh_j));
         assert!(matches!(linked_target.group_imports(fresh_j).unwrap(),
             [SelectedNativeImport::Source { binding, .. }] if *binding == old_r));

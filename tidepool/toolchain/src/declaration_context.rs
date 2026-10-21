@@ -453,6 +453,7 @@ enum OriginalInputDemand {
 #[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
     native_fact_base: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
+    native_completions: crate::artifact_inventory::NativeSelectionCompletions,
     demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -473,6 +474,7 @@ impl PartialEq for OriginalCompilerInputs {
         }) && self.projection == other.projection
             && self.artifacts == other.artifacts
             && self.native_offers == other.native_offers
+            && self.native_completions == other.native_completions
             && self.native_availability == other.native_availability
     }
 }
@@ -783,6 +785,7 @@ impl OriginalCompilerInputs {
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
                 native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+                native_completions: source.native_completions().clone(),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -809,6 +812,7 @@ impl OriginalCompilerInputs {
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+            native_completions: source.native_completions().clone(),
             native_availability: source.native_availability().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -868,12 +872,19 @@ impl OriginalCompilerInputs {
     ) -> Self {
         Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+            native_completions: source.native_completions().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().clone(),
             artifacts: source.artifacts().clone(),
             native_offers: source.native_offers().to_vec(),
             native_availability: source.native_availability().clone(),
         }
+    }
+
+    pub(crate) fn issued_native_completions(
+        &self,
+    ) -> &crate::artifact_inventory::NativeSelectionCompletions {
+        &self.native_completions
     }
 
     pub(crate) fn from_selection(
@@ -971,6 +982,7 @@ impl OriginalCompilerInputs {
         timing.finish(true);
         Ok(NormalizedOriginalCompilerInputs { inputs: Self {
             native_fact_base: selection.native_fact_base().cloned(),
+            native_completions: selection.native_completions(),
             native_availability,
             demand: OriginalInputDemand::Issued(
                 crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
@@ -1120,6 +1132,7 @@ impl OriginalCompilerInputs {
         };
         Ok(Self {
             native_fact_base: self.native_fact_base.clone(),
+            native_completions: self.native_completions.clone(),
             native_availability: self
                 .native_availability
                 .for_compiler_roles(&projection, &artifacts)?,
@@ -1143,6 +1156,7 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
+            native_completions: self.native_completions.append(&other.native_completions)?,
             native_fact_base: self
                 .native_fact_base
                 .clone()
@@ -3601,6 +3615,55 @@ fn compiler_execution_scope(
 }
 
 impl RequestCompilerInputs {
+    /// Advance only immutable completion custody from an actually issued context.
+    /// The receiver keeps its public compiler namespace and lexical policy.
+    pub(crate) fn with_native_completion_from(
+        self: &Arc<Self>,
+        issued: &Arc<ExactDeclarationContext>,
+    ) -> Result<WorldPrimaryProgramSupport, CompileError> {
+        let primary = self
+            .world_primary_context
+            .as_ref()
+            .ok_or_else(|| failure("native completion requires the actual World primary owner"))?;
+        if primary.owner.facts.producer == [0; 32]
+            || primary.owner.facts.producer != issued.owner.facts.producer
+        {
+            return Err(failure(
+                "native completion differs from the primary compiler producer",
+            ));
+        }
+        let support = self
+            .source_support
+            .with_native_completions_from(issued.compiler_source_support())?;
+        if support.native_completions() == self.source_support.native_completions() {
+            return Ok(WorldPrimaryProgramSupport {
+                inputs: Arc::clone(self),
+                context: Arc::clone(primary),
+                changed_owners: Vec::new(),
+                promotion_qualifier_invocations: 0,
+            });
+        }
+        let mut facts = primary.owner.facts.clone();
+        facts.compiler_support = support.clone();
+        let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let inputs = Arc::new(Self {
+            source_support: Arc::new(support),
+            metadata: CompilerArtifactMetadata {
+                entries: self.metadata.entries.clone(),
+                retained: Arc::clone(&self.metadata.retained),
+            },
+            native_selection: self.native_selection.clone(),
+            original_sources: Arc::clone(&self.original_sources),
+            world_primary_context: Some(Arc::clone(&context)),
+        });
+        Ok(WorldPrimaryProgramSupport {
+            inputs,
+            context,
+            changed_owners: Vec::new(),
+            promotion_qualifier_invocations: 0,
+        })
+    }
+
     pub(crate) fn with_type_interfaces(
         self: &Arc<Self>,
         contexts: &[Arc<ExactDeclarationContext>],
@@ -3791,6 +3854,14 @@ impl RequestCompilerInputs {
         &self,
     ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
         Arc::clone(&self.source_support)
+    }
+
+    /// Immutable native completion custody acquired by this exact context.
+    /// These references do not add compiler roles or executable target demand.
+    pub fn issued_native_completions(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::artifact_inventory::IssuedNativeSelectionCompletion>> {
+        self.compiler_source_support().native_completions().iter()
     }
 
     pub(crate) fn compiler_source_support(
@@ -4126,7 +4197,7 @@ fn canonical_source_interface(
     match &entry.payload {
         ArtifactPayload::Canonical(interface) => Some(interface),
         ArtifactPayload::Original(product) => product.module_interface(),
-        ArtifactPayload::Interface(_, _) => None,
+        ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
     }
 }
 
@@ -4157,6 +4228,7 @@ fn materialization_bytes(entries: &[Arc<ArtifactEntry>]) -> u64 {
     entries
         .iter()
         .map(|entry| match &entry.payload {
+            ArtifactPayload::PackageCode(product) => product.bytes().len() as u64,
             ArtifactPayload::Original(product) => {
                 product.interface_bytes().len() as u64
                     + product.product_bytes().len() as u64
@@ -4359,6 +4431,7 @@ pub enum RecoveryPayloadReference {
     Canonical(recovery_artifacts::RecoveryModuleInterfaceRef),
     Join(RecoveryJoinRef),
     Value(RecoveryValueInterfaceRef),
+    PackageCode(crate::certified_products::RecoveryPackageCodeRef),
 }
 
 impl RecoveryPayloadReference {
@@ -4372,6 +4445,9 @@ impl RecoveryPayloadReference {
             Self::Join(reference) => ArtifactDescriptor::from_recovery_join(reference).id,
             Self::Value(reference) => {
                 ArtifactDescriptor::from_recovery_value_interface(reference).id
+            }
+            Self::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference).id
             }
         }
     }
@@ -4442,6 +4518,20 @@ impl RecoveredArtifactAcquisition {
         values: &[RecoveryValueInterfaceRef],
     ) -> Result<Self, RecoveryInventoryError> {
         let references = Self::references(products, module_interfaces, joins, values)?;
+        self.stage_references(references)
+    }
+
+    pub fn stage_payloads(
+        &self,
+        references: &[RecoveryPayloadReference],
+    ) -> Result<Self, RecoveryInventoryError> {
+        self.stage_references(Self::index_payloads(references)?)
+    }
+
+    fn stage_references(
+        &self,
+        references: BTreeMap<ArtifactId, RecoveryPayloadReference>,
+    ) -> Result<Self, RecoveryInventoryError> {
         let mut stage = Self::new(&self.root);
         for (id, reference) in references {
             if let Some(held) = self.payloads.get(&id) {
@@ -4467,10 +4557,70 @@ impl RecoveredArtifactAcquisition {
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
         let references = Self::references(products, module_interfaces, joins, values)?;
+        self.capture_references(references, descriptors, bindings, edges)
+    }
+
+    /// Restore one explicit payload batch under its already-issued exact graph.
+    /// Package records carry no interface role and cannot replace missing rows.
+    pub fn capture_payloads_bound(
+        &mut self,
+        references: &[RecoveryPayloadReference],
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        bindings: &[ArtifactBinding],
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
+        self.capture_references(
+            Self::index_payloads(references)?,
+            descriptors,
+            bindings,
+            edges,
+        )
+    }
+
+    fn index_payloads(
+        references: &[RecoveryPayloadReference],
+    ) -> Result<BTreeMap<ArtifactId, RecoveryPayloadReference>, RecoveryInventoryError> {
+        let mut indexed = BTreeMap::new();
+        for reference in references {
+            if indexed.insert(reference.id(), reference.clone()).is_some() {
+                return Err(failure("duplicate recovery payload reference").into());
+            }
+        }
+        // Original certificates retain their own canonical companion even when
+        // that companion is not separately listed by the requesting snapshot.
+        for reference in references {
+            let RecoveryPayloadReference::Original(original) = reference else {
+                continue;
+            };
+            let Some(interface) = &original.module_interface else {
+                continue;
+            };
+            let companion = RecoveryPayloadReference::Canonical(interface.clone());
+            if indexed
+                .get(&companion.id())
+                .is_some_and(|held| held != &companion)
+            {
+                return Err(
+                    failure("recovery payload identity has conflicting exact references").into(),
+                );
+            }
+            indexed.insert(companion.id(), companion);
+        }
+        Ok(indexed)
+    }
+
+    fn capture_references(
+        &mut self,
+        references: BTreeMap<ArtifactId, RecoveryPayloadReference>,
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        bindings: &[ArtifactBinding],
+        edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
+    ) -> Result<RecoveredArtifactInventory, RecoveryInventoryError> {
         let mut missing_products = Vec::new();
         let mut missing_interfaces = Vec::new();
         let mut missing_joins = Vec::new();
         let mut missing_values = Vec::new();
+        let mut missing_packages = Vec::new();
         let mut held_interfaces = BTreeMap::new();
         for (id, reference) in &references {
             if let Some(held) = self.payloads.get(id) {
@@ -4497,17 +4647,21 @@ impl RecoveredArtifactAcquisition {
                 RecoveryPayloadReference::Value(reference) => {
                     missing_values.push(reference.clone())
                 }
+                RecoveryPayloadReference::PackageCode(reference) => {
+                    missing_packages.push(reference.clone())
+                }
             }
         }
         let captured = if missing_products.is_empty()
             && missing_interfaces.is_empty()
             && missing_joins.is_empty()
             && missing_values.is_empty()
+            && missing_packages.is_empty()
         {
             BTreeMap::new()
         } else {
-            recovery_artifacts::with_artifact_work(&mut self.work, |validation| {
-                RecoveredArtifactInventory::capture_inputs_with_validation(
+            recovery_artifacts::with_artifact_work(&mut self.work, |validation| -> Result<_, RecoveryInventoryError> {
+                let mut captured = RecoveredArtifactInventory::capture_inputs_with_validation(
                     &self.root,
                     &missing_products,
                     &missing_interfaces,
@@ -4516,7 +4670,18 @@ impl RecoveredArtifactAcquisition {
                     None,
                     validation,
                     &held_interfaces,
-                )
+                )?;
+                for reference in &missing_packages {
+                    let product = crate::certified_products::CertifiedPackageCodeProduct::restore(
+                        &self.root, reference, validation,
+                    ).map_err(compiler_evidence_failure)?;
+                    let entry = Arc::new(ArtifactEntry::package_code(product));
+                    if entry.descriptor != crate::artifact_inventory::ArtifactDescriptor::from_recovery_package_code(reference) {
+                        return Err(failure("package recovery descriptor differs from captured bytes").into());
+                    }
+                    captured.entries.insert(entry.descriptor.id, entry);
+                }
+                Ok(captured)
             })?
             .entries
         };
@@ -5444,6 +5609,9 @@ impl CertifiedInterfaceInputs {
                 .get(&owner)
                 .ok_or_else(|| failure("recovery inspection interface is outside its owner"))?;
             let (bytes, packages) = match &entry.payload {
+                ArtifactPayload::PackageCode(_) => {
+                    return Err(failure("package code is not a compiler interface"))
+                }
                 ArtifactPayload::Original(product) => {
                     (product.interface_bytes(), product.package_imports_bytes())
                 }
@@ -5516,6 +5684,7 @@ pub(crate) struct RetainedArtifactMaterialization {
     _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
     rows: imbl::OrdMap<ArtifactId, Arc<RetainedArtifactRow>>,
+    package_rows: imbl::OrdMap<ArtifactId, Arc<RetainedPackageCodeRow>>,
     groups:
         imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
     execution_scope: Option<Arc<Value>>,
@@ -5535,6 +5704,7 @@ struct OwnedExecutionGraphFile {
 
 struct MaterializationFacts<'a> {
     rows: BTreeMap<ArtifactId, &'a Arc<RetainedArtifactRow>>,
+    package_rows: BTreeMap<ArtifactId, &'a Arc<RetainedPackageCodeRow>>,
     groups:
         BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>,
     graph_paths: BTreeMap<[u8; 32], &'a Arc<OwnedExecutionGraphFile>>,
@@ -5559,6 +5729,11 @@ impl MaterializationFacts<'_> {
             _parents: Vec::new(),
             rows: self
                 .rows
+                .into_iter()
+                .map(|(id, row)| (id, Arc::clone(row)))
+                .collect(),
+            package_rows: self
+                .package_rows
                 .into_iter()
                 .map(|(id, row)| (id, Arc::clone(row)))
                 .collect(),
@@ -5616,6 +5791,23 @@ thread_local! {
 }
 
 impl RetainedArtifactMaterialization {
+    pub(crate) fn package_rows(
+        &self,
+        artifacts: &impl crate::artifact_inventory::ArtifactEntryMap<ArtifactId>,
+    ) -> BTreeMap<ArtifactId, Arc<RetainedPackageCodeRow>> {
+        let mut rows = BTreeMap::new();
+        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            rows.extend(
+                owner
+                    .package_rows
+                    .iter()
+                    .filter(|(id, _)| artifacts.contains_key(*id))
+                    .map(|(id, row)| (*id, Arc::clone(row))),
+            );
+        });
+        rows
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fact_detach_count() -> usize {
         CHECKED_VALUE_FACT_DETACHES.with(std::cell::Cell::get)
@@ -5655,6 +5847,7 @@ impl RetainedArtifactMaterialization {
                 _directory: None,
                 _parents: Vec::new(),
                 rows: complete.rows.clone(),
+                package_rows: complete.package_rows.clone(),
                 groups: complete.groups.clone(),
                 execution_scope: complete.execution_scope.clone(),
                 graph_paths: complete.graph_paths.clone(),
@@ -5785,6 +5978,7 @@ impl RetainedArtifactMaterialization {
             _directory: None,
             _parents: Vec::new(),
             rows: std::iter::once((id, row)).collect(),
+            package_rows: Default::default(),
             groups: Default::default(),
             execution_scope: None,
             graph_paths: Arc::new(BTreeMap::new()),
@@ -5822,6 +6016,11 @@ impl RetainedArtifactMaterialization {
             .groups
             .iter()
             .map(|(binding, group)| (*binding, (slot(), *group)))
+            .collect::<BTreeMap<_, _>>();
+        let package_slots = selected
+            .package_rows
+            .keys()
+            .map(|id| (*id, slot()))
             .collect::<BTreeMap<_, _>>();
         let graph_slots = selected
             .graph_paths
@@ -5868,6 +6067,17 @@ impl RetainedArtifactMaterialization {
                     .filter(|(_, selected)| group.same_issuance(selected))
                 {
                     facts.insert(*slot);
+                } else {
+                    excluded = true;
+                }
+            }
+            for (id, row) in &owner.package_rows {
+                if selected
+                    .package_rows
+                    .get(id)
+                    .is_some_and(|selected| Arc::ptr_eq(row, selected))
+                {
+                    facts.insert(package_slots[id]);
                 } else {
                     excluded = true;
                 }
@@ -5942,9 +6152,13 @@ impl RetainedArtifactMaterialization {
             .groups
             .retain(|binding, _| !covered.contains(&group_slots[binding].0));
         selected
+            .package_rows
+            .retain(|id, _| !covered.contains(&package_slots[id]));
+        selected
             .graph_paths
             .retain(|id, _| !covered.contains(&graph_slots[id]));
         if !selected.rows.is_empty()
+            || !selected.package_rows.is_empty()
             || !selected.groups.is_empty()
             || !selected.graph_paths.is_empty()
         {
@@ -5978,6 +6192,7 @@ impl RetainedArtifactMaterialization {
             })
             .collect::<BTreeSet<_>>();
         let mut rows = BTreeMap::new();
+        let mut package_rows = BTreeMap::new();
         let mut graph_paths = BTreeMap::new();
         let mut observed = Vec::new();
         let mut visited = BTreeSet::new();
@@ -5995,6 +6210,13 @@ impl RetainedArtifactMaterialization {
             );
         }
         for &owner in &observed {
+            package_rows.extend(
+                owner
+                    .package_rows
+                    .iter()
+                    .filter(|(id, _)| artifacts.contains_key(*id))
+                    .map(|(id, row)| (*id, row)),
+            );
             rows.extend(
                 owner
                     .rows
@@ -6010,11 +6232,13 @@ impl RetainedArtifactMaterialization {
                     .map(|(digest, file)| (*digest, file)),
             );
         }
-        if rows.is_empty() && groups.is_empty() && graph_paths.is_empty() {
+        if rows.is_empty() && package_rows.is_empty() && groups.is_empty() && graph_paths.is_empty()
+        {
             return None;
         }
         Some(MaterializationFacts {
             rows,
+            package_rows,
             groups,
             graph_paths,
             observed,
@@ -6106,6 +6330,38 @@ impl RetainedArtifactMaterialization {
             }));
         });
         paths
+    }
+}
+
+/// Package backing has no compiler interface row. Sharing this owner retains
+/// its immutable product and directory, independently of any source role.
+pub(crate) struct RetainedPackageCodeRow {
+    entry: Arc<ArtifactEntry>,
+    reference: crate::certified_products::RecoveryPackageCodeRef,
+    directory: Arc<tempfile::TempDir>,
+}
+
+impl RetainedPackageCodeRow {
+    pub(crate) fn reference(&self) -> &crate::certified_products::RecoveryPackageCodeRef {
+        &self.reference
+    }
+    pub(crate) fn restore(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Arc<ArtifactEntry>, CompileError> {
+        let product = crate::certified_products::CertifiedPackageCodeProduct::restore(
+            self.directory.path(),
+            &self.reference,
+            validation,
+        )
+        .map_err(compiler_evidence_failure)?;
+        let entry = Arc::new(ArtifactEntry::package_code(product));
+        if entry.descriptor != self.entry.descriptor {
+            return Err(failure(
+                "restored package code differs from its retained artifact",
+            ));
+        }
+        Ok(entry)
     }
 }
 
@@ -6284,6 +6540,9 @@ impl RetainedArtifactRow {
     ) -> Result<Vec<original_inputs::OriginalInputPart>, CompileError> {
         use original_inputs::{OriginalInputKind as Kind, OriginalInputPart};
         let (interface, packages) = match &entry.payload {
+            ArtifactPayload::PackageCode(_) => {
+                return Err(failure("package code is not an Original input"))
+            }
             ArtifactPayload::Original(product) => {
                 (product.interface_bytes(), product.package_imports_bytes())
             }
@@ -9589,6 +9848,7 @@ impl ProductInputFacts<'_> {
             let source_less = entries
                 .iter()
                 .filter(|entry| match &entry.payload {
+                    ArtifactPayload::PackageCode(_) => false,
                     ArtifactPayload::Interface(..) => true,
                     ArtifactPayload::Canonical(interface) => matches!(
                         interface.origin(),
@@ -10402,8 +10662,8 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             .package_products
             .iter()
             .map(|output| {
-                crate::certified_products::CertifiedPackageCodeProduct::from_world_output(
-                    program,
+                crate::certified_products::CertifiedPackageCodeProduct::from_native_output(
+                    &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(program),
                     relative_prefix,
                     output,
                     &receipt,
@@ -10955,6 +11215,9 @@ fn scope_interface_evidence(
         return Err(failure("interface evidence kind differs from payload"));
     }
     let interface = match &entry.payload {
+        ArtifactPayload::PackageCode(_) => {
+            return Err(failure("package code has no compiler interface evidence"))
+        }
         ArtifactPayload::Canonical(interface) => interface,
         ArtifactPayload::Original(product) => product
             .module_interface()
@@ -11225,6 +11488,16 @@ impl ExactDeclarationContext {
             .retain_custody(target.artifacts())?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
+    pub(crate) fn retain_completed_native_selection(
+        self,
+        completed: &crate::artifact_inventory::CompletedNativeSelection,
+    ) -> Result<Self, CompileError> {
+        let support = self
+            .compiler_source_support()
+            .with_native_selection_completion(completed)?;
+        Ok(self.rebuild(|facts| facts.compiler_support = support))
+    }
+
     pub(crate) fn retain_issued_native_inputs(
         self,
         inputs: &OriginalCompilerInputs,
@@ -11937,6 +12210,13 @@ impl ExactDeclarationContext {
                         .map_err(materialization_failure)?,
                     ));
                 }
+                ArtifactPayload::PackageCode(product) => {
+                    references.push(RecoveryPayloadReference::PackageCode(
+                        product
+                            .materialize(root, MaterializationMode::Durable, &mut validation)
+                            .map_err(materialization_failure)?,
+                    ));
+                }
                 ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_) => {}
             }
         }
@@ -12013,7 +12293,8 @@ impl ExactDeclarationContext {
                 }
                 ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                 | ArtifactPayload::Original(_)
-                | ArtifactPayload::Canonical(_) => None,
+                | ArtifactPayload::Canonical(_)
+                | ArtifactPayload::PackageCode(_) => None,
             })
             .collect()
     }
@@ -12102,7 +12383,8 @@ impl ExactDeclarationContext {
                 }
                 ArtifactPayload::Interface(_, JoinedInterfaceRole::LexicalJoin)
                 | ArtifactPayload::Original(_)
-                | ArtifactPayload::Canonical(_) => None,
+                | ArtifactPayload::Canonical(_)
+                | ArtifactPayload::PackageCode(_) => None,
             })
             .collect()
     }
@@ -12488,7 +12770,8 @@ impl ExactDeclarationContext {
                         }
                         ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                         | ArtifactPayload::Original(_)
-                        | ArtifactPayload::Canonical(_) => None,
+                        | ArtifactPayload::Canonical(_)
+                        | ArtifactPayload::PackageCode(_) => None,
                     })
                     .map(|(descriptor, join)| {
                         Value::Array(vec![
@@ -12666,7 +12949,8 @@ impl ExactDeclarationContext {
                         }
                         ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                         | ArtifactPayload::Original(_)
-                        | ArtifactPayload::Canonical(_) => None,
+                        | ArtifactPayload::Canonical(_)
+                        | ArtifactPayload::PackageCode(_) => None,
                     })
                     .map(|(descriptor, join)| {
                         Value::Array(vec![
@@ -12799,6 +13083,9 @@ impl ExactDeclarationContext {
                 continue;
             }
             let (iface, packages) = match &entry.payload {
+                ArtifactPayload::PackageCode(_) => {
+                    return Err(failure("package code is not a declaration artifact"))
+                }
                 ArtifactPayload::Original(product) => {
                     let snapshot = artifact
                         .product
@@ -13386,6 +13673,29 @@ impl ExactDeclarationContext {
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
         let mut validation = PackageInterfaceValidation::default();
+        let mut package_rows = parents
+            .iter()
+            .flat_map(|parent| parent.package_rows(&metadata.retained.artifacts))
+            .collect::<imbl::OrdMap<_, _>>();
+        for entry in metadata.retained.artifacts.values() {
+            let ArtifactPayload::PackageCode(product) = &entry.payload else {
+                continue;
+            };
+            if package_rows.contains_key(&entry.descriptor.id) {
+                continue;
+            }
+            let reference = product
+                .materialize(root, MaterializationMode::Scratch, &mut validation)
+                .map_err(materialization_failure)?;
+            package_rows.insert(
+                entry.descriptor.id,
+                Arc::new(RetainedPackageCodeRow {
+                    entry: Arc::clone(entry),
+                    reference,
+                    directory: Arc::clone(&directory),
+                }),
+            );
+        }
         for entry in &new_entries {
             if matches!(
                 &entry.payload,
@@ -13411,7 +13721,7 @@ impl ExactDeclarationContext {
             let canonical = match &entry.payload {
                 ArtifactPayload::Canonical(interface) => Some(interface),
                 ArtifactPayload::Original(product) => product.module_interface(),
-                ArtifactPayload::Interface(..) => None,
+                ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
             };
             if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
             {
@@ -13479,7 +13789,7 @@ impl ExactDeclarationContext {
                     canonical_custody: match &entry.payload {
                         ArtifactPayload::Canonical(interface) => Some(interface.clone()),
                         ArtifactPayload::Original(product) => product.module_interface().cloned(),
-                        ArtifactPayload::Interface(..) => None,
+                        ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
                     },
                 },
             );
@@ -13603,6 +13913,7 @@ impl ExactDeclarationContext {
                 .into_iter()
                 .map(|(id, row)| (id, Arc::new(row)))
                 .collect(),
+            package_rows,
             groups: groups.shared_rows(),
             execution_scope: execution_scope.map(Arc::new),
             graph_paths: Arc::new(
@@ -13901,7 +14212,9 @@ impl ExactDeclarationContext {
                             ArtifactPayload::Original(product) => product
                                 .module_interface()
                                 .and_then(|interface| interface.original_input_origins()),
-                            ArtifactPayload::Interface(..) => None,
+                            ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => {
+                                None
+                            }
                         };
                         original_inputs::encode_image(
                             &image_producer,
@@ -14652,7 +14965,9 @@ fn partition_native_recovery_references(
         match reference {
             RecoveryPayloadReference::Original(reference) => products.push(reference),
             RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
-            RecoveryPayloadReference::Join(_) | RecoveryPayloadReference::Value(_) => {
+            RecoveryPayloadReference::Join(_)
+            | RecoveryPayloadReference::Value(_)
+            | RecoveryPayloadReference::PackageCode(_) => {
                 panic!("native-only recovery fixture contains a joined or value interface")
             }
         }
@@ -20663,6 +20978,7 @@ mod tests {
                     assert!(row[3].as_text().is_some());
                     assert!(row[4].as_text().is_some());
                 }
+                ArtifactKind::PackageCode => panic!("fixture contains no package code"),
                 ArtifactKind::LexicalJoin => assert_eq!(row, &[text("join")]),
                 ArtifactKind::ValueInterface => assert_eq!(row, &[text("value")]),
             }
@@ -20795,6 +21111,9 @@ mod tests {
                 RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
                 RecoveryPayloadReference::Join(reference) => joins.push(reference),
                 RecoveryPayloadReference::Value(reference) => values.push(reference),
+                RecoveryPayloadReference::PackageCode(_) => {
+                    panic!("source recovery fixture contains package code")
+                }
             }
         }
         let mut descriptors = context.artifact_view().descriptors();
@@ -22775,6 +23094,7 @@ mod tests {
             .values()
             .map(|entry| {
                 let (interface, packages) = match &entry.payload {
+                    ArtifactPayload::PackageCode(_) => panic!("fixture contains no package code"),
                     ArtifactPayload::Original(product) => {
                         (product.interface_bytes(), product.package_imports_bytes())
                     }
