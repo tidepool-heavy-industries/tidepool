@@ -14889,9 +14889,8 @@ pub(crate) fn certified_product_artifact_view(
     )
 }
 
-// Product, target and inventory admission compare every witness against the
-// same bounded capture; inventory construction must not create one filesystem
-// observation per original module.
+// Fixture inventory admission shares the bounded physical entry validation.
+#[cfg(test)]
 pub(crate) fn certified_product_artifact_view_with_validation(
     producer: [u8; 32],
     products: &[CertifiedRecoveryProduct],
@@ -14901,42 +14900,13 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
-    certified_product_artifact_view_inner(
-        producer, products, interfaces, values, baseline, demand, validation, None,
-    )
-    .map(|admission| admission.artifacts)
-}
-
-pub(crate) fn certified_selected_product_artifact_view_with_validation(
-    producer: [u8; 32],
-    products: &[CertifiedRecoveryProduct],
-    interfaces: &[crate::certified_products::CertifiedModuleInterface],
-    values: &[CertifiedValueInterface],
-    baseline: Option<&ArtifactView>,
-    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
-    validation: &mut PackageInterfaceValidation,
-    selection: &crate::certified_products::CertifiedSourceSelection,
-) -> Result<crate::artifact_inventory::AdmittedTargetArtifacts, CompileError> {
-    if !matches!(
-        demand,
-        crate::artifact_inventory::NativeArtifactDemand::VerifiedTarget { .. }
-            | crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(_)
-    ) {
-        return Err(failure(
-            "selected target requires authenticated target demand",
-        ));
-    }
-    certified_product_artifact_view_inner(
-        producer,
-        products,
-        interfaces,
-        values,
-        baseline,
-        demand,
-        validation,
-        Some(selection),
-    )?
-    .into_target()
+    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
+    let entries = certified_product_artifact_entries(
+        producer, products, interfaces, values, &view, validation,
+    )?;
+    view.inventory()
+        .admit_product_artifacts(&view, entries, demand, None)
+        .map(|admission| admission.artifacts)
 }
 
 pub(crate) fn issue_certified_product_native_availability(
@@ -15013,24 +14983,6 @@ fn certified_product_artifact_entries(
             "original artifact entry custody");
     }
     Ok(entries)
-}
-
-pub(crate) fn certified_product_artifact_view_inner(
-    producer: [u8; 32],
-    products: &[CertifiedRecoveryProduct],
-    interfaces: &[crate::certified_products::CertifiedModuleInterface],
-    values: &[CertifiedValueInterface],
-    baseline: Option<&ArtifactView>,
-    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
-    validation: &mut PackageInterfaceValidation,
-    selection: Option<&crate::certified_products::CertifiedSourceSelection>,
-) -> Result<crate::artifact_inventory::ArtifactAdmission, CompileError> {
-    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
-    let entries = certified_product_artifact_entries(
-        producer, products, interfaces, values, &view, validation,
-    )?;
-    view.inventory()
-        .admit_product_artifacts(&view, entries, demand, selection)
 }
 
 /// Retain the physical request's complete private output custody and its
