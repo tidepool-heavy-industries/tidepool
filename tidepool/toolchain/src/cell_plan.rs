@@ -574,7 +574,7 @@ pub(crate) fn admit_world_plan(
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
     operand: Option<Arc<crate::compiler_world::CompilerWorldCellOperand>>,
     producer: [u8; 32],
-    realization: &str,
+    realization: &tidepool_extract_cmd::WorldRealizationRef,
     receipt: Vec<u8>,
 ) -> Result<Arc<CompilerWorldCellPlan>, CompileError> {
     let facts = admit_world_parser_receipt(
@@ -584,7 +584,7 @@ pub(crate) fn admit_world_plan(
         operand.as_ref().map(|operand| operand.request().sha256),
         &receipt,
     )?;
-    if facts.realization != realization {
+    if &facts.realization != realization {
         return Err(failure(
             "world parser receipt belongs to another realization",
         ));
@@ -607,7 +607,7 @@ pub(crate) fn admit_world_plan(
 struct WorldParserFacts {
     items: Vec<ParsedCellPlanItem>,
     expression_names: WorldExpressionNames,
-    realization: String,
+    realization: tidepool_extract_cmd::WorldRealizationRef,
     observations: Arc<[u8]>,
     digest: [u8; 32],
     allocation: Arc<()>,
@@ -659,10 +659,8 @@ fn admit_world_parser_receipt(
         return Err(failure("world parser observations"));
     };
     let items = admit_parser_items(observations, &fields[7])?;
-    let realization = text(&fields[9])?.to_owned();
-    if realization.is_empty() || realization.len() > 65536 || realization.contains('\0') {
-        return Err(failure("world parser realization"));
-    }
+    let realization = tidepool_extract_cmd::WorldRealizationRef::parse(text(&fields[9])?)
+        .map_err(|_| failure("world parser realization"))?;
     let expression_names = admit_world_expression_names(&items, &fields[10])?;
     let mut digest = Sha256::new();
     digest.update(b"TidepoolWorldCellPlan1\0");
@@ -1182,7 +1180,7 @@ mod tests {
             fields[6].clone(),
             fields[7].clone(),
             Value::Null,
-            Value::Text("held-world-realization".into()),
+            Value::Text(format!("{}.1", "00".repeat(32))),
             Value::Array(Vec::new()),
         ]);
         (recipe, world, producer, receipt)
