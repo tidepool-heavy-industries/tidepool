@@ -8123,6 +8123,7 @@ impl ArtifactView {
     /// Select the already acquired compiler bindings and exact group choices.
     /// Payloads retain their immutable bytes; old transport caches are optional
     /// and do not become parents of this new semantic owner.
+    #[track_caller]
     pub(crate) fn select_acquired_compiler_bindings(
         &self,
         namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
@@ -8158,9 +8159,18 @@ impl ArtifactView {
                 1,
             );
             if !owned.contains(root) {
-                return Err(failure(
-                    "selected compiler binding is outside its acquired view",
-                ));
+                let artifact = match root {
+                    InventoryNodeKey::Artifact(binding) => binding.artifact(),
+                    InventoryNodeKey::Group(group) => group.binding.artifact(),
+                };
+                let caller = std::panic::Location::caller();
+                return Err(failure(&format!(
+                    "selected compiler binding is outside its acquired view: root {root:?}, acquired namespace {:?}, retained nodes {}, caller {}:{}",
+                    self.lease.selection.namespace.get(&artifact),
+                    owned.len(),
+                    caller.file(),
+                    caller.line(),
+                )));
             }
         }
         let state = self.lease.inventory.0.lock().expect("inventory lock");
