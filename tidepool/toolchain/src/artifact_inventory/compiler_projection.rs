@@ -908,6 +908,31 @@ impl NativeSelectionCompletions {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<IssuedNativeSelectionCompletion>> {
         self.owners.values()
     }
+    /// Lend an already completed physical occurrence without reconstructing its
+    /// product or import ownership. The caller still authenticates its selected
+    /// binding closure against the current acquired scope.
+    pub(crate) fn group_product(
+        &self,
+        binding: NativeGroupBinding,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Option<&Arc<crate::certified_products::PendingCertifiedGroup>>, CompileError> {
+        let mut product: Option<&Arc<crate::certified_products::PendingCertifiedGroup>> = None;
+        for completion in self.iter() {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if let Some(row) = completion.rows.get(&binding) {
+                if product.is_some_and(|previous| !previous.same_issuance(&row.product)) {
+                    return Err(failure(
+                        "completed HOME binding has competing physical occurrences",
+                    ));
+                }
+                product = Some(&row.product);
+            }
+        }
+        Ok(product)
+    }
     fn one(completion: Arc<IssuedNativeSelectionCompletion>) -> Self {
         let recorded = imbl::OrdMap::unit(completion.identity, Arc::clone(&completion.recorded));
         let rows = completion.recorded.rows.clone();

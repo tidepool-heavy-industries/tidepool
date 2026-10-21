@@ -3356,13 +3356,26 @@ impl DemandNativeInputs {
             let mut previous = BTreeMap::new();
             for id in contribution.originals() {
                 for binding in contribution.original_groups(*id) {
-                    if let Some(row) = certified.get(&binding) {
+                    let held = self
+                        .cold
+                        .source_support
+                        .native_completions()
+                        .group_product(binding, &operation)?;
+                    let local = certified.get(&binding).map(|row| &row.product);
+                    if let (Some(held), Some(local)) = (held, local) {
+                        if !held.same_issuance(local) {
+                            return Err(failure(
+                                "selected HOME binding changed its completed occurrence",
+                            ));
+                        }
+                    }
+                    if let Some(product) = held.map(Arc::as_ref).or(local) {
                         budget.reserve::<(
                             crate::artifact_inventory::NativeGroupBinding,
                             &PendingCertifiedGroup,
                             [usize; 4],
                         )>(1)?;
-                        previous.insert(binding, &row.product);
+                        previous.insert(binding, product);
                     }
                 }
             }
