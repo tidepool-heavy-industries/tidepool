@@ -1907,10 +1907,23 @@ mod tests {
             let admitted = published
                 .artifact_view()
                 .inventory()
-                .admit_shared_with_demand(
+                .admit_recovery_selection(
                     published.artifact_view(),
                     vec![root.clone()],
-                    NativeArtifactDemand::CertifiedTargetImports(&[source(&root, 29, "entry_29")]),
+                    &BTreeSet::from([
+                        NativeGroupKey {
+                            artifact: root.descriptor.id,
+                            original_ordinal: 29,
+                        },
+                        NativeGroupKey {
+                            artifact: old.descriptor.id,
+                            original_ordinal: 7,
+                        },
+                        NativeGroupKey {
+                            artifact: leaf.descriptor.id,
+                            original_ordinal: 7,
+                        },
+                    ]),
                 )
                 .unwrap();
             assert_eq!(
@@ -1931,8 +1944,8 @@ mod tests {
                     },
                 ])
             );
-            // Reopen the already admitted execution graph with its recorded source
-            // decisions. This does not issue a new compiler output or demand receipt.
+            // Recovery checks this exact graph's custody and recorded source
+            // decisions without constructing an executable target.
             let reopen_view =
                 |view: &ArtifactView| -> Result<ExactDeclarationContext, CompileError> {
                     let support = recover_fixture_compiler_support(

@@ -17208,17 +17208,6 @@ mod tests {
         let product = recovered_witness_fixtures(&[product]).remove(0).product;
         let native = Arc::new(ArtifactEntry::original([2; 32], product.clone()).unwrap());
         let native_id = native.descriptor.id;
-        let import = |ordinal| crate::certified_products::PendingImportOwner::Source {
-            owner: product.owner().clone(),
-            original_ordinal: ordinal,
-            binder: tidepool_repr::execution_schema::SymbolIdentity {
-                unit: product.owner().unit.clone(),
-                module: product.owner().module.clone(),
-                namespace: "value".into(),
-                occurrence: format!("entry_{ordinal}"),
-                record_parent: None,
-            },
-        };
         let issuer = ArtifactInventory::default();
         let carrier = issuer
             .admit_shared_with_demand(
@@ -17228,17 +17217,23 @@ mod tests {
             )
             .unwrap();
         let initial = issuer
-            .admit_shared_with_demand(
+            .admit_recovery_selection(
                 &carrier,
                 vec![native.clone()],
-                NativeArtifactDemand::CertifiedTargetImports(&[import(3)]),
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: native_id,
+                    original_ordinal: 3,
+                }]),
             )
             .unwrap();
         let later = issuer
-            .admit_shared_with_demand(
+            .admit_recovery_selection(
                 &initial,
                 vec![native.clone()],
-                NativeArtifactDemand::CertifiedTargetImports(&[import(7)]),
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: native_id,
+                    original_ordinal: 7,
+                }]),
             )
             .unwrap();
         let selection = later.capture_graph_selection();
@@ -24269,7 +24264,6 @@ mod tests {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ExactArtifactSelection, NativeArtifactDemand,
         };
-        use crate::certified_products::PendingImportOwner;
         let producer = b"scoped materialization producer";
         let producer_sha =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
@@ -24338,52 +24332,41 @@ mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let imports = products
-            .iter()
-            .map(|product| {
-                let definitions =
-                    crate::certified_products::original_native_group_definitions(product, 7)
-                        .unwrap();
-                let tidepool_repr::execution_schema::Group::Recursive(tops) =
-                    &definitions.bindings()[0]
-                else {
-                    panic!("fixture recursive group");
-                };
-                PendingImportOwner::Source {
-                    owner: product.owner().clone(),
+        let first = inventory
+            .admit_recovery_selection(
+                &available,
+                entries.clone(),
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: entries[0].descriptor.id,
                     original_ordinal: 7,
-                    binder: tops[0].identity.clone(),
-                }
-            })
-            .collect::<Vec<_>>();
-        let admit = |imports: &[PendingImportOwner]| {
-            inventory
-                .admit_product_artifacts(
-                    &available,
-                    entries.clone(),
-                    NativeArtifactDemand::CertifiedTargetImports(imports),
-                    None,
-                )
-                .unwrap()
-                .into_target()
-                .unwrap()
-        };
-        let first = admit(&imports[..1]);
-        let broad = admit(&imports);
+                }]),
+            )
+            .unwrap();
+        let broad = inventory
+            .admit_recovery_selection(
+                &available,
+                entries.clone(),
+                &entries
+                    .iter()
+                    .map(|entry| NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: 7,
+                    })
+                    .collect(),
+            )
+            .unwrap();
         let artifact = entries[0].descriptor.id;
         let first_bindings = first
-            .artifacts()
             .selected_native_binding_rows()
             .1
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let mut graph = broad.artifacts().capture_graph_selection();
+        let mut graph = broad.capture_graph_selection();
         graph
             .native_groups
             .retain(|binding| binding.binding.artifact() == artifact);
         graph.roots.retain(|node| !matches!(node, ArtifactBindingNode::Group(binding) if binding.binding.artifact() != artifact));
         let second = broad
-            .artifacts()
             .select_issued(
                 vec![],
                 &ExactArtifactSelection::from_recovered_graph_selection(graph),
@@ -24396,12 +24379,12 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_ne!(first_bindings, second_bindings);
         assert_eq!(
-            first.artifacts().selected_native_groups(),
+            first.selected_native_groups(),
             second.selected_native_groups()
         );
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let first_metadata = projection
-            .project_metadata(first.artifacts().metadata_snapshot())
+            .project_metadata(first.metadata_snapshot())
             .unwrap();
         let second_metadata = projection
             .project_metadata(second.metadata_snapshot())
@@ -24425,7 +24408,7 @@ mod tests {
             let request = scaffold.compiler_inputs(&context, Some(&private)).unwrap();
             (request, private)
         };
-        let (first_inputs, first_private) = request_inputs(first.artifacts());
+        let (first_inputs, first_private) = request_inputs(&first);
         let (second_inputs, second_private) = request_inputs(&second);
         let first_request_bindings = first_inputs
             .artifacts()
@@ -24511,16 +24494,11 @@ mod tests {
             })
             .unwrap()
         };
-        let first_owner = materialize(first.artifacts(), &first_metadata);
+        let first_owner = materialize(&first, &first_metadata);
         let second_owner = materialize(&second, &second_metadata);
         assert!(!Arc::ptr_eq(&first_owner, &second_owner));
         for (view, metadata, expected, owner) in [
-            (
-                first.artifacts(),
-                &first_metadata,
-                &first_bindings,
-                &first_owner,
-            ),
+            (&first, &first_metadata, &first_bindings, &first_owner),
             (&second, &second_metadata, &second_bindings, &second_owner),
         ] {
             assert!(Arc::ptr_eq(owner, &materialize(view, metadata)));
@@ -24533,13 +24511,13 @@ mod tests {
                 if expected == &first_bindings {
                     &second
                 } else {
-                    first.artifacts()
+                    &first
                 },
                 &rows,
             )
             .is_err());
         }
-        let joined = first.artifacts().merge_fixture_selections(&second).unwrap();
+        let joined = first.merge_fixture_selections(&second).unwrap();
         let joined_metadata = projection
             .project_metadata(joined.metadata_snapshot())
             .unwrap();
