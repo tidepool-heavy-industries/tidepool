@@ -41,8 +41,6 @@ use tidepool_repr::execution_schema::{
 use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
-#[cfg(test)]
-use super::prepared::ScopedTargetImage;
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::resident::NativeSourceCustody;
 #[cfg(test)]
@@ -62,63 +60,6 @@ use super::{
 /// import specs its render pulls in, and the live-value environment (var id,
 /// module name) a later adopt must still match.
 type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId, String)>);
-
-/// Exact compiler owners after retained names have been resolved through one
-/// live lexical scope or the same machine's immutable export ledger. Native
-/// installation rechecks the handles under the final checkout; this record
-/// carries no permission to publish a binding.
-pub(crate) struct ResolvedCertifiedTurn {
-    pub groups: Vec<ResolvedSourceGroup>,
-    pub target_sources: NativeSourceCustody,
-    pub target_owners: Vec<ImportOwner>,
-    pub package_interfaces:
-        tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
-    pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-    pub inherited_needed: Vec<InheritedSourceDemand>,
-    pub source_plan: ResolvedSourceDomainPlan,
-}
-
-/// A selected source plan and its own physical runtime source contribution.
-#[derive(Clone)]
-pub(crate) struct ResolvedSourceGroup {
-    group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
-    sources: NativeSourceCustody,
-    proof: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
-}
-
-impl ResolvedSourceGroup {
-    #[cfg(test)]
-    pub(crate) fn unqualified(
-        group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
-    ) -> Self {
-        let sources = NativeSourceCustody::unknown(
-            group
-                .original()
-                .definitions()
-                .sites()
-                .iter()
-                .map(|site| site.site),
-        );
-        Self {
-            group,
-            sources,
-            proof: None,
-        }
-    }
-    pub(crate) fn group(&self) -> &tidepool_codegen::prepared_program::ScopedCertifiedGroup {
-        &self.group
-    }
-
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        tidepool_codegen::prepared_program::ScopedCertifiedGroup,
-        NativeSourceCustody,
-        Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
-    ) {
-        (self.group, self.sources, self.proof)
-    }
-}
 
 /// One successful native installation and its exact source contribution.
 pub(crate) struct InstalledCertifiedTurn {
@@ -171,29 +112,6 @@ impl ResolvedNativeTurn {
 
     pub(super) fn retained_ids(&self) -> impl Iterator<Item = SessionVarId> + '_ {
         self.captures.values().map(|capture| capture.id)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ResolvedSourceDomainPlan {
-    pub(super) target:
-        BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
-    selection: tidepool_codegen::prepared_program::SourceDomainSelection,
-    snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
-}
-
-impl ResolvedSourceDomainPlan {
-    #[cfg(test)]
-    pub(super) fn fixture(
-        target: BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
-        selection: tidepool_codegen::prepared_program::SourceDomainSelection,
-        snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
-    ) -> Self {
-        Self {
-            target,
-            selection,
-            snapshot,
-        }
     }
 }
 
@@ -365,8 +283,6 @@ pub struct PersistentSession {
     compiler_input_revision: u64,
     #[cfg(test)]
     compile_view_bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
-    #[cfg(test)]
-    certified_resolution_work: [std::sync::atomic::AtomicUsize; 2],
     /// Incremental indexes over `bindings`' live set (prepared-import
     /// resolution, retained-import pairs, live module names, root-slot
     /// aliasing refcounts), kept in sync at every bind/evict site below so
@@ -621,8 +537,6 @@ impl PersistentSession {
             compiler_input_revision: 1,
             #[cfg(test)]
             compile_view_bytes_hashed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            #[cfg(test)]
-            certified_resolution_work: [const { std::sync::atomic::AtomicUsize::new(0) }; 2],
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
