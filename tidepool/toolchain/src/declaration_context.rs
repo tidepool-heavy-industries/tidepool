@@ -32450,12 +32450,11 @@ mod tests {
         // Missing input permission is exercised by the real Request-owned
         // compiled_new_output_refuses_absent_input_native_permission history.
         // A closed C+A completion instead carries its authenticated output closure.
-        let wrong_output = support_offer(&wrong_support);
-        let wrong_private = OriginalCompilerInputs::from_selection(
-            &wrong_output.source_selection().unwrap(),
-            wrong_output.artifacts(),
-        )
-        .unwrap();
+        let wrong_output = persisted
+            .compiler_source_support()
+            .source_support(&BTreeSet::from([owner.clone()]))
+            .unwrap();
+        let wrong_private = OriginalCompilerInputs::from_issued_support(&wrong_output);
         let conflicting_support = ExactCompileContext::new(Arc::new(dependent_context.clone()))
             .prepare_compilation_with_private_input(
                 &root.join("conflicting-authored-scope"),
@@ -32469,12 +32468,11 @@ mod tests {
             CompileError::ArtifactInventory(error)
                 if matches!(&error.failure, ArtifactInventoryFailure::OwnerConflict { owner: actual }
                     if actual == &owner)));
-        let configured_output = support_offer(&configured_support);
-        let configured_private = OriginalCompilerInputs::from_selection(
-            &configured_output.source_selection().unwrap(),
-            configured_output.artifacts(),
-        )
-        .unwrap();
+        let configured_output = changed
+            .compiler_source_support()
+            .source_support(&BTreeSet::from([owner.clone()]))
+            .unwrap();
+        let configured_private = OriginalCompilerInputs::from_issued_support(&configured_output);
         let private = selected_private.merge(&configured_private).unwrap();
         let private_request = ExactCompileContext::new(Arc::new(dependent_context.clone()))
             .prepare_compilation_with_private_input(

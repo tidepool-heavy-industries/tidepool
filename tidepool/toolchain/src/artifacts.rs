@@ -12670,7 +12670,26 @@ mod source_proof_pairing_tests {
                     .unwrap()
                     .extend_issued_compiler_support(&issued)
                     .unwrap();
-            assert!(persisted.authored_native_root(1).is_err());
+            let authored_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                certificate.toolchain_identity_sha256(),
+                certificate.product(),
+            );
+            // Origin lookup observes custody; compiler roles and executable
+            // demand remain independently narrowed to the support owner.
+            assert_eq!(persisted.authored_native_root(1).unwrap(), authored_id);
+            let authored_owner = crate::declaration_join::ExactModuleIdentity {
+                unit: certificate.product().owner().unit.clone(),
+                module: certificate.product().owner().module.clone(),
+            };
+            assert!(!persisted
+                .compiler_input_projection()
+                .snapshot_roles()
+                .contains_key(&authored_owner));
+            assert!(persisted
+                .artifact_view()
+                .selected_native_groups()
+                .iter()
+                .all(|group| group.artifact != authored_id));
             let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
             let offer = ModuleCandidateOffer::select_inspection(
                 endpoint.identity().producer_bytes(),
@@ -12688,6 +12707,10 @@ mod source_proof_pairing_tests {
                 .as_ref()
                 .expect("inspection supplies its exact request")
                 .clone();
+            let selected_products = request.compiler_original_products().unwrap();
+            assert_eq!(selected_products.len(), 1);
+            assert_eq!(selected_products[0].owner().unit, owner.unit);
+            assert_eq!(selected_products[0].owner().module, owner.module);
             crate::declaration_context::assert_source_selected_receipt_pairing(
                 root, module, original, support, request, endpoint, offer,
             );
