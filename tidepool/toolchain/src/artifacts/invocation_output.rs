@@ -358,9 +358,11 @@ impl<'a> CapturedNativeOutput<'a> {
                 .selected_path
                 .strip_prefix(self.directory())
                 .map_err(|_| {
-                    CompileError::ExtractFailed(
-                        "package interface is outside completed output".into(),
-                    )
+                    CompileError::ExtractFailed(format!(
+                        "package interface {} is outside completed output {}",
+                        witness.selected_path.display(),
+                        self.directory().display(),
+                    ))
                 })?;
             validation
                 .verify_captured(
@@ -608,7 +610,11 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
         )
     {
         let relative = path.strip_prefix(issuing_root).map_err(|_| {
-            CompileError::ExtractFailed("native package member is outside completed output".into())
+            CompileError::ExtractFailed(format!(
+                "native package member {} is outside completed output {}",
+                path.display(),
+                issuing_root.display(),
+            ))
         })?;
         if relative.as_os_str().is_empty()
             || relative
