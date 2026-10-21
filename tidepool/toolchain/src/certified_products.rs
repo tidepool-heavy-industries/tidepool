@@ -31376,6 +31376,33 @@ None,
             original_native_group_imports(product, 7).unwrap(),
             &[reference]
         );
+        let native = product.original_native().expect("physical nominal witness");
+        let nominal_groups = native
+            .groups
+            .iter()
+            .map(|group| (group.group(), group.imports().to_vec()))
+            .collect::<Vec<_>>();
+        native
+            .validate_promoted_nominal_groups(&nominal_groups)
+            .unwrap();
+        assert!(
+            native
+                .validate_promoted_groups(
+                    &nominal_groups
+                        .iter()
+                        .map(|(group, _)| { (*group, vec![]) })
+                        .collect::<Vec<_>>()
+                )
+                .is_err(),
+            "metadata sharing must not imply executable Original resolution"
+        );
+        let mut changed = nominal_groups.clone();
+        let ReceiptImportOwner::OriginalBinding { binder, .. } = &mut changed[0].1[0] else {
+            unreachable!()
+        };
+        binder.occurrence.push_str("_foreign");
+        assert!(native.validate_promoted_nominal_groups(&changed).is_err());
+        assert!(native.validate_promoted_nominal_groups(&[]).is_err());
         let fresh = ArtifactInventory::default();
         let restored = fresh
             .recover_selection(
