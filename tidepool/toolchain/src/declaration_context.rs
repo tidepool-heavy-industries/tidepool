@@ -10902,7 +10902,7 @@ impl WorldProgramContinuation {
             decoded.program,
             &decoded.binding.stage,
         )?;
-        Ok(DemandedWorldCompilerInputs {
+        let inputs = DemandedWorldCompilerInputs {
             initial,
             demand,
             groups,
@@ -10912,7 +10912,12 @@ impl WorldProgramContinuation {
             context: Arc::clone(&self.context),
             checked_values,
             program_support: self.program.program_support.clone(),
-        })
+        };
+        #[cfg(test)]
+        stage_type_anchor_tests::assert_actual_type_anchors(
+            self, &inputs, &prefix_groups, receipt, products, produced,
+        );
+        Ok(inputs)
     }
 
     fn pending_successor(&self) -> Self {
@@ -16008,6 +16013,9 @@ pub(crate) use native_availability_tests::assert_selected_authored_private_input
 
 #[cfg(test)]
 mod native_availability_tests;
+
+#[cfg(test)]
+mod stage_type_anchor_tests;
 
 #[cfg(test)]
 mod candidate_offer_history_tests;
