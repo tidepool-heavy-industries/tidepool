@@ -1156,7 +1156,9 @@ mod tests {
                 crate::recovery_artifacts::MaterializationMode::Durable,
                 crate::recovery_artifacts::MaterializationMode::Scratch,
             ] {
-                use crate::recovery_artifacts::{PackageInterfaceValidation, RecoveryArtifactError};
+                use crate::recovery_artifacts::{
+                    PackageInterfaceValidation, RecoveryArtifactError,
+                };
                 use sha2::{Digest, Sha256};
 
                 let storage = tempfile::tempdir().unwrap();
