@@ -1180,7 +1180,7 @@ fn immutable_literal_owners(
 pub struct PreparedSourceEntry {
     compiled: Arc<super::turn::CompiledTurn>,
     registry: Arc<ImageRegistry>,
-    pub(super) native: ClosedInstantiationPlan,
+    pub(super) native: Arc<ClosedInstantiationPlan>,
 }
 
 impl PreparedSourceEntry {
@@ -1219,7 +1219,7 @@ impl PreparedSourceEntry {
         ) {
             return Err(super::resident::ResidentError::UnsealedStartupEntry);
         }
-        let native = ClosedInstantiationPlan::prepare(&compiled, &registry)?;
+        let native = Arc::new(ClosedInstantiationPlan::prepare(&compiled, &registry)?);
         Ok(Self {
             compiled,
             registry,

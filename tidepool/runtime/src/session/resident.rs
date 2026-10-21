@@ -179,8 +179,8 @@ impl CapturedSourceOrigin {
         source.admitted_original_source().map(Self)
     }
 
-    // Only the closed source-entry installer calls this for definitions that
-    // its fresh native batch is about to instantiate. Existing physical imports
+    // A closed selection lends only definitions that its native batch is
+    // about to instantiate freshly. Existing physical imports
     // retain their own ProgramFacts in the batch installer.
     pub(super) fn for_closed_definition(
         &self,
@@ -3188,15 +3188,15 @@ impl PreparedCheckedTurn {
 struct AdmittedTurnCode<'a> {
     code: TurnCode<'a>,
     scope: ScopeId,
-    resolved: NativeTurnAdmission<'a>,
+    resolved: NativeTurnAdmission,
 }
 
-enum NativeTurnAdmission<'a> {
+enum NativeTurnAdmission {
     Portable,
     Scoped(super::persistent::ResolvedCertifiedTurn),
     Closed {
-        plan: &'a super::prepared::ClosedInstantiationPlan,
-        origin: &'a CapturedSourceOrigin,
+        plan: Arc<super::prepared::ClosedInstantiationPlan>,
+        origin: CapturedSourceOrigin,
     },
 }
 
@@ -7074,6 +7074,7 @@ where
             .table()
             .with_json_layout(json_runtime_layout_optional(code.prepared()));
         let (_constructor_table, _sites, prepared, certification) = code.into_parts();
+        let prepared = Arc::unwrap_or_clone(prepared);
         let (program, source_keys) = if let Some(certification) = certification.as_ref() {
             let resolved = self
                 .state
@@ -7627,6 +7628,33 @@ where
                 Self::validate_activation_preview_code(spent.admission(), &code)?;
             }
         }
+        // A checked cell's actual settled prefix owns its installation origin.
+        // Closed immutable code can be instantiated under that source without
+        // borrowing live package exports from a prior source or domain.
+        if let Some(certification) = code.certification() {
+            if let Some(prefix) = certification.checked_prefix() {
+                if !certification
+                    .checked_execution()
+                    .is_some_and(|execution| execution.matches_target(code.prepared()))
+                {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                }
+                let registry = self.state.certified_image_registry();
+                if let Some(plan) =
+                    super::prepared::ClosedInstantiationPlan::prepare_code(&code, &registry)?
+                {
+                    let origin = prefix.captured_source_origin().clone();
+                    return Ok(AdmittedTurnCode {
+                        code,
+                        scope,
+                        resolved: NativeTurnAdmission::Closed {
+                            plan: Arc::new(plan),
+                            origin,
+                        },
+                    });
+                }
+            }
+        }
         let resolved = code
             .certification()
             .map(|certification| {
@@ -8087,11 +8115,17 @@ where
             .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
         let (program, source_keys, native_sources) = match resolved {
-            NativeTurnAdmission::Closed { plan, origin } => self
-                .state
-                .install_closed_turn_in(scope, &metadata, plan, origin)?
-                .into_parts(),
+            NativeTurnAdmission::Closed { plan, origin } => match checked {
+                Some(checked) => {
+                    checked.install_closed_turn_in(&mut self.state, scope, &metadata, &plan)?
+                }
+                None => self
+                    .state
+                    .install_closed_turn_in(scope, &metadata, &plan, &origin)?,
+            }
+            .into_parts(),
             NativeTurnAdmission::Scoped(resolved) => {
+                let prepared = Arc::unwrap_or_clone(prepared);
                 let target = match images {
                     TurnImageAcquisition::Ready { bundle } => {
                         super::prepared::ScopedTargetImage::lookup_scoped(
@@ -8136,7 +8170,7 @@ where
                     return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
                 }
                 let (program, native_sources) =
-                    self.install_prepared_with_sources(prepared, &metadata)?;
+                    self.install_prepared_with_sources(Arc::unwrap_or_clone(prepared), &metadata)?;
                 (program, Default::default(), native_sources)
             }
         };
@@ -8258,8 +8292,8 @@ where
                         code,
                         scope,
                         resolved: NativeTurnAdmission::Closed {
-                            plan: &entry.native,
-                            origin,
+                            plan: Arc::clone(&entry.native),
+                            origin: origin.clone(),
                         },
                     },
                     identity,

@@ -2324,21 +2324,16 @@ impl<'a> TurnCode<'a> {
         Ok(code)
     }
 
-    /// Installation consumes the program while preserving borrowed metadata.
+    /// Installation keeps the issued code allocation and borrowed metadata.
     pub(super) fn into_parts(
         self,
     ) -> (
         std::borrow::Cow<'a, DataConTable>,
         std::borrow::Cow<'a, [YieldSite]>,
-        PreparedProgram,
+        Arc<PreparedProgram>,
         std::borrow::Cow<'a, Option<TurnCertification>>,
     ) {
-        (
-            self.table,
-            self.sites,
-            Arc::unwrap_or_clone(self.prepared),
-            self.certification,
-        )
+        (self.table, self.sites, self.prepared, self.certification)
     }
 }
 

@@ -1307,7 +1307,7 @@ impl PersistentSession {
             .or(self.machine.as_mut())
             .expect("closed machine exists or was constructed");
         engine.set_invocation_cancel(self.invocation_cancel.clone());
-        let staged = engine.install_closed_turn(plan, origin, selection.current())?;
+        let staged = engine.install_closed_turn(plan, origin, &selection, &self.bindings)?;
         self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
     }
 

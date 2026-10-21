@@ -2,6 +2,10 @@
 
 use super::*;
 use tidepool_codegen::prepared_program::{DemandedHomeImage, DemandedPackageImage, LiteralOwner};
+use tidepool_codegen::prepared_program::{
+    NativeArtifactBinding, NativeBindingKey, NativeDomainSelection, NativeExportRequest,
+    NativeHomeBinding, ScopedNativeExport, SourceInstanceDomain,
+};
 use tidepool_toolchain::artifact_inventory::{
     ArtifactBinding, CompletedNativeImport, CompletedNativeSelection, CompletedNativeSourceRow,
     CompletedNativeTargetImport, NativeGroupBinding, PackageCodeBinding,
@@ -26,6 +30,28 @@ enum ClosedProduct {
 }
 
 impl ClosedProduct {
+    fn binding_key(&self) -> NativeBindingKey {
+        match self {
+            Self::Home(row) => {
+                let binding = row.binding();
+                NativeBindingKey::Home(NativeHomeBinding {
+                    issuer: NativeArtifactBinding {
+                        artifact: binding.binding.artifact().0,
+                        selection: binding.binding.selection().0,
+                    },
+                    original_ordinal: binding.original_ordinal,
+                })
+            }
+            Self::Package(binding) => {
+                let binding = binding.binding();
+                NativeBindingKey::Package(NativeArtifactBinding {
+                    artifact: binding.artifact.0,
+                    selection: binding.selection.0,
+                })
+            }
+        }
+    }
+
     fn definitions(&self) -> DefinitionsView<'_> {
         match self {
             Self::Home(row) => row.product().group().definitions(),
@@ -51,6 +77,26 @@ impl ClosedImage {
 struct ClosedProgram {
     native: ClosedImage,
     imports: Vec<LocalExportRef>,
+}
+
+impl ClosedProgram {
+    fn request(
+        &self,
+        product: &ClosedProduct,
+        domain: SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<NativeExportRequest, PreparedRuntimeError> {
+        match (product.binding_key(), &self.native) {
+            (NativeBindingKey::Home(key), ClosedImage::Home(image)) => {
+                NativeExportRequest::for_home_code(image, key, domain, value)
+            }
+            (NativeBindingKey::Package(key), ClosedImage::Package(image)) => {
+                NativeExportRequest::for_package(Arc::clone(image), key, domain, value)
+            }
+            _ => return Err(PreparedRuntimeError::CertifiedTargetOwners),
+        }
+        .map_err(PreparedRuntimeError::Install)
+    }
 }
 
 /// A cheap structural proof from the actual target/certification pair. It
@@ -140,8 +186,17 @@ impl ClosedInstantiationPlan {
         compiled: &super::super::turn::CompiledTurn,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
-        let closed = ClosedNativeSelection::from_code(&compiled.code())?
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        Self::prepare_code(&compiled.code(), registry)?
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)
+    }
+
+    pub(in crate::session) fn prepare_code(
+        code: &super::super::turn::TurnCode<'_>,
+        registry: &ImageRegistry,
+    ) -> Result<Option<Self>, PreparedRuntimeError> {
+        let Some(closed) = ClosedNativeSelection::from_code(code)? else {
+            return Ok(None);
+        };
         let selection = &closed.selection;
         let products = &closed.products;
         let mut indices = BTreeMap::new();
@@ -224,13 +279,13 @@ impl ClosedInstantiationPlan {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let (owners, packages, sources) = Self::literal_inputs(
-            compiled.prepared().globals(),
+            closed.target.globals(),
             &target_imports,
             &products,
             &literals,
         )?;
         let target = CompiledProgram::prepare_target_code(
-            compiled.prepared(),
+            &closed.target,
             &owners,
             &packages,
             &sources,
@@ -248,15 +303,16 @@ impl ClosedInstantiationPlan {
                     .expect("every immutable occurrence compiled"),
             })
             .collect();
+        let target_entry = closed.target.entry();
         let plan = Self {
             closed,
             programs,
             target,
-            target_entry: compiled.prepared().entry(),
+            target_entry,
             target_imports,
         };
         BatchProgram::validate_closed(&plan.batch()).map_err(PreparedRuntimeError::Install)?;
-        Ok(plan)
+        Ok(Some(plan))
     }
 
     fn compile_product(
@@ -402,130 +458,249 @@ impl PreparedEngine {
         &mut self,
         plan: &ClosedInstantiationPlan,
         origin: &super::super::resident::CapturedSourceOrigin,
-        domain: tidepool_codegen::prepared_program::SourceInstanceDomain,
+        selection: &NativeDomainSelection,
+        bindings: &BindingTable,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        use tidepool_codegen::prepared_program::{NativeArtifactBinding, NativeHomeBinding};
-        let batch = plan.batch();
-        BatchProgram::validate_closed(&batch).map_err(PreparedRuntimeError::Install)?;
-        let mut facts = plan
-            .programs
+        // The immutable recipe is checked before borrowing any live roots.
+        BatchProgram::validate_closed(&plan.batch()).map_err(PreparedRuntimeError::Install)?;
+        let domain = selection.current();
+        let anchors = plan
+            .closed
+            .products
             .iter()
-            .enumerate()
-            .map(|(index, program)| {
-                let product = &plan.closed.products[index];
-                let mut facts = ProgramFacts::from_image(program.native.image(), None);
-                facts.native_sources = origin.for_closed_definition(plan.closed.definition(index));
-                facts.native_product = Some(match product {
-                    ClosedProduct::Home(row) => NativeProductProof::ClosedHome {
-                        _selection: Arc::clone(&plan.closed.selection),
-                        _binding: row.binding(),
-                    },
-                    ClosedProduct::Package(binding) => NativeProductProof::Package {
-                        _binding: binding.clone(),
-                    },
-                });
-                facts
+            .map(|product| {
+                let binding = product.binding_key();
+                selection
+                    .roots()
+                    .range(
+                        ScopedNativeExport {
+                            domain,
+                            binding,
+                            value: ValueId(0),
+                        }..,
+                    )
+                    .next()
+                    .and_then(|(key, lease)| {
+                        (key.domain == domain && key.binding == binding).then_some(lease)
+                    })
             })
             .collect::<Vec<_>>();
-        let mut target = ProgramFacts::from_image(&plan.target, Some(plan.target_entry));
-        target.native_sources = origin.for_closed_definition(plan.closed.target());
-        target.native_product = Some(NativeProductProof::ClosedTarget {
-            _selection: Arc::clone(&plan.closed.selection),
-        });
-        facts.push(target);
-        let direct = facts
+        // An already installed group retains its exact environment. Only walk
+        // beyond newly instantiated groups; incoming edges do not mint instances.
+        let mut needed = BTreeSet::new();
+        let mut pending = plan
+            .target_imports
             .iter()
-            .map(|facts| facts.native_sources.clone())
+            .map(|export| export.program)
             .collect::<Vec<_>>();
-        let mut admitted = self.plan_batch_evidence(facts)?;
-        let requested: BTreeSet<_> = plan
-            .programs
-            .iter()
-            .flat_map(|program| &program.imports)
-            .chain(&plan.target_imports)
-            .map(|export| (export.program, export.value))
-            .collect();
-        let mut requests = Vec::new();
-        for (index, value) in requested {
-            let program = &plan.programs[index];
-            let product = &plan.closed.products[index];
-            let contract = program
-                .native
-                .image()
-                .export_contract(value)
-                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-            if contract.rep == RuntimeRep::Address {
+        while let Some(index) = pending.pop() {
+            if !needed.insert(index) || anchors[index].is_some() {
                 continue;
             }
-            requests.push(
-                match (product, &program.native) {
-                    (ClosedProduct::Home(row), ClosedImage::Home(image)) => {
-                        let binding = row.binding();
-                        BatchLeaseRequest::for_home_code(
-                            index,
-                            image,
-                            NativeHomeBinding {
-                                issuer: NativeArtifactBinding {
-                                    artifact: binding.binding.artifact().0,
-                                    selection: binding.binding.selection().0,
-                                },
-                                original_ordinal: binding.original_ordinal,
-                            },
-                            domain,
-                            value,
-                        )
-                    }
-                    (ClosedProduct::Package(binding), ClosedImage::Package(image)) => {
-                        let binding = binding.binding();
-                        BatchLeaseRequest::for_package(
-                            index,
-                            Arc::clone(image),
-                            NativeArtifactBinding {
-                                artifact: binding.artifact.0,
-                                selection: binding.selection.0,
-                            },
-                            domain,
-                            value,
-                        )
-                    }
-                    _ => return Err(PreparedRuntimeError::CertifiedTargetOwners),
-                }
-                .map_err(PreparedRuntimeError::Install)?,
+            pending.extend(
+                plan.programs[index]
+                    .imports
+                    .iter()
+                    .map(|export| export.program),
             );
         }
-        let installed = self
-            .machine
-            .install_shared_batch_with_leases(batch, requests)
-            .map_err(PreparedRuntimeError::Install)?;
-        assert_eq!(installed.programs.len(), admitted.len());
-        assert_eq!(installed.causal_members.len(), admitted.len());
-        for (facts, members) in admitted.iter_mut().zip(&installed.causal_members) {
-            let mut sources = NativeSourceCustody::default();
-            for member in members {
-                sources.merge(&direct[*member]);
+        let fresh = needed
+            .iter()
+            .copied()
+            .filter(|index| anchors[*index].is_none())
+            .collect::<Vec<_>>();
+        let remapped = fresh
+            .iter()
+            .enumerate()
+            .map(|(new, old)| (*old, new))
+            .collect::<BTreeMap<_, _>>();
+        let requested = fresh
+            .iter()
+            .flat_map(|index| &plan.programs[*index].imports)
+            .chain(&plan.target_imports)
+            .map(|export| (export.program, export.value))
+            .collect::<BTreeSet<_>>();
+        let mut late_roots = Vec::<NativeInstanceLease>::new();
+        let result = (|| {
+            let mut attachments = Vec::new();
+            let mut existing = BTreeMap::new();
+            let mut requests = Vec::new();
+            for (index, value) in requested {
+                let program = &plan.programs[index];
+                let product = &plan.closed.products[index];
+                let contract = program
+                    .native
+                    .image()
+                    .export_contract(value)
+                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                // Address constants are immutable literal storage, never managed roots.
+                if contract.rep == RuntimeRep::Address {
+                    continue;
+                }
+                let request = program.request(product, domain, value)?;
+                if let Some(anchor) = anchors[index] {
+                    let held = self
+                        .programs
+                        .get(&anchor.instance().program())
+                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    if !Arc::ptr_eq(&held.definitions, program.native.image().definition_facts()) {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    }
+                    // The held instance, not an immutable image or source token,
+                    // determines the reused physical environment and its origins.
+                    let attachment = if let Some(held) =
+                        bindings.retained_native_sibling_attachment(domain, anchor, value)
+                    {
+                        held
+                    } else {
+                        let issued = self
+                            .machine
+                            .retain_native_sibling(anchor, request)
+                            .map_err(PreparedRuntimeError::Install)?;
+                        late_roots.push(issued.lease().clone());
+                        issued
+                    };
+                    existing.insert((index, value), attachment.lease().clone());
+                    attachments.push(attachment);
+                } else {
+                    requests.push(BatchLeaseRequest::new(remapped[&index], request));
+                }
             }
-            facts.facts.native_sources = sources;
+            let imports = |imports: &[LocalExportRef]| -> Result<Vec<_>, PreparedRuntimeError> {
+                imports
+                    .iter()
+                    .map(|export| {
+                        if let Some(lease) = existing.get(&(export.program, export.value)) {
+                            Ok(BatchImport::Existing {
+                                handle: lease.handle(),
+                                entry_signature: lease.entry_signature().cloned(),
+                            })
+                        } else {
+                            Ok(BatchImport::Source {
+                                group: *remapped
+                                    .get(&export.program)
+                                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?,
+                                binding: export.value,
+                            })
+                        }
+                    })
+                    .collect()
+            };
+            let mut batch = fresh
+                .iter()
+                .map(|index| {
+                    let program = &plan.programs[*index];
+                    Ok(BatchProgram {
+                        image: Arc::clone(program.native.image()),
+                        imports: imports(&program.imports)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+            batch.push(BatchProgram {
+                image: Arc::clone(&plan.target),
+                imports: imports(&plan.target_imports)?,
+            });
+            let make_facts = |index: Option<usize>| -> Result<ProgramFacts, PreparedRuntimeError> {
+                let (mut facts, imports) = match index {
+                    Some(index) => {
+                        let program = &plan.programs[index];
+                        let mut facts = ProgramFacts::from_image(program.native.image(), None);
+                        facts.native_sources =
+                            origin.for_closed_definition(plan.closed.definition(index));
+                        facts.native_product = Some(match &plan.closed.products[index] {
+                            ClosedProduct::Home(row) => NativeProductProof::ClosedHome {
+                                _selection: Arc::clone(&plan.closed.selection),
+                                _binding: row.binding(),
+                            },
+                            ClosedProduct::Package(binding) => NativeProductProof::Package {
+                                _binding: binding.clone(),
+                            },
+                        });
+                        (facts, &program.imports)
+                    }
+                    None => {
+                        let mut facts =
+                            ProgramFacts::from_image(&plan.target, Some(plan.target_entry));
+                        facts.native_sources = origin.for_closed_definition(plan.closed.target());
+                        facts.native_product = Some(NativeProductProof::ClosedTarget {
+                            _selection: Arc::clone(&plan.closed.selection),
+                        });
+                        (facts, &plan.target_imports)
+                    }
+                };
+                for import in imports {
+                    if let Some(lease) = existing.get(&(import.program, import.value)) {
+                        let held = self
+                            .programs
+                            .get(&lease.instance().program())
+                            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                        facts.native_sources.merge(&held.native_sources);
+                    }
+                }
+                Ok(facts)
+            };
+            let mut facts = fresh
+                .iter()
+                .map(|index| make_facts(Some(*index)))
+                .collect::<Result<Vec<_>, _>>()?;
+            facts.push(make_facts(None)?);
+            let settled = SettledIds::from_facts(self.programs.values().chain(facts.iter()))?;
+            facts.last_mut().expect("target is final").settled = settled;
+            let direct = facts
+                .iter()
+                .map(|facts| facts.native_sources.clone())
+                .collect::<Vec<_>>();
+            let mut admitted = self.plan_batch_evidence(facts)?;
+            let installed = self
+                .machine
+                .install_shared_batch_with_leases(batch, requests)
+                .map_err(PreparedRuntimeError::Install)?;
+            assert_eq!(installed.programs.len(), admitted.len());
+            assert_eq!(installed.causal_members.len(), admitted.len());
+            for (facts, members) in admitted.iter_mut().zip(&installed.causal_members) {
+                let mut sources = NativeSourceCustody::default();
+                for member in members {
+                    sources.merge(&direct[*member]);
+                }
+                facts.facts.native_sources = sources;
+            }
+            for program in &installed.programs {
+                self.machine
+                    .pin(*program)
+                    .expect("batch returned an installed program");
+            }
+            let target = *installed.programs.last().expect("closed target is final");
+            attachments.extend(installed.source_attachments);
+            Ok(CertifiedTurnInstall {
+                native_sources: admitted
+                    .last()
+                    .expect("target facts are final")
+                    .facts
+                    .native_sources
+                    .clone(),
+                target,
+                groups: installed.programs[..installed.programs.len() - 1].to_vec(),
+                leases: installed.leases,
+                domain_leases: attachments,
+                admitted,
+                package_updates: BTreeMap::new(),
+                exports: BTreeMap::new(),
+            })
+        })();
+        match result {
+            Ok(mut installed) => {
+                installed.leases.extend(late_roots);
+                Ok(installed)
+            }
+            Err(error) => {
+                for lease in late_roots {
+                    assert!(
+                        self.release(lease.handle()),
+                        "failed exact install retains sibling root"
+                    );
+                }
+                Err(error)
+            }
         }
-        for program in &installed.programs {
-            self.machine
-                .pin(*program)
-                .expect("batch returned an installed program");
-        }
-        let target = *installed.programs.last().expect("closed target is final");
-        Ok(CertifiedTurnInstall {
-            native_sources: admitted
-                .last()
-                .expect("closed target facts are final")
-                .facts
-                .native_sources
-                .clone(),
-            target,
-            groups: installed.programs[..installed.programs.len() - 1].to_vec(),
-            leases: installed.leases,
-            domain_leases: installed.source_attachments,
-            admitted,
-            package_updates: BTreeMap::new(),
-            exports: BTreeMap::new(),
-        })
     }
 }
