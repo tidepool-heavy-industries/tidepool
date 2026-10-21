@@ -152,30 +152,33 @@ impl<'a> PublicationCohort<'a> {
         }
         let owner = computed_owner(&data);
         data.original_owner = OriginalOwner::from_owner(&owner);
-        let mut record = Record {
+        let Some(original) = certified.iter().find(|original| {
+            original.owner().unit == data.unit && original.owner().module == data.module
+        }) else {
+            return false;
+        };
+        if original.owner() != &owner
+            || original.interface_bytes() != data.interface
+            || original.product_bytes() != data.products
+            || original.package_imports_bytes() != data.package_imports
+        {
+            return false;
+        }
+        let (Some(canonical), Some(native)) =
+            (original.module_interface(), original.original_native())
+        else {
+            return false;
+        };
+        data.original_certification = original.certification_bytes().to_vec();
+        let execution_source = original.execution_source().cloned();
+        data.execution_source_sha256 = execution_source.as_ref().map(|graph| graph.digest());
+        let record = Record {
             evidence: shared.clone(),
-            module_interface_proof: None,
-            execution_source: None,
-            package_interfaces: None,
+            module_interface_proof: Some(canonical.clone()),
+            execution_source,
+            package_interfaces: Some(native.package_interfaces().clone()),
             data,
         };
-        if let Some(original) = certified.iter().find(|original| {
-            original.owner().unit == record.unit && original.owner().module == record.module
-        }) {
-            if original.owner() != &owner
-                || original.interface_bytes() != record.interface
-                || original.product_bytes() != record.products
-                || original.package_imports_bytes() != record.package_imports
-            {
-                return false;
-            }
-            record.module_interface_proof = original.module_interface().cloned();
-            record.package_interfaces = original.original_native().map(|native| native.package_interfaces().clone());
-            record.data.original_certification = original.certification_bytes().to_vec();
-            record.execution_source = original.execution_source().cloned();
-            record.data.execution_source_sha256 =
-                record.execution_source.as_ref().map(|graph| graph.digest());
-        }
         records.push(record);
         true
     }
@@ -448,11 +451,18 @@ pub(super) fn decode_record(
     let validation = &mut budget.package_validation;
     let owner = data.original_owner.owner();
     let expected = crate::certified_products::home_package_interface_seals(
-        &data.original_certification, &owner, validation,
-    ).ok()?;
+        &data.original_certification,
+        &owner,
+        validation,
+    )
+    .ok()?;
     let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
-        root, &data.package_interfaces, &expected, validation,
-    ).ok()?;
+        root,
+        &data.package_interfaces,
+        &expected,
+        validation,
+    )
+    .ok()?;
     Some(Record {
         data,
         evidence,
@@ -506,7 +516,10 @@ mod tests {
         assert!(publication.records().is_empty());
         assert_eq!(publication.publish_if_records(&output), Some(()));
         assert!(!output.exists(), "captured empty cohorts publish no proof");
-        assert!(publication.issue_record(|_| record.data.clone(), &[]));
+        assert!(!publication.issue_record(|_| record.data.clone(), &[]));
+        assert!(publication.records().is_empty());
+        let original = super::super::tests::finalized_candidate_fixture(&record);
+        assert!(publication.issue_record(|_| record.data.clone(), std::slice::from_ref(&original)));
         let retained = publication.records()[0].evidence.clone();
         let reference = publication.records()[0].data.evidence.clone();
         assert_eq!(reference.sha256, sha(&expected));
@@ -528,7 +541,7 @@ mod tests {
                 data.evidence.sha256 = "not the captured proof".into();
                 data
             },
-            &[]
+            std::slice::from_ref(&original)
         ));
         assert_eq!(publication.records()[1].data.evidence, reference);
         assert!(Arc::ptr_eq(

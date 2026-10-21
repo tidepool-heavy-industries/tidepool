@@ -102,6 +102,9 @@ fn certification_error(
         crate::certified_products::CertificationError::SizeLimit { .. } => {
             ModulePackageError::Bounds
         }
+        crate::certified_products::CertificationError::CapturedModulePayload(error) => {
+            canonical_error(error)
+        }
         _ => ModulePackageError::Format(format),
     }
 }
@@ -320,6 +323,8 @@ struct Catalog {
     execution_graphs: Vec<FileRef>,
 }
 
+const CATALOG_SCHEMA: u32 = 5;
+
 /// Exact references to one physical dependency-evidence file. Catalog rows may
 /// share a path only when they agree on the complete authenticated identity.
 fn evidence_references(
@@ -352,7 +357,11 @@ fn evidence_references(
         if let Some(core) = &module.module_interface.core {
             other_artifacts.insert(core.path.clone());
         }
-        for interface in module.package_interfaces.iter().chain(&module.module_interface.package_interfaces) {
+        for interface in module
+            .package_interfaces
+            .iter()
+            .chain(&module.module_interface.package_interfaces)
+        {
             other_artifacts.insert(interface.path.clone());
         }
         let reference = &module.evidence;
@@ -894,7 +903,7 @@ impl DeploymentModulePackage {
                 )
             })
             .map_err(|_| ModulePackageError::Bounds)?;
-        if catalog.schema != 5 {
+        if catalog.schema != CATALOG_SCHEMA {
             return Err(ModulePackageError::Format("catalog schema"));
         }
         catalog.source_selection.validate_under(policy)?;
@@ -1250,8 +1259,13 @@ impl DeploymentModulePackage {
                     product: candidate.product(Arc::clone(record.product())),
                     certification_bytes: record.original_certification.clone(),
                     module_interface: canonical,
-                    package_interfaces: record.package_interfaces.as_ref()
-                        .ok_or(ModulePackageError::Format("original package interface custody"))?.clone(),
+                    package_interfaces: record
+                        .package_interfaces
+                        .as_ref()
+                        .ok_or(ModulePackageError::Format(
+                            "original package interface custody",
+                        ))?
+                        .clone(),
                     execution_source: record.execution_source.clone(),
                 },
                 &mut validation,
@@ -1467,18 +1481,38 @@ impl DeploymentModulePackage {
             .map_err(|error| certification_error(error, "canonical native binding"))?;
             record.module_interface_proof = Some(canonical);
             let expected = crate::certified_products::home_package_interface_seals(
-                &record.original_certification, &record.original_owner.owner(), &mut validation,
-            ).map_err(|error| certification_error(error, "original package interfaces"))?;
-            record.package_interfaces = Some(crate::certified_products::PackageInterfaceCustody::restore(
-                &self.artifact_root, &record.data.package_interfaces, &expected, &mut validation,
-            ).map_err(|error| certification_error(error, "original package interface custody"))?);
+                &record.original_certification,
+                &record.original_owner.owner(),
+                &mut validation,
+            )
+            .map_err(|error| certification_error(error, "original package interfaces"))?;
+            record.package_interfaces = Some(
+                crate::certified_products::PackageInterfaceCustody::restore(
+                    &self.artifact_root,
+                    &record.data.package_interfaces,
+                    &expected,
+                    &mut validation,
+                )
+                .map_err(|error| {
+                    certification_error(error, "original package interface custody")
+                })?,
+            );
             if let Some(digest) = record.execution_source_sha256 {
                 let graph = graphs
                     .get(&digest)
                     .ok_or(ModulePackageError::Format("missing execution graph"))?
                     .clone();
-                super::validate_original_execution(&record, graph.clone(), record.module_interface_proof.as_ref().unwrap().package_interfaces(), &mut validation)
-                    .ok_or(ModulePackageError::Format("execution source owner"))?;
+                super::validate_original_execution(
+                    &record,
+                    graph.clone(),
+                    record
+                        .module_interface_proof
+                        .as_ref()
+                        .unwrap()
+                        .package_interfaces(),
+                    &mut validation,
+                )
+                .ok_or(ModulePackageError::Format("execution source owner"))?;
                 record.execution_source = Some(graph);
             }
             validate_dependency_evidence(&mut evidence_validation, &record)?;
@@ -1951,10 +1985,14 @@ mod tests {
                     crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity).sha256(),
                     requirements,
                 );
-                match &graph {
+                let product = match &graph {
                     Some(graph) => product.with_execution_source(graph.clone()).unwrap(),
                     None => product,
-                }
+                };
+                crate::certified_products::finalize_original_for_inventory(
+                    product,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                ).unwrap()
             }).collect::<Vec<_>>();
             let (_, prepared) = super::super::prepare_publication(
                 &producer_identity,
@@ -3135,10 +3173,20 @@ fn export_under(
         let evidence = evidence_receipt.reference()?.clone();
         modules.push(ModuleFiles {
             module_interface,
-            package_interfaces: record.package_interfaces.as_ref()
-                .ok_or(ModulePackageError::Format("original package interface custody"))?
-                .materialize(output_root, crate::recovery_artifacts::MaterializationMode::Durable, &mut validation)
-                .map_err(|error| certification_error(error, "original package interface custody"))?,
+            package_interfaces: record
+                .package_interfaces
+                .as_ref()
+                .ok_or(ModulePackageError::Format(
+                    "original package interface custody",
+                ))?
+                .materialize(
+                    output_root,
+                    crate::recovery_artifacts::MaterializationMode::Durable,
+                    &mut validation,
+                )
+                .map_err(|error| {
+                    certification_error(error, "original package interface custody")
+                })?,
             owner: write_ref(
                 output_root,
                 directory.join("owner.json"),
@@ -3191,7 +3239,7 @@ fn export_under(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let catalog = Catalog {
-        schema: 5,
+        schema: CATALOG_SCHEMA,
         source_selection: source_selection.clone(),
         producer_identity: authority.producer_identity,
         consumed_worker_identity: authority.consumed_worker_identity,
