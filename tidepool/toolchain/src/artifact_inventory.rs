@@ -12758,7 +12758,56 @@ mod tests {
                 )
                 .unwrap();
             let physical = fixed.physical_inputs().issued_artifacts();
-            assert_eq!(physical.selected_native_groups().len(), count as usize + 1);
+            assert!(physical.selected_native_groups().is_empty());
+            assert!(physical
+                .roots()
+                .iter()
+                .all(|root| !matches!(root, InventoryNodeKey::Group(_))));
+            let mut own_bindings = BTreeMap::new();
+            for (product, ordinals) in [
+                (&helper, BTreeSet::from([7])),
+                (&consumer, (0..count).collect::<BTreeSet<_>>()),
+            ] {
+                let receipt = fixed
+                    .source_selection()
+                    .produced_source_receipt(&product.descriptor.owner, physical)
+                    .unwrap()
+                    .expect("actual product completed by this physical issuer");
+                let actual_census = receipt
+                    .row()
+                    .offers()
+                    .flat_map(|offer| offer.proof().into_iter())
+                    .flat_map(|proof| proof.selection.graph_selection().native_groups.iter())
+                    .filter(|group| group.binding.artifact() == product.descriptor.id)
+                    .map(|group| group.original_ordinal)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    actual_census, ordinals,
+                    "the held own receipt covers the independently declared census"
+                );
+                for ordinal in ordinals {
+                    let key = NativeGroupKey {
+                        artifact: product.descriptor.id,
+                        original_ordinal: ordinal,
+                    };
+                    let groups = receipt.groups(key).collect::<Vec<_>>();
+                    assert_eq!(groups.len(), 1, "one exact own binding per completed group");
+                    assert!(own_bindings.insert(key, groups[0]).is_none());
+                }
+            }
+            let expected_keys = std::iter::once(NativeGroupKey {
+                artifact: helper.descriptor.id,
+                original_ordinal: 7,
+            })
+            .chain((0..count).map(|ordinal| NativeGroupKey {
+                artifact: consumer.descriptor.id,
+                original_ordinal: ordinal,
+            }))
+            .collect::<BTreeSet<_>>();
+            assert_eq!(
+                own_bindings.keys().copied().collect::<BTreeSet<_>>(),
+                expected_keys
+            );
             assert_eq!(
                 inventory.metrics().issued_scope_nodes - before,
                 u64::from(count) + 1,
@@ -12790,7 +12839,19 @@ mod tests {
                     .unwrap();
                 let target = target.artifacts();
                 let groups = target.capture_graph_selection().native_groups;
-                assert_eq!(groups.len(), 2);
+                assert_eq!(
+                    groups.iter().copied().collect::<BTreeSet<_>>(),
+                    BTreeSet::from([
+                        own_bindings[&NativeGroupKey {
+                            artifact: consumer.descriptor.id,
+                            original_ordinal: ordinal
+                        }],
+                        own_bindings[&NativeGroupKey {
+                            artifact: helper.descriptor.id,
+                            original_ordinal: 7
+                        }],
+                    ])
+                );
                 assert!(groups
                     .iter()
                     .any(|group| group.binding.artifact() == consumer.descriptor.id
