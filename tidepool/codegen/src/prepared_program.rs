@@ -111,10 +111,12 @@ mod data_tag;
 mod demand;
 pub use demand::{
     DemandError, DemandedImage, DemandedPackageImage, GroupInventory, InheritedSourceDemand,
-    PendingGroupInventory, PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup,
-    ScopedDemandedImage, ScopedInheritedSourceDemand, ScopedSourceBinder, ScopedSourceGroupDemand,
-    SealedDemand, SourceBinder, SourceDomainSelection, SourceGroupOutline,
-    SourceInstanceAttachment, SourceInstanceDomain, SourceInstanceLease,
+    NativeArtifactBinding, NativeBindingKey, NativeDomainSelection, NativeHomeBinding,
+    NativeInstanceAttachment, NativeInstanceLease, PackageInstanceLease, PendingGroupInventory,
+    PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup, ScopedDemandedImage,
+    ScopedInheritedSourceDemand, ScopedNativeExport, ScopedSourceBinder, ScopedSourceGroupDemand,
+    SealedDemand, SourceBinder, SourceDomainSelection, SourceGroupOutline, SourceInstanceDomain,
+    SourceInstanceLease,
 };
 #[cfg(test)]
 mod double_to_int_tests;
@@ -564,6 +566,22 @@ unsafe impl Sync for CompiledProgram {}
 static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
+    /// Read the exact compiled export contract without installing mutable state.
+    pub fn export_contract(
+        &self,
+        value: ValueId,
+    ) -> Option<tidepool_repr::execution_schema::ExportContract<'_>> {
+        self.top_exports
+            .get(&value)
+            .map(|export| tidepool_repr::execution_schema::ExportContract {
+                identity: &export.identity,
+                value,
+                rep: export.rep,
+                entry_signature: export.entry_signature.as_ref(),
+                evaluated: export.evaluated,
+            })
+    }
+
     /// Constructor declarations retained by this exact immutable native image.
     pub fn constructor_declarations(
         &self,
@@ -1631,28 +1649,16 @@ impl CompiledProgram {
             top_slots: plan.top_slots,
             top_exports: plan
                 .program
-                .bindings()
-                .iter()
-                .flat_map(|group| match group {
-                    tidepool_repr::execution_schema::Group::NonRecursive(top) => {
-                        std::slice::from_ref(top)
-                    }
-                    tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
-                })
-                .map(|top| {
+                .export_contracts()
+                .map(|contract| {
+                    let contract = contract.expect("validated defining tables");
                     (
-                        top.binding.id,
+                        contract.value,
                         TopExport {
-                            identity: top.identity.clone(),
-                            rep: plan.value_reps[&top.binding.id],
-                            entry_signature: match &top.binding.rhs {
-                                HeapRhs::Function { signature, .. }
-                                | HeapRhs::Thunk { signature, .. } => {
-                                    Some(plan.program.signatures()[signature.0 as usize].clone())
-                                }
-                                HeapRhs::Constructor { .. } | HeapRhs::Bytes(_) => None,
-                            },
-                            evaluated: !matches!(top.binding.rhs, HeapRhs::Thunk { .. }),
+                            identity: contract.identity.clone(),
+                            rep: contract.rep,
+                            entry_signature: contract.entry_signature.cloned(),
+                            evaluated: contract.evaluated,
                         },
                     )
                 })

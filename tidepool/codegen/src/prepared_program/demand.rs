@@ -18,6 +18,89 @@ pub struct SourceBinder {
     pub binder: SymbolIdentity,
 }
 
+/// Factual identity of an issued artifact binding. The runtime retains the
+/// acquired proof; these bytes only distinguish physical installation choices.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NativeArtifactBinding {
+    pub artifact: [u8; 32],
+    pub selection: [u8; 32],
+}
+
+/// A HOME group issuer is distinct from the carrier on its interface edge.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NativeHomeBinding {
+    pub issuer: NativeArtifactBinding,
+    pub original_ordinal: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum NativeBindingKey {
+    Home(NativeHomeBinding),
+    Package(NativeArtifactBinding),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ScopedNativeExport {
+    pub domain: SourceInstanceDomain,
+    pub binding: NativeBindingKey,
+    pub value: ValueId,
+}
+
+/// An immutable observation of the existing binding table, not a new owner of
+/// instances. Exact binding keys keep distinct histories of the same HOME
+/// binder independently selectable.
+#[derive(Clone)]
+pub struct NativeDomainSelection {
+    current: SourceInstanceDomain,
+    roots: BTreeMap<ScopedNativeExport, NativeInstanceLease>,
+}
+
+impl NativeDomainSelection {
+    pub(crate) fn new(
+        current: SourceInstanceDomain,
+        contains: impl Fn(&SourceInstanceDomain) -> bool,
+        entries: impl IntoIterator<Item = (SourceInstanceDomain, NativeInstanceLease)>,
+    ) -> Result<Self, DemandError> {
+        let mut roots: BTreeMap<ScopedNativeExport, NativeInstanceLease> = BTreeMap::new();
+        let mut anchors = BTreeMap::new();
+        if !contains(&current) {
+            return Err(DemandError::MissingDomain(current));
+        }
+        for (domain, lease) in entries {
+            if !contains(&domain) {
+                return Err(DemandError::MissingDomain(domain));
+            }
+            let binding = lease.binding_key();
+            if anchors
+                .insert((domain, binding), lease.instance())
+                .is_some_and(|old| old != lease.instance())
+            {
+                return Err(DemandError::ConflictingNativeInstance { domain, binding });
+            }
+            let key = ScopedNativeExport {
+                domain,
+                binding,
+                value: lease.value(),
+            };
+            if roots.get(&key).is_some_and(|old| {
+                old.handle() != lease.handle()
+                    || old.entry_signature() != lease.entry_signature()
+                    || old.export() != lease.export()
+            }) {
+                return Err(DemandError::ConflictingNativeInstance { domain, binding });
+            }
+            roots.insert(key, lease);
+        }
+        Ok(Self { current, roots })
+    }
+    pub fn current(&self) -> SourceInstanceDomain {
+        self.current
+    }
+    pub fn roots(&self) -> &BTreeMap<ScopedNativeExport, NativeInstanceLease> {
+        &self.roots
+    }
+}
+
 /// Runtime selection context minted by the existing lexical scope owner.
 /// This identity is never reconstructed from durable source loss metadata.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -252,23 +335,23 @@ impl PendingScopedSourceDemand {
 
 /// One native root admission. Existing physical roots require a sealed demand
 /// whose exact anchor is revalidated by the owning binding table.
-pub struct SourceInstanceAttachment {
+pub struct NativeInstanceAttachment {
     domain: SourceInstanceDomain,
-    lease: SourceInstanceLease,
-    inherited: Option<InheritedSourceDemand>,
+    lease: NativeInstanceLease,
+    anchor: Option<NativeInstanceLease>,
 }
 
-static_assertions::assert_not_impl_any!(SourceInstanceAttachment: Clone, Copy);
+static_assertions::assert_not_impl_any!(NativeInstanceAttachment: Clone, Copy);
 
-impl SourceInstanceAttachment {
+impl NativeInstanceAttachment {
     pub(in crate::prepared_program) fn installed(
         domain: SourceInstanceDomain,
-        lease: SourceInstanceLease,
+        lease: NativeInstanceLease,
     ) -> Self {
         Self {
             domain,
             lease,
-            inherited: None,
+            anchor: None,
         }
     }
     pub(crate) fn inherited(
@@ -287,20 +370,20 @@ impl SourceInstanceAttachment {
         }
         Ok(Self {
             domain: demand.domain(),
-            lease,
-            inherited: Some(demand.clone()),
+            lease: NativeInstanceLease::Home(lease),
+            anchor: Some(NativeInstanceLease::Home(demand.anchor().clone())),
         })
     }
     pub(crate) fn domain(&self) -> SourceInstanceDomain {
         self.domain
     }
-    pub fn lease(&self) -> &SourceInstanceLease {
+    pub fn lease(&self) -> &NativeInstanceLease {
         &self.lease
     }
-    pub(crate) fn demand(&self) -> Option<&InheritedSourceDemand> {
-        self.inherited.as_ref()
+    pub(crate) fn anchor(&self) -> Option<&NativeInstanceLease> {
+        self.anchor.as_ref()
     }
-    pub(crate) fn into_parts(self) -> (SourceInstanceDomain, SourceInstanceLease) {
+    pub(crate) fn into_parts(self) -> (SourceInstanceDomain, NativeInstanceLease) {
         (self.domain, self.lease)
     }
 }
@@ -328,6 +411,7 @@ struct PhysicalInstanceRoot {
 
 #[derive(Clone, Debug)]
 struct HomeInstanceEvidence {
+    binding: NativeHomeBinding,
     owner: CachedHomeOwner,
     original_ordinal: u32,
     binder: SourceBinder,
@@ -336,6 +420,7 @@ struct HomeInstanceEvidence {
 impl SourceInstanceLease {
     pub(crate) fn new(
         instance: GroupInstanceId,
+        binding: NativeHomeBinding,
         owner: CachedHomeOwner,
         original_ordinal: u32,
         binder: SourceBinder,
@@ -351,6 +436,7 @@ impl SourceInstanceLease {
                 entry_signature,
             },
             evidence: HomeInstanceEvidence {
+                binding,
                 owner,
                 original_ordinal,
                 binder,
@@ -361,6 +447,10 @@ impl SourceInstanceLease {
     #[must_use]
     pub fn instance(&self) -> GroupInstanceId {
         self.physical.instance
+    }
+
+    pub fn binding(&self) -> NativeHomeBinding {
+        self.evidence.binding
     }
 
     #[must_use]
@@ -394,8 +484,108 @@ impl SourceInstanceLease {
     }
 }
 
+/// A package root can only be issued by the machine from the paired package
+/// image request. It carries no HOME owner or source-binder authority.
+#[derive(Clone)]
+pub struct PackageInstanceLease {
+    physical: PhysicalInstanceRoot,
+    binding: NativeArtifactBinding,
+    image: Arc<DemandedPackageImage>,
+    export: SymbolIdentity,
+}
+
+impl std::fmt::Debug for PackageInstanceLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackageInstanceLease")
+            .field("physical", &self.physical)
+            .field("binding", &self.binding)
+            .field("export", &self.export)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PackageInstanceLease {
+    pub(in crate::prepared_program) fn new(
+        instance: GroupInstanceId,
+        binding: NativeArtifactBinding,
+        image: Arc<DemandedPackageImage>,
+        export: SymbolIdentity,
+        value: ValueId,
+        handle: PreparedHandle,
+        entry_signature: Option<Signature>,
+    ) -> Self {
+        Self {
+            physical: PhysicalInstanceRoot {
+                instance,
+                value,
+                handle,
+                entry_signature,
+            },
+            binding,
+            image,
+            export,
+        }
+    }
+
+    pub fn binding(&self) -> NativeArtifactBinding {
+        self.binding
+    }
+    pub fn image(&self) -> &DemandedPackageImage {
+        &self.image
+    }
+    pub fn export(&self) -> &SymbolIdentity {
+        &self.export
+    }
+}
+
+/// Both native families share the same lexical custody and release mechanism.
+/// HOME-specific consumers must select the HOME variant explicitly.
+#[derive(Clone, Debug)]
+pub enum NativeInstanceLease {
+    Home(SourceInstanceLease),
+    Package(PackageInstanceLease),
+}
+
+impl NativeInstanceLease {
+    fn physical(&self) -> &PhysicalInstanceRoot {
+        match self {
+            Self::Home(lease) => &lease.physical,
+            Self::Package(lease) => &lease.physical,
+        }
+    }
+    pub fn binding_key(&self) -> NativeBindingKey {
+        match self {
+            Self::Home(lease) => NativeBindingKey::Home(lease.binding()),
+            Self::Package(lease) => NativeBindingKey::Package(lease.binding),
+        }
+    }
+    pub fn export(&self) -> &SymbolIdentity {
+        match self {
+            Self::Home(lease) => &lease.binder().binder,
+            Self::Package(lease) => &lease.export,
+        }
+    }
+    pub fn instance(&self) -> GroupInstanceId {
+        self.physical().instance
+    }
+    pub fn value(&self) -> ValueId {
+        self.physical().value
+    }
+    pub fn handle(&self) -> PreparedHandle {
+        self.physical().handle
+    }
+    pub fn entry_signature(&self) -> Option<&Signature> {
+        self.physical().entry_signature.as_ref()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DemandError {
+    #[error("conflicting physical instance for {binding:?} in {domain:?}")]
+    ConflictingNativeInstance {
+        domain: SourceInstanceDomain,
+        binding: NativeBindingKey,
+    },
     #[error("exact prepared native image is unavailable")]
     MissingPreparedNativeImage,
     #[error("source module {unit}:{module} at {version:?} has conflicting product owners")]
@@ -1926,15 +2116,26 @@ mod selection_tests {
                         image: Arc::clone(images[0].image()),
                         imports: vec![],
                     }],
-                    vec![BatchLeaseRequest::for_demanded(
+                    vec![BatchLeaseRequest::for_home(
                         0,
                         &images[0],
-                        &super::tests::source("a"),
+                        NativeHomeBinding {
+                            issuer: NativeArtifactBinding {
+                                artifact: [1; 32],
+                                selection: [2; 32],
+                            },
+                            original_ordinal: images[0].group().original_ordinal(),
+                        },
+                        images[0].domain(),
+                        ValueId(0),
                     )
                     .unwrap()],
                 )
                 .unwrap();
-            leases.extend(receipt.leases);
+            leases.extend(receipt.leases.into_iter().map(|lease| match lease {
+                NativeInstanceLease::Home(home) => home,
+                NativeInstanceLease::Package(_) => panic!("HOME fixture"),
+            }));
         }
         (machine, leases)
     }
@@ -2223,9 +2424,9 @@ mod selection_tests {
             .register_source_instances_in_domains(
                 &tree,
                 retired,
-                vec![SourceInstanceAttachment::installed(
+                vec![NativeInstanceAttachment::installed(
                     SourceInstanceDomain::for_scope(retired),
-                    leases[0].clone(),
+                    NativeInstanceLease::Home(leases[0].clone()),
                 )],
                 &machine,
             )
@@ -2251,9 +2452,9 @@ mod selection_tests {
             .register_source_instances_in_domains(
                 &tree,
                 live,
-                vec![SourceInstanceAttachment::installed(
+                vec![NativeInstanceAttachment::installed(
                     SourceInstanceDomain::for_scope(live),
-                    leases[0].clone(),
+                    NativeInstanceLease::Home(leases[0].clone()),
                 )],
                 &machine,
             )
@@ -2276,7 +2477,12 @@ mod selection_tests {
         let selected = table.selected_source_instances_in(&tree, scope);
         let incoming = leases
             .into_iter()
-            .map(|lease| SourceInstanceAttachment::installed(SourceInstanceDomain::single(), lease))
+            .map(|lease| {
+                NativeInstanceAttachment::installed(
+                    SourceInstanceDomain::single(),
+                    NativeInstanceLease::Home(lease),
+                )
+            })
             .collect();
         let refused = table
             .register_source_instances_in_domains(&tree, scope, incoming, &machine)
