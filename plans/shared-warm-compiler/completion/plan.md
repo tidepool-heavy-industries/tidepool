@@ -1,5 +1,10 @@
 # Complete the compiler-native architecture
 
+Current continuation (2026-10-21): [DeepSeek takeover](deepseek-takeover/README.md).
+Its [state](deepseek-takeover/STATE.md) supersedes older checkpoint/status prose
+below; [cause analysis](deepseek-takeover/06-cause-analysis.md) and the numbered
+leaf plans govern the next bounded G2 repair wave. G2 is not yet accepted.
+
 Status: implementation resumed after architectural review on 2026-10-20.
 Controlling branch: `integration/compiler-query-warm-final`.
 Consolidated source checkpoint: `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`.

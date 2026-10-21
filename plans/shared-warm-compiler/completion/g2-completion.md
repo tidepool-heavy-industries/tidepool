@@ -1,5 +1,10 @@
 # G2: complete the native compiler/runtime join
 
+2026-10-21 review: [DeepSeek takeover](deepseek-takeover/README.md) supplies the
+current source/evidence checkpoint and remaining repair sequence. This document's
+acceptance and authority contracts remain in force; older progress descriptions
+are not current qualification evidence.
+
 Accepted implementation contract, revised 2026-10-20 after joined architecture
 review, consolidated at `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`. Controlling branch:
 `integration/compiler-query-warm-final`.
