@@ -989,6 +989,8 @@ pub fn prepare_world_cell_program(
                     &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
                     segment.package_products(),
+                    segment.originals.package_links(),
+                    None,
                     segment
                         .product_admission()
                         .compiler_inputs()
@@ -4250,6 +4252,11 @@ fn seal_turn_outputs_with_validation(
         physical_native_output,
         &certified,
         &package_products,
+        &ordinary_receipt
+            .as_ref()
+            .expect("ordinary receipt")
+            .package_links,
+        Some(target),
         inherited_support,
         accepted,
         &package_catalog,
@@ -4466,6 +4473,8 @@ fn admit_native_target_products(
     output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
+    links: &certified_products::PackageLinks,
+    target_name: Option<&str>,
     inherited: &crate::artifact_inventory::CompilerSourceSupport,
     accepted: &[certified_products::AcceptedGlobal],
     package_catalog: &PackageInterfaceCatalog<'_>,
@@ -4569,6 +4578,8 @@ fn admit_native_target_products(
                 prepared,
                 output,
                 packages,
+                links,
+                target_name,
                 inherited,
                 &validation.inventory,
             )?,
@@ -6387,6 +6398,8 @@ fn compile_invocation_inner(
                         target.prepared.prepared(),
                         &native_output,
                         &package_products,
+                        &receipt.package_links,
+                        Some(name),
                         &inherited_completion_support,
                         &validation.inventory,
                     )?;

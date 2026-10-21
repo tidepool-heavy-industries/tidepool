@@ -203,6 +203,7 @@ fn issue_original_with_extra_group(
     );
     let packet = CertifiedReceipt {
         package_products: Vec::new(),
+        package_links: crate::certified_products::PackageLinks::empty(),
         modules,
         targets: BTreeMap::new(),
         packages: packages.clone(),
