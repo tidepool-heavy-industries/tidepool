@@ -30,28 +30,6 @@ enum ClosedProduct {
 }
 
 impl ClosedProduct {
-    fn binding_key(&self) -> NativeBindingKey {
-        match self {
-            Self::Home(row) => {
-                let binding = row.binding();
-                NativeBindingKey::Home(NativeHomeBinding {
-                    issuer: NativeArtifactBinding {
-                        artifact: binding.binding.artifact().0,
-                        selection: binding.binding.selection().0,
-                    },
-                    original_ordinal: binding.original_ordinal,
-                })
-            }
-            Self::Package(binding) => {
-                let binding = binding.binding();
-                NativeBindingKey::Package(NativeArtifactBinding {
-                    artifact: binding.artifact.0,
-                    selection: binding.selection.0,
-                })
-            }
-        }
-    }
-
     fn definitions(&self) -> DefinitionsView<'_> {
         match self {
             Self::Home(row) => row.product().group().definitions(),
@@ -60,43 +38,81 @@ impl ClosedProduct {
     }
 }
 
-enum ClosedImage {
-    Home(DemandedHomeImage),
-    Package(Arc<DemandedPackageImage>),
+enum ClosedCompiledProduct {
+    Home {
+        row: Arc<CompletedNativeSourceRow>,
+        image: DemandedHomeImage,
+    },
+    Package {
+        binding: PackageCodeBinding,
+        image: Arc<DemandedPackageImage>,
+    },
 }
 
-impl ClosedImage {
+fn home_key(row: &CompletedNativeSourceRow) -> NativeHomeBinding {
+    let binding = row.binding();
+    NativeHomeBinding {
+        issuer: NativeArtifactBinding {
+            artifact: binding.binding.artifact().0,
+            selection: binding.binding.selection().0,
+        },
+        original_ordinal: binding.original_ordinal,
+    }
+}
+
+fn package_key(binding: &PackageCodeBinding) -> NativeArtifactBinding {
+    let binding = binding.binding();
+    NativeArtifactBinding {
+        artifact: binding.artifact.0,
+        selection: binding.selection.0,
+    }
+}
+
+impl ClosedCompiledProduct {
+    fn binding_key(&self) -> NativeBindingKey {
+        match self {
+            Self::Home { row, .. } => NativeBindingKey::Home(home_key(row)),
+            Self::Package { binding, .. } => NativeBindingKey::Package(package_key(binding)),
+        }
+    }
+
+    fn definitions(&self) -> DefinitionsView<'_> {
+        match self {
+            Self::Home { row, .. } => row.product().group().definitions(),
+            Self::Package { binding, .. } => binding.product().code().definitions(),
+        }
+    }
+
     fn image(&self) -> &Arc<CompiledProgram> {
         match self {
-            Self::Home(image) => image.image(),
-            Self::Package(image) => image.image(),
+            Self::Home { image, .. } => image.image(),
+            Self::Package { image, .. } => image.image(),
         }
+    }
+
+    fn request(
+        &self,
+        domain: SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<NativeExportRequest, PreparedRuntimeError> {
+        match self {
+            Self::Home { row, image } => {
+                NativeExportRequest::for_home_code(image, home_key(row), domain, value)
+            }
+            Self::Package { binding, image } => NativeExportRequest::for_package(
+                Arc::clone(image),
+                package_key(binding),
+                domain,
+                value,
+            ),
+        }
+        .map_err(PreparedRuntimeError::Install)
     }
 }
 
 struct ClosedProgram {
-    native: ClosedImage,
+    native: ClosedCompiledProduct,
     imports: Vec<LocalExportRef>,
-}
-
-impl ClosedProgram {
-    fn request(
-        &self,
-        product: &ClosedProduct,
-        domain: SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<NativeExportRequest, PreparedRuntimeError> {
-        match (product.binding_key(), &self.native) {
-            (NativeBindingKey::Home(key), ClosedImage::Home(image)) => {
-                NativeExportRequest::for_home_code(image, key, domain, value)
-            }
-            (NativeBindingKey::Package(key), ClosedImage::Package(image)) => {
-                NativeExportRequest::for_package(Arc::clone(image), key, domain, value)
-            }
-            _ => return Err(PreparedRuntimeError::CertifiedTargetOwners),
-        }
-        .map_err(PreparedRuntimeError::Install)
-    }
 }
 
 /// A cheap structural proof from the actual target/certification pair. It
@@ -104,7 +120,6 @@ impl ClosedProgram {
 pub(in crate::session) struct ClosedNativeSelection {
     selection: Arc<CompletedNativeSelection>,
     target: Arc<PreparedProgram>,
-    products: Vec<ClosedProduct>,
 }
 
 /// Definition membership lent only by an actual closed selection.
@@ -143,18 +158,6 @@ impl ClosedNativeSelection {
         Ok(Some(Self {
             selection: Arc::clone(selection),
             target: Arc::clone(code.prepared_owner()),
-            products: selection
-                .completion()
-                .rows()
-                .cloned()
-                .map(ClosedProduct::Home)
-                .chain(
-                    selection
-                        .completion()
-                        .package_bindings()
-                        .map(ClosedProduct::Package),
-                )
-                .collect(),
         }))
     }
 
@@ -164,9 +167,9 @@ impl ClosedNativeSelection {
         }
     }
 
-    fn definition(&self, index: usize) -> ClosedNativeDefinition<'_> {
+    fn definition<'a>(&'a self, product: &'a ClosedCompiledProduct) -> ClosedNativeDefinition<'a> {
         ClosedNativeDefinition {
-            definitions: self.products[index].definitions(),
+            definitions: product.definitions(),
         }
     }
 }
@@ -198,7 +201,18 @@ impl ClosedInstantiationPlan {
             return Ok(None);
         };
         let selection = &closed.selection;
-        let products = &closed.products;
+        let products = selection
+            .completion()
+            .rows()
+            .cloned()
+            .map(ClosedProduct::Home)
+            .chain(
+                selection
+                    .completion()
+                    .package_bindings()
+                    .map(ClosedProduct::Package),
+            )
+            .collect::<Vec<_>>();
         let mut indices = BTreeMap::new();
         for (index, product) in products.iter().enumerate() {
             let key = match product {
@@ -216,30 +230,35 @@ impl ClosedInstantiationPlan {
                 .map(|program| LocalExportRef { program, value })
                 .ok_or(PreparedRuntimeError::CertifiedTargetOwners)
         };
-        let imports = products
-            .iter()
-            .map(|product| match product {
-                ClosedProduct::Home(row) => row
-                    .imports()
-                    .iter()
-                    .map(|import| match import {
-                        CompletedNativeImport::Source { binding, value } => {
-                            local(LocalBinding::Home(*binding), *value)
-                        }
-                        CompletedNativeImport::Package { binding, value } => {
-                            local(LocalBinding::Package(binding.binding()), *value)
-                        }
-                        CompletedNativeImport::Retained { .. } => {
-                            Err(PreparedRuntimeError::CertifiedTargetOwners)
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>(),
-                ClosedProduct::Package(binding) => binding
-                    .import_links()
-                    .map(|(binding, value)| local(LocalBinding::Package(binding.binding()), value))
-                    .collect(),
+        let products = products
+            .into_iter()
+            .map(|product| {
+                let imports = match &product {
+                    ClosedProduct::Home(row) => row
+                        .imports()
+                        .iter()
+                        .map(|import| match import {
+                            CompletedNativeImport::Source { binding, value } => {
+                                local(LocalBinding::Home(*binding), *value)
+                            }
+                            CompletedNativeImport::Package { binding, value } => {
+                                local(LocalBinding::Package(binding.binding()), *value)
+                            }
+                            CompletedNativeImport::Retained { .. } => {
+                                Err(PreparedRuntimeError::CertifiedTargetOwners)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>(),
+                    ClosedProduct::Package(binding) => binding
+                        .import_links()
+                        .map(|(binding, value)| {
+                            local(LocalBinding::Package(binding.binding()), value)
+                        })
+                        .collect(),
+                }?;
+                Ok((product, imports))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
         let target_imports = selection
             .target_imports()
             .iter()
@@ -258,7 +277,7 @@ impl ClosedInstantiationPlan {
         // Literal storage is compiled from its exact leaf product before any
         // consumer. Cyclic executable edges need no compilation ordering.
         let mut literals = BTreeMap::new();
-        for (index, product) in products.iter().enumerate() {
+        for (index, (product, _)) in products.iter().enumerate() {
             let definitions = product.definitions();
             if definitions.globals().is_empty()
                 && matches!(definitions.bindings(), [Group::NonRecursive(top)] if matches!(top.binding.rhs, HeapRhs::Bytes(_)))
@@ -271,7 +290,6 @@ impl ClosedInstantiationPlan {
         }
         let mut programs = products
             .iter()
-            .zip(&imports)
             .enumerate()
             .filter(|(index, _)| !literals.contains_key(index))
             .map(|(index, (product, imports))| {
@@ -295,8 +313,7 @@ impl ClosedInstantiationPlan {
         .map_err(PreparedRuntimeError::Compile)?;
         programs.append(&mut literals);
         let programs = products
-            .iter()
-            .zip(imports)
+            .into_iter()
             .enumerate()
             .map(|(index, (_, imports))| ClosedProgram {
                 imports,
@@ -320,10 +337,10 @@ impl ClosedInstantiationPlan {
     fn compile_product(
         product: &ClosedProduct,
         imports: &[LocalExportRef],
-        products: &[ClosedProduct],
-        literals: &BTreeMap<usize, ClosedImage>,
+        products: &[(ClosedProduct, Vec<LocalExportRef>)],
+        literals: &BTreeMap<usize, ClosedCompiledProduct>,
         registry: &ImageRegistry,
-    ) -> Result<ClosedImage, PreparedRuntimeError> {
+    ) -> Result<ClosedCompiledProduct, PreparedRuntimeError> {
         let (owners, packages, sources) =
             Self::literal_inputs(product.definitions().globals(), imports, products, literals)?;
         match product {
@@ -334,7 +351,10 @@ impl ClosedInstantiationPlan {
                 &sources,
                 registry,
             )
-            .map(|image| ClosedImage::Package(Arc::new(image)))
+            .map(|image| ClosedCompiledProduct::Package {
+                binding: binding.clone(),
+                image: Arc::new(image),
+            })
             .map_err(PreparedRuntimeError::Compile),
             ClosedProduct::Home(row) => {
                 let pending = row.product();
@@ -343,7 +363,10 @@ impl ClosedInstantiationPlan {
                     pending.group().clone(),
                 )?;
                 DemandedHomeImage::prepare(code, &owners, &packages, &sources, registry)
-                    .map(ClosedImage::Home)
+                    .map(|image| ClosedCompiledProduct::Home {
+                        row: Arc::clone(row),
+                        image,
+                    })
                     .map_err(PreparedRuntimeError::Compile)
             }
         }
@@ -352,8 +375,8 @@ impl ClosedInstantiationPlan {
     fn literal_inputs(
         globals: &[tidepool_repr::execution_schema::GlobalDecl],
         imports: &[LocalExportRef],
-        products: &[ClosedProduct],
-        literals: &BTreeMap<usize, ClosedImage>,
+        products: &[(ClosedProduct, Vec<LocalExportRef>)],
+        literals: &BTreeMap<usize, ClosedCompiledProduct>,
     ) -> Result<
         (
             Vec<Option<LiteralOwner>>,
@@ -369,7 +392,7 @@ impl ClosedInstantiationPlan {
         let mut packages = BTreeMap::new();
         let mut sources = BTreeMap::new();
         for (global, import) in globals.iter().zip(imports) {
-            let product = products
+            let (product, _) = products
                 .get(import.program)
                 .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
             match product {
@@ -467,11 +490,10 @@ impl PreparedEngine {
         BatchProgram::validate_closed(&plan.batch()).map_err(PreparedRuntimeError::Install)?;
         let domain = selection.current();
         let anchors = plan
-            .closed
-            .products
+            .programs
             .iter()
-            .map(|product| {
-                let binding = product.binding_key();
+            .map(|program| {
+                let binding = program.native.binding_key();
                 selection
                     .roots()
                     .range(
@@ -529,7 +551,6 @@ impl PreparedEngine {
             let mut requests = Vec::new();
             for (index, value) in requested {
                 let program = &plan.programs[index];
-                let product = &plan.closed.products[index];
                 let contract = program
                     .native
                     .image()
@@ -539,7 +560,7 @@ impl PreparedEngine {
                 if contract.rep == RuntimeRep::Address {
                     continue;
                 }
-                let request = program.request(product, domain, value)?;
+                let request = program.native.request(domain, value)?;
                 if let Some(anchor) = anchors[index] {
                     let held = self
                         .programs
@@ -608,15 +629,19 @@ impl PreparedEngine {
                         let program = &plan.programs[index];
                         let mut facts = ProgramFacts::from_image(program.native.image(), None);
                         facts.native_sources =
-                            origin.for_closed_definition(plan.closed.definition(index));
-                        facts.native_product = Some(match &plan.closed.products[index] {
-                            ClosedProduct::Home(row) => NativeProductProof::ClosedHome {
-                                _selection: Arc::clone(&plan.closed.selection),
-                                _binding: row.binding(),
-                            },
-                            ClosedProduct::Package(binding) => NativeProductProof::Package {
-                                _binding: binding.clone(),
-                            },
+                            origin.for_closed_definition(plan.closed.definition(&program.native));
+                        facts.native_product = Some(match &program.native {
+                            ClosedCompiledProduct::Home { row, .. } => {
+                                NativeProductProof::ClosedHome {
+                                    _selection: Arc::clone(&plan.closed.selection),
+                                    _binding: row.binding(),
+                                }
+                            }
+                            ClosedCompiledProduct::Package { binding, .. } => {
+                                NativeProductProof::Package {
+                                    _binding: binding.clone(),
+                                }
+                            }
                         });
                         (facts, &program.imports)
                     }
