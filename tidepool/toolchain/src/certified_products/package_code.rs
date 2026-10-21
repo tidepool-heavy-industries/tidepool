@@ -109,16 +109,16 @@ impl CertifiedPackageCodeInterface {
         &self.bytes
     }
 
-    fn from_world_output(
-        program: &crate::compiler_world::CheckedWorldCellProgram,
+    fn from_native_output(
+        program: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         unit: &str,
         module: &str,
         witness: &PackageInterfaceWitness,
-        operation: &InventoryOperation,
+        validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Arc<Self>> {
         let relative = witness
             .selected_path
-            .strip_prefix(program.directory().path())
+            .strip_prefix(program.directory())
             .map_err(|_| {
                 CertificationError::Mismatch("package interface is outside completed output")
             })?;
@@ -131,16 +131,21 @@ impl CertifiedPackageCodeInterface {
                 "package interface output path",
             ));
         }
-        let bytes = crate::checked_cell::world_output_bytes(program, relative)
+        let bytes = program
+            .bytes(relative)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        operation.charge(bytes.len())?;
-        if sha(bytes) != witness.sha256 {
-            return Err(CertificationError::Mismatch(
-                "package interface captured digest",
-            ));
-        }
-        operation.reserve::<Self>(1)?;
-        operation.charge(unit.len().saturating_add(module.len()))?;
+        validation
+            .verify_captured(
+                &witness.selected_path,
+                &program.physical_directory().join(relative),
+                &witness.sha256,
+                bytes,
+            )
+            .map_err(package_validation_error)?;
+        validation.inventory.reserve::<Self>(1)?;
+        validation
+            .inventory
+            .charge(unit.len().saturating_add(module.len()))?;
         Ok(Arc::new(Self {
             unit: unit.to_owned(),
             module: module.to_owned(),
@@ -341,16 +346,16 @@ impl CertifiedPackageCodeProduct {
     }
 
     /// Only an actual checked output can issue fresh package code. The worker
-    /// declaration names captured bytes, while the held World supplies compiler
+    /// declaration names captured bytes, while the captured native output supplies compiler
     /// and profile authority and the receipt supplies checked interface seals.
-    pub(crate) fn from_world_output(
-        program: &crate::compiler_world::CheckedWorldCellProgram,
+    pub(crate) fn from_native_output(
+        program: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         relative_prefix: &Path,
         output: &PackageProductOutput,
         receipt: &CertifiedReceipt,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<Arc<Self>> {
-        if !Arc::ptr_eq(&program.validation().inventory, &validation.inventory)
+        if !Arc::ptr_eq(program.operation(), &validation.inventory)
             || !receipt.package_products.contains(output)
             || relative_prefix.is_absolute()
             || relative_prefix
@@ -360,7 +365,8 @@ impl CertifiedPackageCodeProduct {
             return Err(CertificationError::Mismatch("package code output owner"));
         }
         let relative = relative_prefix.join(&output.relative_path);
-        let bytes = crate::checked_cell::world_output_bytes(program, &relative)
+        let bytes = program
+            .bytes(&relative)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         validation.inventory.charge(bytes.len())?;
         if sha(bytes) != output.sha256 {
@@ -370,7 +376,7 @@ impl CertifiedPackageCodeProduct {
         let code = parse_code(bytes, &operation)?;
         let owner = code.owner();
         if owner.compiler_sha256 != *program.producer_sha256()
-            || owner.profile_sha256 != *program.logical().profile_sha256()
+            || owner.profile_sha256 != *program.profile_sha256()
             || receipt.finalization.home_units.contains(&owner.unit)
         {
             return Err(CertificationError::Mismatch(
@@ -384,14 +390,13 @@ impl CertifiedPackageCodeProduct {
             .ok_or(CertificationError::Mismatch(
                 "package code defining interface",
             ))?;
-        let defining_interface = CertifiedPackageCodeInterface::from_world_output(
+        let defining_interface = CertifiedPackageCodeInterface::from_native_output(
             program,
             &owner.unit,
             &owner.module,
             interface,
-            &operation,
+            validation,
         )?;
-        verify_package_interface(validation, interface)?;
         operation.reserve::<[u8; 32]>(code.globals().len())?;
         operation.reserve::<Arc<CertifiedPackageCodeInterface>>(code.globals().len())?;
         let mut import_interface_witnesses = Vec::with_capacity(code.globals().len());
@@ -413,22 +418,22 @@ impl CertifiedPackageCodeProduct {
                 .ok_or(CertificationError::Mismatch(
                     "package code import interface",
                 ))?;
-            validate_package_owner(
+            let witness = package_owner_witness(
                 &global.identity.unit,
                 &global.identity.module,
                 &global.identity,
                 &witness.sha256,
                 &SourceGroupMap::new(),
                 &receipt.packages,
-                validation,
             )?;
-            import_interface_witnesses.push(CertifiedPackageCodeInterface::from_world_output(
+            let captured = CertifiedPackageCodeInterface::from_native_output(
                 program,
                 &global.identity.unit,
                 &global.identity.module,
                 witness,
-                &operation,
-            )?);
+                validation,
+            )?;
+            import_interface_witnesses.push(captured);
             import_interfaces.push(witness.sha256);
         }
         // Import seals are part of product identity. Exact dependency binding

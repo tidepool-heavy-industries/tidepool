@@ -1210,7 +1210,7 @@ impl Default for PackageInterfaceValidation {
 }
 
 struct CapturedPackageInterface {
-    _bytes: Vec<u8>,
+    _bytes: Arc<[u8]>,
     sha256: [u8; 32],
 }
 
@@ -1321,6 +1321,70 @@ impl PackageInterfaceValidation {
         self.verify_with_budget(path, expected_sha256, PACKAGE_VALIDATION_RETAIN_LIMIT)
     }
 
+    /// Authenticate bytes borrowed from the actual completed-output owner.
+    /// Its issuing path remains the witness key even after physical relocation.
+    pub(crate) fn verify_captured(
+        &mut self,
+        path: &Path,
+        physical_path: &Path,
+        expected_sha256: &[u8; 32],
+        bytes: &Arc<[u8]>,
+    ) -> Result<(), RecoveryArtifactError> {
+        if !path.is_absolute()
+            || !physical_path.is_absolute()
+            || bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT
+        {
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                path.to_path_buf(),
+            ));
+        }
+        crate::host_work::checkpoint()?;
+        self.inventory
+            .charge(bytes.len())
+            .map_err(accounting_charge_error)?;
+        let sha256 = self.verify_bytes(path, physical_path, bytes, expected_sha256, true)?;
+        if !self.captured.contains_key(path)
+            && bytes.len() <= PACKAGE_VALIDATION_RETAIN_LIMIT.saturating_sub(self.retained_bytes)
+        {
+            self.inventory
+                .reserve::<CapturedPackageInterface>(1)
+                .map_err(accounting_charge_error)?;
+            self.inventory
+                .charge(path.as_os_str().as_encoded_bytes().len())
+                .map_err(accounting_charge_error)?;
+            self.retained_bytes += bytes.len();
+            self.captured.insert(
+                path.to_path_buf(),
+                CapturedPackageInterface {
+                    _bytes: Arc::clone(bytes),
+                    sha256,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_bytes(
+        &mut self,
+        path: &Path,
+        physical_path: &Path,
+        bytes: &[u8],
+        expected_sha256: &[u8; 32],
+        owned: bool,
+    ) -> Result<[u8; 32], RecoveryArtifactError> {
+        let sha256 = self.digest(bytes);
+        if &sha256 != expected_sha256
+            || self
+                .captured
+                .get(path)
+                .is_some_and(|previous| previous.sha256 != sha256)
+        {
+            return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+        }
+        self.record_observed(physical_path, sha256, bytes.len() as u64, owned)?;
+        Ok(sha256)
+    }
+
     fn verify_with_budget(
         &mut self,
         path: &Path,
@@ -1387,17 +1451,13 @@ impl PackageInterfaceValidation {
                 path.to_path_buf(),
             ));
         }
-        let sha256 = self.digest(&bytes);
-        if &sha256 != expected_sha256 {
-            return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
-        }
-        self.record_observed(path, sha256, bytes.len() as u64, false)?;
+        let sha256 = self.verify_bytes(path, path, &bytes, expected_sha256, false)?;
         if bytes.len() <= retain_limit.saturating_sub(self.retained_bytes) {
             self.retained_bytes += bytes.len();
             self.captured.insert(
                 path.to_path_buf(),
                 CapturedPackageInterface {
-                    _bytes: bytes,
+                    _bytes: bytes.into(),
                     sha256,
                 },
             );
@@ -4514,6 +4574,45 @@ mod tests {
     }
 
     #[test]
+    fn package_validation_authenticates_captured_bytes_without_reopening_issuing_path() {
+        let root = tempfile::tempdir().unwrap();
+        let issuing_path = root.path().join("removed-preparing-output/package.hi");
+        let physical_path = root.path().join("retained-package.hi");
+        let bytes: Arc<[u8]> = Arc::from(&b"captured package interface"[..]);
+        fs::write(&physical_path, &bytes).unwrap();
+        let expected: [u8; 32] = Sha256::digest(&bytes).into();
+        let before = package_interface_io();
+        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default()));
+        let (_, observations) =
+            PackageInterfaceValidation::capture_entry(root.path(), operation, |validation| {
+                validation.verify_captured(&issuing_path, &physical_path, &expected, &bytes)?;
+                validation.verify(&issuing_path, &expected)?;
+                validation.retained_bytes = PACKAGE_VALIDATION_RETAIN_LIMIT;
+                let uncached = root.path().join("another-issuing-output/package.hi");
+                validation.verify_captured(&uncached, &physical_path, &expected, &bytes)?;
+                assert!(!validation.captured.contains_key(&uncached));
+                assert!(matches!(
+                    validation.verify_captured(
+                        &issuing_path,
+                        &physical_path,
+                        &expected,
+                        &Arc::from(&b"corrupt"[..])
+                    ),
+                    Err(RecoveryArtifactError::DigestMismatch(_))
+                ));
+                Ok::<_, RecoveryArtifactError>(())
+            })
+            .unwrap();
+        assert!(!issuing_path.exists());
+        assert_eq!(package_interface_io(), before);
+        assert!(!observations.files.contains_key(&issuing_path));
+        let observed = &observations.files[&physical_path];
+        assert_eq!(observed.sha256, expected);
+        assert_eq!(observed.bytes, bytes.len() as u64);
+        assert!(observed.owned);
+    }
+
+    #[test]
     fn package_validation_stage_keeps_one_capture_and_refuses_conflicting_digest() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("package.hi");
@@ -4524,7 +4623,7 @@ mod tests {
         stage.verify(&path, &first).unwrap();
         fs::write(&path, b"second").unwrap();
         stage.verify(&path, &first).unwrap();
-        assert_eq!(stage.captured[&path]._bytes, b"first");
+        assert_eq!(stage.captured[&path]._bytes.as_ref(), b"first");
         assert!(matches!(
             stage.verify(&path, &second),
             Err(RecoveryArtifactError::DigestMismatch(_))
