@@ -52,6 +52,7 @@ pub struct ScopedNativeExport {
 #[derive(Clone)]
 pub struct NativeDomainSelection {
     current: SourceInstanceDomain,
+    authored: HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
     roots: BTreeMap<ScopedNativeExport, NativeInstanceLease>,
 }
 
@@ -104,18 +105,40 @@ impl NativeDomainSelection {
     }
     pub(crate) fn new<'a>(
         current: SourceInstanceDomain,
-        contains: impl Fn(&SourceInstanceDomain) -> bool,
-        targets: impl IntoIterator<Item = SourceInstanceDomain>,
+        authored: HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
         entries: impl IntoIterator<Item = (SourceInstanceDomain, &'a NativeInstanceLease)>,
     ) -> Result<Self, DemandError> {
-        let roots = Self::checked_roots(current, contains, targets, entries)?;
+        let roots = Self::checked_roots(
+            current,
+            |domain| authored.contains_key(domain),
+            authored
+                .values()
+                .flat_map(|origins| origins.values())
+                .copied(),
+            entries,
+        )?;
         Ok(Self {
             current,
+            authored,
             roots: roots
                 .into_iter()
                 .map(|(key, lease)| (key, lease.clone()))
                 .collect(),
         })
+    }
+    /// Resolve an authored HOME dependency in the caller's captured domain.
+    /// Unassociated owners remain in that caller's domain; this does not select
+    /// a native binding or authorize an export.
+    pub fn domain_for_owner(
+        &self,
+        caller: SourceInstanceDomain,
+        owner: &CachedHomeOwner,
+    ) -> Result<SourceInstanceDomain, DemandError> {
+        let origins = self
+            .authored
+            .get(&caller)
+            .ok_or(DemandError::MissingDomain(caller))?;
+        Ok(origins.get(owner).copied().unwrap_or(caller))
     }
     pub fn current(&self) -> SourceInstanceDomain {
         self.current
@@ -2497,6 +2520,18 @@ mod selection_tests {
             .native_domain_selection_in(&tree, ScopeId::ROOT)
             .unwrap();
         assert_eq!(selected.roots().len(), 2);
+        for lease in selected.roots().values() {
+            let NativeInstanceLease::Home(home) = lease else {
+                unreachable!()
+            };
+            assert_eq!(
+                selected
+                    .domain_for_owner(domain, &home.binder().owner)
+                    .unwrap(),
+                domain
+            );
+        }
+
         assert_eq!(
             selected
                 .roots()
