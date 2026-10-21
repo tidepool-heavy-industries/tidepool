@@ -1736,17 +1736,25 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .namespace
         .iter()
         .all(|binding| binding.artifact != a_id));
-    assert!(graph
-        .roots
-        .iter()
-        .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
-    assert!(matches!(
-        admitted.native_requirements_from_roots(&[crate::artifact_inventory::NativeRequirementRoot::Group { artifact: b_id, original_ordinal: 7 }]),
-        Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
-            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                artifact, original_ordinal: 7,
-            } if artifact == b_id)
-    ));
+    assert_eq!(
+        graph
+            .roots
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([selected_b7]),
+    );
+    assert!(admitted
+        .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: b_id,
+            original_ordinal: 7,
+        }])
+        .expect("the input request's selected B7 remains executable")
+        .bindings
+        .is_empty());
     let consume = |view: &ArtifactView,
                    selection: &crate::certified_products::CertifiedSourceSelection,
                    target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
@@ -1914,10 +1922,17 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .namespace
         .iter()
         .all(|binding| binding.artifact != a_id));
-    assert!(graph
-        .roots
-        .iter()
-        .all(|node| !matches!(node, ArtifactBindingNode::Group(_))));
+    assert_eq!(
+        graph
+            .roots
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([selected_b7]),
+    );
     let requested_groups = consume(
         &selected_view,
         &request_selection,
