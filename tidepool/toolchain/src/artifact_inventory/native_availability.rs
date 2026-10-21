@@ -778,8 +778,12 @@ pub(super) fn verified_root_choice(
                 NativeAdmissionRefusal::RootChoiceMissing { owner: identity },
             ))
         }
-        Err(error @ CertificationError::InputDecision { reason, .. }) => {
-            return Err(match root_evidence_refusal(&identity, reason) {
+        Err(error @ CertificationError::InputDecision { .. }) => {
+            let CertificationError::InputDecision { reason, .. } = &error else {
+                unreachable!("arm narrowed to input decisions");
+            };
+            let cause = reason.clone();
+            return Err(match root_evidence_refusal(&identity, cause) {
                 Ok(refusal) => root_refusal(key, refusal),
                 Err(_) => CompileError::CompilerEvidence(Box::new(error)),
             })
@@ -861,8 +865,12 @@ pub(super) fn verified_root_choice(
             key,
             NativeAdmissionRefusal::RootChoiceUnavailable { chosen: *chosen },
         )),
-        Err(error @ CertificationError::InputDecision { reason, .. }) => {
-            Err(match root_evidence_refusal(&identity, reason) {
+        Err(error @ CertificationError::InputDecision { .. }) => {
+            let CertificationError::InputDecision { reason, .. } = &error else {
+                unreachable!("arm narrowed to input decisions");
+            };
+            let cause = reason.clone();
+            Err(match root_evidence_refusal(&identity, cause) {
                 Ok(refusal) => root_refusal(key, refusal),
                 Err(_) => CompileError::CompilerEvidence(Box::new(error)),
             })
@@ -888,7 +896,7 @@ fn root_evidence_refusal(
             }
         }
         InputDecisionRefusal::NativeOwnerMismatch
-        | InputDecisionRefusal::ArtifactIdentityMismatch
+        | InputDecisionRefusal::ArtifactIdentityMismatch(_)
         | InputDecisionRefusal::RoleMismatch => {
             NativeAdmissionRefusal::RootChoiceIdentityMismatch {
                 owner: identity.clone(),

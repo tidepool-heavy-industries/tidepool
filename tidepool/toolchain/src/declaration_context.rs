@@ -1473,8 +1473,17 @@ impl NativeTransportAvailability {
             return Err(compiler_evidence_failure(
                 crate::certified_products::CertificationError::InputDecision {
                     owner: identity,
-                    reason:
-                        crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch,
+                    reason: crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch(
+                        crate::certified_products::ArtifactIdentityMismatch {
+                            stage:
+                                crate::certified_products::ArtifactIdentityStage::RequestedIdentityDiffers,
+                            expected_original: Some(key.artifact),
+                            expected_canonical: Some(canonical),
+                            observed_original: Some(self.original_artifact_id()),
+                            observed_canonical: Some(self.canonical),
+                            observed_kind: None,
+                        },
+                    ),
                 },
             ));
         }
