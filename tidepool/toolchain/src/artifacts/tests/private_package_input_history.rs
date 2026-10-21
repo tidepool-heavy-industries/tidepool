@@ -12,8 +12,8 @@ use crate::recovery_artifacts::PackageInterfaceValidation;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{
     testing, Alternative, AlternativePattern, Atom, CaseKind, ExprFrame, GlobalDecl, GlobalId,
-    Group, HeapBinding, HeapRhs, InventoryOperation, ResultContract, RuntimeRep, SignatureId,
-    SymbolIdentity, TopBinding, ValueId, ValueRef,
+    Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, SignatureId, SymbolIdentity,
+    TopBinding, ValueId, ValueRef,
 };
 
 const MODULE: &str = "PrivatePackageReader";
@@ -340,12 +340,19 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         [PendingImportOwner::Package { .. }]
     ));
     let effective = request.compiler_inputs();
-    let selection = CertifiedSourceSelection::from_compiler_projection(
-        &effective.projection(),
-        &effective.metadata().retained,
-        &InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
+    let mut target_validation = PackageInterfaceValidation::default();
+    let selection =
+        CertifiedSourceSelection::from_compiler_inputs(effective, &target_validation.inventory)
+            .unwrap();
+    let target_inventory = effective.artifacts().inventory();
+    let fixed = target_inventory
+        .bind_segment(
+            effective.artifacts(),
+            vec![],
+            &selection,
+            &mut target_validation,
+        )
+        .unwrap();
 
     let mut target_wire = testing::wire_program();
     target_wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
@@ -385,18 +392,26 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             binder: reader(),
         },
     }];
-    let imports = certified_products::certify_target_available_owners_with_validation(
+    let observed = certified_products::AuthenticatedTargetImports::issue(
         &target,
         &accepted,
-        &issued.recovery_products,
-        request.groups.as_ref(),
-        &selection,
-        &BTreeMap::new(),
-        &mut PackageInterfaceValidation::default(),
+        &target_validation.inventory,
     )
     .unwrap();
+    let admitted = target_inventory
+        .select_native_target(
+            fixed.physical_inputs().physical_cohort().unwrap(),
+            fixed.source_selection(),
+            observed,
+            None,
+            None,
+            &[],
+            &BTreeMap::new(),
+            &mut target_validation,
+        )
+        .unwrap();
     assert!(
-        matches!(imports.as_slice(), [PendingImportOwner::Source { binder, .. }]
+        matches!(admitted.imports(), [PendingImportOwner::Source { binder, .. }]
         if binder == &reader())
     );
 
@@ -453,6 +468,14 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         CertifiedSourceSelection::from_compiler_inputs(public_inputs, &public_validation.inventory)
             .unwrap();
     let inventory = public_inputs.artifacts().inventory();
+    let public_fixed = inventory
+        .bind_segment(
+            public_inputs.artifacts(),
+            vec![],
+            &public_selection,
+            &mut public_validation,
+        )
+        .unwrap();
     let observed = certified_products::AuthenticatedTargetImports::issue(
         &target,
         &accepted,
@@ -463,8 +486,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let public_original_hash = public_original.semantic_sha256();
     let refused = inventory
         .select_native_target(
-            public_inputs.artifacts(),
-            &public_selection,
+            public_fixed.physical_inputs().physical_cohort().unwrap(),
+            public_fixed.source_selection(),
             observed,
             None,
             None,
@@ -575,8 +598,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             .unwrap();
     assert!(unselected.is_empty());
 
-    // A source root and a direct package global can both be admitted before
-    // the first native group is selected. Availability is not target evidence.
+    // Empty demand retains package custody without granting Source execution.
+    // The earlier permitted request can also consume a direct package global.
     let empty_view = view
         .inventory()
         .admit_recovery_selection(
@@ -598,12 +621,19 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .unwrap();
     assert!(late_request.groups.is_empty());
     let late_effective = late_request.compiler_inputs();
-    let late_selection = CertifiedSourceSelection::from_compiler_projection(
-        &late_effective.projection(),
-        &late_effective.metadata().retained,
-        &InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
+    let mut late_validation = PackageInterfaceValidation::default();
+    let late_selection =
+        CertifiedSourceSelection::from_compiler_inputs(late_effective, &late_validation.inventory)
+            .unwrap();
+    let late_inventory = late_effective.artifacts().inventory();
+    let late_fixed = late_inventory
+        .bind_segment(
+            late_effective.artifacts(),
+            vec![],
+            &late_selection,
+            &mut late_validation,
+        )
+        .unwrap();
     late_wire.globals.push(GlobalDecl {
         identity: literal(),
         rep: RuntimeRep::Address,
@@ -656,38 +686,68 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
-    let late_imports = certified_products::certify_target_available_owners_with_validation(
+    let observed = certified_products::AuthenticatedTargetImports::issue(
         &late_target,
         &late_accepted,
-        &issued.recovery_products,
-        &[],
-        &late_selection,
-        &catalog,
-        &mut PackageInterfaceValidation::default(),
+        &late_validation.inventory,
     )
     .unwrap();
+    let refused = late_inventory
+        .select_native_target(
+            late_fixed.physical_inputs().physical_cohort().unwrap(),
+            late_fixed.source_selection(),
+            observed,
+            None,
+            None,
+            &[],
+            &catalog,
+            &mut late_validation,
+        )
+        .err()
+        .expect("package evidence cannot enlarge an empty Source choice");
+    assert!(matches!(refused, CompileError::ArtifactInventory(error)
+        if matches!(error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty { .. }))));
+    assert!(late_effective
+        .artifacts()
+        .selected_native_groups()
+        .is_empty());
+    let observed = certified_products::AuthenticatedTargetImports::issue(
+        &late_target,
+        &late_accepted,
+        &late_validation.inventory,
+    )
+    .unwrap();
+    let late_admitted = target_inventory
+        .select_native_target(
+            fixed.physical_inputs().physical_cohort().unwrap(),
+            fixed.source_selection(),
+            observed,
+            None,
+            None,
+            &[],
+            &catalog,
+            &mut late_validation,
+        )
+        .unwrap();
+    let late_imports = late_admitted.imports();
+    assert_eq!(
+        late_admitted.artifacts().selected_native_groups(),
+        BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
+            artifact: expected_original,
+            original_ordinal: ORDINAL,
+        }])
+    );
     assert!(matches!(
-        late_imports.as_slice(),
+        late_imports,
         [
             PendingImportOwner::Source { .. },
             PendingImportOwner::Package { .. }
         ]
     ));
-    let demanded_view =
-        crate::declaration_context::certified_product_artifact_view_with_validation(
-            producer,
-            &issued.recovery_products,
-            &issued.module_interfaces,
-            &issued.value_interfaces,
-            Some(&late_effective.artifacts()),
-            NativeArtifactDemand::CertifiedTargetImports(&late_imports),
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
     let late_groups =
         crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
-            &demanded_view,
-            Some(&late_request.groups),
+            late_admitted.artifacts(),
+            Some(&request.groups),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
@@ -708,7 +768,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         Some(&witness)
     );
     let late_closure = catalog
-        .select(&late_groups, &late_imports, &selection_operation)
+        .select(&late_groups, late_imports, &selection_operation)
         .unwrap();
     let late_interfaces = certified_products::certify_target_package_interfaces_with_validation(
         &late_target,
