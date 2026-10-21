@@ -10954,7 +10954,19 @@ impl WorldProgramContinuation {
         }
         current_product_owners(receipt, products)?;
         let operation = Arc::clone(initial.operation());
-        let demand = decoded.prefix_inputs(&self.inputs)?;
+        let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
+            decoded.program,
+            &decoded.binding.stage,
+        )?;
+        let checked_types = checked_values.type_interface_contexts(&operation)?;
+        // Visible checked values own TYPE inputs separately from the World's
+        // primary declaration/source namespace. Only this stage borrows them.
+        let stage_inputs = if checked_types.is_empty() {
+            Arc::clone(&self.inputs)
+        } else {
+            self.inputs.with_type_interfaces(&checked_types)?.inputs
+        };
+        let demand = decoded.prefix_inputs(&stage_inputs)?;
         // Prefix source/TYPE projection carries no new executable choice.
         // The empty owner belongs to that prefix, separately from initial.
         let prefix_groups = demand.certify_receipt_groups(
@@ -10977,7 +10989,7 @@ impl WorldProgramContinuation {
                 metadata,
             )
             .map_err(compiler_evidence_failure)?;
-        let support = self.inputs.source_support.project_world_stage_inputs(
+        let support = stage_inputs.source_support.project_world_stage_inputs(
             &demand.demand,
             &demand.native_selection.availability,
             &demand.permission_delta,
@@ -11007,10 +11019,6 @@ impl WorldProgramContinuation {
                 })
             }
         };
-        let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
-            decoded.program,
-            &decoded.binding.stage,
-        )?;
         let inputs = DemandedWorldCompilerInputs {
             initial,
             demand,

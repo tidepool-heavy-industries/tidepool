@@ -2168,6 +2168,37 @@ impl CheckedValueImportAuthority {
         self.values.values().map(|value| value.input().owner)
     }
 
+    /// Borrow the selected values' exact thin TYPE rows and their dependencies.
+    /// Their historical source and native support stays with the checked value.
+    pub(crate) fn type_interface_contexts(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<Arc<crate::declaration_context::ExactDeclarationContext>>, CompileError> {
+        operation
+            .reserve::<Arc<crate::declaration_context::ExactDeclarationContext>>(self.values.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut contexts = Vec::with_capacity(self.values.len());
+        for value in self.values.values() {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let original = match value {
+                CapturedValueInterface::Certified { original, .. } => original,
+                #[cfg(test)]
+                CapturedValueInterface::Raw(_) => {
+                    return Err(failure("World TYPE inputs require an issued checked value"));
+                }
+            };
+            contexts.push(Arc::new(
+                crate::declaration_context::ExactDeclarationContext::checked_value_interface_context(
+                    original,
+                )?,
+            ));
+        }
+        Ok(contexts)
+    }
+
     pub(crate) fn matches_interface(
         &self,
         interface: &crate::recovery_artifacts::CertifiedJoinedInterface,
