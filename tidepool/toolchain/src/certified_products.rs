@@ -20986,21 +20986,24 @@ pub(crate) mod tests {
             .unwrap();
         let item_view = available.select_roots(vec![native.descriptor.id]).unwrap();
         assert!(matches!(
-            OriginalCompilerInputs::from_selection(&premature, &item_view),
+            OriginalCompilerInputs::issue_segment_native_availability(
+                &mut premature,
+                &inventory.empty_view(),
+                vec![native.clone()],
+                &mut PackageInterfaceValidation::default(),
+            ),
             Err(crate::CompileError::ArtifactInventory(error))
                 if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
                     dependency: crate::artifact_inventory::ArtifactDependency::NativeBinding { dependent_ordinal: 17, generation: 11, .. }, ..
                 })
         ));
-        OriginalCompilerInputs::issue_segment_native_availability(
+        let completed = OriginalCompilerInputs::issue_segment_native_availability(
             &mut physical,
             &inventory.empty_view(),
             entries.clone(),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
-        .unwrap()
-        .issued_artifacts()
-        .clone();
+        .unwrap();
         let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
         let [issued] = physical_availability.as_slice() else {
             panic!("one physical native product");
@@ -21129,14 +21132,6 @@ pub(crate) mod tests {
             request_offer.issued_group_carriers().unwrap()
         );
         let inventory = inputs.artifacts().inventory();
-        let fixed = inventory
-            .bind_segment(
-                inputs.artifacts(),
-                entries,
-                &physical,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
         let mut target_validation = PackageInterfaceValidation::default();
         let observations = source_target_observations(&[(&product, 0)]);
         let prepared = prepared_target_fixture(&observations);
@@ -21148,7 +21143,7 @@ pub(crate) mod tests {
         .unwrap();
         let current = inventory
             .select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                completed.issued_artifacts(),
                 &item,
                 observed,
                 None,
@@ -21179,7 +21174,7 @@ pub(crate) mod tests {
         assert!(
             inventory
                 .select_native_target(
-                    fixed.physical_inputs().issued_artifacts(),
+                    completed.issued_artifacts(),
                     &item,
                     observed,
                     None,
@@ -21201,7 +21196,7 @@ pub(crate) mod tests {
         .unwrap();
         let next = inventory
             .select_native_target(
-                fixed.physical_inputs().issued_artifacts(),
+                completed.issued_artifacts(),
                 &physical,
                 observed,
                 None,
