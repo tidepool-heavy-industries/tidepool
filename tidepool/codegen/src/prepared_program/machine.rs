@@ -1210,21 +1210,24 @@ impl<'code> PreparedMachine<'code> {
         block: &RootWords,
         candidate_alloc_start: &mut Option<*mut u8>,
     ) -> Result<Arc<StaticRegion>, ExecutionError> {
-        if std::env::var_os("TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC").is_some() {
+        if tracing::enabled!(target: "tidepool_codegen::constructor_custody", tracing::Level::TRACE)
+        {
             for (declaration, descriptor) in &compiled.interned_constructors {
                 if declaration.identity.symbol.occurrence == "RunRequest"
                     || declaration.identity.family.symbol.occurrence == "AgentProtocol"
                     || declaration.host_id == tidepool_repr::DataConId(18347625841861181856)
                 {
                     let existing = self.interner.by_host(declaration.host_id);
-                    eprintln!(
-                        "constructor custody machine={:p} source={:?} declaration={:?} descriptor={:p} strong={} existing={:?}",
-                        self,
-                        compiled.certified_source,
-                        declaration,
-                        Arc::as_ptr(descriptor),
-                        Arc::strong_count(descriptor),
-                        existing.map(|(known, value)| (known, Arc::as_ptr(value), Arc::strong_count(value))),
+                    tracing::trace!(
+                        target: "tidepool_codegen::constructor_custody",
+                        machine = self as *const Self as usize,
+                        source = ?compiled.certified_source,
+                        declaration = ?declaration,
+                        descriptor = Arc::as_ptr(descriptor) as usize,
+                        strong = Arc::strong_count(descriptor),
+                        existing = ?existing.map(|(known, value)| (
+                            known, Arc::as_ptr(value) as usize, Arc::strong_count(value))),
+                        "constructor custody"
                     );
                 }
             }

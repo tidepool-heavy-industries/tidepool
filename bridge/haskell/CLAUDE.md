@@ -744,14 +744,20 @@ Diagnostics are opt-in:
 
 | Variable | Purpose |
 |---|---|
+| `TIDEPOOL_LOG=off\|error\|warn\|info\|debug\|trace` | structured `tidepool-log` worker events; the `full` trace profile defaults to `trace` |
 | `TIDEPOOL_TIMING=1` | phase timings, nested breakdowns, and counts, correlated by compiler request |
 | `TIDEPOOL_VARID_AUDIT=1` | report VarId collisions |
 | `TIDEPOOL_VARID_AUDIT=<hex>,...` | resolve selected VarIds to names |
 | `TIDEPOOL_DANGLING_DEBUG=1` | show unresolved references before allowed session refs are removed |
-| `TIDEPOOL_IFACE_DEBUG=1` | trace fat-interface loading |
 
 `TIDEPOOL_TEST_DROP_DC` and `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY` are
 fault-injection controls for extractor tests, not debugging defaults.
+
+`tidepool-log` is the owner for exploratory compiler observations. Its JSON
+schema is distinct from timing, reuse, memo, retention and request-phase lines,
+which are protocol records with independent consumers. Use `Tidepool.Logging`
+at call sites instead of adding environment-gated stderr writes. Diagnostic
+delivery is best effort and cannot replace a typed compiler result.
 
 For a separate symbol-rich worker and bounded phase-aligned CPU/RSS captures,
 see [compiler profiling](../../docs/compiler-profiling.md).
