@@ -1161,6 +1161,72 @@ mod tests {
                 .unwrap();
         (directory, graph)
     }
+    #[test]
+    fn snapshot_readers_refuse_previous_package_custody_format() {
+        let (_directory, base) = fixture();
+        let mut staged = base
+            .candidate()
+            .prepare(base.store_revision(), base.high_water())
+            .unwrap();
+        let mut snapshot: DomainSnapshot =
+            read_value(&staged.graph, staged.prepared.snapshot_root.cid()).unwrap();
+        assert_eq!(snapshot.version, 2);
+        snapshot.version = 1;
+        let mut writer = Materializer::new(&staged.graph);
+        let legacy = DomainSnapshotRoot::new(writer.materialize_value(&snapshot).unwrap());
+        let packet = writer.finish().unwrap();
+        staged.graph.stage_packet(packet);
+        staged.prepared.snapshot_root = legacy;
+        staged.prepared.blocks = staged
+            .graph
+            .pending
+            .iter()
+            .map(|(cid, bytes)| (*cid, bytes.clone()))
+            .collect();
+        let (graph, receipt) = match staged.commit() {
+            StoreDisposition::Committed(value) => value,
+            StoreDisposition::Refused(error) => {
+                panic!("representation fixture store refusal: {error:?}")
+            }
+            StoreDisposition::RecoveryRequired(error) => {
+                panic!("representation fixture store failure: {error:?}")
+            }
+        };
+        let state = receipt.state.clone();
+        receipt.installed_blocking().unwrap();
+        for failure in [
+            RecoveryDomainReader::open(graph.store.clone(), &state).unwrap_err(),
+            RecoveryGraph::hydrate_domain(graph.store.clone(), graph.domain, &state).unwrap_err(),
+        ] {
+            assert!(matches!(failure.kind, RecoveryErrorKind::Manifest));
+            assert_eq!(failure.detail, "unsupported domain snapshot version");
+        }
+
+        let (_directory, base) = fixture();
+        let owner = owner(1);
+        let mut candidate = base.candidate();
+        candidate
+            .replace_surface(RecoveryPublicSurface::empty(owner.clone()))
+            .unwrap();
+        let mut graph = candidate.seal().unwrap();
+        let mut header = graph.owner_roots[&owner].clone();
+        let mut snapshot: SurfaceSnapshot = read_value(&graph, header.surface_root.cid()).unwrap();
+        assert_eq!(snapshot.version, 2);
+        snapshot.version = 1;
+        let mut writer = Materializer::new(&graph);
+        header.surface_root = PublicSurfaceRoot::new(writer.materialize_value(&snapshot).unwrap());
+        let packet = writer.finish().unwrap();
+        graph.stage_packet(packet);
+        graph.owner_roots.insert(owner.clone(), header);
+        graph.acquired.lock().surfaces.clear();
+        let failure = graph.surface(&owner).unwrap_err();
+        assert!(matches!(failure.kind, RecoveryErrorKind::Manifest));
+        assert_eq!(
+            failure.detail,
+            "public surface has invalid version or declaration root"
+        );
+    }
+
     fn context(candidate: &mut RecoveryGraphCandidate) -> ContextRoot {
         let context =
             tidepool_toolchain::declaration_join::ExactDeclarationContext::new(&[], &[], vec![])

@@ -5013,7 +5013,7 @@ pub(crate) fn compile_authored_products(
 
 /// Build an explicitly selected immutable source cohort at its final deployment
 /// path. The declared probe and ordered targets run under build-action isolation;
-/// only authenticated originals are exported. Schema 4 retains original source
+/// only authenticated originals are exported. Schema 5 retains original source
 /// paths while allowing the complete product container to move unchanged.
 pub fn build_deployment_module_package(
     source_path: &Path,

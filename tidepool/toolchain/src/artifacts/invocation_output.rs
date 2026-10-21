@@ -1444,6 +1444,12 @@ mod tests {
                 let canonical = product.module_interface().unwrap();
                 let native = product.original_native().unwrap();
                 native_counts.push(native.package_interfaces().iter().count());
+                if package_code {
+                    assert!(
+                        !native.package_interfaces().is_empty(),
+                        "reverse must exercise nonempty Original package references"
+                    );
+                }
                 let target = output.targets["first"].native_inputs.as_ref().unwrap();
                 assert_eq!(
                     target
