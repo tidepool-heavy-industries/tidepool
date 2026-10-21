@@ -603,6 +603,14 @@ impl CompletedNativeProductAvailability {
         &self.row
     }
 
+    fn matches_direct_canonical_binding(&self, namespace: &ArtifactView) -> bool {
+        self.own.matches_direct_canonical_binding(
+            self.row.original_artifact_id(),
+            self.row.canonical,
+            namespace,
+        )
+    }
+
     pub(crate) fn groups(
         &self,
         key: NativeGroupKey,
@@ -8431,13 +8439,14 @@ impl<'a> ProductCompilerInputs<'a> {
         let Some(row) = support.imports.get(entry.descriptor.owner.as_ref()) else {
             return Ok(None);
         };
-        if row.produced.is_none() {
+        let Some(receipt) = &row.produced else {
             return Ok(None);
-        }
-        if support
-            .compiler_support
-            .implementation_entry(&entry.descriptor.owner)
-            .is_none_or(|actual| actual.as_ref() != entry.as_ref())
+        };
+        if !receipt.matches_direct_canonical_binding(self.source_support.artifacts())
+            || support
+                .compiler_support
+                .implementation_entry(&entry.descriptor.owner)
+                .is_none_or(|actual| actual.as_ref() != entry.as_ref())
             || !row.matches_entry(entry)
         {
             return Err(crate::certified_products::CertificationError::Mismatch(
