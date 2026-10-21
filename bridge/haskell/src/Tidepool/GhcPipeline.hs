@@ -321,7 +321,7 @@ import Tidepool.ExactScope
   , exactInputRetentionLimits, optionalInputByteLimit, originalImageCountLimit, commitWorldInputRetention
   , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs, worldSuccessorFacts, worldSuccessorChangedAliases, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
   , worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
-  , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
+  , worldInputsLexicalSurface, worldLexicalImportLines, worldLexicalDeclaration, worldDeclarationInterface
   , worldLexicalObservation, WorldObservationScaffold, worldObservationRequestTypes, worldObservationInputType
   , worldObservationFragment, worldObservationImports
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
@@ -2364,7 +2364,7 @@ prepareWorldObservationStage universe baseEnv timing
       declarationImports = case worldLexicalDeclaration lexical of
         Nothing -> []
         Just declaration -> ["import " ++ exactModule (worldDeclarationInterface declaration)]
-      imports = worldObservationImports scaffold ++ worldLexicalImports lexical ++ declarationImports
+      imports = worldObservationImports scaffold ++ worldLexicalImportLines lexical ++ declarationImports
   createDirectoryIfMissing True directory
   protected <- either fail pure (replaceTemplateModuleHeader
     ("module " ++ owner ++ " where\n" ++ unlines imports) (worldObservationFragment scaffold))
@@ -7791,7 +7791,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               selected <- readIORef universe
                               basis <- heldWorldDemandScope selected timing world
                               lexical <- analyzeOrderedCellWithFlags parserFlags (worldCellTemplate (worldCellPrepareRecipe question))
-                                (unlines (worldLexicalImports (worldInputsLexicalSurface facts))) >>= either (fail . renderCellSplitError) pure
+                                (unlines (worldLexicalImportLines (worldInputsLexicalSurface facts))) >>= either (fail . renderCellSplitError) pure
                               let selectedDeclaration = case worldLexicalDeclaration (worldInputsLexicalSurface facts) of
                                     Nothing -> []
                                     Just facade -> let artifact = worldDeclarationInterface facade in

@@ -9196,7 +9196,7 @@ mod module_product_tests {
                         initial.clone(),
                         CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                         sources,
-                        crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
+                        crate::compiler_world::CompilerWorldLexicalSurface::from_publication_import_lines(
                             if mixed {
                                 vec!["import qualified StageInputG".into()]
                             } else {
@@ -9632,7 +9632,7 @@ mod module_product_tests {
                             None,
                             CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                             sources,
-                            CompilerWorldLexicalSurface::from_publication(Vec::new(), None)?,
+                            CompilerWorldLexicalSurface::from_publication_import_lines(Vec::new(), None)?,
                         )?,
                         &endpoint,
                     )?;

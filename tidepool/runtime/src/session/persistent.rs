@@ -1745,8 +1745,8 @@ impl PersistentSession {
                 }
                 None
             };
-        Ok(CompilerWorldLexicalSurface::from_publication(
-            self.lib().workbench_imports_in(scope).into_specs(),
+        Ok(CompilerWorldLexicalSurface::from_publication_import_lines(
+            self.lib().workbench_imports_in(scope).source_lines(),
             declaration,
         )?)
     }
@@ -4158,7 +4158,7 @@ impl PersistentSession {
                         .prepare_declaration_publication(
                             declaration.joined.evidence.receipt(),
                             &declaration.joined.context,
-                            imports.into_specs(),
+                            imports.source_lines(),
                         )
                         .map_err(SessionError::from)
                 })
