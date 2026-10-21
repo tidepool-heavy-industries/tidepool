@@ -76,7 +76,7 @@ import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
   , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
   , PackageLinkIndex(..), RawOccurrence(..), RawLink(..)
-  , emptyPackageLinkIndex, canonicalizeOccurrences )
+  , emptyPackageLinkIndex, canonicalizeOccurrences, resolveHomeRoots )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -108,7 +108,7 @@ import Tidepool.ExecutionProjection
   , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity
-  , PreparedPackageTarget, packageTargetGroups, projectedPackageModule
+  , PreparedPackageTarget, packageTargetGroups, packageTargetHomeImports, projectedPackageModule
   , projectedPackageInterfaceSha256, projectedPackageDefiningVersion, projectedPackageEncoding )
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, plannedOriginalOwner, plannedInterfaceFingerprint )
@@ -554,6 +554,10 @@ retainPreparedPackageTargets provenance targets captures context = do
           | (name, group, bytes) <- encodings ]
         (occurrences, indexMap) = canonicalizeOccurrences rawOccurrences
         targetOwners = Map.map (Map.map (indexMap Map.!)) rawTargetOwners
+        targetHomeImports = Map.fromList
+          [ (T.pack name, packageTargetHomeImports paired)
+          | (name, paired) <- targets ]
+    homeRoots <- either fail pure (resolveHomeRoots indexMap rawTargetOwners targetHomeImports)
     let interfaces = Map.fromList
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
             ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
@@ -561,7 +565,7 @@ retainPreparedPackageTargets provenance targets captures context = do
         writes = Map.toAscList (Map.fromList
           [("package-products" </> shaHex bytes ++ ".cbor",bytes)
           | (_,_,bytes) <- encodings])
-        links = PackageLinkIndex occurrences targetOwners
+        links = PackageLinkIndex occurrences targetOwners homeRoots
     pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
 
 withWorldStageInputs :: Maybe WorldStageInputs -> PreparedProductContext -> PreparedProductContext

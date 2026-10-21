@@ -10,7 +10,7 @@ module Tidepool.CertifiedProducts
   , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
   , PackageLink(..), PackageOccurrence(..), PackageLinks(..), PackageLinkIndex(..)
   , RawOccurrence(..), RawLink(..), canonicalizeOccurrences
-  , emptyPackageLinks, emptyPackageLinkIndex, linkForOccurrence, encodePackageLinks ) where
+  , resolveHomeRoots, emptyPackageLinks, emptyPackageLinkIndex, linkForOccurrence, encodePackageLinks ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -116,17 +116,19 @@ emptyPackageLinks :: PackageLinks
 emptyPackageLinks = PackageLinks [] Map.empty Map.empty
 
 -- The producer-boundary value carried from CompilerProducts into
--- certification: occurrence rows plus one binder-to-occurrence map per target.
--- A request-wide binder map would be a global symbol index with last-write-wins
--- across targets, so the same SymbolIdentity may name distinct occurrence ids
--- in different targets without colliding here.
+-- certification: occurrence rows, one binder-to-occurrence map per target and
+-- the agreed per-HOME-group package links. A request-wide binder map would be a
+-- global symbol index with last-write-wins across targets, so the same
+-- SymbolIdentity may name distinct occurrence ids in different targets without
+-- colliding here.
 data PackageLinkIndex = PackageLinkIndex
   { packageLinkIndexOccurrences :: [PackageOccurrence]
   , packageLinkIndexTargetOwners :: Map.Map T.Text (Map.Map SymbolIdentity Word32)
+  , packageLinkIndexHomeRoots :: Map.Map (T.Text,T.Text,Word) [PackageLink]
   } deriving (Eq, Show)
 
 emptyPackageLinkIndex :: PackageLinkIndex
-emptyPackageLinkIndex = PackageLinkIndex [] Map.empty
+emptyPackageLinkIndex = PackageLinkIndex [] Map.empty Map.empty
 
 linkForOccurrence :: Map.Map SymbolIdentity Word32 -> SymbolIdentity -> PackageLink
 linkForOccurrence owners identity = case Map.lookup identity owners of
@@ -235,6 +237,31 @@ normalize = reverse . snd . foldl' assign (Map.empty, [])
     assign (table, out) x = case Map.lookup x table of
       Just classId -> (table, classId : out)
       Nothing -> let classId = Map.size table in (Map.insert x classId table, classId : out)
+
+-- Resolve each target's captured HOME-group package-import SymbolIdentity list
+-- through that target's own raw occurrence map, then require every target that
+-- shares a HOME group to agree on the exact ordered link list. Empty lists are
+-- retained, so every fresh HOME group keeps a home_roots entry.
+resolveHomeRoots
+  :: Map.Map Int Word32
+  -> Map.Map T.Text (Map.Map SymbolIdentity Int)
+  -> Map.Map T.Text (Map.Map (T.Text,T.Text,Word) [SymbolIdentity])
+  -> Either String (Map.Map (T.Text,T.Text,Word) [PackageLink])
+resolveHomeRoots indexMap targetOwners targetHomeImports =
+  foldM insertAgreeing Map.empty
+    [ (key, resolveLinks (Map.findWithDefault Map.empty target targetOwners) identities)
+    | (target, imports) <- Map.toAscList targetHomeImports
+    , (key, identities) <- Map.toAscList imports ]
+  where
+    resolveLinks owners =
+      map (\identity -> case Map.lookup identity owners of
+        Just raw -> PackageLinkLocal (indexMap Map.! raw)
+        Nothing -> PackageLinkInherited)
+    insertAgreeing known (key, links) = case Map.lookup key known of
+      Nothing -> Right (Map.insert key links known)
+      Just prior | prior == links -> Right known
+      Just prior -> Left ("targets disagree on HOME group " ++ show key
+        ++ ": " ++ show prior ++ " /= " ++ show links)
 
 data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
@@ -686,22 +713,11 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
               targetOwners = packageLinkIndexTargetOwners packageLinks
-              -- Fresh HOME products are projected with the first target's
-              -- context, so their package imports resolve through that
-              -- target's own occurrence map, never a request-wide symbol map.
-              firstTargetOwners = case targets of
-                [] -> Map.empty
-                (target, _) : _ -> Map.findWithDefault Map.empty (T.pack target) targetOwners
               targetRoots = Map.fromList
                 [ (T.pack target,
                     packageRootLinks (Map.findWithDefault Map.empty (T.pack target) targetOwners) witnesses)
                 | (target, witnesses) <- targetRowsReady ]
-              homeRoots = Map.fromList
-                [ ((productUnit product, productModule product, candidateGroupOrdinal group), roots)
-                | (product, group, witnesses) <- moduleRows
-                , productOrigin product == FreshProduct
-                , let roots = packageRootLinks firstTargetOwners witnesses
-                , not (null roots) ]
+              homeRoots = packageLinkIndexHomeRoots packageLinks
               encodedPackageLinks = encodePackageLinks
                 (PackageLinks (packageLinkIndexOccurrences packageLinks) targetRoots homeRoots)
               originalFields =
@@ -736,6 +752,13 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
               else Right ()
             if or (Map.elems packageConflicts)
               then Left "prior native package owner changed its captured interface"
+              else Right ()
+            let freshHomeKeys = Set.fromList
+                  [ (productUnit product, productModule product, candidateGroupOrdinal group)
+                  | (product, group, _) <- moduleRows
+                  , productOrigin product == FreshProduct ]
+            if Map.keysSet homeRoots /= freshHomeKeys
+              then Left "HOME group package links do not match certified fresh HOME groups"
               else Right ()
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
             Right (certificateBytes,versions,context,packageInterfaceWrites)
