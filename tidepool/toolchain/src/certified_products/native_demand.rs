@@ -159,7 +159,14 @@ fn encode_obligations(
         .collect::<BTreeSet<_>>();
     operation.reserve::<Value>(roots.len())?;
     let mut rows = Vec::with_capacity(roots.len());
+    let mut previous = None;
     for (identity, digest) in roots {
+        if previous == Some(identity) {
+            return Err(CertificationError::Mismatch(
+                "native package obligation seal conflict",
+            ));
+        }
+        previous = Some(identity);
         charge_symbol(operation, identity)?;
         rows.push(value_array([
             value_identity(identity),
@@ -356,6 +363,21 @@ mod tests {
             },
         ];
         assert!(encode_reply(&reversed, &operation).is_err());
+        let mut conflicting = obligations[0].clone();
+        conflicting.interface_digest = [9; 32];
+        let conflicting = [obligations[0].clone(), conflicting];
+        assert!(matches!(
+            encode_reply(
+                &[NativeDemandUseReply {
+                    original: replies[0].original,
+                    obligations: &conflicting,
+                }],
+                &operation
+            ),
+            Err(CertificationError::Mismatch(
+                "native package obligation seal conflict"
+            ))
+        ));
     }
 
     #[test]
