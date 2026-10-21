@@ -668,7 +668,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     &prepared, &observations, &validation.inventory,
                 ).unwrap();
                 let target = inventory.select_native_target(
-                    fixed.physical_inputs().issued_artifacts(), fixed.source_selection(),
+                    fixed.physical_inputs().physical_cohort().unwrap(), fixed.source_selection(),
                     observed, None, Some(request.artifacts()), &[], &BTreeMap::new(), &mut validation,
                 ).unwrap();
                 let groups = target.resolve().unwrap().groups().clone();

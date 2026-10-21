@@ -814,6 +814,11 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             assert_eq!(expected.len(), expected_keys.len());
             assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
             let inventory = inputs.artifacts().inventory();
+            assert!(inputs.physical_cohort().is_err());
+            let physical = inventory
+                .bind_segment(inputs.artifacts(), vec![], &receipt, &mut validation)
+                .unwrap();
+            let before_targets = inventory.metrics().issued_scope_nodes;
             let (prepared, observations) =
                 super::tests::source_target_data(&[(catalog.original(0, version).as_ref(), 11)]);
             let observed =
@@ -821,7 +826,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                     .unwrap();
             let target = inventory
                 .select_native_target(
-                    inputs.artifacts(),
+                    physical.physical_inputs().physical_cohort().unwrap(),
                     &receipt,
                     observed,
                     None,
@@ -857,7 +862,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
                     .unwrap();
             let refused = inventory.select_native_target(
-                inputs.artifacts(),
+                physical.physical_inputs().physical_cohort().unwrap(),
                 &receipt,
                 observed,
                 None,
@@ -871,6 +876,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 11 }
                     if artifact == catalog.original(0, 1 - version).descriptor.id))
             );
+            assert_eq!(inventory.metrics().issued_scope_nodes, before_targets);
         }
         assert_eq!(selected.artifacts().capture_graph_selection(), before);
         assert!(

@@ -20143,7 +20143,7 @@ pub(crate) mod tests {
     fn exact_request_bounds_authentic_target_native_groups_before_admission() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
-            NativeArtifactDemand, NativeGroupKey,
+            NativeGroupKey,
         };
         use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
         let producer_bytes = b"request-native-availability-consumer";
@@ -20325,6 +20325,15 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
+            assert!(request.compiler_inputs().physical_cohort().is_err());
+            let physical = inventory
+                .bind_segment(
+                    request.compiler_inputs().artifacts(),
+                    vec![],
+                    &selection,
+                    &mut validation,
+                )
+                .unwrap();
             let membership = request
                 .compiler_inputs()
                 .available_original_sources(std::slice::from_ref(&product), &validation.inventory)
@@ -20362,6 +20371,7 @@ pub(crate) mod tests {
                 .unwrap();
                 assert_eq!(checked.imports(), &[edge]);
             }
+            let before_targets = inventory.metrics().issued_scope_nodes;
             for ordinal in [7, 9001] {
                 observed += 1;
                 let accepted = source_target_observations(&[(&product, ordinal)]);
@@ -20393,8 +20403,8 @@ pub(crate) mod tests {
                         .unwrap();
                 let outcome = inventory
                     .select_native_target(
-                        request.compiler_inputs().artifacts(),
-                        &selection,
+                        physical.physical_inputs().physical_cohort().unwrap(),
+                        physical.source_selection(),
                         observed_target,
                         None,
                         None,
@@ -20420,6 +20430,7 @@ pub(crate) mod tests {
                 }
                 eprintln!("native_availability_consumer mode={mode} ordinal={ordinal} expected_accept={expected} actual={outcome:?}");
             }
+            assert_eq!(inventory.metrics().issued_scope_nodes, before_targets);
         }
         assert_eq!(observed, 6);
         assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
@@ -20714,6 +20725,18 @@ pub(crate) mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
+                assert!(next.compiler_inputs().physical_cohort().is_err());
+                let physical = next
+                    .compiler_inputs()
+                    .artifacts()
+                    .inventory()
+                    .bind_segment(
+                        next.compiler_inputs().artifacts(),
+                        vec![],
+                        &next_selection,
+                        &mut validation,
+                    )
+                    .unwrap();
                 let membership = next
                     .compiler_inputs()
                     .available_original_sources(
@@ -20721,6 +20744,12 @@ pub(crate) mod tests {
                         &validation.inventory,
                     )
                     .unwrap();
+                let before_targets = physical
+                    .physical_inputs()
+                    .issued_artifacts()
+                    .inventory()
+                    .metrics()
+                    .issued_scope_nodes;
                 for ordinal in [7, 9001] {
                     observed += 1;
                     let accepted = source_target_observations(&[(&product, ordinal)]);
@@ -20766,8 +20795,8 @@ pub(crate) mod tests {
                             .artifacts()
                             .inventory()
                             .select_native_target(
-                                next.compiler_inputs().artifacts(),
-                                &next_selection,
+                                physical.physical_inputs().physical_cohort().unwrap(),
+                                physical.source_selection(),
                                 observed_target,
                                 None,
                                 None,
@@ -20785,6 +20814,15 @@ pub(crate) mod tests {
                         assert_eq!(admitted.artifacts().selected_native_groups(), groups);
                     }
                 }
+                assert_eq!(
+                    physical
+                        .physical_inputs()
+                        .issued_artifacts()
+                        .inventory()
+                        .metrics()
+                        .issued_scope_nodes,
+                    before_targets
+                );
             }
         }
         assert_eq!(observed, 16);
@@ -21114,7 +21152,7 @@ pub(crate) mod tests {
         .unwrap();
         let current = inventory
             .select_native_target(
-                completed.issued_artifacts(),
+                completed.physical_cohort().unwrap(),
                 &item,
                 observed,
                 None,
@@ -21145,7 +21183,7 @@ pub(crate) mod tests {
         assert!(
             inventory
                 .select_native_target(
-                    completed.issued_artifacts(),
+                    completed.physical_cohort().unwrap(),
                     &item,
                     observed,
                     None,
@@ -21167,7 +21205,7 @@ pub(crate) mod tests {
         .unwrap();
         let next = inventory
             .select_native_target(
-                completed.issued_artifacts(),
+                completed.physical_cohort().unwrap(),
                 &physical,
                 observed,
                 None,
@@ -21922,7 +21960,7 @@ pub(crate) mod tests {
                 .unwrap();
         let admitted_target = owner
             .select_native_target(
-                finished_artifacts,
+                finished.physical_cohort().unwrap(),
                 &current,
                 observed,
                 None,
@@ -21981,7 +22019,7 @@ pub(crate) mod tests {
                 .unwrap();
         let mixed_target = owner
             .select_native_target(
-                finished_artifacts,
+                finished.physical_cohort().unwrap(),
                 &current,
                 observed,
                 None,
@@ -22235,7 +22273,7 @@ pub(crate) mod tests {
                     .unwrap();
             let bound = inventory
                 .select_native_target(
-                    bound.physical_inputs().issued_artifacts(),
+                    bound.physical_inputs().physical_cohort().unwrap(),
                     bound.source_selection(),
                     observed,
                     None,
@@ -22247,7 +22285,8 @@ pub(crate) mod tests {
                 .unwrap()
                 .artifacts()
                 .clone();
-            for view in [bound] {
+            {
+                let view = bound;
                 let graph = view.capture_graph_selection();
                 assert_eq!(
                     graph.native_groups.len(),
@@ -22574,7 +22613,7 @@ pub(crate) mod tests {
                 .unwrap();
                 let bound = inventory
                     .select_native_target(
-                        bound.physical_inputs().issued_artifacts(),
+                        bound.physical_inputs().physical_cohort().unwrap(),
                         bound.source_selection(),
                         observed,
                         None,
@@ -22586,7 +22625,8 @@ pub(crate) mod tests {
                     .unwrap()
                     .artifacts()
                     .clone();
-                for view in [bound] {
+                {
+                    let view = bound;
                     let graph = view.capture_graph_selection();
                     let parents = graph
                         .native_groups
@@ -22743,7 +22783,7 @@ pub(crate) mod tests {
                 .unwrap();
                 let error = inventory
                     .select_native_target(
-                        physical,
+                        bound.physical_inputs().physical_cohort().unwrap(),
                         &input_selection,
                         observed,
                         None,
@@ -22839,7 +22879,7 @@ pub(crate) mod tests {
                     .unwrap();
             let selected = inventory
                 .select_native_target(
-                    completed.physical_inputs().issued_artifacts(),
+                    completed.physical_inputs().physical_cohort().unwrap(),
                     completed.source_selection(),
                     observed,
                     None,
@@ -22877,7 +22917,7 @@ pub(crate) mod tests {
                     .unwrap();
             let repeated = inventory
                 .select_native_target(
-                    completed.physical_inputs().issued_artifacts(),
+                    completed.physical_inputs().physical_cohort().unwrap(),
                     completed.source_selection(),
                     observed,
                     None,
@@ -23073,7 +23113,7 @@ pub(crate) mod tests {
                     .unwrap();
             let early = inventory
                 .select_native_target(
-                    completed.physical_inputs().issued_artifacts(),
+                    completed.physical_inputs().physical_cohort().unwrap(),
                     completed.source_selection(),
                     observed,
                     None,
@@ -23483,7 +23523,7 @@ pub(crate) mod tests {
         .unwrap();
         let admitted = inventory
             .select_native_target(
-                physical.physical_inputs().issued_artifacts(),
+                physical.physical_inputs().physical_cohort().unwrap(),
                 physical.source_selection(),
                 observed,
                 None,
@@ -23530,7 +23570,7 @@ pub(crate) mod tests {
         .unwrap();
         let foreign = inventory
             .select_native_target(
-                physical.physical_inputs().issued_artifacts(),
+                physical.physical_inputs().physical_cohort().unwrap(),
                 physical.source_selection(),
                 observed,
                 None,
@@ -23565,7 +23605,7 @@ pub(crate) mod tests {
         .unwrap();
         let independent = inventory
             .select_native_target(
-                physical.physical_inputs().issued_artifacts(),
+                physical.physical_inputs().physical_cohort().unwrap(),
                 physical.source_selection(),
                 observed,
                 None,
@@ -23610,7 +23650,7 @@ pub(crate) mod tests {
         .unwrap();
         let narrowed = inventory
             .select_native_target(
-                physical.physical_inputs().issued_artifacts(),
+                physical.physical_inputs().physical_cohort().unwrap(),
                 physical.source_selection(),
                 observed,
                 None,
@@ -23768,7 +23808,7 @@ pub(crate) mod tests {
                     .unwrap();
             let target = inventory
                 .select_native_target(
-                    physical,
+                    fixed.physical_inputs().physical_cohort().unwrap(),
                     selection,
                     observed,
                     None,
