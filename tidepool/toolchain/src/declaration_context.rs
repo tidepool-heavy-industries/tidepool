@@ -4389,7 +4389,11 @@ impl RequestCompilerInputs {
         Arc<crate::certified_products::AvailableOriginalSources>,
         crate::certified_products::CertificationError,
     > {
-        self.original_sources.admit(products, operation)
+        self.original_sources.admit(
+            &self.metadata.original_source_membership_basis(),
+            products,
+            operation,
+        )
     }
 }
 
@@ -8550,6 +8554,41 @@ impl ExactProgramSegmentAdmission {
     }
 }
 
+/// Immutable product census owner, independent of admission-operation lifetime.
+/// Weak identities do not retain a previous World prefix or its payload custody.
+#[derive(Clone)]
+pub(crate) struct OriginalSourceMembershipBasis(OriginalSourceMembershipOwner);
+
+#[derive(Clone)]
+enum OriginalSourceMembershipOwner {
+    Exact(std::sync::Weak<crate::artifact_inventory::RetainedArtifactMetadata>),
+    World(std::sync::Weak<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>),
+}
+
+impl OriginalSourceMembershipBasis {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (
+                OriginalSourceMembershipOwner::Exact(left),
+                OriginalSourceMembershipOwner::Exact(right),
+            ) => std::sync::Weak::ptr_eq(left, right),
+            (
+                OriginalSourceMembershipOwner::World(left),
+                OriginalSourceMembershipOwner::World(right),
+            ) => std::sync::Weak::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl CompilerArtifactMetadata {
+    pub(crate) fn original_source_membership_basis(&self) -> OriginalSourceMembershipBasis {
+        OriginalSourceMembershipBasis(OriginalSourceMembershipOwner::Exact(Arc::downgrade(
+            &self.retained,
+        )))
+    }
+}
+
 /// Borrowed issued facts needed by output certification. This view performs no
 /// input selection, physical materialization or authority issuance. The
 /// source support is owned so a demanded world owner can carry its projected
@@ -8712,17 +8751,6 @@ impl<'a> ProductCompilerInputs<'a> {
 
     pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
         self.native_selection.advertised.clone()
-    }
-
-    pub(crate) fn available_original_sources(
-        &self,
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    ) -> Result<
-        Arc<crate::certified_products::AvailableOriginalSources>,
-        crate::certified_products::CertificationError,
-    > {
-        self.original_sources.admit(products, operation)
     }
 }
 
@@ -9273,6 +9301,31 @@ impl<'a> ExactProductAdmission<'a> {
                     1,
                 );
             })
+    }
+
+    /// The membership index follows the same immutable original-product owner
+    /// enumerated by `retained_product_entries`, even across a World advance
+    /// within one inventory operation.
+    pub(crate) fn available_original_sources(
+        &self,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<
+        Arc<crate::certified_products::AvailableOriginalSources>,
+        crate::certified_products::CertificationError,
+    > {
+        let compiler = &self.facts.compiler;
+        let basis = match self.compilation_binding {
+            ProductCompilationBinding::Exact(_) => {
+                compiler.metadata.original_source_membership_basis()
+            }
+            ProductCompilationBinding::World(_) => {
+                OriginalSourceMembershipBasis(OriginalSourceMembershipOwner::World(Arc::downgrade(
+                    &compiler.native_selection.availability.0,
+                )))
+            }
+        };
+        compiler.original_sources.admit(&basis, products, operation)
     }
 
     pub(crate) fn is_world_compilation(&self) -> bool {

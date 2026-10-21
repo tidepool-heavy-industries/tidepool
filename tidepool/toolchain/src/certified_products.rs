@@ -5382,13 +5382,14 @@ impl AvailableOriginalSources {
     }
 }
 
-/// A request or physical segment retains one immutable membership per live
-/// admission operation. A fresh admission earns and charges its own index.
+/// A request retains one immutable membership for its current product census
+/// and live admission operation. A changed census earns and charges a new index.
 #[derive(Default)]
 pub(crate) struct RetainedOriginalSources {
     admitted: std::sync::Mutex<
         Option<(
             std::sync::Weak<InventoryOperation>,
+            crate::declaration_context::OriginalSourceMembershipBasis,
             Arc<AvailableOriginalSources>,
         )>,
     >,
@@ -5397,6 +5398,7 @@ pub(crate) struct RetainedOriginalSources {
 impl RetainedOriginalSources {
     pub(crate) fn admit(
         &self,
+        basis: &crate::declaration_context::OriginalSourceMembershipBasis,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         operation: &Arc<InventoryOperation>,
     ) -> CertResult<Arc<AvailableOriginalSources>> {
@@ -5404,17 +5406,22 @@ impl RetainedOriginalSources {
             .admitted
             .lock()
             .expect("original source membership lock");
-        if let Some((previous, sources)) = admitted.as_ref() {
-            if previous
-                .upgrade()
-                .is_some_and(|previous| Arc::ptr_eq(&previous, operation))
+        if let Some((previous, previous_basis, sources)) = admitted.as_ref() {
+            if previous_basis.same_owner(basis)
+                && previous
+                    .upgrade()
+                    .is_some_and(|previous| Arc::ptr_eq(&previous, operation))
             {
                 sources.validate_observation(products, operation)?;
                 return Ok(Arc::clone(sources));
             }
         }
         let sources = AvailableOriginalSources::authenticate(products, operation)?;
-        *admitted = Some((Arc::downgrade(operation), Arc::clone(&sources)));
+        *admitted = Some((
+            Arc::downgrade(operation),
+            basis.clone(),
+            Arc::clone(&sources),
+        ));
         Ok(sources)
     }
 }
@@ -11920,7 +11927,6 @@ pub(crate) fn certify_products_with_validation(
     let available_originals = inherited_products;
     let mut source_groups = match exact {
         Some(admission) => admission
-            .compiler_inputs()
             .available_original_sources(&available_originals, &validation.inventory)?
             .overlay(admission.groups(), &validation.inventory)?,
         None => SourceGroupMap::new(),
