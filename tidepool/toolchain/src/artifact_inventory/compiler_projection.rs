@@ -1176,7 +1176,7 @@ impl SelectedCompilerInterfaces<'_> {
             native_offers: Arc::from([]),
             native_fact_owner: None,
             native_offer_facts: Default::default(),
-            native_completions: self.native_completions.clone(),
+            native_completions: NativeSelectionCompletions::default(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: IssuedInputNativeDecisions::default(),
         }
