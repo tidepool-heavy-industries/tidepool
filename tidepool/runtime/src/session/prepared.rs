@@ -19,12 +19,12 @@ use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
-    InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, PackageLiteral, Parcel,
-    ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
-    PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
-    PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
-    ScopedDemandedImage, ScopedSourceBinder, SourceBinder, SourceInstanceAttachment,
-    SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
+    InheritedSourceDemand, ManagedBuilder, ManagedField, ManagedNode, NativeInstanceAttachment,
+    NativeInstanceLease, PackageLiteral, Parcel, ParkRequest, PreparedCallOptions,
+    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as CodegenPreparedOuter, PreparedReplyEvidence, PreparedResult,
+    PreparedResultBatch, ProgramId, RunOptions, ScopedDemandedImage, ScopedSourceBinder,
+    SourceBinder, SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
 };
 #[cfg(test)]
 use tidepool_codegen::prepared_program::{ScopedCertifiedGroup, SourceInstanceDomain};
@@ -709,6 +709,7 @@ impl From<LinkError> for PreparedRuntimeError {
 /// the identity and entry signature an importer links against.
 struct ProgramFacts {
     native_sources: NativeSourceCustody,
+    native_product: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
     entry: Option<ValueId>,
     definitions: Arc<DefinitionFacts>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
@@ -811,6 +812,7 @@ impl NativeCodePlan {
 pub(crate) struct SelectedNativeImage {
     native: DemandedImage,
     sources: NativeSourceCustody,
+    proof: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
 }
 
 impl SelectedNativeImage {
@@ -824,7 +826,11 @@ impl SelectedNativeImage {
                 .iter()
                 .map(|site| site.site),
         );
-        Self { native, sources }
+        Self {
+            native,
+            sources,
+            proof: None,
+        }
     }
     pub(crate) fn group(&self) -> &CertifiedGroup {
         self.native.group()
@@ -1474,10 +1480,11 @@ impl ImageTarget {
             .into_iter()
             .zip(resolved.groups.iter().cloned())
             .map(|(image, group)| {
-                let (group, sources) = group.into_parts();
+                let (group, sources, proof) = group.into_parts();
                 ScopedDemandedImage::admit(image, group).map(|image| SelectedNativeImage {
                     native: image.into_image(),
                     sources,
+                    proof,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1670,8 +1677,8 @@ pub(crate) struct CertifiedTurnInstall {
     pub(super) native_sources: NativeSourceCustody,
     pub target: ProgramId,
     pub groups: Vec<ProgramId>,
-    pub leases: Vec<SourceInstanceLease>,
-    pub domain_leases: Vec<SourceInstanceAttachment>,
+    pub leases: Vec<NativeInstanceLease>,
+    pub domain_leases: Vec<NativeInstanceAttachment>,
     admitted: Vec<AdmittedProgramFacts>,
     package_updates: BTreeMap<SymbolIdentity, [u8; 32]>,
     exports: BTreeMap<SymbolIdentity, CodeExport>,
@@ -2065,6 +2072,7 @@ impl ProgramFacts {
             native_sources: NativeSourceCustody::unknown(
                 definitions.sites.iter().map(|site| site.site),
             ),
+            native_product: None,
             entry,
             settled: None,
             definitions,
@@ -4542,8 +4550,8 @@ impl PreparedEngine {
         bindings: &mut BindingTable,
         scopes: &tidepool_codegen::scope::ScopeTree,
         scope: tidepool_codegen::scope::ScopeId,
-        attachments: Vec<SourceInstanceAttachment>,
-    ) -> Result<tidepool_codegen::binding_table::SourceScopeAdmission, Vec<SourceInstanceAttachment>>
+        attachments: Vec<NativeInstanceAttachment>,
+    ) -> Result<tidepool_codegen::binding_table::SourceScopeAdmission, Vec<NativeInstanceAttachment>>
     {
         bindings.register_source_instances_in_domains(scopes, scope, attachments, &self.machine)
     }
@@ -4882,7 +4890,7 @@ impl PreparedEngine {
         }
 
         let mut late_leases = BTreeMap::new();
-        let mut late_attachments = Vec::<SourceInstanceAttachment>::new();
+        let mut late_attachments = Vec::<NativeInstanceAttachment>::new();
         let mut late_roots = BTreeMap::<
             (
                 tidepool_codegen::prepared_program::GroupInstanceId,
@@ -4890,7 +4898,7 @@ impl PreparedEngine {
             ),
             usize,
         >::new();
-        let mut new_late_roots = Vec::<SourceInstanceLease>::new();
+        let mut new_late_roots = Vec::<NativeInstanceLease>::new();
         for (key, requested) in late_sources {
             let physical = (requested.anchor().instance(), requested.binder().clone());
             let existing = bindings.retained_source_sibling_attachment(requested);
@@ -4920,7 +4928,10 @@ impl PreparedEngine {
                 new_late_roots.push(lease.clone());
             }
             late_roots.entry(physical).or_insert(late_attachments.len());
-            late_leases.insert(key, lease);
+            let NativeInstanceLease::Home(home) = lease else {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            };
+            late_leases.insert(key, home);
             late_attachments.push(attachment);
         }
 
@@ -4932,6 +4943,7 @@ impl PreparedEngine {
                     facts.native_sources = selected
                         .sources
                         .select(facts.sites.iter().map(|site| site.site));
+                    facts.native_product = selected.proof.clone();
                     facts
                 })
                 .collect();
@@ -5230,11 +5242,29 @@ impl PreparedEngine {
             let requests = source_needed
                 .iter()
                 .map(|binder| {
-                    let &(group, _) = source
+                    let &(group, value) = source
                         .get(binder)
                         .expect("source edge selected an in-batch binder");
-                    BatchLeaseRequest::for_demanded(group, &demanded[group].native, &binder.source)
-                        .map_err(PreparedRuntimeError::Install)
+                    let proof = demanded[group]
+                        .proof
+                        .as_ref()
+                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    let binding = proof.binding();
+                    let key = tidepool_codegen::prepared_program::NativeHomeBinding {
+                        issuer: tidepool_codegen::prepared_program::NativeArtifactBinding {
+                            artifact: binding.binding.artifact().0,
+                            selection: binding.binding.selection().0,
+                        },
+                        original_ordinal: binding.original_ordinal,
+                    };
+                    BatchLeaseRequest::for_home(
+                        group,
+                        &demanded[group].native,
+                        key,
+                        binder.domain,
+                        value,
+                    )
+                    .map_err(PreparedRuntimeError::Install)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let installed = self
@@ -5381,7 +5411,7 @@ impl PreparedEngine {
     pub(crate) fn abort_certified_turn(
         &mut self,
         staged: CertifiedTurnInstall,
-        tokens: Vec<SourceInstanceLease>,
+        tokens: Vec<NativeInstanceLease>,
     ) -> Result<(), PreparedRuntimeError> {
         assert!(
             staged.leases.is_empty(),
@@ -7008,7 +7038,8 @@ pub(super) mod tests {
                     let certification = super::super::turn::TurnCertification::from_artifacts(
                         &products.artifacts,
                         target,
-                    );
+                    )
+                    .unwrap();
                     let resolved = raw
                         .resolve_certification_in(scope, target.prepared.prepared(), &certification)
                         .unwrap();

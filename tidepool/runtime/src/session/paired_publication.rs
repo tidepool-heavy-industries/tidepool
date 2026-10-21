@@ -18,11 +18,11 @@ use tidepool_toolchain::declaration_join::{
 
 use super::persistent::PersistentSession;
 use super::render::{
-    AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration, extend_exports_by_head,
+    extend_exports_by_head, AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration,
 };
 use super::{
-    DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
-    SessionError, SessionLib, StagedPublicManifest, recovery,
+    recovery, DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
+    SessionError, SessionLib, StagedPublicManifest,
 };
 
 #[derive(Clone)]
@@ -313,10 +313,7 @@ fn snapshot_digest(snapshot: &PublicVisibilitySnapshot) -> serde_json::Value {
         "machine_incarnation": snapshot.machine_incarnation.map(|id| id.0),
         "bindings": snapshot.bindings.iter().map(|(name, id)| (name, id.raw())).collect::<Vec<_>>(),
         "source_instances": snapshot.source_instances.iter().map(|key| {
-            let identity = &key.binder.binder;
-            serde_json::json!({"instance": key.instance.raw(), "module_version": key.binder.version.0,
-                "unit": identity.unit, "module": identity.module, "namespace": identity.namespace,
-                "occurrence": identity.occurrence, "record_parent": identity.record_parent})
+            serde_json::json!({"instance": key.instance.raw(), "value": key.value.0})
         }).collect::<Vec<_>>(),
     })
 }
@@ -328,7 +325,7 @@ fn paired_version(base: &PublicManifestBase) -> String {
         super::PublicPublicationBaseline::Ephemeral => serde_json::json!({ "mode": "ephemeral" }),
     };
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "schema": "tidepool-paired-declaration-baseline-v3", "session": base.session.0,
+        "schema": "tidepool-paired-declaration-baseline-v4", "session": base.session.0,
         "owner": base.owner_stamp.owner.identity(), "epoch": base.owner_stamp.epoch,
         "target": target, "library": base.semantic.library,
         "public": snapshot_digest(&base.semantic.expected_public), "private": snapshot_digest(&base.semantic.expected_private),

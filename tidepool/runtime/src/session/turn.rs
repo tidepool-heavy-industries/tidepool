@@ -1662,6 +1662,7 @@ pub struct TurnCertification {
     /// Retain the actual output's selecting owner. Group summaries cannot
     /// reconstruct its exact target roots or ordered dependency choices.
     pub(super) original_output: Option<Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
+    pub(super) native_group_proofs: Arc<[tidepool_toolchain::artifacts::OwnedNativeSourceProduct]>,
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
@@ -1679,6 +1680,13 @@ pub(super) struct CurrentNativeSources<'a> {
 }
 
 impl<'a> CurrentNativeSources<'a> {
+    pub(super) fn group_proof(
+        &self,
+        pending: &PendingCertifiedGroup,
+    ) -> Result<Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>, CompileError> {
+        selected_group_proof(&self.products, pending)
+    }
+
     pub(super) fn from_targets(
         targets: &'a crate::RuntimePreparedTargets,
         name: &str,
@@ -1737,6 +1745,20 @@ impl<'a> CurrentNativeSources<'a> {
         }
         sources
     }
+}
+
+pub(super) fn selected_group_proof(
+    products: &tidepool_toolchain::artifacts::ResolvedNativeSourceProducts<'_>,
+    pending: &PendingCertifiedGroup,
+) -> Result<Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>, CompileError> {
+    let mut rows = products.groups().filter(|row| row.matches_group(pending));
+    let selected = rows.next();
+    if rows.next().is_some() {
+        return Err(CompileError::ExtractFailed(
+            "native group requires an exact selected binding occurrence".into(),
+        ));
+    }
+    Ok(selected.map(|row| row.to_owned()))
 }
 
 /// Checked runtime output is ready only with its original prefix owner.
@@ -1816,6 +1838,7 @@ impl Default for TurnCertification {
     fn default() -> Self {
         Self {
             original_output: None,
+            native_group_proofs: Arc::from([]),
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
             groups: Arc::from([]),
@@ -1865,15 +1888,26 @@ impl TurnCertification {
     pub(crate) fn from_artifacts(
         artifacts: &crate::CompiledArtifacts,
         target: &crate::TargetArtifact,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CompileError> {
+        let native_group_proofs = target
+            .native_source_products()?
+            .map(|products| {
+                products
+                    .groups()
+                    .map(|row| row.to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into();
+        Ok(Self {
+            native_group_proofs,
             artifact_view: artifacts.artifact_view.clone(),
             groups: artifacts.certified_groups.clone().into(),
             target_owners: target.pending_imports.clone(),
             package_interfaces: target.package_interfaces.clone(),
             recovery_products: artifacts.recovery_products.clone().into(),
             ..Default::default()
-        }
+        })
     }
 
     pub(super) fn host_prototype(&self) -> Result<Self, CompileError> {
@@ -2010,6 +2044,7 @@ impl CompiledTurn {
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
             original_output: Some(Arc::clone(products)),
+            native_group_proofs: Arc::from([]),
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
@@ -5054,6 +5089,7 @@ fn compiled_native_output(
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
                 original_output: Some(Arc::clone(products)),
+                native_group_proofs: Arc::from([]),
                 artifact_view: products.artifact_view().clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports().to_vec(),

@@ -3533,6 +3533,9 @@ pub struct OwnedNativeSourceProduct {
 }
 
 impl OwnedNativeSourceProduct {
+    pub fn matches_group(&self, group: &certified_products::PendingCertifiedGroup) -> bool {
+        self.group.same_issuance(group)
+    }
     pub fn group(&self) -> &certified_products::PendingCertifiedGroup {
         &self.group
     }
@@ -3541,6 +3544,15 @@ impl OwnedNativeSourceProduct {
     }
     pub fn imports(&self) -> &[certified_products::SelectedNativeImport] {
         &self.imports
+    }
+}
+
+impl std::fmt::Debug for OwnedNativeSourceProduct {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwnedNativeSourceProduct")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
     }
 }
 
@@ -3630,10 +3642,18 @@ impl CompiledArtifacts {
             .targets
             .get(name)
             .ok_or_else(|| CompileError::ExtractFailed("native source target is absent".into()))?;
-        let Some(inputs) = &target.native_inputs else {
+        target.native_source_products()
+    }
+}
+
+impl TargetArtifact {
+    pub fn native_source_products(
+        &self,
+    ) -> Result<Option<ResolvedNativeSourceProducts<'_>>, CompileError> {
+        let Some(inputs) = &self.native_inputs else {
             return Ok(None);
         };
-        ResolvedNativeSourceProducts::issue(inputs.resolve_sources()?, target.prepared.prepared())
+        ResolvedNativeSourceProducts::issue(inputs.resolve_sources()?, self.prepared.prepared())
             .map(Some)
     }
 }

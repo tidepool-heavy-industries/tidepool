@@ -2537,18 +2537,7 @@ fn checked_snapshot_with_basis(
     for key in &native_shares {
         frame(b"native");
         frame(&key.instance.raw().to_le_bytes());
-        frame(&key.binder.version.0);
-        frame(key.binder.binder.unit.as_bytes());
-        frame(key.binder.binder.module.as_bytes());
-        frame(key.binder.binder.namespace.as_bytes());
-        frame(key.binder.binder.occurrence.as_bytes());
-        match &key.binder.binder.record_parent {
-            Some(parent) => {
-                frame(&[1]);
-                frame(parent.as_bytes());
-            }
-            None => frame(&[0]),
-        }
+        frame(&key.value.0.to_le_bytes());
     }
     RuntimeCheckedPrefixSnapshot {
         session_root,
@@ -4838,14 +4827,7 @@ impl PersistentSession {
         }
         for key in &native_shares {
             frame(&key.instance.raw().to_le_bytes());
-            frame(&key.binder.version.0);
-            frame(key.binder.binder.unit.as_bytes());
-            frame(key.binder.binder.module.as_bytes());
-            frame(key.binder.binder.namespace.as_bytes());
-            frame(key.binder.binder.occurrence.as_bytes());
-            if let Some(parent) = &key.binder.binder.record_parent {
-                frame(parent.as_bytes());
-            }
+            frame(&key.value.0.to_le_bytes());
         }
         purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);

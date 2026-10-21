@@ -19,8 +19,8 @@ use tidepool_codegen::binding_table::{
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId, ResidencyCounts,
-    SourceBinder, SourceGroupOutline, SourceInstanceLease,
+    ImageRegistry, InheritedSourceDemand, NativeInstanceLease, PendingGroupInventory, ProgramId,
+    ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -73,6 +73,7 @@ pub(crate) struct ResolvedCertifiedTurn {
 pub(crate) struct ResolvedSourceGroup {
     group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
     sources: NativeSourceCustody,
+    proof: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
 }
 
 impl ResolvedSourceGroup {
@@ -88,7 +89,11 @@ impl ResolvedSourceGroup {
                 .iter()
                 .map(|site| site.site),
         );
-        Self { group, sources }
+        Self {
+            group,
+            sources,
+            proof: None,
+        }
     }
     pub(crate) fn group(&self) -> &tidepool_codegen::prepared_program::ScopedCertifiedGroup {
         &self.group
@@ -99,8 +104,9 @@ impl ResolvedSourceGroup {
     ) -> (
         tidepool_codegen::prepared_program::ScopedCertifiedGroup,
         NativeSourceCustody,
+        Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
     ) {
-        (self.group, self.sources)
+        (self.group, self.sources, self.proof)
     }
 }
 
@@ -480,7 +486,7 @@ struct RecoveryInitialization {
     scope: ScopeId,
     owner_epoch: u64,
     machine_incarnation: Option<tidepool_repr::SessionId>,
-    sources: Vec<SourceInstanceLease>,
+    sources: Vec<NativeInstanceLease>,
 }
 
 /// The committed fact from moving one name into the persistent binding store.
@@ -913,7 +919,8 @@ impl PersistentSession {
             .targets
             .get(name)
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let certification = TurnCertification::from_artifacts(&targets.artifacts, target);
+        let certification = TurnCertification::from_artifacts(&targets.artifacts, target)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         let current = super::turn::CurrentNativeSources::from_targets(targets, name)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         self.resolve_certification_with_sources(
@@ -1111,10 +1118,37 @@ impl PersistentSession {
             .map(|scoped| scoped.into_demand())
             .collect();
         let mut groups = Vec::with_capacity(plans.len());
+        let products = certification
+            .original_output
+            .as_ref()
+            .map(|output| output.native_source_products())
+            .transpose()
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         for plan in plans {
             let pending = &certification.groups[plan.index()];
             let imports = resolve(pending.group().globals(), pending.imports())?;
             groups.push(ResolvedSourceGroup {
+                proof: match (&products, &origin) {
+                    (Some(products), _) => super::turn::selected_group_proof(products, pending),
+                    (None, NativeInstallationSource::Checked(current)) => {
+                        current.group_proof(pending)
+                    }
+                    (None, _) => {
+                        let mut proofs = certification
+                            .native_group_proofs
+                            .iter()
+                            .filter(|proof| proof.matches_group(pending));
+                        let proof = proofs.next();
+                        if proofs.next().is_some() {
+                            Err(crate::CompileError::ExtractFailed(
+                                "native group requires an exact selected binding occurrence".into(),
+                            ))
+                        } else {
+                            Ok(proof.cloned())
+                        }
+                    }
+                }
+                .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?,
                 sources: match &origin {
                     NativeInstallationSource::Checked(current) => current.group(pending),
                     NativeInstallationSource::ClosedEntry { entry, source } => {
@@ -1384,10 +1418,7 @@ impl PersistentSession {
         released
     }
 
-    fn release_source_instance_roots(
-        &mut self,
-        leases: Vec<tidepool_codegen::prepared_program::SourceInstanceLease>,
-    ) -> usize {
+    fn release_source_instance_roots(&mut self, leases: Vec<NativeInstanceLease>) -> usize {
         let mut released = 0;
         for lease in leases {
             if self
@@ -3157,18 +3188,46 @@ impl PersistentSession {
                             path: self.lib().root.clone(),
                             detail: "native source lease has no owning machine incarnation".into(),
                         })?;
-                let identity = key.binder.binder.clone();
+                let lease = self.bindings.native_instance(&key).ok_or_else(|| {
+                    SessionError::RecoveryManifest {
+                        path: self.lib().root.clone(),
+                        detail: "native instance observation lost its physical custody owner"
+                            .into(),
+                    }
+                })?;
+                let identity = lease.export();
+                let binder = super::recovery::RecoverySourceIdentity {
+                    unit: identity.unit.clone(),
+                    module: identity.module.clone(),
+                    namespace: identity.namespace.clone(),
+                    occurrence: identity.occurrence.clone(),
+                    record_parent: identity.record_parent.clone(),
+                };
+                let binding = match lease {
+                    NativeInstanceLease::Home(home) => {
+                        let key = home.binding();
+                        super::recovery::RecoveryNativeBinding::Home {
+                            artifact: key.issuer.artifact,
+                            selection: key.issuer.selection,
+                            original_ordinal: key.original_ordinal,
+                            module_version: home.binder().version.0,
+                            binder,
+                        }
+                    }
+                    NativeInstanceLease::Package(package) => {
+                        let key = package.binding();
+                        super::recovery::RecoveryNativeBinding::Package {
+                            artifact: key.artifact,
+                            selection: key.selection,
+                            binder,
+                        }
+                    }
+                };
                 Ok(super::recovery::RecoveryPublicSourceInstance {
                     machine_incarnation: incarnation.0,
                     instance: key.instance.raw(),
-                    module_version: key.binder.version.0,
-                    binder: super::recovery::RecoverySourceIdentity {
-                        unit: identity.unit,
-                        module: identity.module,
-                        namespace: identity.namespace,
-                        occurrence: identity.occurrence,
-                        record_parent: identity.record_parent,
-                    },
+                    value: key.value.0,
+                    binding,
                 })
             })
             .collect()
@@ -3352,7 +3411,7 @@ impl PersistentSession {
     fn validate_recovery_native_dependencies(
         &self,
         scope: ScopeId,
-        sources: &[SourceInstanceLease],
+        sources: &[NativeInstanceLease],
     ) -> Result<(), SessionError> {
         if !sources.is_empty()
             && (self.machine_incarnation.is_none()
@@ -3408,10 +3467,9 @@ impl PersistentSession {
                 .zip(&initialization.sources)
                 .any(|(current, original)| {
                     current.instance() != original.instance()
-                        || current.binder() != original.binder()
+                        || current.export() != original.export()
                         || current.handle() != original.handle()
-                        || current.owner() != original.owner()
-                        || current.original_ordinal() != original.original_ordinal()
+                        || current.binding_key() != original.binding_key()
                         || current.value() != original.value()
                         || current.entry_signature() != original.entry_signature()
                 })
