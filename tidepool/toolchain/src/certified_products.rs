@@ -1523,15 +1523,53 @@ pub struct OriginalAvailabilityRefusal {
     pub original_ordinal: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputDecisionRefusal {
     MissingContinuationOwner,
     MissingDecision,
     NativeOwnerMismatch,
-    ArtifactIdentityMismatch,
+    ArtifactIdentityMismatch(ArtifactIdentityMismatch),
     RoleMismatch,
     UnexpectedVersion,
     UnavailableChosenBinding,
+}
+
+/// The exact rejecting predicate of a native input identity check, carrying
+/// the expected and observed artifact identities available at that boundary.
+/// A `None` field means the owning check could not observe that identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactIdentityMismatch {
+    pub stage: ArtifactIdentityStage,
+    pub expected_original: Option<crate::artifact_inventory::ArtifactId>,
+    pub expected_canonical: Option<crate::artifact_inventory::ArtifactId>,
+    pub observed_original: Option<crate::artifact_inventory::ArtifactId>,
+    pub observed_canonical: Option<crate::artifact_inventory::ArtifactId>,
+    pub observed_kind: Option<crate::artifact_inventory::ArtifactKind>,
+}
+
+impl ArtifactIdentityMismatch {
+    pub(crate) fn refused(stage: ArtifactIdentityStage) -> Self {
+        Self {
+            stage,
+            expected_original: None,
+            expected_canonical: None,
+            observed_original: None,
+            observed_canonical: None,
+            observed_kind: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArtifactIdentityStage {
+    MissingSelectedRow,
+    MissingOriginalSlot,
+    RequestedIdentityDiffers,
+    NonOriginalPayload,
+    MissingModuleMapCanonical,
+    MissingInterfacePayload,
+    NominalMembershipDiffers,
+    ModuleInterfaceDiffers,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4753,7 +4791,15 @@ impl CertifiedSourceSelection {
                     })
                     .ok_or(CertificationError::InputDecision {
                         owner: identity.clone(),
-                        reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                        reason: InputDecisionRefusal::ArtifactIdentityMismatch(
+                            ArtifactIdentityMismatch {
+                                stage: ArtifactIdentityStage::MissingModuleMapCanonical,
+                                expected_original: Some(key.artifact),
+                                ..ArtifactIdentityMismatch::refused(
+                                    ArtifactIdentityStage::MissingModuleMapCanonical,
+                                )
+                            },
+                        ),
                     })?;
                 candidates = select_input_native_group_candidates(
                     source, key, canonical, owner, &identity, candidates,
@@ -6252,12 +6298,32 @@ fn authenticate_original_binding_membership(
         return Err(refuse(InputDecisionRefusal::RoleMismatch));
     }
     if primary.interface() != interface || primary.original() != Some(original) {
-        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
+            ArtifactIdentityMismatch {
+                stage: ArtifactIdentityStage::RequestedIdentityDiffers,
+                expected_original: Some(original.artifact),
+                expected_canonical: Some(interface.artifact),
+                observed_original: primary.original().map(|binding| binding.artifact),
+                observed_canonical: Some(primary.interface().artifact),
+                observed_kind: None,
+            },
+        )));
     }
     let interface_entry = source
         .artifacts()
         .observed_payload(&interface.artifact)
-        .ok_or_else(|| refuse(InputDecisionRefusal::ArtifactIdentityMismatch))?;
+        .ok_or_else(|| {
+            refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
+                ArtifactIdentityMismatch {
+                    stage: ArtifactIdentityStage::MissingInterfacePayload,
+                    expected_canonical: Some(interface.artifact),
+                    expected_original: Some(original.artifact),
+                    ..ArtifactIdentityMismatch::refused(
+                        ArtifactIdentityStage::MissingInterfacePayload,
+                    )
+                },
+            ))
+        })?;
     let reference = ReceiptImportOwner::OriginalBinding {
         unit: owner.unit.clone(),
         module: owner.module.clone(),
@@ -6313,14 +6379,34 @@ pub(crate) fn original_reference_payload_member<'a>(
         || original_entry.descriptor.id != original.artifact
         || interface_entry.descriptor.id != interface.artifact
     {
-        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
+            ArtifactIdentityMismatch {
+                stage: ArtifactIdentityStage::NominalMembershipDiffers,
+                expected_original: Some(original.artifact),
+                expected_canonical: Some(interface.artifact),
+                observed_original: Some(original_entry.descriptor.id),
+                observed_canonical: Some(interface_entry.descriptor.id),
+                observed_kind: Some(original_entry.payload.artifact_kind()),
+            },
+        )));
     }
     let crate::artifact_inventory::ArtifactPayload::Canonical(canonical) = &interface_entry.payload
     else {
         return Err(refuse(InputDecisionRefusal::NativeOwnerMismatch));
     };
     if product.module_interface() != Some(canonical) {
-        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
+            ArtifactIdentityMismatch {
+                stage: ArtifactIdentityStage::ModuleInterfaceDiffers,
+                expected_original: Some(original.artifact),
+                expected_canonical: product
+                    .module_interface()
+                    .map(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id),
+                observed_original: Some(original_entry.descriptor.id),
+                observed_canonical: Some(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical)),
+                observed_kind: None,
+            },
+        )));
     }
     if let Some(operation) = operation {
         operation.charge(product.owner().unit.len() + product.owner().module.len())?;
@@ -15589,7 +15675,7 @@ pub(crate) mod tests {
                 &operation
             ),
             Err(CertificationError::InputDecision {
-                reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch(_),
                 ..
             })
         ));
@@ -15621,7 +15707,7 @@ pub(crate) mod tests {
                 &operation
             ),
             Err(CertificationError::InputDecision {
-                reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch(_),
                 ..
             })
         ));
@@ -15884,7 +15970,7 @@ pub(crate) mod tests {
         assert!(matches!(
             initial.with_metadata([&references[0], &conflicting]),
             Err(CertificationError::InputDecision {
-                reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch(_),
                 ..
             })
         ));
