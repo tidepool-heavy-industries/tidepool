@@ -6491,7 +6491,11 @@ pub(crate) fn original_reference_payload_member<'a>(
                 .groups
                 .iter()
                 .flat_map(|group| group.group.binders().iter())
-                .take(16)
+                .filter(|binder| {
+                    binder.occurrence.contains("id")
+                        || binder.module.contains("GHC")
+                        || binder.unit.contains("ghc")
+                })
                 .cloned()
                 .collect::<Vec<_>>(),
         );
