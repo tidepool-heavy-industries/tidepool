@@ -316,7 +316,7 @@ fn assert_physical_selection(
     let decoded = crate::declaration_context::decode_world_source_receipt(checked, 0)?;
     let segment = decoded.issue_segment_originals(
         None,
-        Some(&physical),
+        &physical,
         &mut validation,
         crate::declaration_context::WorldProgramContinuation::begin(checked),
     )?;

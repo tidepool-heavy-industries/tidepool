@@ -874,7 +874,7 @@ pub fn prepare_world_cell_program(
             crate::declaration_context::decode_world_source_receipt(&program, stage.index())?;
         let mut segment = decoded.issue_segment_originals(
             None,
-            Some(&stage_produced),
+            &stage_produced,
             &mut validation,
             continuation,
         )?;

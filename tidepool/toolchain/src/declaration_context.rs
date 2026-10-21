@@ -10821,6 +10821,7 @@ impl WorldProgramContinuation {
         decoded: &DecodedWorldSourceReceipt<'_>,
         receipt: &crate::certified_products::CertifiedReceipt,
         products: &crate::certified_products::ParsedModuleProducts,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<DemandedWorldCompilerInputs, CompileError> {
         self.ensure_program(decoded.program)?;
@@ -10876,6 +10877,7 @@ impl WorldProgramContinuation {
             &original_bindings,
             receipt,
             products,
+            produced,
             &operation,
         )?;
         let groups = match initial.selection() {
@@ -11302,7 +11304,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
             let later_produced = produced.for_segment(1..1).unwrap();
             match later.issue_segment_originals(
                 None,
-                Some(&later_produced),
+                &later_produced,
                 &mut validation,
                 WorldProgramContinuation::begin(program),
             ) {
@@ -11319,7 +11321,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
             .unwrap()
             .issue_segment_originals(
                 None,
-                Some(&stage_produced),
+                &stage_produced,
                 &mut validation,
                 WorldProgramContinuation::begin(program),
             )
@@ -11510,7 +11512,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
         let stage_produced = produced.for_segment(1..1).unwrap();
         let result = next.issue_segment_originals(
             None,
-            Some(&stage_produced),
+            &stage_produced,
             &mut validation,
             continuation,
         );
@@ -11661,7 +11663,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     pub(crate) fn issue_segment_originals(
         self,
         candidates: Option<&crate::module_candidates::CandidateSet>,
-        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
         validation: &mut PackageInterfaceValidation,
         continuation: WorldProgramContinuation,
     ) -> Result<WorldProgramSegment, CompileError> {
@@ -11725,7 +11727,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let operation = program.validation().inventory.as_ref();
-        let inputs = continuation.stage_inputs(&self, &receipt, &raw, validation)?;
+        let inputs = continuation.stage_inputs(&self, &receipt, &raw, produced, validation)?;
         let selected_values = crate::artifacts::SelectedSessionValueOwners::from_checked_imports(
             &inputs.checked_values,
             operation,
@@ -11778,7 +11780,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             authored.as_ref(),
             candidates,
             &selected_values,
-            produced,
+            Some(produced),
             &package_interfaces,
             validation,
         )
