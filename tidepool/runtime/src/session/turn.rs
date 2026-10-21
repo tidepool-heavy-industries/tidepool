@@ -2085,6 +2085,13 @@ impl CompiledTurn {
         &self,
     ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, CompileError>
     {
+        if let Some(products) = self
+            .certification
+            .as_ref()
+            .and_then(|certification| certification.original_output.as_ref())
+        {
+            return products.original_execution_context();
+        }
         self.code()
             .original_source()?
             .map(|source| source.execution_context())
@@ -2103,21 +2110,12 @@ impl CompiledTurn {
         let certification = self.certification.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("published source original lacks compiler custody".into())
         })?;
-        let proof = certification.ordinary_original().ok_or_else(|| {
+        let products = certification.original_output.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed(
-                "published source original lacks original input authority".into(),
+                "published source original lacks its completed output owner".into(),
             )
         })?;
-        proof.published_source_original_selection(
-            &self.prepared,
-            &certification.groups,
-            &certification.target_owners,
-            &certification.package_interfaces,
-            &self.table,
-            &self.asks,
-            revision,
-            public_root,
-        )
+        products.published_source_original_selection(revision, public_root)
     }
 
     /// Exact original artifact identities retained by this compiler output.
