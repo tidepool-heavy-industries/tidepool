@@ -4775,6 +4775,48 @@ impl std::fmt::Debug for AuthenticatedOriginalBindings {
 }
 
 impl AuthenticatedOriginalBindings {
+    fn restrict<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+    ) -> CertResult<Arc<Self>> {
+        let mut uses = BTreeMap::new();
+        for reference in references {
+            crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+            let member = self
+                .uses
+                .get(reference)
+                .ok_or(CertificationError::Mismatch(
+                    "Original projection exceeds its authenticated uses",
+                ))?;
+            let ReceiptImportOwner::OriginalBinding {
+                unit,
+                module,
+                binder,
+                ..
+            } = reference
+            else {
+                return Err(CertificationError::Mismatch(
+                    "Original projection reference kind",
+                ));
+            };
+            self.operation
+                .reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(1)?;
+            charge_symbol(&self.operation, binder)?;
+            self.operation.charge(
+                unit.len()
+                    .saturating_add(module.len())
+                    .saturating_add(member.0.unit.len())
+                    .saturating_add(member.0.module.len()),
+            )?;
+            uses.insert(reference.clone(), member.clone());
+        }
+        Ok(Arc::new(Self {
+            basis: Arc::clone(&self.basis),
+            operation: Arc::clone(&self.operation),
+            uses,
+        }))
+    }
+
     pub(crate) fn issue<'a>(
         basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         operation: Arc<InventoryOperation>,
@@ -4899,6 +4941,16 @@ impl std::fmt::Debug for ResolvedOriginalBindings {
 }
 
 impl ResolvedOriginalBindings {
+    /// Restrict this already permitted owner; no membership or permission is reissued.
+    pub(crate) fn restrict<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+    ) -> CertResult<Arc<Self>> {
+        Ok(Arc::new(Self {
+            authenticated: self.authenticated.restrict(references)?,
+        }))
+    }
+
     pub(crate) fn issue<'a>(
         basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         operation: Arc<InventoryOperation>,

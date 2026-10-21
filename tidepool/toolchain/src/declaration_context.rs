@@ -2344,11 +2344,186 @@ pub(crate) struct DemandCertifiedGroups {
     // execution association is available only through the paired rows below.
     products: Vec<PendingCertifiedGroup>,
     resolved_originals: Option<Arc<crate::certified_products::ResolvedOriginalBindings>>,
+    original_use_roots: BTreeMap<
+        crate::certified_products::ReceiptImportOwner,
+        crate::artifact_inventory::NativeGroupBinding,
+    >,
     retained_bindings: Vec<crate::artifact_inventory::NativeBindingRequirement>,
     package_obligations: Vec<NativePackageObligation>,
 }
 
+fn charge_original_use(
+    reference: &crate::certified_products::ReceiptImportOwner,
+    budget: &NativeDemandBudget<'_>,
+) -> Result<(), CompileError> {
+    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+        unit,
+        module,
+        binder,
+        ..
+    } = reference
+    else {
+        return Err(failure("native use has another reference kind"));
+    };
+    budget.strings(
+        [
+            unit.len(),
+            module.len(),
+            binder.unit.len(),
+            binder.module.len(),
+            binder.namespace.len(),
+            binder.occurrence.len(),
+            binder.record_parent.as_ref().map_or(0, String::len),
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add),
+    )
+}
+
 impl DemandCertifiedGroups {
+    /// Follow roots recorded by the original choice issuer and their exact
+    /// dependency links. The projection never resolves a symbol or permission.
+    fn restrict_uses(
+        &self,
+        references: &[crate::certified_products::ReceiptImportOwner],
+    ) -> Result<Self, CompileError> {
+        let budget = NativeDemandBudget(Some(&self.operation));
+        let resolved_originals = self
+            .resolved_originals
+            .as_ref()
+            .ok_or_else(|| failure("native projection lost its resolved use owner"))?
+            .restrict(references)
+            .map_err(compiler_evidence_failure)?;
+        let mut original_use_roots = BTreeMap::new();
+        let mut pending = Vec::new();
+        let mut queued = BTreeSet::new();
+        for reference in references {
+            budget.checkpoint()?;
+            let binding = *self
+                .original_use_roots
+                .get(reference)
+                .ok_or_else(|| failure("native projection exceeds its issued use roots"))?;
+            budget.reserve::<(
+                crate::certified_products::ReceiptImportOwner,
+                crate::artifact_inventory::NativeGroupBinding,
+            )>(1)?;
+            charge_original_use(reference, &budget)?;
+            original_use_roots.insert(reference.clone(), binding);
+            if !queued.contains(&binding) {
+                budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(2)?;
+                queued.insert(binding);
+                pending.push(binding);
+            }
+        }
+        let mut rows = BTreeMap::new();
+        while let Some(binding) = pending.pop() {
+            budget.checkpoint()?;
+            let row = self
+                .rows
+                .get(&binding)
+                .ok_or_else(|| failure("native projection lost an issued dependency row"))?;
+            budget.reserve::<(
+                crate::artifact_inventory::NativeGroupBinding,
+                SelectedNativeGroupRow,
+            )>(1)?;
+            budget
+                .reserve::<crate::artifact_inventory::NativeGroupBinding>(row.dependencies.len())?;
+            rows.insert(binding, row.clone());
+            for dependency in &row.dependencies {
+                if !queued.contains(dependency) {
+                    budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(2)?;
+                    queued.insert(*dependency);
+                    pending.push(*dependency);
+                }
+            }
+        }
+        let mut retained_bindings = BTreeSet::new();
+        let mut package_obligations = BTreeSet::new();
+        for (binding, row) in &rows {
+            for (index, import) in row.imports.iter().enumerate() {
+                budget.checkpoint()?;
+                let identity = match import {
+                    crate::certified_products::SelectedNativeImport::Retained {
+                        identity, ..
+                    }
+                    | crate::certified_products::SelectedNativeImport::Package {
+                        identity, ..
+                    } => identity,
+                    crate::certified_products::SelectedNativeImport::Source { .. } => continue,
+                };
+                budget.strings(
+                    [
+                        identity.unit.len(),
+                        identity.module.len(),
+                        identity.namespace.len(),
+                        identity.occurrence.len(),
+                        identity.record_parent.as_ref().map_or(0, String::len),
+                    ]
+                    .into_iter()
+                    .fold(0usize, usize::saturating_add),
+                )?;
+                match import {
+                    crate::certified_products::SelectedNativeImport::Retained {
+                        binding,
+                        identity,
+                        generation,
+                    } => {
+                        budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(1)?;
+                        let requirement = crate::artifact_inventory::NativeBindingRequirement {
+                            artifact_id: binding.artifact,
+                            identity: identity.clone(),
+                            generation: *generation,
+                        };
+                        if self.retained_bindings.binary_search(&requirement).is_err() {
+                            return Err(failure(
+                                "native projection changed an issued retained requirement",
+                            ));
+                        }
+                        retained_bindings.insert(requirement);
+                    }
+                    crate::certified_products::SelectedNativeImport::Package {
+                        identity,
+                        interface_digest,
+                    } => {
+                        budget.reserve::<NativePackageObligation>(1)?;
+                        let obligation = NativePackageObligation {
+                            demander: *binding,
+                            global_index: u32::try_from(index)
+                                .map_err(|_| failure("native import index exceeds format"))?,
+                            identity: identity.clone(),
+                            interface_digest: *interface_digest,
+                        };
+                        if self.package_obligations.binary_search(&obligation).is_err() {
+                            return Err(failure(
+                                "native projection changed an issued package obligation",
+                            ));
+                        }
+                        package_obligations.insert(obligation);
+                    }
+                    crate::certified_products::SelectedNativeImport::Source { .. } => {
+                        unreachable!()
+                    }
+                }
+            }
+        }
+        budget.reserve::<PendingCertifiedGroup>(rows.len())?;
+        let products = rows.values().map(|row| row.product.clone()).collect();
+        budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(
+            retained_bindings.len(),
+        )?;
+        budget.reserve::<NativePackageObligation>(package_obligations.len())?;
+        Ok(Self {
+            basis: Arc::clone(&self.basis),
+            operation: Arc::clone(&self.operation),
+            rows,
+            products,
+            resolved_originals: Some(resolved_originals),
+            original_use_roots,
+            retained_bindings: retained_bindings.into_iter().collect(),
+            package_obligations: package_obligations.into_iter().collect(),
+        })
+    }
+
     pub(crate) fn contains_original_use(
         &self,
         reference: &crate::certified_products::ReceiptImportOwner,
@@ -2369,6 +2544,28 @@ impl DemandCertifiedGroups {
             ));
         }
         let budget = NativeDemandBudget(Some(&self.operation));
+        budget.reserve::<(
+            crate::certified_products::ReceiptImportOwner,
+            crate::artifact_inventory::NativeGroupBinding,
+        )>(
+            self.original_use_roots
+                .len()
+                .saturating_add(other.original_use_roots.len()),
+        )?;
+        let mut original_use_roots = BTreeMap::new();
+        for (reference, binding) in self
+            .original_use_roots
+            .iter()
+            .chain(&other.original_use_roots)
+        {
+            charge_original_use(reference, &budget)?;
+            if original_use_roots
+                .insert(reference.clone(), *binding)
+                .is_some_and(|prior| prior != *binding)
+            {
+                return Err(failure("native Original use changed its issued root"));
+            }
+        }
         let resolved_originals = match (&self.resolved_originals, &other.resolved_originals) {
             (Some(left), Some(right)) => {
                 Some(left.merge(right).map_err(compiler_evidence_failure)?)
@@ -2452,6 +2649,7 @@ impl DemandCertifiedGroups {
             rows,
             products,
             resolved_originals,
+            original_use_roots,
             retained_bindings: retained_bindings.into_iter().collect(),
             package_obligations: package_obligations.into_iter().collect(),
         })
@@ -2528,6 +2726,7 @@ struct ExternalSourceGlobal<'a> {
     module: Cow<'a, str>,
     module_version: Option<Cow<'a, tidepool_repr::execution_schema::ModuleVersion>>,
     original_ordinal: u32,
+    original_use: Option<&'a crate::certified_products::ReceiptImportOwner>,
 }
 
 impl<'a> ReceiptNativeInputDemand<'a> {
@@ -2597,6 +2796,7 @@ impl<'a> ReceiptNativeInputDemand<'a> {
                     module: Cow::Owned(resolved.module.clone()),
                     module_version: Some(Cow::Owned(resolved.module_version.clone())),
                     original_ordinal: *ordinal,
+                    original_use: Some(&global.owner),
                 });
                 continue;
             }
@@ -2621,6 +2821,7 @@ impl<'a> ReceiptNativeInputDemand<'a> {
                 module: Cow::Borrowed(module),
                 module_version: module_version.as_ref().map(Cow::Borrowed),
                 original_ordinal: *original_ordinal,
+                original_use: None,
             });
         }
         Ok(Self {
@@ -2686,6 +2887,7 @@ impl DemandNativeInputs {
         }
         let mut roots = BTreeMap::new();
         let mut proofs = BTreeMap::new();
+        let mut original_use_roots = BTreeMap::new();
         for global in &inputs.sources {
             budget.checkpoint()?;
             let ExternalSourceGlobal {
@@ -2693,6 +2895,7 @@ impl DemandNativeInputs {
                 module,
                 module_version,
                 original_ordinal,
+                original_use,
             } = global;
             // The shared choice owner also constructs one temporary owner key.
             budget.strings(unit.len().saturating_add(module.len()).saturating_mul(2))?;
@@ -2762,6 +2965,19 @@ impl DemandNativeInputs {
                 .ok_or_else(|| failure("receipt native group lacks its scoped contribution"))?;
             if candidates.next().is_some() {
                 return Err(failure("receipt native group has ambiguous scoped issuers"));
+            }
+            if let Some(reference) = original_use {
+                budget.reserve::<(
+                    crate::certified_products::ReceiptImportOwner,
+                    crate::artifact_inventory::NativeGroupBinding,
+                )>(1)?;
+                charge_original_use(reference, &budget)?;
+                if original_use_roots
+                    .insert((*reference).clone(), binding)
+                    .is_some_and(|prior| prior != binding)
+                {
+                    return Err(failure("native Original use changed its issued root"));
+                }
             }
             if let Some(previous) = roots.get(&key) {
                 if *previous != binding {
@@ -2963,6 +3179,7 @@ impl DemandNativeInputs {
             rows,
             products,
             resolved_originals: inputs.resolved_originals.clone(),
+            original_use_roots,
             retained_bindings: retained_bindings.into_iter().collect(),
             package_obligations: package_obligations.into_iter().collect(),
         })
@@ -2973,11 +3190,21 @@ impl DemandNativeInputs {
 /// unresolved code demand until the package producer completes this owner.
 /// Broader body availability cannot construct an executable-ready result.
 pub(crate) struct ResolvedNativeDemand {
-    demand: DemandNativeInputs,
+    demand: Arc<DemandNativeInputs>,
     groups: Arc<DemandCertifiedGroups>,
 }
 
 impl ResolvedNativeDemand {
+    pub(crate) fn restrict_uses(
+        &self,
+        references: &[crate::certified_products::ReceiptImportOwner],
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            demand: Arc::clone(&self.demand),
+            groups: Arc::new(self.groups.restrict_uses(references)?),
+        })
+    }
+
     pub(crate) fn groups(&self) -> &DemandCertifiedGroups {
         &self.groups
     }
@@ -3008,7 +3235,10 @@ impl RequestCompilerInputs {
         let budget = NativeDemandBudget(Some(&validation.inventory));
         let mut roots = BTreeSet::new();
         let mut sources = Vec::new();
-        for (owner, ordinal) in resolved.sources() {
+        for reference in packet.originals() {
+            let (owner, ordinal) = resolved
+                .get(reference)
+                .ok_or_else(|| failure("native demand lost its authenticated use"))?;
             budget.checkpoint()?;
             budget.strings(
                 owner
@@ -3025,6 +3255,7 @@ impl RequestCompilerInputs {
                 module: Cow::Owned(owner.module.clone()),
                 module_version: Some(Cow::Owned(owner.module_version.clone())),
                 original_ordinal: *ordinal,
+                original_use: Some(reference),
             });
         }
         let inputs = ReceiptNativeInputDemand {
@@ -3040,7 +3271,7 @@ impl RequestCompilerInputs {
             })?;
         let groups = demand.certify_receipt_groups(&inputs, validation)?;
         Ok(ResolvedNativeDemand {
-            demand,
+            demand: Arc::new(demand),
             groups: Arc::new(groups),
         })
     }
@@ -21290,6 +21521,98 @@ mod tests {
                 .compiler_inputs(&context, None)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn retained_native_demand_projects_exact_uses_without_reacquiring_or_retaining_siblings() {
+        use crate::artifact_inventory::{ArtifactBinding, NativeArtifactDemand};
+        let cold = demanded_native_fixture(1, NativeArtifactDemand::AllGroups, false);
+        let mut validation = PackageInterfaceValidation::default();
+        let pair = |binding: ArtifactBinding| {
+            Value::Array(vec![
+                Value::Bytes(binding.artifact.0.to_vec()),
+                Value::Bytes(binding.selection.0.to_vec()),
+            ])
+        };
+        let mut uses = Vec::new();
+        for (module, ordinal) in [("DemandParent", 7), ("UnrelatedNative0", 1)] {
+            let owner = identity("fixture", module);
+            let primary = cold
+                .compiler_source_support()
+                .compiler_primary_input(&owner)
+                .unwrap()
+                .unwrap();
+            let artifact = primary.original().unwrap().artifact;
+            let row = &cold.native_selection.availability.0[&artifact];
+            let ArtifactPayload::Original(product) = &row.original.payload else {
+                unreachable!()
+            };
+            let binder = crate::certified_products::original_available_groups(product)
+                .unwrap()
+                .find(|group| group.original_ordinal() == ordinal)
+                .unwrap()
+                .binders()
+                .iter()
+                .next()
+                .unwrap()
+                .clone();
+            uses.push(Value::Array(vec![
+                text("fixture"),
+                text(module),
+                pair(primary.interface()),
+                pair(primary.original().unwrap()),
+                Value::Array(vec![
+                    text(&binder.unit),
+                    text(&binder.module),
+                    text(&binder.namespace),
+                    text(&binder.occurrence),
+                    binder.record_parent.as_ref().map_or(Value::Null, text),
+                ]),
+            ]));
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![text("TPNATIVEDEMAND1"), Value::Array(uses)]),
+            &mut bytes,
+        )
+        .unwrap();
+        let packet =
+            crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
+                .unwrap();
+        let acquired = cold
+            .resolve_native_demand(&packet, &mut validation)
+            .unwrap();
+        let before = cold.source_support.artifacts().inventory().metrics();
+        let parent = acquired.restrict_uses(&packet.originals()[..1]).unwrap();
+        let unrelated = acquired.restrict_uses(&packet.originals()[1..]).unwrap();
+        let after = cold.source_support.artifacts().inventory().metrics();
+        assert_eq!(after.graph_visits, before.graph_visits);
+        assert_eq!(after.view_queries, before.view_queries);
+        assert!(Arc::ptr_eq(&acquired.demand, &parent.demand));
+        assert!(Arc::ptr_eq(&acquired.demand, &unrelated.demand));
+        assert!(Arc::ptr_eq(&parent.groups.operation, &validation.inventory));
+        assert!(parent.belongs_to(&cold) && unrelated.belongs_to(&cold));
+        let selected = |resolved: &ResolvedNativeDemand| {
+            resolved
+                .groups()
+                .groups()
+                .iter()
+                .map(|row| (row.owner().module.clone(), row.group().original_ordinal()))
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            selected(&parent),
+            BTreeSet::from([("DemandParent".into(), 7), ("DemandChild".into(), 9)])
+        );
+        assert_eq!(
+            selected(&unrelated),
+            BTreeSet::from([("UnrelatedNative0".into(), 1)])
+        );
+        assert!(parent.groups.contains_original_use(&packet.originals()[0]));
+        assert!(!parent.groups.contains_original_use(&packet.originals()[1]));
+        assert!(parent.restrict_uses(&packet.originals()[1..]).is_err());
+        let repeated = parent.restrict_uses(&packet.originals()[..1]).unwrap();
+        assert_eq!(selected(&repeated), selected(&parent));
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub(crate) struct WorldNativeDemandCompletion {
     pub(super) operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     pub(super) context: Arc<ExactDeclarationContext>,
     pub(super) inputs: Arc<RequestCompilerInputs>,
+    acquisitions: Vec<Arc<ResolvedNativeDemand>>,
+    acquired_uses: BTreeMap<crate::certified_products::ReceiptImportOwner, usize>,
     stages: BTreeMap<u64, WorldNativeDemandStage>,
 }
 
@@ -146,6 +148,8 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 operation: Arc::clone(&validation.inventory),
                 context,
                 inputs,
+                acquisitions: Vec::new(),
+                acquired_uses: BTreeMap::new(),
                 stages: BTreeMap::new(),
             },
             validation,
@@ -193,26 +197,90 @@ impl<'a> WorldNativeDemandResolver<'a> {
         if fresh.originals().is_empty() {
             return Err(source_failure("native demand made no selection progress"));
         }
-        let resolved = self
-            .completion
-            .inputs
-            .resolve_native_demand(&fresh, self.validation)?;
-        if !resolved.belongs_to(&self.completion.inputs) {
-            return Err(source_failure(
-                "native demand resolved against another input owner",
-            ));
+        let unacquired = fresh
+            .without_known(
+                |reference| self.completion.acquired_uses.contains_key(reference),
+                &self.validation.inventory,
+            )
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let new_index = self.completion.acquisitions.len();
+        let acquired = if unacquired.originals().is_empty() {
+            None
+        } else {
+            let resolved = self
+                .completion
+                .inputs
+                .resolve_native_demand(&unacquired, self.validation)?;
+            if !resolved.belongs_to(&self.completion.inputs) {
+                return Err(source_failure(
+                    "native demand resolved against another input owner",
+                ));
+            }
+            Some(Arc::new(resolved))
+        };
+        self.validation
+            .inventory
+            .reserve::<(usize, Vec<crate::certified_products::ReceiptImportOwner>)>(
+                fresh.originals().len(),
+            )
+            .and_then(|_| {
+                self.validation
+                    .inventory
+                    .reserve::<crate::certified_products::ReceiptImportOwner>(
+                        fresh.originals().len(),
+                    )
+            })
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut requested =
+            BTreeMap::<usize, Vec<crate::certified_products::ReceiptImportOwner>>::new();
+        for reference in fresh.into_originals() {
+            crate::host_work::checkpoint()?;
+            let index = self
+                .completion
+                .acquired_uses
+                .get(&reference)
+                .copied()
+                .unwrap_or(new_index);
+            requested.entry(index).or_default().push(reference);
         }
-        let groups = resolved.groups();
+        self.validation
+            .inventory
+            .reserve::<Arc<ResolvedNativeDemand>>(requested.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut batches = Vec::with_capacity(requested.len());
+        let mut groups: Option<Arc<DemandCertifiedGroups>> = None;
+        for (index, references) in requested {
+            let acquisition = self
+                .completion
+                .acquisitions
+                .get(index)
+                .or_else(|| {
+                    if index == new_index {
+                        acquired.as_ref()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| source_failure("native use lost its request acquisition"))?;
+            let selected = Arc::new(acquisition.restrict_uses(&references)?);
+            groups = Some(match groups {
+                Some(prior) => Arc::new(prior.merge(selected.groups())?),
+                None => Arc::clone(selected.shared_groups()),
+            });
+            batches.push(selected);
+        }
+        let groups =
+            groups.ok_or_else(|| source_failure("native demand lost its fresh selected uses"))?;
         let reply =
             native_demand::encode_reply(groups.package_obligations(), &self.validation.inventory)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
         let selected_groups = match prior {
-            Some(prior) => Arc::new(prior.selected_groups.merge(groups)?),
-            None => Arc::clone(resolved.shared_groups()),
+            Some(prior) => Arc::new(prior.selected_groups.merge(&groups)?),
+            None => groups,
         };
         self.validation
             .inventory
-            .reserve::<Arc<ResolvedNativeDemand>>(1)
+            .reserve::<Arc<ResolvedNativeDemand>>(batches.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         if prior.is_none() {
             self.validation
@@ -220,17 +288,35 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 .reserve::<(u64, WorldNativeDemandStage)>(1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         }
-        let resolved = Arc::new(resolved);
+        if acquired.is_some() {
+            self.validation
+                .inventory
+                .reserve::<Arc<ResolvedNativeDemand>>(1)
+                .and_then(|_| {
+                    self.validation
+                        .inventory
+                        .reserve::<(crate::certified_products::ReceiptImportOwner, usize)>(
+                            unacquired.originals().len(),
+                        )
+                })
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
         // No request or Original fact is changed until this whole batch succeeds.
+        if let Some(acquired) = acquired {
+            self.completion.acquisitions.push(acquired);
+            for reference in unacquired.into_originals() {
+                self.completion.acquired_uses.insert(reference, new_index);
+            }
+        }
         match self.completion.stages.entry(demand.stage) {
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let stage = entry.get_mut();
-                stage.batches.push(resolved);
+                stage.batches.extend(batches);
                 stage.selected_groups = selected_groups;
             }
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(WorldNativeDemandStage {
-                    batches: vec![resolved],
+                    batches,
                     selected_groups,
                 });
             }

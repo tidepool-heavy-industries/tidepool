@@ -12,6 +12,10 @@ impl NativeDemandPacket {
         &self.originals
     }
 
+    pub(crate) fn into_originals(self) -> Vec<ReceiptImportOwner> {
+        self.originals
+    }
+
     pub(crate) fn without_known(
         &self,
         known: impl Fn(&ReceiptImportOwner) -> bool,
