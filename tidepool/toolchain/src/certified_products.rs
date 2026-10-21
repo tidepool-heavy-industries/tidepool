@@ -856,7 +856,12 @@ impl CertifiedSegmentOriginals {
                         .package_availability
                         .get(owner)
                         .expect("reused owner retains its inherited witness");
-                    self.carry_inherited_package_witness(owner, inherited, validation)?;
+                    carry_inherited_package_witness(
+                        &self.products.recovery_products,
+                        owner,
+                        inherited,
+                        validation,
+                    )?;
                 }
             }
         }
@@ -937,33 +942,38 @@ impl CertifiedSegmentOriginals {
         };
         Ok((products, item.globals, additions))
     }
+}
 
-    /// Retain the selected authority and its byte evidence for an already-issued
-    /// package interface whose copied location has changed. The inherited
-    /// witness keeps its original issuance provenance; only its authenticated
-    /// bytes are re-registered under the issued logical path.
-    fn carry_inherited_package_witness(
-        &self,
-        owner: &(String, String),
-        inherited: &PackageInterfaceWitness,
-        validation: &mut PackageInterfaceValidation,
-    ) -> CertResult<()> {
-        for product in self.products.recovery_products.iter() {
-            let Some(native) = product.original_native() else {
-                continue;
-            };
-            if let Some(token) = native.package_interfaces().get(owner) {
-                if token.sha256() == &inherited.sha256 {
-                    return validation
-                        .register_package_interface(&inherited.selected_path, token)
-                        .map_err(package_validation_error);
-                }
+/// Retain the selected authority and its byte evidence for an already-issued
+/// package interface whose copied location has changed. The inherited witness
+/// keeps its original issuance provenance; only its authenticated bytes are
+/// re-registered under the issued logical path.
+fn carry_inherited_package_witness(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    owner: &(String, String),
+    inherited: &PackageInterfaceWitness,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    // Prefer the exact issued token: its retained bytes survive removal of the
+    // original transaction copy without reopening storage.
+    for product in products {
+        let Some(native) = product.original_native() else {
+            continue;
+        };
+        if let Some(token) = native.package_interfaces().get(owner) {
+            if token.sha256() == &inherited.sha256 {
+                return validation
+                    .register_package_interface(&inherited.selected_path, token)
+                    .map_err(package_validation_error);
             }
         }
-        Err(CertificationError::Mismatch(
-            "inherited package interface custody",
-        ))
     }
+    // A legacy decoded home witness has no retained token. Authenticate its
+    // inherited bytes through the existing capture path and register them
+    // under the issued logical path. Missing, inaccessible or corrupt storage
+    // keeps its typed refusal; the incoming new path is never consumed as
+    // authority.
+    verify_package_interface(validation, inherited)
 }
 
 /// An incoming segment-item package observation, classified against the
@@ -25991,6 +26001,100 @@ pub(crate) mod tests {
             .unwrap(),
             packages
         );
+    }
+
+    #[test]
+    fn carry_inherited_package_witness_prefers_token_then_legacy_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("External.hi");
+        std::fs::write(&path, [0x43]).unwrap();
+        let packages = BTreeMap::from([(
+            ("external-package".into(), "External".into()),
+            PackageInterfaceWitness {
+                selected_path: path.clone(),
+                sha256: sha(&[0x43]),
+            },
+        )]);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture(
+                "Consumer",
+                Some(PendingImportOwner::Package {
+                    unit: "external-package".into(),
+                    module: "External".into(),
+                    binder: SymbolIdentity {
+                        unit: "external-package".into(),
+                        ..testing::identity("External", "entry")
+                    },
+                    interface_digest: sha(&[0x43]),
+                }),
+                7,
+                &packages,
+            ),
+            [1; 32],
+        );
+        let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        let legacy = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            issued.owner().clone(),
+            issued.interface_bytes().to_vec(),
+            issued.product_bytes().to_vec(),
+            issued.package_imports_bytes().to_vec(),
+            issued.certification_bytes().to_vec(),
+        );
+        assert!(legacy.original_native().is_none());
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let inherited = packages[&owner].clone();
+
+        // Native token preferred: retained bytes survive producer removal and
+        // re-register under the issued logical path without reopening storage.
+        std::fs::remove_file(&path).unwrap();
+        let mut native_validation = PackageInterfaceValidation::default();
+        carry_inherited_package_witness(
+            std::slice::from_ref(&issued),
+            &owner,
+            &inherited,
+            &mut native_validation,
+        )
+        .unwrap();
+        assert!(verify_package_interface(&mut native_validation, &inherited).is_ok());
+
+        // Legacy readable copy re-registers through the existing capture path.
+        std::fs::write(&path, [0x43]).unwrap();
+        let mut legacy_validation = PackageInterfaceValidation::default();
+        carry_inherited_package_witness(
+            std::slice::from_ref(&legacy),
+            &owner,
+            &inherited,
+            &mut legacy_validation,
+        )
+        .unwrap();
+
+        // A removed legacy copy is a typed refusal.
+        std::fs::remove_file(&path).unwrap();
+        let mut removed_validation = PackageInterfaceValidation::default();
+        assert!(matches!(
+            carry_inherited_package_witness(
+                std::slice::from_ref(&legacy),
+                &owner,
+                &inherited,
+                &mut removed_validation,
+            ),
+            Err(CertificationError::CapturedModulePayload(_))
+        ));
+
+        // A corrupt legacy copy is a typed refusal.
+        std::fs::write(&path, [0x44]).unwrap();
+        let mut corrupt_validation = PackageInterfaceValidation::default();
+        assert!(matches!(
+            carry_inherited_package_witness(
+                std::slice::from_ref(&legacy),
+                &owner,
+                &inherited,
+                &mut corrupt_validation,
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
+        ));
     }
 
     #[test]
