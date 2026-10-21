@@ -50,7 +50,10 @@ pub enum HostWorkCounter {
     InputFdEnumeration,
     InputFdSelectedRowVisit,
     InputFdSliceVisit,
+    /// Physical graph entries examined or digest lookups attempted, including misses.
     MaterializationGraphVisit,
+    /// Distinct selected graph transports found during FD enumeration.
+    /// Unrelated retained graphs are not included.
     InputFdDistinctGraph,
     InputFdMetadataVisit,
     InputFdExport,

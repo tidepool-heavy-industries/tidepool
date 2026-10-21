@@ -6732,17 +6732,30 @@ impl RetainedArtifactMaterialization {
         let mut rows = BTreeMap::new();
         let mut owner_visits = 0usize;
         let mut row_visits = 0usize;
-        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
-            owner_visits += 1;
-            for (id, row) in &owner.rows {
-                row_visits += 1;
-                if selected.contains(id) {
-                    rows.insert(*id, row.as_ref());
+        if !selected.is_empty() {
+            self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                owner_visits += 1;
+                // Keep the parent-first overwrite order, including shared
+                // ancestors; only the side used to probe this owner changes.
+                if owner.rows.len() <= selected.len() {
+                    for (id, row) in &owner.rows {
+                        row_visits += 1;
+                        if selected.contains(id) {
+                            rows.insert(*id, row.as_ref());
+                        }
+                    }
+                } else {
+                    for id in &selected {
+                        row_visits += 1;
+                        if let Some(row) = owner.rows.get(id) {
+                            rows.insert(*id, row.as_ref());
+                        }
+                    }
                 }
-            }
-        });
+            });
+        }
         tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_selected_rows",
-            owner_visits, row_visits, selected_rows = rows.len(), metadata_entry_visits = metadata.entries.len(),
+            owner_visits, row_probes = row_visits, selected_rows = rows.len(), metadata_entry_visits = metadata.entries.len(),
             "selected immutable physical rows");
         rows
     }
@@ -6766,6 +6779,39 @@ impl RetainedArtifactMaterialization {
             });
         }
         groups
+    }
+
+    fn selected_graph_path_refs<'a>(
+        &'a self,
+        selected: &BTreeSet<[u8; 32]>,
+    ) -> BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile> {
+        let mut paths = BTreeMap::new();
+        if !selected.is_empty() {
+            self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+                if owner.graph_paths.len() <= selected.len() {
+                    for (digest, path) in owner.graph_paths.iter() {
+                        crate::host_work::record_host_work(
+                            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+                            1,
+                        );
+                        if selected.contains(digest) {
+                            paths.insert(*digest, path.as_ref());
+                        }
+                    }
+                } else {
+                    for digest in selected {
+                        crate::host_work::record_host_work(
+                            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+                            1,
+                        );
+                        if let Some(path) = owner.graph_paths.get(digest) {
+                            paths.insert(*digest, path.as_ref());
+                        }
+                    }
+                }
+            });
+        }
+        paths
     }
 
     fn graph_path_refs<'a>(&'a self) -> BTreeMap<[u8; 32], &'a OwnedExecutionGraphFile> {
@@ -9490,24 +9536,30 @@ impl ExactCompilationRequest {
                 files.insert(Arc::as_ptr(&file) as usize, file);
             }
         }
-        let graph_paths = materialization.graph_path_refs();
+        let selected_graphs = metadata
+            .entries
+            .values()
+            .filter_map(|entry| {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::InputFdMetadataVisit,
+                    1,
+                );
+                match &entry.payload {
+                    ArtifactPayload::Original(product) => {
+                        product.execution_source().map(|graph| graph.digest())
+                    }
+                    _ => None,
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        let graph_paths = materialization.selected_graph_path_refs(&selected_graphs);
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::InputFdDistinctGraph,
             graph_paths.len() as u64,
         );
-        for entry in metadata.entries.values() {
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::InputFdMetadataVisit,
-                1,
-            );
-            if let ArtifactPayload::Original(product) = &entry.payload {
-                if let Some(graph) = product.execution_source() {
-                    if let Some(owned) = graph_paths.get(&graph.digest()) {
-                        let file = owned.transport.compiler_file_lease();
-                        files.insert(Arc::as_ptr(&file) as usize, file);
-                    }
-                }
-            }
+        for owned in graph_paths.values() {
+            let file = owned.transport.compiler_file_lease();
+            files.insert(Arc::as_ptr(&file) as usize, file);
         }
         tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_input_transport_files",
             selected_row_visits, slice_visits, graph_path_visits = graph_paths.len(),

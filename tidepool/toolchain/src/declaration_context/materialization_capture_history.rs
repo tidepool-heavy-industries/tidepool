@@ -402,6 +402,133 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
 }
 
 #[test]
+fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
+    use crate::host_work::{HostWorkCounter, HostWorkObservation};
+    let (first, producer) = metadata_fixture();
+    let (second, _) = metadata_fixture();
+    let scratch = tempfile::tempdir().unwrap();
+    let first_request = first
+        .prepare_compilation(&scratch.path().join("first"), &producer)
+        .unwrap();
+    let second_request = second
+        .prepare_compilation(&scratch.path().join("second"), &producer)
+        .unwrap();
+    let first_owner = first_request.materialization.as_ref().unwrap();
+    let second_owner = second_request.materialization.as_ref().unwrap();
+    let metadata = first.compiler_metadata_snapshot().unwrap();
+    let beta = metadata.entries[&identity("fixture", "Beta")].descriptor.id;
+    let narrow = captured_materialization_context(&first, vec![beta]);
+    let narrow_metadata = Arc::new(narrow.compiler_metadata_snapshot().unwrap());
+    let empty = captured_materialization_context(&first, vec![]);
+    let empty_metadata = empty.compiler_metadata_snapshot().unwrap();
+    // These overlays share already issued physical row handles. They create
+    // neither a certificate nor compiler/native selection authority.
+    let overlay = |parents, rows| {
+        Arc::new(RetainedArtifactMaterialization {
+            kind: MaterializationKind::Issued,
+            _directory: None,
+            _parents: parents,
+            rows,
+            package_rows: Default::default(),
+            groups: Default::default(),
+            execution_scope: None,
+            graph_paths: Arc::new(BTreeMap::new()),
+            payload_work: Default::default(),
+        })
+    };
+    let left = overlay(vec![first_owner.clone()], second_owner.rows.clone());
+    let right = overlay(vec![first_owner.clone()], Default::default());
+    let diamond = overlay(
+        vec![left.clone(), right.clone(), left.clone()],
+        Default::default(),
+    );
+    let root_override = overlay(vec![diamond.clone()], first_owner.rows.clone());
+    let reverse = overlay(vec![right, left], Default::default());
+    for owner in [&diamond, &root_override, &reverse] {
+        for selected in [&metadata, narrow_metadata.as_ref(), &empty_metadata] {
+            let wanted = selected
+                .entries
+                .values()
+                .map(|entry| entry.descriptor.id)
+                .collect::<BTreeSet<_>>();
+            let mut expected = BTreeMap::new();
+            owner.visit_owners(&mut BTreeSet::new(), &mut |ancestor| {
+                for (id, row) in &ancestor.rows {
+                    if wanted.contains(id) {
+                        expected.insert(*id, row.as_ref());
+                    }
+                }
+            });
+            let actual = owner.selected_rows(selected);
+            assert_eq!(
+                actual.keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>()
+            );
+            assert!(actual
+                .iter()
+                .all(|(id, row)| std::ptr::eq(*row, expected[id])));
+        }
+    }
+    assert!(
+        std::ptr::eq(
+            diamond.selected_rows(&narrow_metadata)[&beta],
+            second_owner.rows[&beta].as_ref()
+        ),
+        "the shared ancestor must not replace the later left branch"
+    );
+    assert!(std::ptr::eq(
+        root_override.selected_rows(&narrow_metadata)[&beta],
+        first_owner.rows[&beta].as_ref()
+    ));
+    let mut selected_request = first_request.clone();
+    selected_request.materialization = Some(diamond.clone());
+    selected_request.transport_metadata = narrow_metadata;
+    let observation = HostWorkObservation::new();
+    let files = observation.scope(|| selected_request.input_transport_files());
+    let mut expected = BTreeMap::new();
+    for slice in second_owner.rows[&beta].owned_inputs.values() {
+        let file = slice.compiler_file_lease();
+        expected.insert(Arc::as_ptr(&file) as usize, file);
+    }
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| Arc::as_ptr(file) as usize)
+            .collect::<Vec<_>>(),
+        expected.keys().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        observation
+            .snapshot()
+            .get(HostWorkCounter::InputFdSelectedRowVisit),
+        1
+    );
+    assert_eq!(
+        observation.snapshot().get(HostWorkCounter::InputFdExport),
+        files.len() as u64
+    );
+    assert!(!files.is_empty());
+    let weak_files = files.iter().map(Arc::downgrade).collect::<Vec<_>>();
+    drop(expected);
+    drop(selected_request);
+    drop(diamond);
+    drop(root_override);
+    drop(reverse);
+    drop(narrow);
+    drop(empty);
+    drop(first_request);
+    drop(second_request);
+    drop(first);
+    drop(second);
+    assert!(
+        files.iter().all(|file| file.metadata().unwrap().len() > 0),
+        "exact exported leases outlive their issuing row owners"
+    );
+    drop(files);
+    assert!(weak_files.iter().all(|file| file.upgrade().is_none()));
+}
+
+#[test]
 fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
     let (first, producer) = metadata_fixture();
     let (second, second_producer) = metadata_fixture();
@@ -635,6 +762,25 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     };
     let base = materialize(&context);
     assert_eq!(base.graph_paths.len(), 1);
+    // An independent real writer supplies equal graph bytes with a distinct
+    // physical lease, so pointer precedence is observable.
+    let independent_metadata = context.compiler_metadata_snapshot().unwrap();
+    let independent_b = context
+        .materialize_retained_artifacts(
+            context.artifact_view(),
+            &independent_metadata,
+            vec![],
+            tempfile::tempdir().unwrap(),
+            &RequestInputTransport::OwnedArena,
+        )
+        .unwrap();
+    let independent_b_graph = independent_b.graph_paths[&graph_b.digest()].clone();
+    assert!(!Arc::ptr_eq(
+        &independent_b_graph,
+        &base.graph_paths[&graph_b.digest()]
+    ));
+    let independent_directory = independent_b.directory().path().to_path_buf();
+    drop(independent_b);
     let b_path = base.graph_paths[&graph_b.digest()].path.clone();
     let b_directory = base.directory().path().to_path_buf();
     let weak_b = Arc::downgrade(&base);
@@ -736,6 +882,144 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     let a_directory = current.directory().path().to_path_buf();
     let weak_a = Arc::downgrade(&current);
     assert_eq!(current.graph_path_refs().len(), 2);
+    let graph_files = {
+        use crate::host_work::{HostWorkCounter, HostWorkObservation};
+        let overlay = |parents, paths| {
+            Arc::new(RetainedArtifactMaterialization {
+                kind: MaterializationKind::Issued,
+                _directory: None,
+                _parents: parents,
+                rows: Default::default(),
+                package_rows: Default::default(),
+                groups: Default::default(),
+                execution_scope: None,
+                graph_paths: Arc::new(paths),
+                payload_work: Default::default(),
+            })
+        };
+        let shared = weak_b.upgrade().unwrap();
+        let left = overlay(
+            vec![shared.clone()],
+            BTreeMap::from([(graph_b.digest(), independent_b_graph.clone())]),
+        );
+        let right = overlay(vec![shared], BTreeMap::new());
+        let diamond = overlay(
+            vec![left.clone(), right, left],
+            BTreeMap::from([(
+                graph_a.digest(),
+                current.graph_paths[&graph_a.digest()].clone(),
+            )]),
+        );
+        let full = diamond.graph_path_refs();
+        assert!(
+            std::ptr::eq(full[&graph_b.digest()], independent_b_graph.as_ref()),
+            "the left branch overwrites the shared ancestor despite its repeated reference"
+        );
+        let missing = [0xfe; 32];
+        assert!(!full.contains_key(&missing));
+        for wanted in [
+            BTreeSet::new(),
+            BTreeSet::from([graph_b.digest()]),
+            BTreeSet::from([graph_a.digest()]),
+            BTreeSet::from([graph_a.digest(), graph_b.digest()]),
+            BTreeSet::from([missing]),
+            BTreeSet::from([missing, graph_b.digest()]),
+        ] {
+            let actual = diamond.selected_graph_path_refs(&wanted);
+            let expected = full
+                .iter()
+                .filter(|(digest, _)| wanted.contains(*digest))
+                .map(|(digest, file)| (*digest, *file))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                actual.keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>()
+            );
+            assert!(actual
+                .iter()
+                .all(|(digest, file)| std::ptr::eq(*file, expected[digest])));
+        }
+        let metadata = context.compiler_metadata_snapshot().unwrap();
+        let flat = RetainedArtifactMaterialization::capture_custody(
+            &[diamond],
+            &metadata.retained.artifacts,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(flat.graph_paths.len(), 2);
+        let all_work = HostWorkObservation::new();
+        let all = all_work.scope(|| flat.graph_path_refs());
+        let selected_work = HostWorkObservation::new();
+        let selected = selected_work
+            .scope(|| flat.selected_graph_path_refs(&BTreeSet::from([graph_b.digest()])));
+        assert_eq!(
+            all_work
+                .snapshot()
+                .get(HostWorkCounter::MaterializationGraphVisit),
+            2
+        );
+        assert_eq!(
+            selected_work
+                .snapshot()
+                .get(HostWorkCounter::MaterializationGraphVisit),
+            1
+        );
+        assert!(std::ptr::eq(
+            selected[&graph_b.digest()],
+            all[&graph_b.digest()]
+        ));
+        let missing_work = HostWorkObservation::new();
+        assert!(missing_work
+            .scope(|| flat.selected_graph_path_refs(&BTreeSet::from([missing])))
+            .is_empty());
+        assert_eq!(
+            missing_work
+                .snapshot()
+                .get(HostWorkCounter::MaterializationGraphVisit),
+            1,
+            "a failed lookup is still a counted probe"
+        );
+        let empty_work = HostWorkObservation::new();
+        assert!(empty_work
+            .scope(|| flat.selected_graph_path_refs(&BTreeSet::new()))
+            .is_empty());
+        assert_eq!(
+            empty_work
+                .snapshot()
+                .get(HostWorkCounter::MaterializationGraphVisit),
+            0
+        );
+        println!("demanded-graph retained=2 selected=1 full_probes=2 selected_probes=1 missing_probes=1 empty_probes=0");
+        selected
+            .values()
+            .map(|graph| graph.transport.compiler_file_lease())
+            .collect::<Vec<_>>()
+    };
+    let graph_weak = graph_files.iter().map(Arc::downgrade).collect::<Vec<_>>();
+    let graph_offset = independent_b_graph.transport.offset();
+    assert_eq!(
+        independent_b_graph.transport.len(),
+        graph_b.bytes().len() as u64
+    );
+    drop(independent_b_graph);
+    assert!(
+        !independent_directory.exists(),
+        "exported memfd leases do not retain historical directory metadata"
+    );
+    assert!(graph_files
+        .iter()
+        .all(|file| file.metadata().unwrap().len() > 0));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0; graph_b.bytes().len()];
+        graph_files[0]
+            .read_exact_at(&mut bytes, graph_offset)
+            .unwrap();
+        assert_eq!(bytes, graph_b.bytes());
+    }
+    drop(graph_files);
+    assert!(graph_weak.iter().all(|file| file.upgrade().is_none()));
     let captured =
         captured_materialization_context(&context, vec![a.descriptor.id, b.descriptor.id]);
     drop(current);
