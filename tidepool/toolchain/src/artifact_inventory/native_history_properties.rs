@@ -1920,21 +1920,6 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             .unwrap();
         let closure = selection.selected_original_closure(&completed).unwrap();
         let opted = merged.certify_original_closure(&closure).unwrap();
-        let owner = match &catalog.originals[0].payload {
-            ArtifactPayload::Original(product) => product.owner().clone(),
-            _ => unreachable!(),
-        };
-        let imports = vec![PendingImportOwner::Source {
-            owner,
-            original_ordinal: 3,
-            binder: SymbolIdentity {
-                unit: "fixture".into(),
-                module: "History0".into(),
-                namespace: "value".into(),
-                occurrence: "entry_3".into(),
-                record_parent: None,
-            },
-        }];
         let required = catalog.group_closure(&root_groups(0));
         let expected_groups = identities
             .iter()
@@ -1962,20 +1947,25 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 )
                 .unwrap();
             let receiving_inventory = inputs.artifacts().inventory();
-            let mut fixed = receiving_inventory
-                .bind_segment(
-                    inputs.artifacts(),
-                    Vec::new(),
-                    &continuation,
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                )
-                .unwrap();
-            let target = receiving_inventory.admit_bound_target(
-                &mut fixed,
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let root_entry = catalog.originals.first().expect("actual history root");
+            let (prepared, accepted) =
+                super::tests::source_target_data(&[(root_entry.as_ref(), 3)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
+            let target = receiving_inventory.select_native_target(
                 inputs.artifacts(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                Vec::new(),
                 &continuation,
+                observed,
+                None,
+                Some(inputs.artifacts()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             );
             if expects_empty {
                 assert!(matches!(target, Err(CompileError::ArtifactInventory(error))
@@ -1986,7 +1976,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                         owner, original_ordinal: 3,
                     }) if owner.unit == "fixture" && owner.module == "History0")));
             } else {
-                let target = target.unwrap().bind_target(None, imports.clone());
+                let target = target.unwrap();
                 let resolved = target.resolve().unwrap();
                 assert_eq!(resolved.groups(), &expected_groups);
             }
