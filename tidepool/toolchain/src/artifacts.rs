@@ -3739,6 +3739,14 @@ impl CompiledArtifacts {
 }
 
 impl TargetArtifact {
+    /// Borrow the completion issued for this exact physical target. It is
+    /// separate from broader Original availability and retained byte custody.
+    pub fn completed_native_selection(
+        &self,
+    ) -> Option<&Arc<crate::artifact_inventory::CompletedNativeSelection>> {
+        self.native_inputs.as_ref()?.completed_selection()
+    }
+
     pub fn native_source_products(
         &self,
     ) -> Result<Option<ResolvedNativeSourceProducts<'_>>, CompileError> {
@@ -3751,6 +3759,13 @@ impl TargetArtifact {
 }
 
 impl SealedTurnProducts {
+    /// Borrow this output's already issued target links without resolving them again.
+    pub fn completed_native_selection(
+        &self,
+    ) -> Option<&Arc<crate::artifact_inventory::CompletedNativeSelection>> {
+        self.target.completed_selection()
+    }
+
     /// The execution context belongs to this completed output, including its
     /// issued native custody independently of the original compilation inputs.
     pub fn original_execution_context(

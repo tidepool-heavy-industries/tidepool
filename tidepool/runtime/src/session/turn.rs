@@ -1661,6 +1661,8 @@ pub struct TurnCertification {
     /// reconstruct its exact target roots or ordered dependency choices.
     pub(super) original_output: Option<Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
     pub(super) native_group_proofs: Arc<[tidepool_toolchain::artifacts::OwnedNativeSourceProduct]>,
+    pub(super) native_selection:
+        Option<Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>>,
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
@@ -1836,6 +1838,7 @@ impl Default for TurnCertification {
     fn default() -> Self {
         Self {
             original_output: None,
+            native_selection: None,
             native_group_proofs: Arc::from([]),
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
@@ -1899,6 +1902,7 @@ impl TurnCertification {
             .into();
         Ok(Self {
             native_group_proofs,
+            native_selection: target.completed_native_selection().cloned(),
             artifact_view: artifacts.artifact_view.clone(),
             groups: artifacts.certified_groups.clone().into(),
             target_owners: target.pending_imports.clone(),
@@ -2042,6 +2046,7 @@ impl CompiledTurn {
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
             original_output: Some(Arc::clone(products)),
+            native_selection: products.completed_native_selection().cloned(),
             native_group_proofs: Arc::from([]),
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
@@ -5045,6 +5050,7 @@ fn compiled_native_output(
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
                 original_output: Some(Arc::clone(products)),
+                native_selection: products.completed_native_selection().cloned(),
                 native_group_proofs: Arc::from([]),
                 artifact_view: products.artifact_view().clone(),
                 groups: products.certified_groups.clone(),

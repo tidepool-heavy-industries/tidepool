@@ -73,15 +73,9 @@ impl ClosedInstantiationPlan {
             .certification
             .as_ref()
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let output = certification
-            .original_output
+        let selection = certification
+            .native_selection
             .as_ref()
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let resolved = output
-            .native_source_products()
-            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        let selection = resolved
-            .completed_selection()
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?
             .clone();
         if !selection.completion().retained_requirements().is_empty() {
