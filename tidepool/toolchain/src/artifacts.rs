@@ -233,29 +233,31 @@ fn deserialize_request_type_signatures<'de, D: serde::Deserializer<'de>>(
 /// layout. The final live input is response authority, never authored progress.
 #[derive(Debug)]
 pub struct RequestInputLayout<'a> {
-    site: &'a YieldSite,
+    input: &'a crate::checked_cell::CanonicalInputTypeWitness,
+    progress: Option<&'a crate::checked_cell::CanonicalInputTypeWitness>,
+    response: &'a crate::checked_cell::CanonicalInputTypeWitness,
     signatures: &'a crate::checked_cell::RequestTypeSignatures,
 }
 
 impl<'a> RequestInputLayout<'a> {
     pub fn input(&self) -> &'a crate::checked_cell::CanonicalInputTypeWitness {
-        self.site.input_type_witnesses[0].as_ref().unwrap()
+        self.input
     }
 
     pub fn progress(&self) -> Option<&'a crate::checked_cell::CanonicalInputTypeWitness> {
-        self.signatures
-            .progress()
-            .map(|_| self.site.input_type_witnesses[1].as_ref().unwrap())
+        self.progress
     }
 
     pub fn response_index(&self) -> usize {
-        self.site.inputs.len() - 1
+        if self.progress.is_some() {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn response(&self) -> &'a crate::checked_cell::CanonicalInputTypeWitness {
-        self.site.input_type_witnesses[self.response_index()]
-            .as_ref()
-            .unwrap()
+        self.response
     }
 
     pub fn signatures(&self) -> &'a crate::checked_cell::RequestTypeSignatures {
@@ -267,7 +269,9 @@ impl<'a> RequestInputLayout<'a> {
 pub enum RequestInputLayoutError {
     #[error("request site {site} has no compiler-issued request signatures")]
     MissingSignatures { site: u64 },
-    #[error("request site {site} describes {actual} live input types, expected {expected} from its compiler-issued request signatures")]
+    #[error(
+        "request site {site} describes {actual} live input types, expected {expected} from its compiler-issued request signatures"
+    )]
     InputArity {
         site: u64,
         actual: usize,
@@ -313,13 +317,19 @@ impl YieldSite {
                 expected,
             });
         }
-        for (index, witness) in self.input_type_witnesses.iter().enumerate() {
-            if witness.is_none() {
-                return Err(RequestInputLayoutError::MissingWitness { site, index });
-            }
-        }
+        let witness = |index| {
+            self.input_type_witnesses[index]
+                .as_ref()
+                .ok_or(RequestInputLayoutError::MissingWitness { site, index })
+        };
         Ok(RequestInputLayout {
-            site: self,
+            input: witness(0)?,
+            progress: if signatures.progress().is_some() {
+                Some(witness(1)?)
+            } else {
+                None
+            },
+            response: witness(expected - 1)?,
             signatures,
         })
     }

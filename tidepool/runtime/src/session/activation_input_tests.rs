@@ -6509,6 +6509,10 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
             .request_result_type_witness(site, &submission)
             .unwrap();
         assert_eq!(expected_response.as_ref(), layout.response());
+        assert!(matches!(
+            resident.request_result_type_witness(site ^ 1, &submission),
+            Err(ResidentError::InvalidActivationInput { site: rejected }) if rejected == site ^ 1
+        ));
 
         let row = resident
             .parked
@@ -6553,7 +6557,12 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
             fixture.resume_activation(&mut resident, activation),
             ResidentOutcome::Completed { .. }
         ));
+        let retired_submission = submission.clone();
         let outcome = settle_request_submission(&mut resident, submission);
+        assert!(matches!(
+            resident.request_result_type_witness(site, &retired_submission),
+            Err(ResidentError::InvalidActivationInput { site: rejected }) if rejected == site
+        ));
         if index == 0 {
             reservation = suspended(outcome);
         } else {

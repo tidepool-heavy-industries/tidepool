@@ -3903,6 +3903,39 @@ struct ParkedContinuation {
     resource_owners: Vec<ContinuationResourceOwner>,
 }
 
+/// Metadata authenticated for the actual live frame's compiler-issued site.
+struct AuthenticatedParkedSite<'a> {
+    site: u64,
+    metadata: &'a YieldSite,
+    interfaces: &'a AuthenticatedInputContext,
+    original_sources: &'a NativeSourceCustody,
+}
+
+impl AuthenticatedParkedSite<'_> {
+    fn canonical_input(
+        &self,
+        input: usize,
+    ) -> Result<&tidepool_toolchain::checked_cell::CanonicalInputTypeWitness, ResidentError> {
+        if self.metadata.input_type_witnesses.len() != self.metadata.inputs.len() {
+            return Err(ResidentError::InvalidActivationInput { site: self.site });
+        }
+        self.metadata
+            .input_type_witnesses
+            .get(input)
+            .and_then(Option::as_ref)
+            .ok_or(ResidentError::MissingActivationInputWitness { site: self.site })
+    }
+
+    fn singleton_input(
+        &self,
+    ) -> Result<&tidepool_toolchain::checked_cell::CanonicalInputTypeWitness, ResidentError> {
+        if self.metadata.inputs.len() != 1 {
+            return Err(ResidentError::InvalidActivationInput { site: self.site });
+        }
+        self.canonical_input(0)
+    }
+}
+
 /// A resident JIT session: one long-lived [`PreparedEngine`] whose heap and
 /// effect state persist across turns.
 ///
@@ -5592,6 +5625,45 @@ where
         Ok(RequestReceiverEntry { custody, realm })
     }
 
+    fn authenticated_parked_site(
+        &self,
+        continuation: &str,
+        expected_site: Option<u64>,
+    ) -> Result<AuthenticatedParkedSite<'_>, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput {
+            site: expected_site.unwrap_or(0),
+        };
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == continuation)
+            .ok_or_else(invalid)?;
+        let site = self
+            .state
+            .prepared()
+            .and_then(|engine| engine.parked_site(entry.id))
+            .ok_or_else(invalid)?;
+        if expected_site.is_some_and(|expected| expected != site) {
+            return Err(invalid());
+        }
+        let interfaces = entry
+            .provenance
+            .authenticated_inputs
+            .get(&site)
+            .ok_or(ResidentError::UnauthenticatedActivationInputWitness { site })?;
+        let metadata = entry
+            .provenance
+            .sites
+            .get(&site)
+            .ok_or(ResidentError::InvalidActivationInput { site })?;
+        Ok(AuthenticatedParkedSite {
+            site,
+            metadata,
+            interfaces,
+            original_sources: &entry.provenance.original_sources,
+        })
+    }
+
     /// Capture the live payload and its input type from the same original
     /// parked request. The affine token retains the requesting program's
     /// provenance independently of the actor that will mount the value.
@@ -5602,26 +5674,10 @@ where
         site: u64,
     ) -> Result<RuntimeActivationInput, ResidentError> {
         let invalid = || ResidentError::InvalidActivationInput { site };
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == hole.cont_id())
-            .ok_or_else(invalid)?;
-        let parked_site = self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.parked_site(entry.id))
-            .ok_or_else(invalid)?;
-        if parked_site != site {
-            return Err(invalid());
-        }
-        let original_source = self.parked_original_source(hole)?;
-        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        if !provenance.authenticated_inputs.contains_key(&site) {
-            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
-        }
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let layout = metadata
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        let original_source = parked.original_sources.require_unique(site)?;
+        let layout = parked
+            .metadata
             .request_input_layout()
             .map_err(|error| match error {
                 crate::RequestInputLayoutError::WitnessArity { .. }
@@ -5634,14 +5690,13 @@ where
         let input_type = input_type_witness.signature().presentation().to_owned();
         let signatures = layout.signatures().clone();
         let progress_type_witness = layout.progress().map(|witness| Arc::new(witness.clone()));
-        let interfaces = provenance
-            .authenticated_inputs
-            .get(&site)
-            .ok_or_else(invalid)?;
+        let interfaces = parked.interfaces;
         let execution_owner = interfaces.execution.require_unique(site)?;
         let original_execution = execution_owner.context.clone();
         let type_evidence = self
-            .request_site_type_evidence(site)
+            .state
+            .prepared()
+            .and_then(|engine| engine.request_site_type_evidence(site))
             .ok_or_else(invalid)?
             .authenticate_request_types(signatures, &interfaces.types)
             .map_err(SessionError::Compile)?;
@@ -5679,29 +5734,8 @@ where
         continuation: &str,
     ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
     {
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == continuation)
-            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
-        let site = self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.parked_site(entry.id))
-            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
-        let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = Arc::clone(&entry.provenance);
-        if !provenance.authenticated_inputs.contains_key(&site) {
-            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
-        }
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.inputs.len() != 1 || metadata.input_type_witnesses.len() != 1 {
-            return Err(invalid());
-        }
-        let witness = metadata.input_type_witnesses[0]
-            .as_ref()
-            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
-        Ok(Arc::new(witness.clone()))
+        let parked = self.authenticated_parked_site(continuation, None)?;
+        Ok(Arc::new(parked.singleton_input()?.clone()))
     }
 
     pub fn capture_progress_publication(
@@ -5719,42 +5753,6 @@ where
         })
     }
 
-    fn parked_canonical_input_witness(
-        &mut self,
-        continuation: &str,
-        site: u64,
-        input: usize,
-    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
-    {
-        let invalid = || ResidentError::InvalidActivationInput { site };
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == continuation)
-            .ok_or_else(invalid)?;
-        if self
-            .state
-            .prepared_mut()
-            .and_then(|engine| engine.parked_site(entry.id))
-            != Some(site)
-        {
-            return Err(invalid());
-        }
-        if !entry.provenance.authenticated_inputs.contains_key(&site) {
-            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
-        }
-        let metadata = entry.provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.input_type_witnesses.len() != metadata.inputs.len() {
-            return Err(invalid());
-        }
-        let witness = metadata
-            .input_type_witnesses
-            .get(input)
-            .and_then(Option::as_ref)
-            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
-        Ok(Arc::new(witness.clone()))
-    }
-
     /// Admission uses the submitted original site's final canonical response
     /// input, while its static unit reply remains independent.
     pub fn request_result_type_witness(
@@ -5764,10 +5762,12 @@ where
     ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
     {
         let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let layout = metadata.request_input_layout().map_err(|_| invalid())?;
-        self.parked_canonical_input_witness(hole.cont_id(), site, layout.response_index())
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        let layout = parked
+            .metadata
+            .request_input_layout()
+            .map_err(|_| invalid())?;
+        Ok(Arc::new(layout.response().clone()))
     }
 
     /// An observer's own parked typed helper issues its expected result type.
@@ -5787,13 +5787,8 @@ where
         hole: &ResidentHole,
     ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
     {
-        let invalid = || ResidentError::InvalidActivationInput { site };
-        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.inputs.len() != 1 {
-            return Err(invalid());
-        }
-        self.parked_canonical_input_witness(hole.cont_id(), site, 0)
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        Ok(Arc::new(parked.singleton_input()?.clone()))
     }
 
     pub fn capture_result_publication(
@@ -5819,7 +5814,8 @@ where
         if actual != site {
             return Err(invalid());
         }
-        let type_witness = self.parked_canonical_input_witness(hole.cont_id(), site, input)?;
+        let parked = self.authenticated_parked_site(hole.cont_id(), Some(site))?;
+        let type_witness = Arc::new(parked.canonical_input(input)?.clone());
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?
             .ok_or_else(invalid)?;
