@@ -2712,13 +2712,22 @@ impl IssuedNativeOffer {
                 .into_iter()
                 .collect::<BTreeSet<_>>();
             let owned = &issuing_view.read_projection(&state).nodes;
-            let nodes =
+            let metadata_nodes =
                 issuing_view.native_payload_custody_nodes(&state, owned, &executable_nodes)?;
+            // Nominal body references retain their exact carrier and TYPE
+            // dependencies as custody. Close those metadata seeds before
+            // creating a lease whose snapshot can traverse their edges.
+            let nodes = admitted_closure(&state, metadata_nodes.iter().copied());
+            if nodes.iter().any(|node| !owned.contains(node)) {
+                return Err(failure(
+                    "native offer metadata closure leaves its issuing custody",
+                ));
+            }
             let metadata = nodes
-                .difference(&executable_nodes)
+                .iter()
+                .filter(|node| !executable_nodes.contains(node))
                 .copied()
                 .collect::<Vec<_>>();
-            let nodes = nodes.into_iter().collect::<imbl::OrdSet<_>>();
             let selected = selection_snapshot_for_lease(
                 &state,
                 &BTreeMap::from([(original, carrier), (interface, canonical)]),
@@ -2726,7 +2735,7 @@ impl IssuedNativeOffer {
                 &metadata,
                 &[],
             );
-            let groups = nodes
+            let groups = executable_nodes
                 .iter()
                 .filter_map(|node| match node {
                     ArtifactBindingNode::Group(group) => Some(*group),
@@ -2746,7 +2755,9 @@ impl IssuedNativeOffer {
                     &mut payloads,
                     &mut acquired_owner_counts,
                     id,
-                    Arc::clone(&source.payloads[&id]),
+                    Arc::clone(source.payloads.get(&id).ok_or_else(|| {
+                        failure("native offer metadata closure lacks its issued payload")
+                    })?),
                 );
             }
             let lease = Arc::new(ViewLease {
