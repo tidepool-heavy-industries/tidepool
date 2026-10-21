@@ -134,6 +134,7 @@ pub(crate) fn entry_payloads(
 ) -> Vec<(OriginalInputKind, &[u8])> {
     use crate::artifact_inventory::ArtifactPayload;
     let (interface, packages, canonical) = match &entry.payload {
+        ArtifactPayload::PackageCode(_) => return Vec::new(),
         ArtifactPayload::Original(product) => (
             product.interface_bytes(),
             product.package_imports_bytes(),

@@ -17,7 +17,7 @@ use tidepool_repr::execution_schema::{
 };
 
 mod package_code;
-pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct};
+pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageCodeInterfaceRef};
 pub(crate) mod native_demand;
 pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
@@ -3276,6 +3276,13 @@ impl CertifiedSourceSelection {
         Self::new_product_ingress()
     }
 
+    pub(crate) fn native_completions(&self) -> crate::artifact_inventory::NativeSelectionCompletions {
+        match &self.input_origin {
+            CertifiedInputOrigin::Continuation(source) => source.native_completions().clone(),
+            CertifiedInputOrigin::NewProducts => Default::default(),
+        }
+    }
+
     pub(crate) fn continuation_input(
         &self,
         owner: &crate::declaration_join::ExactModuleIdentity,
@@ -5073,13 +5080,9 @@ fn resolve_receipt_owner_with_validation(
                     reason: InputDecisionRefusal::MissingContinuationOwner,
                 })?;
             let ordinal = *ordinal;
-            // The item receipt must still agree with this selected continuation.
-            selected.receipt_source_owner(
-                &owner.unit,
-                &owner.module,
-                Some(&native.module_version),
-                ordinal,
-            )?;
+            // This exact pair/symbol was already permitted by the retained
+            // initial input owner. Prefix products can change the current
+            // module policy without replacing that historical selection.
             let resolved = sources
                 .get(&(native.clone(), ordinal, binder.clone()))
                 .ok_or_else(|| {
@@ -9522,7 +9525,7 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::ArtifactPayload::Original(product) => {
                             product.module_interface().cloned()
                         }
-                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) => None,
+                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => None,
                     })
                     .collect()
             });
@@ -19987,7 +19990,7 @@ pub(crate) mod tests {
             &packet(vec![batch_uses[1].clone()], &validation.inventory), &mut validation,
         ).unwrap();
         let merged = first.groups().merge(second.groups()).unwrap();
-        assert_eq!(merged.bindings(), BTreeSet::from([old_r, old_g, fresh_g, fresh_j]));
+        assert_eq!(merged.selected_rows().keys().copied().collect::<BTreeSet<_>>(), BTreeSet::from([old_r, old_g, fresh_g, fresh_j]));
         assert_eq!(merged.retained_bindings(), resolved.groups().retained_bindings());
         let mut foreign_validation = PackageInterfaceValidation::default();
         let foreign = inputs.resolve_native_demand(
