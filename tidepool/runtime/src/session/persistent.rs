@@ -7333,67 +7333,83 @@ mod checkpoint_scope_tests {
     #[test]
     fn stale_sibling_descriptor_cannot_restore_released_root_with_live_anchor() {
         use super::super::prepared::tests::{
-            certified_sibling_fixture, install_selected_groups_fixture,
-            prepare_selected_groups_fixture,
+            compile_source_publication_fixture, install_runtime_fixture_in,
         };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
-        let root = tempfile::tempdir().unwrap();
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        let mut session = publication_session(&recovery, root.path(), 828);
-        let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let groups = [certified_sibling_fixture()];
-        let source = |name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", name),
-        };
-        let (ta, _) = install_selected_groups_fixture(&mut session, a, &groups, source("a"));
+        let targets = compile_source_publication_fixture();
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let a = source.scope();
+        let (first, _, _first_placement) =
+            install_runtime_fixture_in(&mut session, a, targets, "first");
         let b = session.mint_detached_scope(a).unwrap();
-        let (old_target, old_delta) =
-            install_selected_groups_fixture(&mut session, a, &groups, source("b"));
-        let stale = selected_sources(&session, a)
-            .into_iter()
-            .find(|lease| lease.binder().binder.occurrence == "b")
+        let _b_placement = session.prepared_lexical_scope_lease(b).unwrap();
+        let before = session.bindings.source_instance_keys_in(&session.scopes, b);
+        let (second, delta, _second_placement) =
+            install_runtime_fixture_in(&mut session, a, targets, "second");
+        let selected = session
+            .bindings
+            .native_domain_selection_in(&session.scopes, b)
             .unwrap();
-        assert!(session.prepared_mut().unwrap().unpin(old_target));
-        assert!(session.retire_failed_turn_source_instances(a, &old_delta));
-        assert!(!session.prepared_mut().unwrap().release(stale.handle()));
-        let (target, evidence, inherited) =
-            prepare_selected_groups_fixture(&session, b, &groups, &[source("b")]);
-        assert_eq!(inherited.len(), 1);
-        assert!(
-            session
-                .bindings
-                .retained_source_sibling_attachment(&inherited[0])
-                .is_none(),
-            "live anchor cannot issue a stale sibling descriptor"
-        );
-        let (fresh, _, _) = session
-            .install_certified_turn_in(
-                b,
-                &target.fixture_constructor_metadata(),
-                target,
-                &evidence,
-                &inherited,
-                &|_| None,
-            )
-            .unwrap()
-            .into_parts();
-        let live = selected_sources(&session, b)
+        let (anchor_key, anchor) = selected
+            .roots()
+            .iter()
+            .find(|(_, lease)| lease.export().occurrence == "first")
+            .expect("real recursive first export is held by capture");
+        let stale = session
+            .bindings
+            .source_instances_in(&session.scopes, a)
             .into_iter()
-            .find(|lease| lease.binder().binder.occurrence == "b")
+            .find(|lease| lease.export().occurrence == "second")
+            .expect("real sibling was installed");
+        assert_eq!(
+            stale.binding_key(),
+            anchor.binding_key(),
+            "actual recursive group premise"
+        );
+        assert_eq!(stale.instance(), anchor.instance());
+        let held = session
+            .bindings
+            .retained_native_sibling_attachment(anchor_key.domain, anchor, stale.value())
+            .unwrap();
+        assert!(session.prepared_mut().unwrap().unpin(second));
+        assert!(session.retire_failed_turn_source_instances(a, &delta));
+        assert!(!session.prepared_mut().unwrap().release(stale.handle()));
+        let revision = session.bindings.mutation_revision();
+        assert!(session
+            .machine
+            .as_ref()
+            .unwrap()
+            .admit_source_instances(&mut session.bindings, &session.scopes, b, vec![held])
+            .is_err());
+        assert_eq!(session.bindings.mutation_revision(), revision);
+        assert_eq!(
+            session.bindings.source_instance_keys_in(&session.scopes, b),
+            before
+        );
+        assert!(session
+            .bindings
+            .retained_native_sibling_attachment(anchor_key.domain, anchor, stale.value())
+            .is_none());
+        let (fresh, _, _fresh_placement) =
+            install_runtime_fixture_in(&mut session, b, targets, "second");
+        let live = session
+            .bindings
+            .source_instances_in(&session.scopes, b)
+            .into_iter()
+            .find(|lease| lease.export().occurrence == "second")
             .unwrap();
         assert_eq!(
             live.instance(),
             stale.instance(),
-            "exact group CAF is shared"
+            "exact existing group instance remains anchored"
         );
         assert_ne!(
             live.handle(),
             stale.handle(),
-            "only a new machine-issued root is admitted"
+            "only a newly issued physical root is admitted"
         );
-        for target in [ta, fresh] {
-            session.prepared_mut().unwrap().unpin(target);
+        for target in [first, fresh] {
+            assert!(session.prepared_mut().unwrap().unpin(target));
         }
         session.retire_scope(a);
         session.retire_scope(b);
@@ -7403,6 +7419,7 @@ mod checkpoint_scope_tests {
             .quiesce_and_collect_now()
             .unwrap();
         assert_eq!(session.persistent_roots_count(), 0);
+        assert_eq!(session.residency().unwrap().programs, 0);
     }
 
     #[test]
