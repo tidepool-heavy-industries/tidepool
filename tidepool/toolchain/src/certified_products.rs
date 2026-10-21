@@ -2924,7 +2924,151 @@ pub(crate) struct CurrentProductRef<'a> {
     ordinal: u32,
 }
 
+pub(crate) enum CurrentSourceDependency<'a> {
+    Local(CurrentProductRef<'a>),
+    Issued(crate::declaration_context::ChosenNativeGroupSupport),
+    Unavailable,
+}
+
 impl<'a> CurrentProductRef<'a> {
+    pub(crate) fn available_original_group(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> Result<Option<crate::declaration_context::ChosenNativeGroupSupport>, crate::CompileError>
+    {
+        self.selection
+            .original_bindings
+            .as_ref()
+            .ok_or_else(|| {
+                crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(
+                    "Original requirement lacks its metadata owner",
+                )))
+            })?
+            .available_group(reference, operation)
+    }
+
+    pub(crate) fn available_source_dependency(
+        &self,
+        reference: &ReceiptImportOwner,
+        entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
+            crate::artifact_inventory::ArtifactId,
+        >,
+        operation: &InventoryOperation,
+    ) -> Result<CurrentSourceDependency<'a>, crate::CompileError> {
+        use crate::artifact_inventory::{ArtifactPayload, NativeGroupKey};
+        let evidence = |error| crate::CompileError::CompilerEvidence(Box::new(error));
+        let ReceiptImportOwner::Source {
+            unit,
+            module,
+            module_version,
+            original_ordinal,
+            binder,
+        } = reference
+        else {
+            return Err(evidence(CertificationError::Mismatch(
+                "Source availability reference kind",
+            )));
+        };
+        let owner = self
+            .selection
+            .receipt_source_member(unit, module, module_version.as_ref())
+            .map_err(evidence)?;
+        let native = self
+            .selection
+            .modules
+            .get(&(unit.clone(), module.clone()))
+            .and_then(ReceiptSourceSelection::native);
+        if native.is_some_and(|native| {
+            matches!(native.origin, ReceiptNativeOrigin::NewProduct)
+                && matches!(
+                    native.availability,
+                    ReceiptNativeAvailability::NewProduct { .. }
+                )
+        }) {
+            return self
+                .current_source_child(reference, entries)
+                .map_err(evidence)?
+                .map(CurrentSourceDependency::Local)
+                .ok_or_else(|| {
+                    evidence(CertificationError::Mismatch(
+                        "Source availability lost its current cohort child",
+                    ))
+                });
+        }
+        let row = match native.and_then(|native| native.availability.issued_row()) {
+            Some(row) => row.as_ref(),
+            None => self
+                .selection
+                .private_advertised
+                .receipt_original(
+                    &self.selection.private_native,
+                    unit,
+                    module,
+                    &owner.module_version,
+                )
+                .map_err(|error| evidence(CertificationError::OriginalClosure(Box::new(error))))?
+                .ok_or_else(|| {
+                    evidence(CertificationError::Mismatch(
+                        "Source availability lost its exact row",
+                    ))
+                })?,
+        };
+        let entry = row.target_original(owner).ok_or_else(|| {
+            evidence(CertificationError::Mismatch(
+                "Source availability exact owner",
+            ))
+        })?;
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(evidence(CertificationError::Mismatch(
+                "Source availability payload kind",
+            )));
+        };
+        let witness = product
+            .original_native()
+            .filter(|witness| witness.matches_original(product))
+            .ok_or_else(|| {
+                evidence(CertificationError::Mismatch(
+                    "Source availability native witness",
+                ))
+            })?;
+        if !witness
+            .group(*original_ordinal)
+            .is_some_and(|group| group.group.binders().contains(binder))
+        {
+            return Err(evidence(CertificationError::Mismatch(
+                "Source availability binder membership",
+            )));
+        }
+        let source = self.request_inputs().ok_or_else(|| {
+            evidence(CertificationError::Mismatch(
+                "Source availability lacks its request input owner",
+            ))
+        })?;
+        let canonical = crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(
+            product.module_interface().ok_or_else(|| {
+                evidence(CertificationError::Mismatch(
+                    "Source availability canonical witness",
+                ))
+            })?,
+        );
+        Ok(
+            match row.choose_group(
+                source,
+                NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: *original_ordinal,
+                },
+                crate::declaration_context::NativeGroupChoiceIdentity::CompilerRole(canonical),
+                owner,
+                operation,
+            )? {
+                Some(chosen) => CurrentSourceDependency::Issued(chosen),
+                None => CurrentSourceDependency::Unavailable,
+            },
+        )
+    }
+
     pub(crate) fn nominal_imports(&self) -> CertResult<&'a [ReceiptImportOwner]> {
         let crate::artifact_inventory::ArtifactPayload::Original(product) = &self.entry.payload
         else {
@@ -3551,13 +3695,16 @@ impl CertifiedSourceSelection {
 
     pub(crate) fn finish_new_product_availability(
         &mut self,
-        metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
-        issued: &BTreeMap<
-            crate::artifact_inventory::ArtifactId,
-            Arc<crate::declaration_context::CompletedNativeProductAvailability>,
-        >,
+        issued: &crate::declaration_context::CompletedRequestNativeAvailability,
     ) -> CertResult<()> {
-        for selected in Arc::make_mut(&mut self.modules).values_mut() {
+        let metadata = issued.artifacts().metadata_snapshot();
+        let carried = self
+            .private_native
+            .merge(issued.rows())
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+            .into_rows();
+        let mut modules = Arc::clone(&self.modules);
+        for selected in Arc::make_mut(&mut modules).values_mut() {
             let ReceiptSourceSelection::Native { interface, native } = selected else {
                 continue;
             };
@@ -3568,11 +3715,13 @@ impl CertifiedSourceSelection {
                 continue;
             }
             let id = native.original_artifact_id()?;
-            let completed = issued.get(&id).ok_or(CertificationError::Mismatch(
-                "new product lacks exact issued native availability",
-            ))?;
+            let completed = issued
+                .completed_product(id)
+                .ok_or(CertificationError::Mismatch(
+                    "new product lacks exact issued native availability",
+                ))?;
             let original = completed.row();
-            let entry = native.original_entry(*interface, metadata)?;
+            let entry = native.original_entry(*interface, &metadata)?;
             let actual =
                 original
                     .target_original(&native.owner)
@@ -3588,6 +3737,8 @@ impl CertifiedSourceSelection {
             }
             native.availability = ReceiptNativeAvailability::Completed(Arc::clone(completed));
         }
+        self.modules = modules;
+        self.private_native = carried;
         Ok(())
     }
 

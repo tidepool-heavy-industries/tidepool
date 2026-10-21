@@ -1438,6 +1438,10 @@ enum ArtifactRootIntent<'a> {
         selected: &'a [IssuedNativeOffer],
         dependencies: &'a NativeDependencyCatalog<'a>,
     },
+    CurrentCohort {
+        selection: &'a crate::certified_products::CertifiedSourceSelection,
+        classified: &'a native_availability::ClassifiedNativeCohort,
+    },
     Offered(
         &'a CompilerInputProjection,
         &'a [IssuedNativeOffer],
@@ -1465,7 +1469,9 @@ impl ArtifactRootIntent<'_> {
             Self::SuppliedArtifacts => Vec::new(),
             // Checked availability is not a selected graph. Its membership
             // is queried only for certified fresh dependency demand below.
-            Self::PrivateAvailability { .. } | Self::Offered(..) => Vec::new(),
+            Self::PrivateAvailability { .. } | Self::CurrentCohort { .. } | Self::Offered(..) => {
+                Vec::new()
+            }
             Self::Certified(selection) => {
                 let mut requirements = Vec::new();
                 for proof in selection.new_product_native_requirements() {
@@ -4262,90 +4268,77 @@ impl ArtifactInventory {
                 ));
             };
             root_causes.insert(group, NativeSourceCause::Current);
-            let mut by_edge = dependencies
-                .iter()
-                .map(|dependency| (dependency.key(), dependency.target().clone()))
-                .collect::<BTreeMap<_, _>>();
             let mut edges = BTreeSet::from([(
                 PlannedTarget::Artifact(group.artifact),
                 ArtifactDependency::Interface,
             )]);
-            for (owner, dependency) in entry.native_requirements_for(group.original_ordinal) {
-                let target = if let ArtifactDependency::NativeGroup {
-                    dependent_ordinal,
-                    required_ordinal,
-                } = dependency
-                {
-                    let edge = native_availability::NativeGroupEdge {
-                        dependent_ordinal: *dependent_ordinal,
-                        required_ordinal: *required_ordinal,
-                    };
-                    let target = by_edge.remove(&(owner.clone(), edge)).ok_or_else(|| {
-                        native_admission_failure(
-                            group,
-                            NativeAdmissionRefusal::HistoricalEdgeMissing {
-                                parent: group,
-                                required_ordinal: *required_ordinal,
-                            },
-                        )
-                    })?;
-                    edge_causes.push((
-                        group,
-                        PlannedTarget::from(target.clone()),
-                        target.source_cause(),
-                    ));
-                    let (id, ordinal) = match target {
-                        native_availability::NativeGroupTarget::ExactGroup(ref issued)
-                        | native_availability::NativeGroupTarget::CurrentIssued(ref issued) => {
-                            let child = issued.binding();
-                            (child.binding.artifact(), child.original_ordinal)
-                        }
-                        native_availability::NativeGroupTarget::NewGroup(child) => {
-                            (child.artifact, child.original_ordinal)
-                        }
-                    };
-                    let child_entry = fixed.demanded_entry(&incoming, id)?;
-                    if child_entry.descriptor.owner != *owner {
-                        return Err(native_admission_failure(
-                            group,
-                            NativeAdmissionRefusal::HistoricalOwnerMismatch { parent: group },
-                        ));
+            for dependency in dependencies {
+                let target = dependency.target();
+                let edge = dependency.edge();
+                let (id, ordinal) = match target {
+                    native_availability::NativeGroupTarget::ExactGroup(issued)
+                    | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
+                        let child = issued.binding();
+                        (child.binding.artifact(), child.original_ordinal)
                     }
-                    if !child_entry.native_group_ordinals.contains(&ordinal) {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::NativeGroupUnavailable {
-                                artifact: id,
-                                original_ordinal: ordinal,
-                            },
-                        ));
+                    native_availability::NativeGroupTarget::NewGroup(child) => {
+                        (child.artifact, child.original_ordinal)
                     }
-                    match target {
-                        native_availability::NativeGroupTarget::ExactGroup(issued)
-                        | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
-                            PlannedTarget::ExactGroup(issued.binding())
-                        }
-                        native_availability::NativeGroupTarget::NewGroup(child) => {
-                            pending.push(child);
-                            PlannedTarget::NewGroup(child)
-                        }
-                    }
-                } else {
-                    let id = fixed.owners.interfaces.get(owner).copied().ok_or_else(|| {
-                        admission_failure(ArtifactInventoryFailure::MissingDependency {
-                            artifact: group.artifact,
-                            dependent: entry.descriptor.owner.clone(),
-                            required: owner.clone(),
-                            dependency: dependency.clone(),
-                        })
-                    })?;
-                    PlannedTarget::Artifact(id)
                 };
-                edges.insert((target, dependency.clone()));
-            }
-            if !by_edge.is_empty() {
-                return Err(failure(
-                    "current native dependency plan has an unconsumed obligation",
+                if edge.dependent_ordinal != group.original_ordinal
+                    || edge.required_ordinal != ordinal
+                {
+                    return Err(failure(
+                        "carried native dependency differs from its physical obligation",
+                    ));
+                }
+                let child_entry = fixed.demanded_entry(&incoming, id)?;
+                if &child_entry.descriptor.owner != dependency.owner() {
+                    return Err(native_admission_failure(
+                        group,
+                        NativeAdmissionRefusal::HistoricalOwnerMismatch { parent: group },
+                    ));
+                }
+                if !child_entry.native_group_ordinals.contains(&ordinal) {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact: id,
+                            original_ordinal: ordinal,
+                        },
+                    ));
+                }
+                let planned_target = match target {
+                    native_availability::NativeGroupTarget::ExactGroup(issued)
+                    | native_availability::NativeGroupTarget::CurrentIssued(issued) => {
+                        PlannedTarget::ExactGroup(issued.binding())
+                    }
+                    native_availability::NativeGroupTarget::NewGroup(child) => {
+                        pending.push(*child);
+                        PlannedTarget::NewGroup(*child)
+                    }
+                };
+                edge_causes.push((group, planned_target, target.source_cause()));
+                edges.insert((
+                    planned_target,
+                    ArtifactDependency::NativeGroup {
+                        dependent_ordinal: edge.dependent_ordinal,
+                        required_ordinal: edge.required_ordinal,
+                    },
                 ));
+            }
+            for (owner, dependency) in entry.native_requirements_for(group.original_ordinal) {
+                if matches!(dependency, ArtifactDependency::NativeGroup { .. }) {
+                    continue;
+                }
+                let id = fixed.owners.interfaces.get(owner).copied().ok_or_else(|| {
+                    admission_failure(ArtifactInventoryFailure::MissingDependency {
+                        artifact: group.artifact,
+                        dependent: entry.descriptor.owner.clone(),
+                        required: owner.clone(),
+                        dependency: dependency.clone(),
+                    })
+                })?;
+                edges.insert((PlannedTarget::Artifact(id), dependency.clone()));
             }
             planned.insert(group, edges);
         }
@@ -5122,7 +5115,10 @@ impl ArtifactInventory {
         selected.extend(supplied.clone());
         let mut consumed_namespace = None;
         let namespace_ids = match root_intent {
-            ArtifactRootIntent::Certified(issued) => Some(
+            ArtifactRootIntent::Certified(issued)
+            | ArtifactRootIntent::CurrentCohort {
+                selection: issued, ..
+            } => Some(
                 issued
                     .artifact_ids_from_entries(&selected)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
@@ -5232,7 +5228,8 @@ impl ArtifactInventory {
                     continue;
                 }
                 let pair = match root_intent {
-                    ArtifactRootIntent::Certified(selection) => selection
+                    ArtifactRootIntent::Certified(selection)
+                    | ArtifactRootIntent::CurrentCohort { selection, .. } => selection
                         .continuation_input(&entry.descriptor.owner)
                         .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
                         .and_then(|(source, _)| {
@@ -5260,6 +5257,11 @@ impl ArtifactInventory {
         let mut resolved_targets = BTreeMap::new();
         let mut current_dependencies = BTreeMap::new();
         let acquisition = match root_intent {
+            ArtifactRootIntent::CurrentCohort { classified, .. } => {
+                Some(native_availability::bind_classified_cohort(
+                    &mut state, parent, &selected, classified,
+                )?)
+            }
             ArtifactRootIntent::PrivateAvailability { dependencies, .. } => {
                 Some(native_availability::bind_fresh_product_dependencies(
                     &mut state,
@@ -5369,7 +5371,9 @@ impl ArtifactInventory {
             Some(target) => Ok(target),
             None if matches!(
                 root_intent,
-                ArtifactRootIntent::Certified(_) | ArtifactRootIntent::PrivateAvailability { .. }
+                ArtifactRootIntent::Certified(_)
+                    | ArtifactRootIntent::PrivateAvailability { .. }
+                    | ArtifactRootIntent::CurrentCohort { .. }
             ) =>
             {
                 Err(admission_failure(

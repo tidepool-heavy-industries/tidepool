@@ -3089,11 +3089,23 @@ impl DemandNativeInputs {
                 artifact: id,
                 original_ordinal: *original_ordinal,
             };
+            let choice = match original_use {
+                Some(crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                    interface,
+                    original,
+                    ..
+                }) => NativeGroupChoiceIdentity::OriginalPair {
+                    interface: *interface,
+                    original: *original,
+                },
+                Some(_) => return Err(failure("native Original use has another reference kind")),
+                None => NativeGroupChoiceIdentity::CompilerRole(role.interface()),
+            };
             let chosen = row
                 .choose_group(
                     &self.cold.source_support,
                     key,
-                    NativeGroupChoiceIdentity::CompilerRole(role.interface()),
+                    choice,
                     native_owner,
                     &operation,
                 )?

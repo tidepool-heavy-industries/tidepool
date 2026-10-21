@@ -271,12 +271,264 @@ pub(super) struct ResolvedNativeDependency {
 }
 
 impl ResolvedNativeDependency {
-    pub(super) fn key(&self) -> (ExactModuleIdentity, NativeGroupEdge) {
-        (self.required_owner.clone(), self.edge)
+    pub(super) fn owner(&self) -> &ExactModuleIdentity {
+        &self.required_owner
+    }
+    pub(super) fn edge(&self) -> NativeGroupEdge {
+        self.edge
     }
     pub(super) fn target(&self) -> &NativeGroupTarget {
         &self.target
     }
+}
+
+enum CohortNativeRequirement {
+    Local {
+        owner: ExactModuleIdentity,
+        edge: NativeGroupEdge,
+        child: NativeGroupKey,
+    },
+    External {
+        owner: ExactModuleIdentity,
+        edge: NativeGroupEdge,
+        support: crate::declaration_context::ChosenNativeGroupSupport,
+    },
+    Unavailable,
+}
+
+/// All nominal group obligations of one physical output cohort are classified
+/// once. Unavailable obligations remain explicit until local closure is removed.
+pub(super) struct ClassifiedNativeCohort {
+    entries: Vec<Arc<ArtifactEntry>>,
+    requirements: BTreeMap<NativeGroupKey, Vec<CohortNativeRequirement>>,
+    available: BTreeSet<NativeGroupKey>,
+}
+
+impl ClassifiedNativeCohort {
+    pub(super) fn classify(
+        physical: &ArtifactView,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        use crate::certified_products::{CurrentSourceDependency, ReceiptImportOwner};
+        let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
+        let entries = selection
+            .complete_native_entries(physical)
+            .map_err(evidence)?;
+        let metadata = physical.metadata_snapshot();
+        let mut requirements = BTreeMap::new();
+        let mut reverse = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupKey>>::new();
+        let mut blocked = BTreeSet::new();
+        for entry in &entries {
+            for &ordinal in &entry.native_group_ordinals {
+                crate::host_work::checkpoint()?;
+                let key = NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: ordinal,
+                };
+                let current = selection
+                    .current_product(key, entry)
+                    .map_err(evidence)?
+                    .ok_or_else(|| {
+                        failure("cohort requirement lacks its actual current product")
+                    })?;
+                let imports = current.nominal_imports().map_err(evidence)?;
+                operation
+                    .reserve::<CohortNativeRequirement>(imports.len())
+                    .map_err(|error| evidence(error.into()))?;
+                let mut obligations = Vec::new();
+                for reference in imports {
+                    crate::host_work::checkpoint()?;
+                    operation
+                        .charge(1)
+                        .map_err(|error| evidence(error.into()))?;
+                    let (unit, module) = match reference {
+                        ReceiptImportOwner::Source { unit, module, .. }
+                        | ReceiptImportOwner::OriginalBinding { unit, module, .. } => {
+                            (unit, module)
+                        }
+                        _ => continue,
+                    };
+                    operation
+                        .charge(unit.len() + module.len())
+                        .map_err(|error| evidence(error.into()))?;
+                    let owner = ExactModuleIdentity {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                    };
+                    let requirement = match reference {
+                        ReceiptImportOwner::Source { .. } => match current
+                            .available_source_dependency(
+                                reference,
+                                &metadata.artifacts,
+                                operation,
+                            )? {
+                            CurrentSourceDependency::Local(child) => {
+                                let child = child.key();
+                                operation
+                                    .reserve::<(NativeGroupKey, [usize; 4])>(2)
+                                    .map_err(|error| evidence(error.into()))?;
+                                reverse.entry(child).or_default().insert(key);
+                                CohortNativeRequirement::Local {
+                                    owner,
+                                    edge: NativeGroupEdge {
+                                        dependent_ordinal: ordinal,
+                                        required_ordinal: child.original_ordinal,
+                                    },
+                                    child,
+                                }
+                            }
+                            CurrentSourceDependency::Issued(support) => {
+                                CohortNativeRequirement::External {
+                                    owner,
+                                    edge: NativeGroupEdge {
+                                        dependent_ordinal: ordinal,
+                                        required_ordinal: support.binding().original_ordinal,
+                                    },
+                                    support,
+                                }
+                            }
+                            CurrentSourceDependency::Unavailable => {
+                                CohortNativeRequirement::Unavailable
+                            }
+                        },
+                        ReceiptImportOwner::OriginalBinding { .. } => {
+                            match current.available_original_group(reference, operation)? {
+                                Some(support) => CohortNativeRequirement::External {
+                                    owner,
+                                    edge: NativeGroupEdge {
+                                        dependent_ordinal: ordinal,
+                                        required_ordinal: support.binding().original_ordinal,
+                                    },
+                                    support,
+                                },
+                                None => CohortNativeRequirement::Unavailable,
+                            }
+                        }
+                        _ => unreachable!("native nominal requirement classified above"),
+                    };
+                    if matches!(requirement, CohortNativeRequirement::Unavailable) {
+                        operation
+                            .reserve::<(NativeGroupKey, [usize; 4])>(1)
+                            .map_err(|error| evidence(error.into()))?;
+                        blocked.insert(key);
+                    }
+                    obligations.push(requirement);
+                }
+                operation
+                    .reserve::<(NativeGroupKey, Vec<CohortNativeRequirement>, [usize; 4])>(1)
+                    .map_err(|error| evidence(error.into()))?;
+                requirements.insert(key, obligations);
+            }
+        }
+        operation
+            .reserve::<NativeGroupKey>(blocked.len())
+            .map_err(|error| evidence(error.into()))?;
+        let mut pending = blocked.iter().copied().collect::<Vec<_>>();
+        while let Some(child) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            for &parent in reverse.get(&child).into_iter().flatten() {
+                operation
+                    .charge(1)
+                    .map_err(|error| evidence(error.into()))?;
+                if !blocked.contains(&parent) {
+                    operation
+                        .reserve::<NativeGroupKey>(2)
+                        .map_err(|error| evidence(error.into()))?;
+                    blocked.insert(parent);
+                    pending.push(parent);
+                }
+            }
+        }
+        operation
+            .reserve::<(NativeGroupKey, [usize; 4])>(requirements.len())
+            .map_err(|error| evidence(error.into()))?;
+        let available = requirements
+            .keys()
+            .filter(|key| !blocked.contains(key))
+            .copied()
+            .collect();
+        Ok(Self {
+            entries,
+            requirements,
+            available,
+        })
+    }
+
+    pub(super) fn available(&self) -> &BTreeSet<NativeGroupKey> {
+        &self.available
+    }
+    pub(super) fn entries(&self) -> &[Arc<ArtifactEntry>] {
+        &self.entries
+    }
+}
+
+pub(super) fn bind_classified_cohort(
+    state: &mut InventoryState,
+    parent: &ArtifactView,
+    entries: &impl ArtifactEntryMap<ArtifactId>,
+    cohort: &ClassifiedNativeCohort,
+) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
+    let mut acquisition = CertifiedNativeDemandAcquisition {
+        entries: BTreeMap::new(),
+        bindings: BTreeMap::new(),
+        offers: Vec::new(),
+    };
+    for &key in &cohort.available {
+        let mut dependencies = Vec::new();
+        for requirement in &cohort.requirements[&key] {
+            crate::host_work::checkpoint()?;
+            let (required_owner, edge, target) = match requirement {
+                CohortNativeRequirement::Local { owner, edge, child } => {
+                    if !cohort.available.contains(child) {
+                        return Err(failure(
+                            "available cohort group retains unavailable local dependency",
+                        ));
+                    }
+                    (owner.clone(), *edge, NativeGroupTarget::NewGroup(*child))
+                }
+                CohortNativeRequirement::External {
+                    owner,
+                    edge,
+                    support,
+                } => {
+                    let binding = support.binding();
+                    let native = NativeSupportRef::checked(
+                        state,
+                        parent,
+                        binding,
+                        crate::certified_products::CertifiedNativeGroupSupport::Issued(
+                            support.contribution().offer(),
+                        ),
+                    )?;
+                    let issued = native.describe(binding)?;
+                    native.acquire(state, entries, &mut acquisition.entries, &issued)?;
+                    acquisition
+                        .offers
+                        .push(support.contribution().offer().clone());
+                    (
+                        owner.clone(),
+                        *edge,
+                        NativeGroupTarget::ExactGroup(Arc::new(issued)),
+                    )
+                }
+                CohortNativeRequirement::Unavailable => {
+                    return Err(failure(
+                        "available cohort group retains an unavailable obligation",
+                    ))
+                }
+            };
+            dependencies.push(ResolvedNativeDependency {
+                required_owner,
+                edge,
+                target,
+            });
+        }
+        acquisition
+            .bindings
+            .insert(key, VerifiedNativeBinding::NewCurrent { dependencies });
+    }
+    Ok(acquisition)
 }
 
 /// One exact labeled native dependency edge from a parent group.
