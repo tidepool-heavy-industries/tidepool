@@ -4839,9 +4839,20 @@ impl CertifiedSourceSelection {
         {
             match selected.version {
                 ReceiptSourceVersion::Original if version.is_none() => {
-                    return Err(CertificationError::Mismatch(
-                        "missing cached source version",
-                    ))
+                    match (&selected.origin, &selected.availability) {
+                        // The same program's produced Source retains its exact
+                        // completed issuer across stages. An initial Original
+                        // input does not acquire that derived identity.
+                        (
+                            ReceiptNativeOrigin::PriorStageProduct,
+                            ReceiptNativeAvailability::Completed(_),
+                        ) => {}
+                        _ => {
+                            return Err(CertificationError::Mismatch(
+                                "missing cached source version",
+                            ))
+                        }
+                    }
                 }
                 ReceiptSourceVersion::RetainedCore if version.is_some() => {
                     return Err(CertificationError::Mismatch(
@@ -15603,6 +15614,22 @@ pub(crate) mod tests {
         let source_selection =
             CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
                 .unwrap();
+        assert!(matches!(
+            source_selection.receipt_source_member(&owner.unit, &owner.module, None),
+            Err(CertificationError::Mismatch(
+                "missing cached source version"
+            ))
+        ));
+        let wrong_version = ModuleVersion([0xff; 32]);
+        assert_ne!(wrong_version, product.owner().module_version);
+        assert!(matches!(
+            source_selection.receipt_source_member(
+                &owner.unit,
+                &owner.module,
+                Some(&wrong_version)
+            ),
+            Err(CertificationError::Mismatch("source module version"))
+        ));
         assert_eq!(
             source_selection
                 .receipt_source_member(
