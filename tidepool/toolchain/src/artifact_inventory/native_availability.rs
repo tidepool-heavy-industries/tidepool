@@ -271,12 +271,45 @@ pub(super) struct ResolvedNativeDependency {
 }
 
 impl ResolvedNativeDependency {
-    pub(super) fn owner(&self) -> &ExactModuleIdentity {
-        &self.required_owner
+    pub(super) fn target_key(&self) -> NativeGroupKey {
+        match &self.target {
+            NativeGroupTarget::ExactGroup(issued) | NativeGroupTarget::CurrentIssued(issued) => {
+                NativeGroupKey {
+                    artifact: issued.binding.binding.artifact(),
+                    original_ordinal: issued.binding.original_ordinal,
+                }
+            }
+            NativeGroupTarget::NewGroup(key) => *key,
+        }
     }
-    pub(super) fn edge(&self) -> NativeGroupEdge {
-        self.edge
+
+    pub(super) fn planned_edge(
+        &self,
+        parent: NativeGroupKey,
+        child: &ArtifactEntry,
+    ) -> Result<(PlannedTarget, ArtifactDependency), CompileError> {
+        let target = self.target_key();
+        if self.edge.dependent_ordinal != parent.original_ordinal
+            || self.edge.required_ordinal != target.original_ordinal
+            || child.descriptor.id != target.artifact
+            || child.descriptor.owner != self.required_owner
+            || !child
+                .native_group_ordinals
+                .contains(&target.original_ordinal)
+        {
+            return Err(failure(
+                "carried native dependency differs from its physical obligation",
+            ));
+        }
+        Ok((
+            PlannedTarget::from(self.target.clone()),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: self.edge.dependent_ordinal,
+                required_ordinal: self.edge.required_ordinal,
+            },
+        ))
     }
+
     pub(super) fn target(&self) -> &NativeGroupTarget {
         &self.target
     }

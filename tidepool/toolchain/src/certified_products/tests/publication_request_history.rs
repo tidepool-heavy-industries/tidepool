@@ -658,7 +658,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 let entries = outputs.values().map(|(entry, _, _)| entry.clone()).collect();
                 let imports = outputs.values().map(|(_, import, _)| import.clone()).collect::<Vec<_>>();
                 let inventory = request.artifacts().inventory();
-                let mut fixed = inventory.bind_segment(request.artifacts(), entries, &selection).unwrap();
+                let mut fixed = inventory.bind_segment(request.artifacts(), entries, &selection, &mut crate::recovery_artifacts::PackageInterfaceValidation::default()).unwrap();
                 let target = inventory.admit_bound_target(
                     &mut fixed, request.artifacts(),
                     crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),

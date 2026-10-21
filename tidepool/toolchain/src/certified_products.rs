@@ -15765,7 +15765,7 @@ pub(crate) mod tests {
             entry.descriptor.id
         );
         assert_eq!(selected.compiler_projection(&view).unwrap(), projection);
-        let completed = selected.complete_native_entries(&view).unwrap();
+        let completed = selected.complete_native_entries(&view, &operation).unwrap();
         assert_eq!(completed.len(), 1);
         assert!(Arc::ptr_eq(
             &completed[0],
@@ -15814,7 +15814,10 @@ pub(crate) mod tests {
             .unwrap();
         assert!(own.same_issuance(offered));
         assert!(
-            selected.complete_native_entries(&view).unwrap().is_empty(),
+            selected
+                .complete_native_entries(&view, &operation)
+                .unwrap()
+                .is_empty(),
             "already-issued body is not a new product to reissue"
         );
     }
@@ -16097,7 +16100,9 @@ pub(crate) mod tests {
                 usize::from(namespace_original)
             );
             assert_eq!(
-                selection.complete_native_entries(&view).unwrap(),
+                selection
+                    .complete_native_entries(&view, &operation)
+                    .unwrap(),
                 vec![native.clone()]
             );
             assert!(selection.permits_native_group(native.descriptor.id, original.owner(), 9));
