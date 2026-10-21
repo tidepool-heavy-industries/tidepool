@@ -249,14 +249,14 @@ fn retirement_types() -> Vec<TypeDef> {
             field("reloadPrevious", "previous", Named("SourceRevision")),
             field("reloadCandidate", "candidate", Named("SourceRevision")),
             field("reloadOperation", "operation", HsType::maybe(Named("ReloadOperation"))),
-            field("reloadRetirementState", "state", Named("ReloadRetirementState")),
+            field("reloadRetirementState", "state", HsType::maybe(Named("ReloadRetirementState"))),
             field("reloadBlockers", "blockers", HsType::list(Named("ReloadBlocker"))),
             field("reloadResourceOutcomes", "outcomes", HsType::list(Named("ReloadResourceOutcome"))),
             field("reloadRetirementSurface", "surface", Named("ReloadSurfaceDiff")),
             field("reloadPrimaryCause", "primary", HsType::maybe(Named("ReloadCause"))),
             field("reloadSecondaryCauses", "secondary", HsType::list(Named("ReloadCause"))),
             field("reloadOperationalSettlement", "settlement", Named("ReloadOperationalSettlement")),
-        ], &["Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Source outcome, operational settlement and primary/secondary causes are independent observations. Inspect the owning operation and resource records for detailed retained obligations."]),
+        ], &["Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. An absent source outcome means it was not observed; it does not establish that A is fenced or reopened, or that B was published. Blockers list actual observations, not an assertion that an unavailable census was empty. Source outcome, operational settlement and primary/secondary causes are independent observations. Inspect the owning operation and resource records for detailed retained obligations."]),
     ]
 }
 

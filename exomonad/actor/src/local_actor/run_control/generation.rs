@@ -664,7 +664,7 @@ impl RunControlNativeCleanup {
 impl GenerationRetirementReplyMetadata {
     fn receipt(
         &self,
-        state: tidepool_bridge_effects::RlRetirementState,
+        state: Option<tidepool_bridge_effects::RlRetirementState>,
         blockers: Vec<tidepool_bridge_effects::RlBlocker>,
         primary: Option<tidepool_bridge_effects::RlCause>,
         secondary: Vec<tidepool_bridge_effects::RlCause>,
@@ -689,10 +689,10 @@ impl GenerationRetirementReplyMetadata {
     }
 
     fn unavailable(&self, detail: &str) -> GenerationRetirementResult {
-        use tidepool_bridge_effects::{RlCause, RlCauseKind, RlRetirementStage, RlRetirementState};
+        use tidepool_bridge_effects::{RlCause, RlCauseKind};
         self.receipt(
-            RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadSourcePublication),
-            vec![tidepool_bridge_effects::RlBlocker::ReloadUnclassifiedSourceWork(1)],
+            None,
+            Vec::new(),
             Some(RlCause {
                 kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
                 detail: detail.into(),
@@ -1081,7 +1081,7 @@ impl GenerationRetirementCore {
             let receipt = match completion {
                 GenerationRetirementCompletion::DefaultRefused { receipt, .. } => receipt.clone(),
                 GenerationRetirementCompletion::BPublished { .. } => metadata.receipt(
-                    State::ReloadBPublished(metadata.report.changed_modules.clone(), Vec::new()),
+                    Some(State::ReloadBPublished(metadata.report.changed_modules.clone(), Vec::new())),
                     Vec::new(),
                     None,
                     Vec::new(),
@@ -1092,7 +1092,7 @@ impl GenerationRetirementCore {
                     diagnostic_refusals,
                     diagnostic,
                 } => metadata.receipt(
-                    State::ReloadAReopened,
+                    Some(State::ReloadAReopened),
                     Vec::new(),
                     Some(cause(
                         Cause::ReloadPublicationFailed,
@@ -1146,7 +1146,7 @@ impl GenerationRetirementCore {
             } => (Some(cutoff), Some(custody)),
             GenerationRetirementPhase::ReservationFailed(error) => {
                 return metadata.receipt(
-                    State::ReloadRetirementFenced(Stage::ReloadCandidateSettlement),
+                    None,
                     Vec::new(),
                     Some(cause(
                         Cause::ReloadCandidateSettlementFailed,
@@ -1159,7 +1159,7 @@ impl GenerationRetirementCore {
         };
         if let Some(GenerationPublicationCustody::SourceRestoredPending { .. }) = custody {
             return metadata.receipt(
-                State::ReloadAReopened, Vec::new(), None,
+                Some(State::ReloadAReopened), Vec::new(), None,
                 vec![cause(Cause::ReloadAcknowledgementUnconfirmed, "original source is restored; actual publication obligations and diagnostic evidence remain retained".into())],
             );
         }
@@ -1188,11 +1188,11 @@ impl GenerationRetirementCore {
                             Cause::ReloadAcknowledgementUnconfirmed,
                             format!("retirement coordinate projection refused: {refusal:?}"),
                         ));
-                        vec![tidepool_bridge_effects::RlBlocker::ReloadUnclassifiedSourceWork(1)]
+                        Vec::new()
                     }
                 }
             }
-            None => vec![tidepool_bridge_effects::RlBlocker::ReloadUnclassifiedSourceWork(1)],
+            None => Vec::new(),
         };
         if let Some(GenerationRetirementCutoffPhase::RetirementFailed { error, .. }) = cutoff {
             secondary.push(cause(
@@ -1220,9 +1220,27 @@ impl GenerationRetirementCore {
             ),
         };
         let state = if custody.is_some_and(GenerationPublicationCustody::published) {
-            State::ReloadBPublished(metadata.report.changed_modules.clone(), Vec::new())
+            Some(State::ReloadBPublished(
+                metadata.report.changed_modules.clone(),
+                Vec::new(),
+            ))
         } else {
-            State::ReloadRetirementFenced(Stage::ReloadSourcePublication)
+            cutoff.and_then(|cutoff| {
+                let fence = match cutoff {
+                    GenerationRetirementCutoffPhase::AwaitCapture { fence, .. }
+                    | GenerationRetirementCutoffPhase::Captured { fence, .. }
+                    | GenerationRetirementCutoffPhase::Unconfirmed { fence, .. }
+                    | GenerationRetirementCutoffPhase::RetirementFailed { fence, .. } => fence,
+                    GenerationRetirementCutoffPhase::NotStarted
+                    | GenerationRetirementCutoffPhase::Refused(_)
+                    | GenerationRetirementCutoffPhase::RetirementInProgress { .. }
+                    | GenerationRetirementCutoffPhase::Retired { .. } => return None,
+                };
+                fence
+                    .pending_claims()
+                    .ok()
+                    .map(|_| State::ReloadRetirementFenced(Stage::ReloadSourcePublication))
+            })
         };
         metadata.receipt(state, blockers, Some(primary), secondary)
     }
@@ -1459,6 +1477,7 @@ enum GenerationRetirementProjectionRefusal {
     WatchIdentity,
     OperationCoordinate,
     PendingClaims,
+    WorkUnavailable,
     FrozenReloadReportMissing,
     OperationMissing,
 }
@@ -1605,7 +1624,7 @@ impl GenerationRetirementCapture {
                 i64::try_from(count)
                     .map_err(|_| GenerationRetirementProjectionRefusal::PendingClaims)?,
             )),
-            Err(_) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+            Err(_) => return Err(GenerationRetirementProjectionRefusal::PendingClaims),
         }
         Ok(blockers)
     }
@@ -1621,7 +1640,9 @@ impl GenerationRetirementWork {
             RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
         };
         match self {
-            Self::Unavailable => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+            Self::Unavailable => {
+                return Err(GenerationRetirementProjectionRefusal::WorkUnavailable)
+            }
             Self::Observed(work) => {
                 for observed in &work.invocations {
                     let actor = retirement_actor_identity(observed.actor)?;
@@ -2075,7 +2096,7 @@ fn reconcile_unstarted(
             "generation retirement refused because admitted dependent work remains",
         ) {
             Ok(source_settlement) => {
-                receipt.state = tidepool_bridge_effects::RlRetirementState::ReloadAReopened;
+                receipt.state = Some(tidepool_bridge_effects::RlRetirementState::ReloadAReopened);
                 let receipt = Arc::new(receipt);
                 let evidence = Arc::new(
                     crate::resident_actor::RetirementDiagnosticEvidence::default_refusal(&receipt),
@@ -3267,9 +3288,9 @@ impl RunState {
                 previous: report.previous.clone(),
                 candidate: report.candidate.clone(),
                 operation: Some(retirement_operation(operation_id)?),
-                state: RlRetirementState::ReloadRetirementFenced(
+                state: Some(RlRetirementState::ReloadRetirementFenced(
                     RlRetirementStage::ReloadCandidateSettlement,
-                ),
+                )),
                 blockers: capture.blockers()?,
                 outcomes: Vec::new(),
                 surface: report.surface.clone(),

@@ -949,6 +949,10 @@ impl RunControlClient {
                         capture.work,
                         GenerationRetirementWork::Unavailable
                     ));
+                    assert!(matches!(
+                        capture.blockers(),
+                        Err(GenerationRetirementProjectionRefusal::WorkUnavailable)
+                    ));
                     let GenerationCapturePhysicalClosure::Guarded { actors, .. } =
                         &capture.physical_closure;
                     let member = captured_reservation.as_ref().unwrap().identity();
