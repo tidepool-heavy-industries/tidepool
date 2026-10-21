@@ -97,3 +97,37 @@ must remain true (exact ordered slot selection survives reversed target order;
 shared bytes are not duplicated), while the same-seal/different-body positive,
 the transitive competitor, and the negative/recovery matrices remain queued
 behind the renumbering fixture and the P2 decoder.
+
+## Joined-tip review findings (P1 `dfeff6e569`, P2 `3c661591a1`)
+
+The joined producer/consumer tips expose three concrete defects that the
+oracle controls are written to catch. All three are first-class P3 findings,
+not hypothetical cases.
+
+1. **Cross-language receipt version mismatch.** The producer now emits
+   `TPCERT` version 12 (`CertifiedProducts.hs`, `encodeWord 12`), but P2's
+   committed decoder still accepts only version 11
+   (`certified_products.rs::product_receipt_payload`). Every native fixture
+   compile refuses `UnsupportedVersion { found: 12, expected: 11 }`. The
+   version bump must be committed atomically with the decoder; P2's
+   uncommitted working tree contains the matching bump.
+2. **`home_roots` keyed owner-only in the producer.** P1's
+   `packageLinksHomeRoots` is `Map (unit, module) [PackageLink]` and is built
+   with `Map.fromListWith (flip (++))`, merging the package roots of every
+   original ordinal of one HOME module. P2's working decoder expects
+   `(unit, module, original_ordinal)`. `MultiOrdinalHome.hs` supplies a module
+   with two ordinals whose package roots differ, so owner-only keys or cursor
+   reuse assigns one ordinal's roots to the other.
+3. **Request-wide binder-to-occurrence map is last-write-wins.** P1 builds one
+   `Map SymbolIdentity Word32` (`packageLinkIndexExportOwner`) across every
+   target's encodings. When the same exported symbol appears in two target
+   occurrences (for example `actualSort` reached at `Int` versus `String`), the
+   map keeps one entry, so both targets' slots resolve to one occurrence. The
+   target link must come from that target's own `PreparedPackageTarget`, and a
+   parent occurrence's imports from that parent's projection.
+
+`PackageLink::Inherited` is refused everywhere in P2's committed decoder
+("fresh package occurrence cannot import an inherited terminal"); the exact
+held-terminal resolution (`resolve_held_package_binding`: one exact binding,
+zero/multiple refusal) is in P2's uncommitted tree, so the Inherited
+zero/one/many oracle is queued behind it.

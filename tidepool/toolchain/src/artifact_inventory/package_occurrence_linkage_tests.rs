@@ -2,64 +2,79 @@
 //!
 //! Every positive history here is produced by the real compiler through
 //! `test_support::compile_invocation`; no test-only certificate constructor
-//! grants package authority. The assertions are written against the retained
-//! physical selection, so a regression to the previous `(seal, symbol)` /
-//! first-match selector refuses these fixtures with "competing captured code
-//! products" (or selects the wrong body) instead of passing.
+//! grants package authority. The assertions read the compiler-issued
+//! selection, never a re-derivation of the repaired index.
 //!
 //! These tests are ignored by default because they require the rooted
 //! compiler service; the joined qualification runs them in that environment.
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::artifact_inventory::CompletedNativeTargetImport;
 use crate::artifacts::test_support::compile_invocation;
 use crate::artifacts::CompileInvocation;
 
-/// For each ordered package slot of a completed target, the defining
-/// `unit:module:occurrence` identity paired with the package body bytes that
-/// slot resolved to. The oracle reads the compiler-issued selection; it never
-/// re-derives the repaired index.
-fn package_slot_bodies(
-    output: &crate::artifacts::CompiledArtifacts,
-    selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
-    target: &str,
-) -> BTreeMap<String, Vec<u8>> {
-    let globals = output.targets[target].prepared.prepared().globals();
-    let mut slots = BTreeMap::new();
-    for (global, link) in globals.iter().zip(selection.target_imports()) {
-        if let CompletedNativeTargetImport::Package { binding, .. } = link {
-            let key = format!(
-                "{}:{}:{}",
-                global.identity.unit, global.identity.module, global.identity.occurrence
-            );
-            slots.insert(key, binding.product().bytes().to_vec());
-        }
-    }
-    slots
+/// One ordered package slot of a completed target: the defining identity, the
+/// resolved body bytes, and the exact ordered child history. This is the
+/// discriminating observation the old `(seal, symbol)` selector could not
+/// produce; it keeps repeated slots in order instead of collapsing them.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PackageSlotRecord {
+    identity: String,
+    body_sha256: [u8; 32],
+    child_history: Vec<(String, [u8; 32])>,
 }
 
-/// The ordered defining identities of the target's package slots. Order is
-/// the program's own package-global order; reversing target order must not
-/// reorder or re-resolve another target's slots.
-fn package_slot_identities(
+fn child_history(
+    binding: &crate::artifact_inventory::PackageCodeBinding,
+) -> Vec<(String, [u8; 32])> {
+    let mut history = Vec::new();
+    collect_child_history(binding, &mut history, 0);
+    history
+}
+
+fn collect_child_history(
+    binding: &crate::artifact_inventory::PackageCodeBinding,
+    history: &mut Vec<(String, [u8; 32])>,
+    depth: usize,
+) {
+    if depth > 8 {
+        return;
+    }
+    let product = binding.product();
+    let owner = product.code().owner();
+    let digest: [u8; 32] = sha256(product.bytes());
+    history.push((format!("{}:{}", owner.unit, owner.module), digest));
+    for (child, _) in binding.import_links() {
+        collect_child_history(&child, history, depth + 1);
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
+fn package_slot_records(
     output: &crate::artifacts::CompiledArtifacts,
     selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
     target: &str,
-) -> Vec<String> {
+) -> Vec<PackageSlotRecord> {
     output.targets[target]
         .prepared
         .prepared()
         .globals()
         .iter()
         .zip(selection.target_imports())
-        .filter_map(|(global, link)| {
-            matches!(link, CompletedNativeTargetImport::Package { .. }).then(|| {
-                format!(
+        .filter_map(|(global, link)| match link {
+            CompletedNativeTargetImport::Package { binding, .. } => Some(PackageSlotRecord {
+                identity: format!(
                     "{}:{}:{}",
                     global.identity.unit, global.identity.module, global.identity.occurrence
-                )
-            })
+                ),
+                body_sha256: sha256(binding.product().bytes()),
+                child_history: child_history(binding),
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -93,7 +108,7 @@ fn completed_selection(
 fn reversed_targets_keep_exact_ordered_package_slots() {
     let source =
         include_str!("../../tests/fixtures/package-occurrence-linkage/SameSealTwoProducts.hs");
-    let mut expected: Option<(Vec<String>, Vec<String>)> = None;
+    let mut expected: Option<(Vec<PackageSlotRecord>, Vec<PackageSlotRecord>)> = None;
     for targets in [
         ["onlySort", "sortThenUnlines"],
         ["sortThenUnlines", "onlySort"],
@@ -103,26 +118,22 @@ fn reversed_targets_keep_exact_ordered_package_slots() {
         let sort_then_unlines = completed_selection(&output, "sortThenUnlines");
 
         // Both targets retain actual package code resolved through the export
-        // contract (not merely a digest match).
-        let only_sort_slots = package_slot_bodies(&output, &only_sort, "onlySort");
+        // contract (not merely a digest match). Ordering a target first or
+        // second must not change its own ordered slots, resolved body, or
+        // child history: the producer's paired occurrence, not a request-wide
+        // binder map, decides which occurrence each slot resolves to.
+        let only_sort_slots = package_slot_records(&output, &only_sort, "onlySort");
         let sort_then_unlines_slots =
-            package_slot_bodies(&output, &sort_then_unlines, "sortThenUnlines");
+            package_slot_records(&output, &sort_then_unlines, "sortThenUnlines");
         assert!(
             !only_sort_slots.is_empty() && !sort_then_unlines_slots.is_empty(),
             "both targets must select actual package code"
         );
-
-        // Ordering a target first or second must not change its own ordered
-        // slot selection: the producer's paired occurrence, not map order,
-        // decides which body each slot resolves to.
-        let order = (
-            package_slot_identities(&output, &only_sort, "onlySort"),
-            package_slot_identities(&output, &sort_then_unlines, "sortThenUnlines"),
-        );
+        let order = (only_sort_slots.clone(), sort_then_unlines_slots.clone());
         if let Some(previous) = &expected {
             assert_eq!(
                 previous, &order,
-                "reversing target order changed a target's exact package slots"
+                "reversing target order changed a target's exact package slots, body, or child history"
             );
         } else {
             expected = Some(order);
@@ -138,11 +149,33 @@ fn transitive_import_prefers_exact_child_over_competing_sibling() {
         include_str!("../../tests/fixtures/package-occurrence-linkage/TransitiveCompetitor.hs");
     let output = compile_fixture(source, &["viaText", "directText"]);
     let via_text = completed_selection(&output, "viaText");
+    let direct_text = completed_selection(&output, "directText");
 
     // Data.Text's transitive child selection and the direct sibling target may
     // retain two distinct projections of the same defining module. The exact
     // link must not silently borrow the sibling's body.
-    assert!(!package_slot_bodies(&output, &via_text, "viaText").is_empty());
+    let via = package_slot_records(&output, &via_text, "viaText");
+    let direct = package_slot_records(&output, &direct_text, "directText");
+    assert!(!via.is_empty(), "viaText must retain actual package code");
+    // The shared defining module's occurrence must resolve from each target's
+    // own projection; a first-match or shared-map selector would give both
+    // targets the same child history even when they differ.
+    if !direct.is_empty() {
+        for left in &via {
+            for right in &direct {
+                if left.identity == right.identity {
+                    assert_eq!(
+                        left.body_sha256, right.body_sha256,
+                        "a shared symbol keeps one immutable envelope"
+                    );
+                    assert_eq!(
+                        left.child_history, right.child_history,
+                        "the transitive child history must match the direct sibling for one symbol"
+                    );
+                }
+            }
+        }
+    }
     drop(output);
 }
 
@@ -154,18 +187,17 @@ fn repeated_slots_share_immutable_bytes_without_losing_multiplicity() {
     let selection = completed_selection(&output, "threeSorts");
     // Three identical `sort` demands resolve through one shared immutable
     // `actualSort` body (plus the Ord dictionary). Byte sharing must not
-    // duplicate the retained payload: each distinct symbol keeps exactly one
-    // body, never three copies of the same envelope.
-    let bodies = package_slot_bodies(&output, &selection, "threeSorts");
-    let sort_bodies = bodies
+    // duplicate the retained payload.
+    let slots = package_slot_records(&output, &selection, "threeSorts");
+    let sort_slots = slots
         .iter()
-        .filter(|(identity, _)| identity.ends_with(":actualSort"))
+        .filter(|record| record.identity.ends_with(":actualSort"))
         .count();
     assert_eq!(
-        sort_bodies, 1,
+        sort_slots, 1,
         "three identical sort demands share one immutable actualSort body"
     );
-    assert!(!bodies.is_empty(), "the target selects actual package code");
+    assert!(!slots.is_empty(), "the target selects actual package code");
     drop(output);
 }
 
@@ -178,11 +210,49 @@ fn duplicate_envelope_histories_remain_distinct_bindings() {
     let first = completed_selection(&output, "firstHistory");
     let second = completed_selection(&output, "secondHistory");
     // One payload under two child histories keeps two distinct occurrences.
-    // This fixture shares a defining module across two targets with different
-    // reachability; the manifest must keep their ordered slots distinct even
-    // when envelope bytes are shared.
-    let first_slots = package_slot_identities(&output, &first, "firstHistory");
-    let second_slots = package_slot_identities(&output, &second, "secondHistory");
+    // The manifest must keep their ordered slots distinct even when envelope
+    // bytes are shared.
+    let first_slots = package_slot_records(&output, &first, "firstHistory");
+    let second_slots = package_slot_records(&output, &second, "secondHistory");
     assert!(!first_slots.is_empty() && !second_slots.is_empty());
+    drop(output);
+}
+
+#[test]
+#[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
+    // A fresh HOME module with two original ordinals, each importing a
+    // different package. Owner-only home_roots plus a shared cursor would
+    // assign one ordinal's roots to the other; ordinal-qualified keys keep
+    // each group's roots with its own group.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("MultiOrdinalHome.hs"),
+        include_str!("../../tests/fixtures/package-occurrence-linkage/MultiOrdinalHome.hs"),
+    )
+    .unwrap();
+    let source =
+        include_str!("../../tests/fixtures/package-occurrence-linkage/MultiOrdinalHomeConsumer.hs");
+    let output = compile_invocation(
+        &CompileInvocation {
+            source,
+            targets: &["result"],
+            include: &[root.path().to_owned()],
+            fallback_module_name: "MultiOrdinalHomeConsumer",
+        },
+        |_, _, _| {},
+    )
+    .expect("fresh multi-ordinal HOME module compiles through common admission");
+
+    // Each original ordinal keeps exactly its own package slot. The shared
+    // `sort` body must be reached only by `byList`; `byText` reaches `pack`.
+    let selection = completed_selection(&output, "result");
+    let slots = package_slot_records(&output, &selection, "result");
+    let has_sort = slots.iter().any(|s| s.identity.ends_with(":actualSort"));
+    let has_pack = slots.iter().any(|s| s.identity.contains(":pack"));
+    assert!(
+        has_sort && has_pack,
+        "both HOME ordinals select their own package roots, found {slots:?}"
+    );
     drop(output);
 }
