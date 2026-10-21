@@ -2442,6 +2442,7 @@ impl IssuedNativeOffer {
         let source_receipt = admitted.source_receipt;
         let supplied = admitted.supplied;
         let source = admitted.lease;
+        let issuing_view = ArtifactView::from_custody(Arc::clone(&source));
         let mut offers = Vec::new();
         let state = source.inventory.0.lock().expect("inventory lock");
         // Index the solver-issued roots once. The carrier is part of the key:
@@ -2540,16 +2541,24 @@ impl IssuedNativeOffer {
                     .map(ArtifactBindingNode::Group)
                     .collect()
             };
+            let executable_nodes = admitted_closure(&state, selected_roots.iter().copied())
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let owned = &issuing_view.read_projection(&state).nodes;
+            let nodes =
+                issuing_view.native_payload_custody_nodes(&state, owned, &executable_nodes)?;
+            let metadata = nodes
+                .difference(&executable_nodes)
+                .copied()
+                .collect::<Vec<_>>();
+            let nodes = nodes.into_iter().collect::<imbl::OrdSet<_>>();
             let selected = selection_snapshot_for_lease(
                 &state,
                 &BTreeMap::from([(original, carrier), (interface, canonical)]),
                 &selected_roots,
-                &[],
+                &metadata,
                 &[],
             );
-            // This pass is the acquisition-time complete closure validation;
-            // demand consumers retain the proof and query exact rows by key.
-            let nodes = admitted_closure(&state, selected_roots.iter().copied());
             let groups = nodes
                 .iter()
                 .filter_map(|node| match node {
@@ -2558,7 +2567,9 @@ impl IssuedNativeOffer {
                 })
                 .collect();
             let mut custody_selection = (*selected).clone();
-            custody_selection.custody_roots = custody_selection.roots.clone();
+            for (root, ()) in &custody_selection.roots {
+                custody_selection.custody_roots.insert(*root, ());
+            }
             custody_selection.roots.clear();
             custody_selection.namespace.clear();
             let mut payloads = Default::default();

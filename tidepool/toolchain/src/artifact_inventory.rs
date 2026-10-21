@@ -5838,6 +5838,7 @@ impl ArtifactInventory {
             .map(|(id, entry)| Ok((id, state.canonicalize(entry)?)))
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         cold_validation::validate_selected_rows(&state, &entries, &plan)?;
+        cold_validation::validate_nominal_custody(&entries, &plan)?;
         let namespace = selection
             .namespace
             .iter()

@@ -7056,8 +7056,6 @@ fn decode_home_witness_with_operation(
                         .ok_or(CertificationError::Mismatch("home source witness"))?;
                     if module_version.as_ref() != Some(&source.module_version)
                         || binder != &global.identity
-                        || binder.unit != *unit
-                        || binder.module != *module
                     {
                         return Err(CertificationError::Mismatch("home source witness"));
                     }
@@ -7086,10 +7084,22 @@ fn decode_home_witness_with_operation(
                     }
                     used_packages.insert(key);
                 }
-                ReceiptImportOwner::OriginalBinding { .. } => {
-                    return Err(CertificationError::Receipt(
-                        "unresolved original binding in home witness",
-                    ));
+                ReceiptImportOwner::OriginalBinding {
+                    unit,
+                    module,
+                    binder,
+                    ..
+                } => {
+                    if unit.is_empty()
+                        || module.is_empty()
+                        || binder != &global.identity
+                        || binder.unit != *unit
+                        || binder.module != *module
+                    {
+                        return Err(CertificationError::Mismatch(
+                            "home Original reference witness",
+                        ));
+                    }
                 }
                 ReceiptImportOwner::Retained { identity, .. } if identity != &global.identity => {
                     return Err(CertificationError::Mismatch("home retained witness"));
@@ -7188,8 +7198,6 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
                         .ok_or(CertificationError::Mismatch("home source witness"))?;
                     if module_version.as_ref() != Some(&source.module_version)
                         || binder != &global.identity
-                        || binder.unit != *unit
-                        || binder.module != *module
                     {
                         return Err(CertificationError::Mismatch("home source witness"));
                     }
@@ -7219,10 +7227,22 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
                     }
                     used_packages.insert(key);
                 }
-                ReceiptImportOwner::OriginalBinding { .. } => {
-                    return Err(CertificationError::Receipt(
-                        "unresolved original binding in home witness",
-                    ));
+                ReceiptImportOwner::OriginalBinding {
+                    unit,
+                    module,
+                    binder,
+                    ..
+                } => {
+                    if unit.is_empty()
+                        || module.is_empty()
+                        || binder != &global.identity
+                        || binder.unit != *unit
+                        || binder.module != *module
+                    {
+                        return Err(CertificationError::Mismatch(
+                            "home Original reference witness",
+                        ));
+                    }
                 }
                 ReceiptImportOwner::Retained { identity, .. } if identity != &global.identity => {
                     return Err(CertificationError::Mismatch("home retained witness"));
@@ -7826,9 +7846,9 @@ fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNat
                     });
                     continue;
                 }
-                ReceiptImportOwner::OriginalBinding { .. } => {
-                    unreachable!("home witness decoder rejects unresolved original binding")
-                }
+                // Full Original requirements remain borrowed from the same witness;
+                // Source adjacency cannot represent their exact pair or binding scope.
+                ReceiptImportOwner::OriginalBinding { .. } => continue,
                 ReceiptImportOwner::Package { .. } => continue,
             };
             requirements.push((owner, dependency));
@@ -30797,6 +30817,132 @@ None,
                 "conflicting admitted interface owner"
             ))
         ));
+    }
+
+    #[test]
+    fn nominal_original_home_metadata_survives_cold_without_group_permission() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactPayload,
+            NativeArtifactDemand,
+        };
+        let producer = [1; 32];
+        let child_product = fixture_finalized_product(
+            original_groups_fixture("NominalChild", vec![(7, vec![])], 1, &BTreeMap::new()),
+            producer,
+        );
+        let child = Arc::new(ArtifactEntry::original(producer, child_product.clone()).unwrap());
+        let inventory = ArtifactInventory::default();
+        let child_view = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::clone(&child)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let child_graph = child_view.capture_graph_selection();
+        let original = child_graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == child.descriptor.id)
+            .copied()
+            .unwrap();
+        let interface = child_graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact != child.descriptor.id)
+            .copied()
+            .unwrap();
+        let binder = testing::identity("NominalChild", "entry");
+        let reference = ReceiptImportOwner::OriginalBinding {
+            unit: child_product.owner().unit.clone(),
+            module: child_product.owner().module.clone(),
+            interface,
+            original,
+            binder: binder.clone(),
+        };
+        // Edit untrusted compiler-shaped evidence, then enter the production
+        // physical completion boundary; the encoded reference grants nothing.
+        let draft = original_groups_fixture(
+            "NominalParent",
+            vec![(
+                7,
+                vec![PendingImportOwner::Source {
+                    owner: child_product.owner().clone(),
+                    original_ordinal: 7,
+                    binder,
+                }],
+            )],
+            2,
+            &BTreeMap::new(),
+        );
+        let mut witness = decode_home_witness(draft.certification_bytes()).unwrap();
+        witness.groups[0].2[0].owner = reference.clone();
+        witness.sources.clear();
+        let bytes = encode_home_witness(&witness).unwrap();
+        let cold = decode_home_witness(&bytes).unwrap();
+        assert_eq!(cold.groups[0].2[0].owner, reference);
+        assert!(native_requirements_from_witness(&cold)
+            .artifact_edges
+            .is_empty());
+        let nominal = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            draft.owner().clone(),
+            draft.interface_bytes().to_vec(),
+            draft.product_bytes().to_vec(),
+            draft.package_imports_bytes().to_vec(),
+            bytes,
+        );
+        let parent = Arc::new(
+            ArtifactEntry::original(producer, fixture_finalized_product(nominal, producer))
+                .unwrap(),
+        );
+        let physical = inventory
+            .admit_shared_with_demand(
+                &child_view,
+                vec![Arc::clone(&parent)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let published = physical
+            .select_publication_roots(parent.descriptor.id, vec![parent.descriptor.id])
+            .unwrap();
+        let graph = published.capture_graph_selection();
+        assert!(graph.native_groups.is_empty());
+        assert!(graph.bindings.contains(&original));
+        assert!(graph.bindings.contains(&interface));
+        let ArtifactPayload::Original(product) = &parent.payload else {
+            unreachable!()
+        };
+        assert_eq!(
+            original_native_group_imports(product, 7).unwrap(),
+            &[reference]
+        );
+        let fresh = ArtifactInventory::default();
+        let restored = fresh
+            .recover_selection(
+                &fresh.empty_view(),
+                published.entries(),
+                &graph,
+                &published.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(restored.capture_graph_selection(), graph);
+        assert!(restored.selected_native_groups().is_empty());
+
+        // Omitting metadata custody does not alter any selected outgoing row;
+        // the full nominal witness independently detects the lost exact pair.
+        let mut missing = graph;
+        missing.bindings.retain(|binding| *binding != original);
+        missing.namespace.retain(|binding| *binding != original);
+        missing
+            .custody_roots
+            .retain(|node| *node != ArtifactBindingNode::Artifact(original));
+        let mut edges = published.binding_dependencies();
+        edges.retain(|(source, _, _)| *source != ArtifactBindingNode::Artifact(original));
+        let fresh = ArtifactInventory::default();
+        assert!(matches!(fresh.recover_selection(
+            &fresh.empty_view(), published.entries(), &missing, &edges,
+        ), Err(crate::CompileError::ExtractFailed(message))
+            if message == "artifact inventory: nominal Original exact canonical pair changed"));
     }
 
     #[test]
