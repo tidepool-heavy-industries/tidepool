@@ -175,6 +175,7 @@ impl ClosedNativeSelection {
 }
 
 /// Immutable code, acquired products and exact ordered local import choices.
+/// Construction validates the complete image/import contract before publication.
 /// No field can represent an existing runtime handle or a lexical domain.
 pub(in crate::session) struct ClosedInstantiationPlan {
     closed: ClosedNativeSelection,
@@ -486,8 +487,6 @@ impl PreparedEngine {
         selection: &NativeDomainSelection,
         bindings: &BindingTable,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
-        // The immutable recipe is checked before borrowing any live roots.
-        BatchProgram::validate_closed(&plan.batch()).map_err(PreparedRuntimeError::Install)?;
         let domain = selection.current();
         let anchors = plan
             .programs
