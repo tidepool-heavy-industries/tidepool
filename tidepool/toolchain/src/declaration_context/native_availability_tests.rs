@@ -1735,7 +1735,8 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         matches!(&denied, CompileError::ArtifactInventory(error) if matches!(error.failure,
         crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
             artifact, original_ordinal: 9001,
-        } if artifact == b_id))
+        } if artifact == b_id)),
+        "known B9001 body must refuse as permission, actual={denied:?}"
     );
     let CompileError::ArtifactInventory(ref denied_error) = denied else {
         unreachable!()
@@ -6947,7 +6948,10 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             );
             let admitted = admitted.map(|_| ());
             if ordinal == Some(demanded) {
-                assert!(admitted.is_ok());
+                assert!(
+                    admitted.is_ok(),
+                    "offered={ordinal:?}, demanded={demanded}, actual={admitted:?}"
+                );
             } else {
                 assert!(
                     matches!(&admitted, Err(CompileError::ArtifactInventory(error))
@@ -6995,10 +6999,10 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             &mut validation,
         );
         assert!(
-            matches!(denied, Err(CompileError::ArtifactInventory(error))
+            matches!(&denied, Err(CompileError::ArtifactInventory(error))
             if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 }
                 if artifact == unrelated_entry.descriptor.id)),
-            "unoffered dependency custody cannot authorize native demand"
+            "unoffered dependency custody cannot authorize native demand; actual={denied:?}"
         );
     }
 }
