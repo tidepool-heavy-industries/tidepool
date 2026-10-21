@@ -18,7 +18,7 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{
     CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
-    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion,
+    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion, CompletedNativeSelection,
 };
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
@@ -555,6 +555,7 @@ impl TargetNativeInputs {
         }
         Ok(CertifiedTargetNativeInputs {
             target: self,
+            completed: None,
             groups,
             links: if needs_retained_owner { TargetNativeLinks::RetainedInputs } else {
                 TargetNativeLinks::Immutable(links.into())
@@ -658,6 +659,7 @@ impl TargetNativeInputs {
 /// products. Graph-only compiler consumers cannot issue runtime source proofs.
 #[derive(Debug)]
 pub(crate) struct CertifiedTargetNativeInputs {
+    completed: Option<Arc<CompletedNativeSelection>>,
     target: TargetNativeInputs,
     groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
     links: TargetNativeLinks,
@@ -677,6 +679,28 @@ impl std::ops::Deref for CertifiedTargetNativeInputs {
 }
 
 impl CertifiedTargetNativeInputs {
+    /// Complete this exact physical target without changing its selected HOME
+    /// roots or compiler roles. Missing package code remains a refusal.
+    pub(crate) fn complete_native_selection(
+        mut self,
+        prepared: &tidepool_repr::execution_schema::PreparedProgram,
+        output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
+        packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+        inherited: &CompilerSourceSupport,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(self.resolve_sources()?, prepared)?;
+        let completed = compiler_projection::complete_native_selection(
+            &sources, output, packages, inherited.native_completions(), operation,
+        )?;
+        self.completed = Some(completed);
+        Ok(self)
+    }
+
+    pub(crate) fn completed_selection(&self) -> Option<&Arc<CompletedNativeSelection>> {
+        self.completed.as_ref()
+    }
+
     pub(crate) fn certified_groups(
         &self,
     ) -> &crate::declaration_context::CertifiedArtifactGroupBindings {
@@ -688,6 +712,7 @@ impl CertifiedTargetNativeInputs {
             target: self.target.resolve()?,
             groups: &self.groups,
             links: &self.links,
+            completed: self.completed.as_ref(),
         })
     }
 }
@@ -697,6 +722,7 @@ pub(crate) struct ResolvedNativeSourceTarget<'a> {
     target: ResolvedNativeTarget<'a>,
     groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
     links: &'a TargetNativeLinks,
+    completed: Option<&'a Arc<CompletedNativeSelection>>,
 }
 
 impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
@@ -717,6 +743,10 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         self.groups
             .shared_imports(binding)
             .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
+    }
+
+    pub(crate) fn completed_selection(&self) -> Option<&'a Arc<CompletedNativeSelection>> {
+        self.completed
     }
 
     pub(crate) fn target_link_requirements(
@@ -1593,6 +1623,7 @@ pub enum PackageCodeRefusal {
     ExportUnavailable,
     ImportContract,
     ConflictingPlan,
+    AmbiguousInheritance { candidates: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -21991,6 +22022,7 @@ mod package_code {
             parent: &ArtifactView,
             fresh: Vec<PackageCodePlan>,
             roots: Vec<PackageCodeTarget>,
+            inherited: &[Arc<Self>],
             operation: &tidepool_repr::execution_schema::InventoryOperation,
         ) -> Result<Arc<Self>, CompileError> {
             let account = |error| {
@@ -22070,6 +22102,97 @@ mod package_code {
                     validate_import(*id, &plans[id].product, index, target.as_ref())?;
                 }
             }
+            // Only actual prior package owners supply reuse candidates. Matching
+            // immutable code is insufficient: every ordered child must remain
+            // an eligible exact binding in this same planned environment.
+            let mut candidates =
+                BTreeMap::<ArtifactId, BTreeMap<ArtifactBinding, PackageCodeBinding>>::new();
+            for graph in inherited {
+                for (binding, row) in &graph.rows {
+                    crate::host_work::checkpoint()?;
+                    operation.charge(1).map_err(account)?;
+                    if required.contains(&binding.artifact)
+                        && row.product == plans[&binding.artifact].product
+                    {
+                        operation
+                            .reserve::<PackageCodeBinding>(1)
+                            .map_err(account)?;
+                        candidates.entry(binding.artifact).or_default().insert(
+                            *binding,
+                            PackageCodeBinding {
+                                graph: Arc::clone(graph),
+                                binding: *binding,
+                            },
+                        );
+                    }
+                }
+            }
+            loop {
+                let mut rejected = Vec::new();
+                for (id, options) in &candidates {
+                    for (binding, held) in options {
+                        crate::host_work::checkpoint()?;
+                        operation.charge(1).map_err(account)?;
+                        let children = &held.graph.rows[binding].imports;
+                        let matches = children.len() == plans[id].imports.len()
+                            && children
+                                .iter()
+                                .zip(&plans[id].imports)
+                                .all(|(child, target)| match target {
+                                    PackageCodeTarget::Held(exact) => *child == exact.binding,
+                                    PackageCodeTarget::Fresh(id) => candidates
+                                        .get(id)
+                                        .is_some_and(|options| options.contains_key(child)),
+                                });
+                        if !matches {
+                            operation
+                                .reserve::<(ArtifactId, ArtifactBinding)>(1)
+                                .map_err(account)?;
+                            rejected.push((*id, *binding));
+                        }
+                    }
+                }
+                if rejected.is_empty() {
+                    break;
+                }
+                for (id, binding) in rejected {
+                    candidates
+                        .get_mut(&id)
+                        .expect("existing candidate set")
+                        .remove(&binding);
+                }
+            }
+            let mut reused = BTreeMap::new();
+            for (id, options) in candidates {
+                if options.len() > 1 {
+                    return Err(refusal(
+                        id,
+                        PackageCodeRefusal::AmbiguousInheritance {
+                            candidates: options.len(),
+                        },
+                    ));
+                }
+                if let Some((_, held)) = options.into_iter().next() {
+                    required.remove(&id);
+                    pending.push(PackageCodeTarget::Held(held.clone()));
+                    reused.insert(id, held);
+                }
+            }
+            while let Some(target) = pending.pop() {
+                crate::host_work::checkpoint()?;
+                operation.charge(1).map_err(account)?;
+                let PackageCodeTarget::Held(held) = target else {
+                    unreachable!("inherited exact closure");
+                };
+                if rows.contains_key(&held.binding) {
+                    continue;
+                }
+                pending.extend(held.imports().map(PackageCodeTarget::Held));
+                acquisitions
+                    .entry(Arc::as_ptr(&held.graph) as usize)
+                    .or_insert_with(|| held.graph.artifacts.clone());
+                rows.insert(held.binding, Arc::clone(&held.graph.rows[&held.binding]));
+            }
             let mut acquired = parent.clone();
             for incoming in acquisitions.values() {
                 acquired = acquired.retain_custody(incoming)?;
@@ -22079,10 +22202,13 @@ mod package_code {
             let provisional = ArtifactSelectionId([0; 32]);
             let node = |target: &PackageCodeTarget, scope| match target {
                 PackageCodeTarget::Held(held) => InventoryNodeKey::Artifact(held.binding),
-                PackageCodeTarget::Fresh(id) => InventoryNodeKey::Artifact(ArtifactBinding {
-                    artifact: *id,
-                    selection: scope,
-                }),
+                PackageCodeTarget::Fresh(id) => InventoryNodeKey::Artifact(reused.get(id).map_or(
+                    ArtifactBinding {
+                        artifact: *id,
+                        selection: scope,
+                    },
+                    |held| held.binding,
+                )),
             };
             let planned = required
                 .iter()
@@ -22112,11 +22238,14 @@ mod package_code {
             let resolve = |target: &PackageCodeTarget| -> Result<ArtifactBinding, CompileError> {
                 match target {
                     PackageCodeTarget::Held(held) => Ok(held.binding),
-                    PackageCodeTarget::Fresh(id) => Ok(ArtifactBinding {
-                        artifact: *id,
-                        selection: scope
-                            .ok_or_else(|| refusal(*id, PackageCodeRefusal::MissingProduct))?,
-                    }),
+                    PackageCodeTarget::Fresh(id) => match reused.get(id) {
+                        Some(held) => Ok(held.binding),
+                        None => Ok(ArtifactBinding {
+                            artifact: *id,
+                            selection: scope
+                                .ok_or_else(|| refusal(*id, PackageCodeRefusal::MissingProduct))?,
+                        }),
+                    },
                 }
             };
             let mut payloads = BTreeMap::new();
@@ -22175,17 +22304,14 @@ mod package_code {
             let prepared = scope_proof::prepare_install(&state, witness)?;
             validate_existing_rows(&state, &bound)?;
             scope_proof::install(&mut state, prepared);
-            let roots = roots
-                .iter()
-                .map(resolve)
-                .collect::<Result<BTreeSet<_>, _>>()?
-                .into_iter()
-                .collect::<Vec<_>>();
+            let roots = roots.iter().map(resolve).collect::<Result<Vec<_>, _>>()?;
             let parents = vec![Arc::clone(&acquired.lease)];
             let custody = roots
                 .iter()
                 .copied()
                 .map(InventoryNodeKey::Artifact)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>();
             let selection =
                 selection_snapshot_for_lease(&state, &BTreeMap::new(), &[], &custody, &parents);
@@ -22303,16 +22429,13 @@ mod package_code {
                 }
             }
             drop(state);
-            let roots = roots
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let roots = roots.to_vec();
             let custody = roots
                 .iter()
                 .copied()
                 .map(InventoryNodeKey::Artifact)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect();
             let retained = inventory.retain(
                 Vec::new(),
@@ -22326,6 +22449,74 @@ mod package_code {
                 roots: roots.into(),
                 rows,
             }))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn package_graph_requires_acquired_package_rows_and_refuses_atomically() {
+            let inventory = ArtifactInventory::default();
+            let empty = inventory.empty_view();
+            let operation =
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+            let before = empty.capture_graph_selection();
+            let scopes = inventory.0.lock().unwrap().selection_plans.len();
+            let absent = ArtifactId([91; 32]);
+            let missing = IssuedPackageCodeGraph::issue(
+                &empty,
+                vec![],
+                vec![PackageCodeTarget::Fresh(absent)],
+                &[],
+                &operation,
+            )
+            .unwrap_err();
+            assert!(matches!(missing, CompileError::ArtifactInventory(error)
+            if error.failure == ArtifactInventoryFailure::PackageCode {
+                artifact: absent, reason: PackageCodeRefusal::MissingProduct,
+            }));
+            assert_eq!(empty.capture_graph_selection(), before);
+            assert_eq!(inventory.0.lock().unwrap().selection_plans.len(), scopes);
+            let no_packages =
+                IssuedPackageCodeGraph::issue(&empty, vec![], vec![], &[], &operation).unwrap();
+            assert!(no_packages.roots().is_empty());
+            assert_eq!(no_packages.bindings().len(), 0);
+            assert!(no_packages
+                .artifacts()
+                .capture_graph_selection()
+                .namespace
+                .is_empty());
+            assert!(no_packages
+                .artifacts()
+                .capture_graph_selection()
+                .roots
+                .is_empty());
+            let canonical =
+                ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "fixture",
+                    "PackageInterfaceOnly",
+                    BTreeMap::new(),
+                ));
+            let view = inventory.admit(&empty, vec![canonical]).unwrap();
+            let selected = view.capture_graph_selection();
+            let binding = selected.namespace[0];
+            let wrong_kind =
+                IssuedPackageCodeGraph::from_issued(&view, &[binding], &operation).unwrap_err();
+            assert!(matches!(wrong_kind, CompileError::ArtifactInventory(error)
+            if error.failure == ArtifactInventoryFailure::PackageCode {
+                artifact: binding.artifact, reason: PackageCodeRefusal::WrongKind,
+            }));
+            let unacquired =
+                IssuedPackageCodeGraph::from_issued(&empty, &[binding], &operation).unwrap_err();
+            assert!(matches!(unacquired, CompileError::ArtifactInventory(error)
+            if error.failure == ArtifactInventoryFailure::PackageCode {
+                artifact: binding.artifact,
+                reason: PackageCodeRefusal::MissingBinding { binding },
+            }));
+            assert_eq!(view.capture_graph_selection(), selected);
         }
     }
 }

@@ -3781,6 +3781,14 @@ impl RequestCompilerInputs {
         Arc::clone(&self.source_support)
     }
 
+    /// Immutable native completion custody acquired by this exact context.
+    /// These references do not add compiler roles or executable target demand.
+    pub fn issued_native_completions(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::artifact_inventory::IssuedNativeSelectionCompletion>> {
+        self.compiler_source_support().native_completions().iter()
+    }
+
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
@@ -11383,6 +11391,14 @@ impl ExactDeclarationContext {
             .retain_custody(target.artifacts())?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
+    pub(crate) fn retain_completed_native_selection(
+        self,
+        completed: &crate::artifact_inventory::CompletedNativeSelection,
+    ) -> Result<Self, CompileError> {
+        let support = self.compiler_source_support().with_native_selection_completion(completed)?;
+        Ok(self.rebuild(|facts| facts.compiler_support = support))
+    }
+
     pub(crate) fn retain_issued_native_inputs(
         self,
         inputs: &OriginalCompilerInputs,
