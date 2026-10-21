@@ -1165,6 +1165,10 @@ mod tests {
         };
         let first = completed("first");
         let second = completed("second");
+        crate::artifact_inventory::IssuedNativeSelectionCompletion::assert_collection_history(&[
+            Arc::clone(first.completion()),
+            Arc::clone(second.completion()),
+        ]);
         for name in ["first", "second"] {
             let target = &output.targets[name];
             let selection = completed(name);
