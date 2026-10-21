@@ -19,10 +19,10 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         "run this retained binary with checkout and build outputs inaccessible"
     );
     assert!(
-        std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_none(),
-        "the package gate must not adopt an existing daemon"
+        std::env::var_os(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV).is_some(),
+        "the package gate requires its namespace-owned compiler service"
     );
-    for variable in ["TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR"] {
+    for variable in ["TIDEPOOL_BUILD_PRODUCTS_DIR"] {
         let directory = PathBuf::from(std::env::var_os(variable).expect("explicit empty cache"));
         assert!(directory.is_absolute());
         assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);

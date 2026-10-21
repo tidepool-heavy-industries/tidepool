@@ -37,6 +37,7 @@ TRACE_QUEUE_BYTE_LIMIT = 64 << 10
 TRANSACTION_DIRECTORY_LIMIT = 4096
 TRANSACTION_CAPTURE_LIMIT = 256
 COMPILER_SELECTION_RESOURCES = (
+    'TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT',
     'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG',
     'TIDEPOOL_COMPILER_MODULES',
     'TIDEPOOL_PREPARED_ROOT_ENTRY',
@@ -48,6 +49,10 @@ COMPILER_SELECTION_FLAGS = (
     'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256',
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
     'TIDEPOOL_EXTRACT_NO_DAEMON',
+)
+OWNED_COMPILER_RESOURCES = (
+    'TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER', 'TIDEPOOL_COMPILER_DEPLOYMENT',
+    'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG',
 )
 EXECUTION_RESULT = re.compile(
     r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
@@ -145,6 +150,7 @@ DELEGATED_ENVIRONMENT = (
     'PATH', 'HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
     'LD_LIBRARY_PATH', 'TMPDIR', 'TMP', 'TEMP', 'TEMPDIR',
     'TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER', 'TIDEPOOL_COMPILER_DEPLOYMENT',
+    'TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT',
     'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG',
     'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256',
     'TIDEPOOL_PRELUDE_DIR', 'TIDEPOOL_GHC_LIBDIR', 'GHC_LIBDIR',
@@ -496,6 +502,15 @@ def resolve_resource_environment(names):
     for name in (*COMPILER_SELECTION_RESOURCES, *COMPILER_SELECTION_FLAGS):
         os.environ.pop(name, None)
     os.environ.update(selected)
+
+
+def validate_owned_compiler_resources(declared_resources):
+    missing = sorted(set(OWNED_COMPILER_RESOURCES) - set(declared_resources))
+    if missing:
+        raise RuntimeError('owned-resident requires declared service resources: ' + ', '.join(missing))
+    for name in ('LD_LIBRARY_PATH', 'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES'):
+        if os.environ.get(name):
+            raise RuntimeError('owned-resident refuses generic loader resource: ' + name)
 
 
 def parse_args(argv, *, require_binary=True):
@@ -1408,7 +1423,12 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             'trace_profile': trace_profile,
             'compiler_diagnostics': compiler_diagnostics,
         }, indent=2) + '\n')
+    environment = dict(os.environ) if environment is None else environment
     if compiler_mode == 'owned-resident':
+        if 'TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT' in declared_resources:
+            # Mixed harnesses declare both real manifests. Only this owned edge
+            # selects the service expectation; direct Portable cases keep theirs.
+            environment['TIDEPOOL_COMPILER_DEPLOYMENT'] = environment['TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT']
         frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
         if artifact_root is None or not frontend:
             raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
@@ -1425,7 +1445,6 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                      else Path(tempfile.mkdtemp(prefix='tidepool-libtest-cache-')))
     if artifact_root is not None:
         compile_cache.mkdir(mode=0o700)
-    environment = dict(os.environ) if environment is None else environment
     environment['TIDEPOOL_COMPILE_CACHE_DIR'] = str(compile_cache)
     record['compile_cache_root'] = str(compile_cache)
     if artifact_root is None:
@@ -1772,9 +1791,8 @@ def main(argv=None):
             all_names = names(options.binary)
             ignored_names = set(names(options.binary, '--ignored'))
             selected = select_tests(all_names, ignored_names, options)
-            if (any(compiler_mode_for(options, name) == 'owned-resident' for name in selected)
-                    and not os.environ.get('TIDEPOOL_EXTRACT')):
-                raise RuntimeError('owned-resident requires a declared TIDEPOOL_EXTRACT frontend')
+            if any(compiler_mode_for(options, name) == 'owned-resident' for name in selected):
+                validate_owned_compiler_resources(options.resource_env)
         except RunnerInterrupted as error:
             print(f'libtest runner interrupted by signal {error.signum}', file=sys.stderr)
             return 128 + error.signum

@@ -9930,12 +9930,13 @@ mod module_product_tests {
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
         let products = crate::paths::build_products_dir(&endpoint.identity().producer_hex());
         assert!(products.starts_with(&compile_cache));
-        for directory in [&compile_cache, &products] {
-            match std::fs::read_dir(directory) {
-                Ok(entries) => assert_eq!(entries.count(), 0),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => panic!("isolated cache inspection {}: {error}", directory.display()),
-            }
+        match std::fs::read_dir(&products) {
+            Ok(entries) => assert_eq!(entries.count(), 0, "no prior module products"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "isolated product inspection {}: {error}",
+                products.display()
+            ),
         }
         let source = include_str!("../tests/fixtures/deployment-module-package/Consumer.hs");
         let original = crate::artifacts::test_support::compile_targets(

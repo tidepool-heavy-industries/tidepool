@@ -513,9 +513,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIs(group["ignored"], True)
         self.assertIs(group["haskell_worker"], True)
         for resource in (
-            "//build/package:compiler_deployment",
+            "//build/package:compiler_service_deployment",
             "//bridge/haskell:facade_embedded_sources",
-            "//build/package:tidepool_extract_runtime_libraries",
         ):
             self.assertIn(resource, group["resources"])
         for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
@@ -538,9 +537,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("//build/package:native_catalog", group["resources"])
         self.assertEqual(group["resource_env"]["TIDEPOOL_COMPILER_MODULES"],
                          "$(location //build/package:native_catalog)/catalog.json")
-        for resource in ("//build/package:compiler_deployment",
-                         "//bridge/haskell:facade_embedded_sources",
-                         "//build/package:tidepool_extract_runtime_libraries"):
+        for resource in ("//build/package:compiler_service_deployment",
+                         "//bridge/haskell:facade_embedded_sources"):
             self.assertIn(resource, group["resources"])
         for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
                          "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
@@ -1737,12 +1735,40 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground':
             'owned-resident',
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof': 'owned-resident'})
+        self.assertEqual(generated['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
+                         '$(location //build/package:compiler_deployment)')
+        self.assertEqual(generated['resource_env']['TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT'],
+                         '$(location //build/package:compiler_service_deployment)/compiler-deployment.json')
+        self.assertNotIn('LD_LIBRARY_PATH', generated['resource_env'])
         history = self.rule("tidepool/toolchain", "toolchain_source_proof_pairing_test",
                             "tidepool_rust_test_cases")
         self.assertEqual(history['case_compiler_modes'], {
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof':
             'owned-resident'})
         self.assertNotIn('TIDEPOOL_TEST_TRACE_PROFILE', history['env'])
+        for target in ('toolchain_source_proof_pairing_test', 'toolchain_accepted_join_custody_test',
+                       'toolchain_catalog_captured_inputs_test', 'toolchain_linked_entry_reopen_test',
+                       'toolchain_retained_entry_refusal_test'):
+            native = self.rule('tidepool/toolchain', target, 'tidepool_rust_test_cases')
+            self.assertEqual(native['expected_count'], 1)
+            self.assertEqual(native['case_compiler_modes'],
+                             {name: 'owned-resident' for name in native['exact_tests']})
+            self.assertEqual(native['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
+                             '$(location //build/package:compiler_service_deployment)/compiler-deployment.json')
+        for _, native in self.rules('tidepool/toolchain').values():
+            if 'owned-resident' not in native.get('case_compiler_modes', {}).values():
+                continue
+            for resource in ('TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER',
+                             'TIDEPOOL_COMPILER_DEPLOYMENT', 'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'):
+                self.assertIn(resource, native['resource_env'])
+            for loader in ('LD_LIBRARY_PATH', 'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES'):
+                self.assertNotIn(loader, native.get('env', {}))
+                self.assertNotIn(loader, native['resource_env'])
+        for target in ('toolchain_borrowed_native_recapture_test', 'toolchain_native_original_recapture_test'):
+            observed = self.rule('tidepool/toolchain', target, 'tidepool_rust_test_cases')
+            self.assertNotIn('case_compiler_modes', observed)
+            self.assertEqual(observed['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
+                             '$(location //build/package:compiler_deployment)')
         reference = self.rule("tidepool/toolchain", "toolchain_world_reference_history_test",
                               "tidepool_rust_test_cases")
         self.assertEqual(reference['env']['TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES'], '0')

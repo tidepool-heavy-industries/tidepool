@@ -40,6 +40,13 @@ class IsolatedLibtestTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def owned_service_resources(self):
+        config = Path(self.tmp.name) / 'compiler-service-source.bin'
+        config.write_bytes(b'declared launch data; no compiler authority')
+        config.with_suffix('.sha256').write_text(hashlib.sha256(config.read_bytes()).hexdigest() + '\n')
+        return {name: str(config if name == 'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG' else self.binary)
+                for name in runner.OWNED_COMPILER_RESOURCES}
+
     def test_argument_preflight_uses_the_runner_contract_without_binary_resolution(self):
         with patch.object(runner.Path, 'resolve') as resolve:
             options = runner.parse_args([
@@ -730,6 +737,42 @@ class IsolatedLibtestTests(unittest.TestCase):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, artifact_root=root, compiler_mode='owned-resident')
         self.assertTrue(passed)
+
+    def test_mixed_harness_selects_only_its_declared_mode_manifest(self):
+        resources = self.owned_service_resources()
+        rooted = Path(self.tmp.name) / 'rooted-deployment.json'
+        rooted.write_text('independently declared rooted manifest')
+        resources['TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT'] = str(rooted)
+        for mode in ('direct', 'owned-resident'):
+            root = Path(self.tmp.name) / ('mixed-' + mode)
+            expected = str(rooted) if mode == 'owned-resident' else resources['TIDEPOOL_COMPILER_DEPLOYMENT']
+            def execute(args, timeout, environment=None):
+                self.assertEqual(environment['TIDEPOOL_COMPILER_DEPLOYMENT'], expected)
+                self.assertEqual('--owned-daemon-run' in args, mode == 'owned-resident')
+                if mode == 'owned-resident':
+                    (root / 'compiler').mkdir()
+                    (root / 'compiler/owned-compiler-outcome.json').write_text(
+                        json.dumps({'cleanup': {'status': 'confirmed'}}))
+                return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+            with self.subTest(mode=mode), patch.dict(os.environ, resources, clear=True), \
+                 patch.object(runner, 'execute', side_effect=execute):
+                runner.resolve_resource_environment(tuple(resources))
+                passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                    10, artifact_root=root, compiler_mode=mode, declared_resources=tuple(resources))
+            self.assertTrue(passed)
+
+    def test_missing_mixed_service_manifest_cannot_fall_back_to_direct_manifest(self):
+        resources = self.owned_service_resources()
+        resources['TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT'] = str(Path(self.tmp.name) / 'absent-manifest')
+        with patch.dict(os.environ, resources), patch.object(runner, 'run_one') as execute:
+            result, _, errors = self.invoke([
+                '--exact', 'suite::works', '--expected-count', '1',
+                '--case-compiler-mode', 'suite::works=owned-resident',
+                *[word for name in resources for word in ('--resource-env', name)]],
+                lambda argv, *args, **kwargs: self.discover(argv))
+        self.assertEqual(result, 1)
+        self.assertIn('TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT', errors)
+        execute.assert_not_called()
 
     def test_owned_compiler_allowances_forward_without_changing_child_or_worker_count(self):
         frontend = Path(self.tmp.name) / 'allowance-frontend'
@@ -2644,12 +2687,13 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertCountEqual(launched, ['suite::works', 'suite::also_works'])
 
     def test_declared_case_compiler_modes_preserve_explicit_global_precedence(self):
+        resources = self.owned_service_resources()
         for global_mode, expected in ((None, 'owned-resident'), ('direct', 'direct')):
             with self.subTest(global_mode=global_mode):
                 arguments = ['--exact', 'suite::works', '--expected-count', '1',
                              '--case-compiler-mode', 'suite::works=owned-resident',
-                             '--output-dir', str(Path(self.tmp.name) / f'modes-{global_mode}'),
-                             '--resource-env', 'TIDEPOOL_EXTRACT']
+                             '--output-dir', str(Path(self.tmp.name) / f'modes-{global_mode}')]
+                arguments += [word for name in resources for word in ('--resource-env', name)]
                 if global_mode:
                     arguments += ['--compiler-mode', global_mode]
                 records = []
@@ -2661,7 +2705,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                     return True, '', ''
 
                 with patch.object(runner, 'run_one', side_effect=case), \
-                     patch.dict(os.environ, TIDEPOOL_EXTRACT=str(self.binary)):
+                     patch.dict(os.environ, resources):
                     result, _, errors = self.invoke(arguments, lambda argv, *args, **kwargs: self.discover(argv))
                 self.assertEqual(result, 0, errors)
                 self.assertEqual(records, [expected])
@@ -2713,11 +2757,12 @@ class IsolatedLibtestTests(unittest.TestCase):
                  '--case-compiler-mode', 'suite::works=owned-resident'],
                 lambda argv, *args, **kwargs: self.discover(argv))
         self.assertEqual(result, 1)
-        self.assertIn('requires a declared TIDEPOOL_EXTRACT frontend', errors)
+        self.assertIn('requires declared service resources', errors)
         execute.assert_not_called()
         allocate.assert_not_called()
 
     def test_declared_owned_resident_case_retains_temporary_failure_evidence(self):
+        resources = self.owned_service_resources()
         retained = Path(self.tmp.name) / 'temporary-case'
         retained.mkdir()
 
@@ -2731,11 +2776,12 @@ class IsolatedLibtestTests(unittest.TestCase):
 
         with patch.object(runner.tempfile, 'mkdtemp', return_value=str(retained)) as allocate, \
              patch.object(runner, 'run_one', side_effect=case), \
-             patch.dict(os.environ, TIDEPOOL_EXTRACT=str(self.binary)):
+             patch.dict(os.environ, resources):
             result, output, errors = self.invoke(
                 ['--exact', 'suite::works', '--expected-count', '1',
                  '--case-compiler-mode', 'suite::works=owned-resident',
-                 '--resource-env', 'TIDEPOOL_EXTRACT'], lambda argv, *args, **kwargs: self.discover(argv))
+                 *[word for name in resources for word in ('--resource-env', name)]],
+                lambda argv, *args, **kwargs: self.discover(argv))
         self.assertEqual(result, 1)
         allocate.assert_called_once_with(prefix='tidepool-libtest-case-', dir='/tmp')
         self.assertIn(str(retained), output)
@@ -2743,6 +2789,47 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertFalse(report['passed'])
         self.assertEqual(report['execution']['process_cleanup_status'], 'unconfirmed')
         self.assertTrue(Path(report['execution']['artifact_root']).is_dir())
+
+    def test_owned_service_resources_refuse_partial_declarations_before_case_allocation(self):
+        resources = self.owned_service_resources()
+        for missing in resources:
+            declared = set(resources) - {missing}
+            with self.subTest(missing=missing), patch.dict(os.environ, resources), \
+                 patch.object(runner, 'run_one') as execute, \
+                 patch.object(runner.tempfile, 'mkdtemp') as allocate:
+                result, _, errors = self.invoke([
+                    '--exact', 'suite::works', '--expected-count', '1',
+                    '--case-compiler-mode', 'suite::works=owned-resident',
+                    *[word for name in sorted(declared) for word in ('--resource-env', name)]],
+                    lambda argv, *args, **kwargs: self.discover(argv))
+            self.assertEqual(result, 1)
+            self.assertIn(missing, errors)
+            execute.assert_not_called()
+            allocate.assert_not_called()
+
+    def test_owned_service_resource_macro_refuses_missing_inputs_and_loader_injection(self):
+        calls = []
+        def fail(message):
+            raise ValueError(message)
+        namespace = {'sh_test': lambda **kwargs: calls.append(kwargs), 'fail': fail}
+        definitions = SCRIPT.with_name('defs.bzl').read_text()
+        exec('\n'.join(line for line in definitions.splitlines() if not line.startswith('load(')), namespace)
+        resources = self.owned_service_resources()
+        for mutation in [*resources, 'LD_LIBRARY_PATH', 'TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES']:
+            selected = dict(resources)
+            if mutation in selected:
+                selected.pop(mutation)
+            else:
+                selected[mutation] = '/generic/loader'
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, mutation):
+                namespace['tidepool_rust_test_cases'](name='owned', binary=':libtest',
+                    exact_tests=['suite::works'], expected_count=1,
+                    case_compiler_modes={'suite::works': 'owned-resident'}, resource_env=selected)
+        self.assertEqual(calls, [])
+        namespace['tidepool_rust_test_cases'](name='owned', binary=':libtest',
+            exact_tests=['suite::works'], expected_count=1,
+            case_compiler_modes={'suite::works': 'owned-resident'}, resource_env=resources)
+        self.assertEqual(len(calls), 1)
 
     def test_case_timeouts_apply_to_process_and_delegated_watchdog_and_receipt(self):
         retained = Path(self.tmp.name) / 'case-timeouts'
