@@ -135,6 +135,27 @@ fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
     fields
 }
 
+#[test]
+fn production_issued_contribution_preserves_home_owner() {
+    let native = product("ContributionHome", 34);
+    let owner = ExactModuleIdentity {
+        unit: native.owner().unit.clone(),
+        module: native.owner().module.clone(),
+    };
+    let context = native_context(&native);
+    let contribution = context
+        .compiler_source_support()
+        .native_availability()
+        .rows()
+        .flat_map(|row| row.contributions.iter())
+        .next()
+        .expect("the production offer issues its request contribution");
+    assert!(
+        contribution.has_home_original_owner(&owner),
+        "an issued Contribution retains its HOME Original owner"
+    );
+}
+
 fn dependent_product(
     module: &str,
     version: u8,

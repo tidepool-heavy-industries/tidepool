@@ -10392,11 +10392,65 @@ mod tests {
         assert!(!counts.contains_key(&owner));
     }
 
+    #[test]
+    fn production_root_selection_removes_payloads_through_the_owner_census() {
+        let inventory = ArtifactInventory::default();
+        let home = Arc::new(entry("RootSelection", &[]));
+        let owner = home.descriptor.owner.clone();
+        let other = Arc::new(entry("OtherSelection", &[]));
+        let other_owner = other.descriptor.owner.clone();
+        let homes = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![Arc::clone(&home), other],
+            )
+            .unwrap();
+        let broad = homes;
+        assert_eq!(
+            broad.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+        assert!(broad.lease.has_home_acquired_owner(&owner));
+        assert!(broad.lease.has_acquired_owner(&other_owner));
+
+        // This enters the production projected-materialization removal path,
+        // rather than mutating the payload map and census by hand.
+        let selected = broad.select_roots(vec![home.descriptor.id]).unwrap();
+        assert_eq!(
+            selected.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+        assert!(!selected.lease.acquired_owner_counts.contains_key(&other_owner));
+        assert_eq!(
+            selected
+                .lease
+                .acquired_owner_counts
+                .iter()
+                .map(|(owner, counts)| (owner.clone(), *counts))
+                .collect::<BTreeMap<_, _>>(),
+            acquired_owner_oracle(&selected)
+        );
+        // The broad view retains its independent acquired payloads.
+        assert_eq!(
+            broad.lease.acquired_owner_counts.get(&owner),
+            Some(&AcquiredOwnerCounts {
+                observed: 1,
+                home: 1
+            })
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(48))]
         #[test]
         fn typed_owner_index_matches_independent_census_over_replace_merge_remove_histories(
-            history in proptest::collection::vec((0usize..7, 0u8..4, 0usize..3, proptest::bool::ANY), 1..40),
+            history in proptest::collection::vec((0usize..7, 0u8..5, 0usize..3, proptest::bool::ANY), 1..40),
         ) {
             let homes = (0..7)
                 .map(|index| Arc::new(entry(&format!("Census{index}"), &[])))
@@ -10455,8 +10509,9 @@ mod tests {
             let mut payloads: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>> = imbl::OrdMap::new();
             let mut counts: imbl::OrdMap<ExactModuleIdentity, AcquiredOwnerCounts> =
                 imbl::OrdMap::new();
-            let mut operations = [0usize; 4];
+            let mut operations = [0usize; 5];
             let mut class_replaced = 0usize;
+            let mut cross_owner_replaced = 0usize;
             for (step, (owner, action, source, remove_partner)) in history.into_iter().enumerate() {
                 operations[action as usize] += 1;
                 let id = |entry: &Arc<ArtifactEntry>| entry.descriptor.id;
@@ -10502,7 +10557,7 @@ mod tests {
                             }
                         }
                     }
-                    _ => {
+                    3 => {
                         // Union with an independently assembled operand: its
                         // payload map is built without any index routine.
                         let mut incoming: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>> =
@@ -10530,6 +10585,32 @@ mod tests {
                             }
                         }
                     }
+                    4 => {
+                        // A malformed/corrupt replacement can reuse the exact
+                        // map key while naming another owner. The census must
+                        // release the old owner and acquire the new one.
+                        let keys = payloads.keys().copied().collect::<Vec<_>>();
+                        if let Some(target) = keys.get(source % keys.len().max(1)) {
+                            let mut moved = payloads[target].as_ref().clone();
+                            let previous_owner = moved.descriptor.owner.module.clone();
+                            let mut next_owner = (owner + step + source + 1) % 7;
+                            if format!("Census{next_owner}") == previous_owner {
+                                next_owner = (next_owner + 1) % 7;
+                            }
+                            moved.descriptor.owner = ExactModuleIdentity {
+                                unit: "unit".into(),
+                                module: format!("Census{next_owner}"),
+                            };
+                            ViewLease::insert_payload(
+                                &mut payloads,
+                                &mut counts,
+                                *target,
+                                Arc::new(moved),
+                            );
+                            cross_owner_replaced += 1;
+                        }
+                    }
+                    _ => unreachable!("generated census operation"),
                 }
                 if remove_partner {
                     let keys = payloads.keys().copied().collect::<Vec<_>>();
@@ -10597,6 +10678,29 @@ mod tests {
                     );
                 }
             }
+            if operations[4] == 0 {
+                let target = payloads
+                    .keys()
+                    .next()
+                    .copied()
+                    .unwrap_or(homes[0].descriptor.id);
+                let mut moved = payloads
+                    .get(&target)
+                    .unwrap_or(&homes[0])
+                    .as_ref()
+                    .clone();
+                let previous_owner = moved.descriptor.owner.module.clone();
+                moved.descriptor.owner = ExactModuleIdentity {
+                    unit: "unit".into(),
+                    module: if previous_owner == "Census0" {
+                        "Census1".into()
+                    } else {
+                        "Census0".into()
+                    },
+                };
+                ViewLease::insert_payload(&mut payloads, &mut counts, target, Arc::new(moved));
+                cross_owner_replaced += 1;
+            }
             let expected = census(&payloads);
             let actual = counts
                 .iter()
@@ -10604,7 +10708,7 @@ mod tests {
                 .collect::<BTreeMap<_, _>>();
             proptest::prop_assert_eq!(&actual, &expected);
             eprintln!(
-                "typed-census-history insert_replace_remove_union={operations:?} class_replaced={class_replaced} surviving={}",
+                "typed-census-history insert_replace_remove_union_cross_owner={operations:?} class_replaced={class_replaced} cross_owner_replaced={cross_owner_replaced} surviving={}",
                 payloads.len()
             );
         }
