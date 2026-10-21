@@ -374,7 +374,7 @@ impl NativeOutputPurpose for OriginalOutput {}
 /// Keep the actual completed transaction, selected deployment, physical root,
 /// decoded receipt and its captured members together at the compile front door.
 pub(super) fn extract_native<P: NativeOutputPurpose>(
-    run: tidepool_extract_cmd::ExtractRun,
+    run: &tidepool_extract_cmd::ExtractRun,
     deployment: &crate::toolchain::AdmittedCompilerDeployment,
     root: &Path,
     layout: &InvocationOutputLayout<P>,
@@ -443,6 +443,24 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
         bundle.operation(),
     )
     .map_err(compiler_evidence_failure)?;
+    bundle
+        .operation()
+        .reserve::<FiniteNativeOutput>(1)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    bundle
+        .operation()
+        .reserve::<(PathBuf, Arc<[u8]>)>(1)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    bundle
+        .operation()
+        .charge(
+            root.as_os_str()
+                .len()
+                .saturating_add(issuing_root.as_os_str().len())
+                .saturating_add("certified-products.cbor".len())
+                .saturating_add(receipt_bytes.len()),
+        )
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
     let mut files = BTreeMap::from([(
         PathBuf::from("certified-products.cbor"),
         receipt_bytes.into(),
@@ -496,6 +514,10 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
             bundle.operation(),
         )
         .map_err(compiler_evidence_failure)?;
+        bundle
+            .operation()
+            .charge(relative.as_os_str().len().saturating_add(bytes.len()))
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
         files.insert(relative.to_path_buf(), bytes.into());
     }
     let output = FiniteNativeOutput {

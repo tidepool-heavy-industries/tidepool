@@ -672,6 +672,12 @@ impl AppliedModuleCandidateOffer {
                 "admitted turn endpoint differs from applied request".into(),
             ));
         }
+        let deployment = endpoint.deployment().clone();
+        if deployment.package_source_association().is_none() {
+            return Err(CompileError::ExtractFailed(
+                "native turn requires an admitted package service profile".into(),
+            ));
+        }
         let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &self.command);
         let run = endpoint
             .execute_with_input_files(&self.command, self.input_transport_files(), |close| {
@@ -689,10 +695,15 @@ impl AppliedModuleCandidateOffer {
         let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
-            self.read_admitted_turn(directory.path(), request.supports_compile_input_identity())
-                .map_err(|error| {
-                    self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
-                })?
+            self.read_admitted_turn(
+                directory.path(),
+                request.supports_compile_input_identity(),
+                &run,
+                &deployment,
+            )
+            .map_err(|error| {
+                self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
+            })?
         } else {
             (None, None)
         };
@@ -2457,6 +2468,8 @@ impl SelectedModuleCandidateOffer {
         &self,
         directory: &Path,
         issue_identity: bool,
+        run: &tidepool_extract_cmd::ExtractRun,
+        deployment: &crate::toolchain::AdmittedCompilerDeployment,
     ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
         let turn: Arc<[u8]> =
             crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
@@ -2479,7 +2492,32 @@ impl SelectedModuleCandidateOffer {
             }
         };
         let sites = decode_turn_yield_sites(site_observations)?;
-        let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
+        let native = invocation_output::extract_native(
+            run,
+            deployment,
+            directory,
+            &invocation_output::InvocationOutputLayout::original(&["__prepared"])?,
+            &mut |_, _, _| {},
+            |_, _| {},
+        )?;
+        let targets = native.bundle.targets();
+        let [target] = targets.as_slice() else {
+            return Err(CompileError::ExtractFailed(
+                "native turn output target count".into(),
+            ));
+        };
+        let mut output = ProgramNativeOutput {
+            directory: directory.to_path_buf(),
+            target: Arc::new(tidepool_repr::execution_schema::parse_program(
+                &target.prepared_bytes,
+                &crate::prepared_artifact::production_requirements()?,
+                DecodeLimits::default(),
+            )?),
+            turn: turn.clone(),
+            metadata: native.bundle.metadata().into(),
+            source: source.to_owned(),
+            products: None,
+        };
         let deserialize_start = Instant::now();
         let (table, warnings) =
             tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
@@ -2493,8 +2531,11 @@ impl SelectedModuleCandidateOffer {
         let module = extract_module_name(source).ok_or_else(|| {
             CompileError::ExtractFailed("admitted turn source module missing".into())
         })?;
-        output.products = seal_turn_outputs_inner(
+        output.products = seal_turn_outputs_with_validation(
             self,
+            self.exact
+                .as_ref()
+                .map(|request| request.receipt_admission()),
             directory,
             &directory.join(format!("{module}.hs")),
             source,
@@ -2503,6 +2544,14 @@ impl SelectedModuleCandidateOffer {
             issue_identity.then_some((&table, sites.as_slice())),
             None,
             OriginalOutputPublication::Transaction,
+            None,
+            None,
+            None,
+            None,
+            Some((&native.native_output(), &native.receipt)),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+                native.bundle.operation(),
+            )),
         )?
         .map(Arc::new);
         Ok((
@@ -5719,6 +5768,7 @@ fn compile_invocation_inner(
         Ok(attempt) => attempt,
         Err(error) => {
             if matches!(&error, CompileAttemptError::Endpoint(error) if error.definitely_unsubmitted())
+                || matches!(&error, CompileAttemptError::Deployment(_))
                 || matches!(&error, CompileAttemptError::Diagnostic(CompileError::Io(error))
                     | CompileAttemptError::ModulePackage(crate::toolchain::ModulePackageError::Interrupted(error))
                     if error.kind() == std::io::ErrorKind::Interrupted)
@@ -5800,7 +5850,7 @@ fn compile_invocation_inner(
         let portable = (|| {
             let layout = invocation_output::InvocationOutputLayout::portable(inv.targets)?;
             let bundle = extract_and_read(
-                run,
+                &run,
                 output_owner.path(),
                 &layout,
                 &mut on_stage,
@@ -5845,7 +5895,7 @@ fn compile_invocation_inner(
     if let CompilationOutputOwner::Original(preparation) = output_owner {
         let original_layout = invocation_output::InvocationOutputLayout::original(inv.targets)?;
         let extracted = invocation_output::extract_native(
-            run,
+            &run,
             &deployment,
             preparation.raw(),
             &original_layout,
@@ -5933,7 +5983,7 @@ fn compile_invocation_inner(
         return Ok(CompilationOutput::Original(original));
     }
     let extracted = invocation_output::extract_native(
-        run,
+        &run,
         &deployment,
         output_owner.path(),
         &layout,
@@ -6679,7 +6729,7 @@ pub(crate) struct RawTargetOutput {
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
 pub(crate) fn extract_and_read<P>(
-    run: tidepool_extract_cmd::ExtractRun,
+    run: &tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
     layout: &invocation_output::InvocationOutputLayout<P>,
     mut on_stage: impl FnMut(&str, Duration, u64),
