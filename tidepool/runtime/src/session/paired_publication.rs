@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::SourceLeaseKey;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
+use tidepool_toolchain::compiler_world::{CompilerWorld, PrivateCompilerProgress};
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
     DeclarationWrite, ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
@@ -97,6 +98,11 @@ pub(super) struct WorldExecutionIntent {
     pub(super) original_source: Arc<super::RuntimeOriginalSource>,
     pub(super) target: Arc<super::RuntimeLexicalScopeLease>,
     pub(super) private: Arc<super::inspection::InspectionWorldAssociation>,
+    /// The exact typed progress the private execution actually produced.
+    /// An installed no-cell invocation is `Unchanged`; a completed cell is
+    /// `Checked`; started/refused/uncertain work is `Incomplete` and can never
+    /// become either successful publication branch.
+    pub(super) progress: PrivateCompilerProgress,
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -624,12 +630,15 @@ impl PersistentSession {
         {
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
+        let progress =
+            CompilerWorld::classify_private_publication(&private.world, &facts.published.world);
         let world = Some(WorldExecutionIntent {
             association: facts.published,
             source: facts.source,
             original_source: facts.original_source,
             target: facts.public_target,
             private,
+            progress,
         });
         let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
         let intent = self.freeze_execution_intent_from_snapshot(

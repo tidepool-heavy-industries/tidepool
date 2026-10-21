@@ -1437,6 +1437,25 @@ pub struct CompilerWorld {
     position: Option<WorldCellPosition>,
 }
 
+/// The exact typed compiler progress a private execution can carry into public
+/// promotion. Only the compiler owner can classify its own products; runtime
+/// code never guesses this from tool names, `position.is_none()`, or Arc
+/// address identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrivateCompilerProgress {
+    /// The private World is the exact borrowed public product with no compiler
+    /// additions. Publication keeps the latest public World instead of
+    /// restoring the older borrowed base.
+    Unchanged,
+    /// A real completed checked-cell successor was issued by the cell owner.
+    /// The existing checked promotion path validates its full lineage.
+    Checked,
+    /// Compiler work started, changed its input, was refused, or otherwise
+    /// never produced a completed checked successor. None of these may become
+    /// either successful publication branch.
+    Incomplete,
+}
+
 #[derive(Clone, Debug)]
 struct WorldCellPosition {
     original_base: [u8; 32],
@@ -1448,6 +1467,37 @@ struct WorldCellPosition {
 impl CompilerWorld {
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.restoration.logical_id
+    }
+    /// Classify the private compiler product against the public base it
+    /// borrowed. An unchanged borrow keeps the same logical product; only a
+    /// real completed checked successor is `Checked`. Started, foreign, or
+    /// otherwise incomplete progress is `Incomplete` and cannot publish.
+    pub fn classify_private_publication(
+        private: &Arc<Self>,
+        original_public: &Arc<Self>,
+    ) -> PrivateCompilerProgress {
+        let fences_match = |candidate: &Self, base: &Self| {
+            candidate.restoration.producer == base.restoration.producer
+                && candidate.restoration.profile == base.restoration.profile
+                && candidate.restoration.inputs.sources.seal()
+                    == base.restoration.inputs.sources.seal()
+        };
+        let same_product = private.logical_id() == original_public.logical_id();
+        let (position_present, original_base_matches, complete) = match private.position.as_ref() {
+            Some(position) => (
+                true,
+                position.original_base == *original_public.logical_id(),
+                position.next_item == position.total_items,
+            ),
+            None => (false, false, false),
+        };
+        classify_private_world(
+            same_product,
+            position_present,
+            fences_match(private, original_public),
+            original_base_matches,
+            complete,
+        )
     }
     /// The last actual Ready admission's optional storage observation. This
     /// is neither current residency nor a lease and may be stale after END.
@@ -1479,6 +1529,32 @@ impl CompilerWorld {
             .clone()
             .with_observation(observation)?;
         self.with_primary_and_lexical(lexical.observation_type_contexts(), Some(&lexical))
+    }
+}
+
+/// The compiler owner's closed decision table for a private World. It never
+/// consults tool names, runtime booleans, or Arc address identity.
+fn classify_private_world(
+    same_product: bool,
+    position_present: bool,
+    fences_match: bool,
+    position_original_base_matches: bool,
+    position_complete: bool,
+) -> PrivateCompilerProgress {
+    if !fences_match {
+        return PrivateCompilerProgress::Incomplete;
+    }
+    if same_product {
+        return if position_present {
+            PrivateCompilerProgress::Incomplete
+        } else {
+            PrivateCompilerProgress::Unchanged
+        };
+    }
+    if position_present && position_original_base_matches && position_complete {
+        PrivateCompilerProgress::Checked
+    } else {
+        PrivateCompilerProgress::Incomplete
     }
 }
 
@@ -2618,6 +2694,41 @@ mod tests {
             make(vec![extra]).seal(),
             make(vec![captured("Module.hs", b"module Module where\nx = 1\n")]).seal()
         );
+    }
+
+    #[test]
+    fn private_publication_classification_keeps_three_closed_branches() {
+        // The owner-issued decision table has exactly three outcomes. Each row
+        // is an independent expectation from the contract, not a recomputation
+        // through the same expression.
+        let classify = |same, position, fences, base_match, complete| {
+            classify_private_world(same, position, fences, base_match, complete)
+        };
+        // An unchanged borrow keeps the same product with no checked position.
+        assert_eq!(
+            classify(true, false, true, false, false),
+            PrivateCompilerProgress::Unchanged
+        );
+        // A real completed checked successor is the only checked branch.
+        assert_eq!(
+            classify(false, true, true, true, true),
+            PrivateCompilerProgress::Checked
+        );
+        // Anything started, foreign, or unfinished refuses.
+        for (same, position, fences, base_match, complete) in [
+            (false, true, true, true, false),   // incomplete checked prefix
+            (false, true, true, false, true),   // foreign checked base
+            (false, false, true, false, false), // changed input, no successor
+            (false, true, false, true, true),   // foreign producer/profile/source
+            (true, true, true, false, false),   // unchanged product with a position
+            (true, false, false, false, false), // unchanged product, foreign lineage
+        ] {
+            assert_eq!(
+                classify(same, position, fences, base_match, complete),
+                PrivateCompilerProgress::Incomplete,
+                "({same}, {position}, {fences}, {base_match}, {complete})"
+            );
+        }
     }
 }
 
