@@ -7,7 +7,7 @@ use super::*;
 use crate::certified_products::{
     certify_products, decode_receipt_in, CertifiedProducts, ParsedModuleProducts,
 };
-use crate::declaration_context::{certified_product_artifact_view, ExactDeclarationContext};
+use crate::declaration_context::ExactDeclarationContext;
 use crate::declaration_join::ExactModuleIdentity;
 
 #[derive(Clone, Copy)]
