@@ -14138,10 +14138,14 @@ pub(crate) mod tests {
             extended.metadata(&references[1])
         );
         let mut conflicting = references[0].clone();
-        let ReceiptImportOwner::OriginalBinding { original, .. } = &mut conflicting else {
+        let ReceiptImportOwner::OriginalBinding {
+            original: conflicting_original,
+            ..
+        } = &mut conflicting
+        else {
             unreachable!()
         };
-        *original = alternate_pair;
+        *conflicting_original = alternate_pair;
         assert!(matches!(
             initial.with_metadata([&references[0], &conflicting]),
             Err(CertificationError::InputDecision {
