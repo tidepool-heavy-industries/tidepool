@@ -1780,7 +1780,7 @@ tidepool_buildscript_run(
             rules.append(testing_fixture_test_cases(unit_target["name"]))
         shared = package_name in {"exomonad-host", "tidepool-runtime", "exomonad-actor"}
         if package_name in {"tidepool-runtime", "exomonad-actor"}:
-            env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
+            env, resources, worker = compiler_service_test_inputs(package_name, unit_target["name"], mixed=True)
             if package_name == "tidepool-runtime":
                 env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker),
