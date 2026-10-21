@@ -1,5 +1,109 @@
 //! Finite source publication and later cells use the actual B source owner.
 use super::*;
+use std::collections::BTreeMap;
+use tidepool_codegen::prepared_program::{NativeBindingKey, NativeInstanceLease};
+use tidepool_repr::execution_schema::{Group, HeapRhs, UpdatePolicy, ValueId};
+
+type CafKey = (NativeBindingKey, ValueId);
+
+#[derive(Debug)]
+struct HeldPackageCaf {
+    lease: NativeInstanceLease,
+    pointer: usize,
+    evaluated: bool,
+}
+
+fn observed_package_cafs(
+    resident: &mut TestSession,
+    scope: ScopeId,
+) -> BTreeMap<CafKey, HeldPackageCaf> {
+    let snapshot = resident
+        .public_visibility_snapshot_in(scope)
+        .expect("the actual installation/public scope is still live");
+    let leases = snapshot
+        .source_instances
+        .iter()
+        .map(|key| {
+            resident
+                .state
+                .bindings()
+                .native_instance(key)
+                .expect("each issued physical key retains its actual native lease")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let mut observations = BTreeMap::<CafKey, HeldPackageCaf>::new();
+    for lease in leases {
+        let NativeInstanceLease::Package(package) = &lease else {
+            continue;
+        };
+        let values = package
+            .image()
+            .group()
+            .definitions()
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops.as_slice(),
+            })
+            .filter(|top| {
+                matches!(
+                    top.binding.rhs,
+                    HeapRhs::Thunk {
+                        update: UpdatePolicy::Memoize,
+                        ..
+                    }
+                )
+            })
+            .map(|top| top.binding.id)
+            .collect::<Vec<_>>();
+        for value in values {
+            let key = (lease.binding_key(), value);
+            if let Some(previous) = observations.get(&key) {
+                assert_eq!(previous.lease.instance(), lease.instance(),
+                    "this actual scope must not conflate two physical instances for one package binding");
+                continue;
+            }
+            let observed = crate::session::prepared::tests::observe_package_instance(
+                resident
+                    .state
+                    .require_prepared()
+                    .expect("one actual physical engine"),
+                &lease,
+                value,
+            )
+            .expect("the actual package image/program/value/root pairing remains live");
+            observations.insert(
+                key,
+                HeldPackageCaf {
+                    lease: lease.clone(),
+                    pointer: observed.pointer,
+                    evaluated: observed.evaluated,
+                },
+            );
+        }
+    }
+    observations
+}
+
+fn assert_same_package_instance(previous: &HeldPackageCaf, current: &HeldPackageCaf) {
+    assert_eq!(previous.lease.binding_key(), current.lease.binding_key());
+    assert_eq!(
+        previous.lease.instance(),
+        current.lease.instance(),
+        "repeated actual-domain demand must preserve mutable package state"
+    );
+    let (NativeInstanceLease::Package(a), NativeInstanceLease::Package(b)) =
+        (&previous.lease, &current.lease)
+    else {
+        unreachable!()
+    };
+    assert!(
+        Arc::ptr_eq(a.image().image(), b.image().image()),
+        "the actual root retains its same immutable package code"
+    );
+}
 
 #[test]
 #[ignore = "requires the rooted runtime_package_source_history_test resources"]
@@ -107,10 +211,52 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     let installation_a = capsule_a.installation_scope().clone();
     let installation_b = capsule_b.installation_scope().clone();
     assert_ne!(installation_a.scope(), installation_b.scope());
-    // Both physical installations now exist, and neither entry has run. The
-    // held native leases supply the CAF observations at this exact boundary.
+    // Read both roots before execution can collect or update either closure.
+    let initial_a = observed_package_cafs(&mut resident, installation_a.scope());
+    let initial_b = observed_package_cafs(&mut resident, installation_b.scope());
+    assert!(
+        !initial_a.is_empty(),
+        "the real selected package groups must contain a memoizing CAF"
+    );
+    assert_eq!(
+        initial_a.keys().collect::<Vec<_>>(),
+        initial_b.keys().collect::<Vec<_>>()
+    );
+    for (key, a) in &initial_a {
+        let b = &initial_b[key];
+        assert_ne!(a.lease.instance(), b.lease.instance());
+        assert_ne!(
+            a.pointer, b.pointer,
+            "fresh A/B CAFs must be distinct heap objects: {key:?}"
+        );
+        let (NativeInstanceLease::Package(a), NativeInstanceLease::Package(b)) =
+            (&a.lease, &b.lease)
+        else {
+            unreachable!()
+        };
+        assert!(
+            Arc::ptr_eq(a.image().image(), b.image().image()),
+            "fresh installation shares immutable package code only"
+        );
+    }
     run_package_source(&mut resident, capsule_a, &source_a);
+    let forced_a = observed_package_cafs(&mut resident, installation_a.scope());
+    let untouched_b = observed_package_cafs(&mut resident, installation_b.scope());
+    let forced_key = initial_a.iter().find_map(|(key, initial)| {
+        (!initial.evaluated && !initial_b[key].evaluated && forced_a[key].evaluated
+            && !untouched_b[key].evaluated).then_some(*key)
+    }).unwrap_or_else(|| panic!(
+        "real A execution must force a selected CAF while B stays unforced: A={initial_a:?} after={forced_a:?} B={untouched_b:?}"
+    ));
+    assert_same_package_instance(&initial_a[&forced_key], &forced_a[&forced_key]);
+    assert_same_package_instance(&initial_b[&forced_key], &untouched_b[&forced_key]);
     run_package_source(&mut resident, capsule_b, &source_b);
+    let forced_b = observed_package_cafs(&mut resident, installation_b.scope());
+    assert_same_package_instance(&initial_b[&forced_key], &forced_b[&forced_key]);
+    assert!(
+        forced_b[&forced_key].evaluated,
+        "B forces its own actual CAF"
+    );
 
     // Public B is its actual issued lease, not installer I_B or a named substitute.
     resident.public_source = source_b.clone();
@@ -132,13 +278,26 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "if PackageProbe.packageProbe 0 > 0 then (42 :: Int) else 0",
         42,
     );
+    let public_first = observed_package_cafs(&mut resident, public_b);
+    let first_caf = public_first
+        .get(&forced_key)
+        .expect("the first B cell demands the SAME issued package CAF binding");
+    assert!(first_caf.evaluated);
+    assert_ne!(
+        first_caf.lease.instance(),
+        forced_b[&forced_key].lease.instance(),
+        "public B and private installer I_B are separate physical domains"
+    );
     public_package_cell(
         &mut resident,
         &recipe,
         "packageSecond",
-        "P.fst packageFirst + if PackageProbe.packageSibling '\\NUL' > 0 then 1 else 0",
+        "P.fst packageFirst + if PackageProbe.packageProbe 1 > 0 && PackageProbe.packageSibling '\\NUL' > 0 then 1 else 0",
         43,
     );
+    let public_second = observed_package_cafs(&mut resident, public_b);
+    assert_same_package_instance(first_caf, &public_second[&forced_key]);
+    assert!(public_second[&forced_key].evaluated);
     let cutoff = source_a.source_admission().fence_if_idle().unwrap();
     assert!(cutoff
         .retire(
@@ -157,6 +316,16 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "packageAfterCutoff",
         "P.fst packageSecond + if PackageProbe.packageProbe 2 > 0 then 1 else 0",
         44,
+    );
+    let public_after_cutoff = observed_package_cafs(&mut resident, public_b);
+    assert_same_package_instance(first_caf, &public_after_cutoff[&forced_key]);
+    assert!(public_after_cutoff[&forced_key].evaluated);
+    eprintln!(
+        "PACKAGE_CAF_HISTORY {:?} I_A={:?} I_B={:?} public_B={:?}",
+        forced_key,
+        forced_a[&forced_key].lease.instance(),
+        forced_b[&forced_key].lease.instance(),
+        public_after_cutoff[&forced_key].lease.instance()
     );
     drop(resident);
     drop(installation_b);
