@@ -12,6 +12,33 @@ impl NativeDemandPacket {
         &self.originals
     }
 
+    pub(crate) fn without_known(
+        &self,
+        known: impl Fn(&ReceiptImportOwner) -> bool,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        operation.reserve::<ReceiptImportOwner>(self.originals.len())?;
+        let mut originals = Vec::new();
+        for original in &self.originals {
+            if known(original) {
+                continue;
+            }
+            let ReceiptImportOwner::OriginalBinding {
+                unit,
+                module,
+                binder,
+                ..
+            } = original
+            else {
+                return Err(CertificationError::Receipt("native demand reference kind"));
+            };
+            operation.charge(unit.len().saturating_add(module.len()))?;
+            charge_symbol(operation, binder)?;
+            originals.push(original.clone());
+        }
+        Ok(Self { originals })
+    }
+
     pub(crate) fn decode(bytes: &[u8], operation: &InventoryOperation) -> CertResult<Self> {
         let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
         let value = operation.decode_value(bytes, limit)?;

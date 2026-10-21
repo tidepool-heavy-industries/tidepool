@@ -2335,6 +2335,15 @@ pub(crate) struct DemandCertifiedGroups {
 }
 
 impl DemandCertifiedGroups {
+    pub(crate) fn contains_original_use(
+        &self,
+        reference: &crate::certified_products::ReceiptImportOwner,
+    ) -> bool {
+        self.resolved_originals
+            .as_ref()
+            .is_some_and(|resolved| resolved.get(reference).is_some())
+    }
+
     /// Append only already resolved batches from this same request. Each
     /// scoped occurrence keeps its own ordered links, even when code is shared.
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
@@ -2951,7 +2960,7 @@ impl DemandNativeInputs {
 /// Broader body availability cannot construct an executable-ready result.
 pub(crate) struct ResolvedNativeDemand {
     demand: DemandNativeInputs,
-    groups: DemandCertifiedGroups,
+    groups: Arc<DemandCertifiedGroups>,
 }
 
 impl ResolvedNativeDemand {
@@ -2963,8 +2972,8 @@ impl ResolvedNativeDemand {
         Arc::ptr_eq(self.demand.cold(), inputs)
     }
 
-    pub(crate) fn into_groups(self) -> DemandCertifiedGroups {
-        self.groups
+    pub(crate) fn shared_groups(&self) -> &Arc<DemandCertifiedGroups> {
+        &self.groups
     }
 }
 
@@ -3016,7 +3025,10 @@ impl RequestCompilerInputs {
                 other => failure(format!("native demand refused: {other}")),
             })?;
         let groups = demand.certify_receipt_groups(&inputs, validation)?;
-        Ok(ResolvedNativeDemand { demand, groups })
+        Ok(ResolvedNativeDemand {
+            demand,
+            groups: Arc::new(groups),
+        })
     }
 
     /// Consume a closed role/interface demand from this exact cold owner. The
