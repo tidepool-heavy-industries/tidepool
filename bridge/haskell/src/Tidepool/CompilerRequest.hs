@@ -5,7 +5,7 @@
 -- Completed preparation retains its actual recovery references and local worklist;
 -- later compiles and helper operations cannot replace either.
 module Tidepool.CompilerRequest
-  ( BoundCompilerRequest, withBoundCompilerRequest, boundWorkerRequest
+  ( BoundCompilerRequest, withBoundCompilerRequest, withBoundCompilerRequestWithNativeDemand, boundWorkerRequest
   , boundRequestOperation, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
@@ -18,7 +18,7 @@ module Tidepool.CompilerRequest
   ) where
 
 import Control.Exception (Exception, evaluate, throw, throwIO, fromException)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (replicateM, foldM, forM, forM_, unless, when)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -41,14 +41,15 @@ import Tidepool.CompilerExecution
   , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
   ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
+  , CompletedWorldProducts, completeWorldProducts, completedWorldNative
+  , WorldStageInputs, exchangeWorldNativeDemand, bindWorldStageInputsWithNativeDemand, requireWorldStageInputs, withWorldStageBasis, worldStagePriorOriginals, withWorldStageBindings, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , StagedOriginalProducts, withStagedOriginalBindings, stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts
+  , StagedOriginalProducts, stagedOriginalBinders, stagedOriginalExternalDemand, stagedOriginalReference, withWorldStageInputs
   , stagedDeclarationInputReferences
-  , newPreparedOriginalInterfaceArtifactsWithPrior
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
   , prepareOriginalProductsWithCacheAndReuse, prepareOriginalProductsWithWorklist
-  , prepareCompilerProjectionContext, requireOriginalExecutableGlobals, admitCurrentOriginalProducts
+  , prepareCompilerProjectionContext, requireOriginalExecutableGlobals, admitCurrentOriginalProducts, retainPreparedPackageTargets
   , preparedCurrentOriginalInventory, preparedProductInventory, currentOriginalBinders
   , currentOriginalBindingsExcept, currentReconciledOriginalProducts )
 import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
@@ -56,20 +57,27 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations
 import Tidepool.ExactScope
 import Tidepool.ExecutionSchema (SymbolIdentity(..), WireProgram(..), SiteRow(..))
 import qualified Tidepool.ExecutionSchema as Execution
-import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput)
+import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, projectedGroupEncodingInput)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability
   , projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate
   , preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedModuleProductOutcomes
-  , preparedRootIdentity )
+  , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget, packageTargetProgram, packageTargetConstructors, packageTargetGroups
+  , projectedPackageModule, projectedPackageInterfaceSha256, projectedPackageEncoding
+  , projectedPackageConstructors, projectedPackageYieldSites )
 import Tidepool.HostBindingAuthority (HostBindingRepresentation, hostBindingRepresentationJsonAuthority)
 import Tidepool.ConstructorIdentity (IssuedConstructor)
 import qualified Tidepool.EffectSchema
 import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature)
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithPrior, unrecoveredExactProducts)
-import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver)
+import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..))
+import Tidepool.OriginalProductRoots (requiredOriginalExternalGlobalsWithPrior, unrecoveredExactProducts)
+import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver
+  , preparedComponentVersion, preparedComponentModules, capturePreparedPackageInterfaces)
+import Tidepool.FatIface (fatOriginalOwner)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactSha256)
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
@@ -91,16 +99,22 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.Text.Encoding as TE
 import Data.Char (digitToInt)
-import Data.List (intercalate)
+import Data.List (intercalate, sortOn)
 import System.Directory (createDirectoryIfMissing, canonicalizePath)
 import System.FilePath ((</>), makeRelative, isAbsolute, splitDirectories)
 import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeBool)
 import Codec.CBOR.Write (toStrictByteString)
+import qualified Codec.CBOR.Decoding as D
+import Codec.CBOR.Read (deserialiseFromBytes)
+import qualified Data.ByteString.Lazy as BL
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Driver.Env (hsc_dflags)
+import GHC.Driver.Env (hsc_dflags, hsc_home_unit)
+import GHC.Unit.Home (isHomeUnit)
+import GHC.Unit.Module (Module, mkModule, mkModuleName)
+import GHC.Unit.Types (stringToUnit)
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Utils.Outputable (ppr)
 import Tidepool.Binders
@@ -129,7 +143,7 @@ import Tidepool.SessionArtifacts
 -- The admitted operation owns every field that admission already validated;
 -- later stages add only their own produced settings.
 data BoundCompilerRequest = BoundCompilerRequest CompilerScope WorkerRequest
-  AdmittedCompilerOperation CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs)
+  AdmittedCompilerOperation CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs) (Maybe NativeDemandExchange)
 
 -- One operation shape after shape admission and exact/held acquisition. A
 -- World preparation retains its validated immutable plan; a failed acquisition
@@ -145,10 +159,10 @@ data HeldWorldCellPreparation
   | HeldWorldCellAdmitted HeldWorldCellAdmission
 
 boundWorkerRequest :: BoundCompilerRequest -> WorkerRequest
-boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _) = args
+boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _ _) = args
 
 boundRequestOperation :: BoundCompilerRequest -> RequestOperation
-boundRequestOperation (BoundCompilerRequest _ _ admitted _ _ _) = admittedTag admitted
+boundRequestOperation (BoundCompilerRequest _ _ admitted _ _ _ _) = admittedTag admitted
   where
     admittedTag (AdmittedExactOperation _ operation) = operation
     admittedTag (AdmittedHeldQueryOperation _ question) = WorldQueryOperation question
@@ -159,15 +173,20 @@ boundRequestOperation (BoundCompilerRequest _ _ admitted _ _ _) = admittedTag ad
     heldPreparationQuestion (HeldWorldCellAdmitted admission) = heldWorldCellQuestion admission
 
 boundRequestExactScope :: BoundCompilerRequest -> Maybe ExactScope
-boundRequestExactScope (BoundCompilerRequest _ _ admitted _ _ _) = case admitted of
+boundRequestExactScope (BoundCompilerRequest _ _ admitted _ _ _ _) = case admitted of
   AdmittedExactOperation exact _ -> exact
   _ -> Nothing
 
 boundParserFlags :: BoundCompilerRequest -> DynFlags
-boundParserFlags (BoundCompilerRequest scope _ _ _ _ _) = scopedParserFlags scope
+boundParserFlags (BoundCompilerRequest scope _ _ _ _ _ _) = scopedParserFlags scope
 
 withBoundCompilerRequest :: PhaseSink -> CompilerScope -> WorkerRequest -> (BoundCompilerRequest -> IO a) -> IO (Completion a)
-withBoundCompilerRequest sink compilerScope parsed use = do
+withBoundCompilerRequest sink compilerScope parsed =
+  withBoundCompilerRequestWithNativeDemand sink Nothing compilerScope parsed
+
+withBoundCompilerRequestWithNativeDemand :: PhaseSink -> Maybe NativeDemandExchange -> CompilerScope
+  -> WorkerRequest -> (BoundCompilerRequest -> IO a) -> IO (Completion a)
+withBoundCompilerRequestWithNativeDemand sink native compilerScope parsed use = do
   when (isJust (requestEnsureExactInputs parsed)) $
     fail "source-free exact input acquisition cannot enter compiler request binding"
   grant <- either fail pure (compilerExecutionGrant (requestCompilerJobs parsed))
@@ -234,7 +253,7 @@ withBoundCompilerRequest sink compilerScope parsed use = do
           pure (AdmittedHeldCellPrepareOperation preparation)
         _ -> pure (AdmittedExactOperation exact operation)
       emitPhase sink BodyStarted
-      result <- use (BoundCompilerRequest compilerScope args admitted grant executor Nothing)
+      result <- use (BoundCompilerRequest compilerScope args admitted grant executor Nothing native)
       emitPhase sink BodyFinished
       pure result
 
@@ -244,16 +263,16 @@ data CellCompilationInputs = CellCompilationInputs (Maybe ProgramSourceImports)
   [((String,String),String)] [CompletedValueImport]
 
 cellSegmentRequest :: BoundCompilerRequest -> ProgramCellState ExactScope -> BoundCompilerRequest
-cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldQueryOperation _ _) _ _ _) _ = throw CheckedPurposeMismatch
-cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldCellPlanOperation _ _) _ _ _) _ = throw CheckedPurposeMismatch
-cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldCellPrepareOperation _) _ _ _) _ = throw CheckedPurposeMismatch
-cellSegmentRequest (BoundCompilerRequest scope args (AdmittedExactOperation _ operation) grant executor _) state =
+cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldQueryOperation _ _) _ _ _ _) _ = throw CheckedPurposeMismatch
+cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldCellPlanOperation _ _) _ _ _ _) _ = throw CheckedPurposeMismatch
+cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldCellPrepareOperation _) _ _ _ _) _ = throw CheckedPurposeMismatch
+cellSegmentRequest (BoundCompilerRequest scope args (AdmittedExactOperation _ operation) grant executor _ native) state =
   let exact = programInput state
       values = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell exact))
       inputs = CellCompilationInputs (programSourceImports state) (programOriginals state)
         (selectedProgramValues (programValues state))
   in BoundCompilerRequest scope (args {requestInjectVals=values,requestRetainedGenerations=programRetained state})
-    (AdmittedExactOperation (Just exact) operation) grant executor (Just inputs)
+    (AdmittedExactOperation (Just exact) operation) grant executor (Just inputs) native
 
 cellCompilationPurpose :: CellCompilationInputs -> CompilePurpose -> CompilePurpose
 cellCompilationPurpose (CellCompilationInputs imports originals values) = withProgramSourceImports imports . replacePurpose
@@ -270,7 +289,7 @@ cellCompilationPurpose (CellCompilationInputs imports originals values) = withPr
 compileBoundCompleted :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath
   -> IO (CompletedCompilerResult result)
-compileBoundCompleted (BoundCompilerRequest scope args admitted grant executor cell) selection retained purpose session path = do
+compileBoundCompleted (BoundCompilerRequest scope args admitted grant executor cell _) selection retained purpose session path = do
   requireCompilerExecutorOpen executor
   let effectivePurpose = maybe purpose (`cellCompilationPurpose` purpose) cell
   normalizedPurpose <- either throwIO pure (normalizeCompilePurpose effectivePurpose)
@@ -285,7 +304,7 @@ compileBoundCompleted (BoundCompilerRequest scope args admitted grant executor c
 -- World source and purpose are issued by the admitted stage. The ordinary
 -- request helper cannot supply substitutes for either through its raw inputs.
 compileBoundWorldCompleted :: BoundCompilerRequest -> PipelineSelection result -> IO (CompletedCompilerResult result)
-compileBoundWorldCompleted (BoundCompilerRequest scope _ admitted _ executor _) selection = do
+compileBoundWorldCompleted (BoundCompilerRequest scope _ admitted _ executor _ _) selection = do
   requireCompilerExecutorOpen executor
   case admitted of
     AdmittedHeldCellPrepareOperation (HeldWorldCellRefused _ refusal) -> throwIO refusal
@@ -307,45 +326,89 @@ compileBoundRequest request selection retained purpose session path =
 -- completion and no independent pending state.
 data PreparedCompletion
   = PreparedOrdinaryCompletion
-  | PreparedWorldCompletion WorldCompilerCompletion
+  | PreparedWorldCompletion CompiledWorldStage (Maybe NativeDemandExchange)
 
 data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
-  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) PreparedCompletion
+  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) PreparedCompletion !PreparedOutputAuthority
+
+data PreparedOutputAuthority
+  = NativeOriginalAuthority !NativeProductProvenance
+  | PortableAuthority
+
+preparedCompilationOutputIntent :: PreparedCompilation -> PreparedOutputIntent
+preparedCompilationOutputIntent (PreparedCompilation _ _ _ _ _ _ authority) = case authority of
+  NativeOriginalAuthority _ -> NativeOriginals
+  PortableAuthority -> PortableExecutable
+
+preparedCompilationNativeProvenance :: PreparedCompilation -> IO NativeProductProvenance
+preparedCompilationNativeProvenance (PreparedCompilation _ _ _ _ _ _ authority) = case authority of
+  NativeOriginalAuthority provenance -> pure provenance
+  PortableAuthority -> throwIO CheckedPurposeMismatch
+
+acquirePreparedOutputAuthority :: BoundCompilerRequest -> IO PreparedOutputAuthority
+acquirePreparedOutputAuthority (BoundCompilerRequest scope args _ _ executor _ _) = do
+  requireCompilerExecutorOpen executor
+  case preparedOutputIntent args of
+    PortableExecutable -> pure PortableAuthority
+    NativeOriginals -> NativeOriginalAuthority <$> scopedNativeProductProvenance scope
 
 preparedCompilationResult :: PreparedCompilation -> PreparedPipelineResult
-preparedCompilationResult (PreparedCompilation result _ _ _ _ _) = result
+preparedCompilationResult (PreparedCompilation result _ _ _ _ _ _) = result
 
 preparedCompilationWorldInputs :: PreparedCompilation -> Maybe WorldCellInputs
-preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion) = Nothing
-preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world)) =
-  Just (worldCompilerCompletionInputs world)
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion _) = Nothing
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world _) _) =
+  Just (worldCompilerCompletionInputs (compiledWorldStageCompletion world))
 
 preparedCompilationPlannedDeclaration :: PreparedCompilation -> Maybe (PlannedDeclaration,PlannedDeclarationInventory)
-preparedCompilationPlannedDeclaration (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion) = Nothing
-preparedCompilationPlannedDeclaration (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world)) =
-  worldCompilerCompletionPlannedDeclaration world
+preparedCompilationPlannedDeclaration (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion _) = Nothing
+preparedCompilationPlannedDeclaration (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world _) _) =
+  worldCompilerCompletionPlannedDeclaration (compiledWorldStageCompletion world)
 
 withPreparedCompilation :: PreparedCompilation
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a)
   -> IO a
-withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _) use = do
+withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _ _) use = do
   guard
   requireCompilerExecutorOpen executor
   use result recovery executor worklist
 
+-- World effects borrow the bound stage's own result, caches and executor.
+-- The ordinary route has no predecessor or native exchange authority.
+withPreparationInputs :: PreparedCompilation -> Maybe WorldStageInputs
+  -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a) -> IO a
+withPreparationInputs completion (Just inputs) use = case completion of
+  PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion stage _) _ -> do
+    requireWorldStageInputs stage inputs
+    withWorldStageCompilation inputs (\prepared recovery executor -> use prepared recovery executor Nothing)
+  _ -> throwIO CheckedPurposeMismatch
+withPreparationInputs completion Nothing use = case completion of
+  PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion _ -> withPreparedCompilation completion use
+  _ -> throwIO CheckedPurposeMismatch
+
+bindPreparedWorldInputs :: PreparedCompilation -> Maybe CompletedWorldProducts -> IO WorldStageInputs
+bindPreparedWorldInputs completion prior = withPreparedCompilation completion $ \_ _ _ _ -> case completion of
+  PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion stage native) _ -> do
+    inputs <- bindWorldStageInputsWithNativeDemand stage prior native
+    provenance <- preparedCompilationNativeProvenance completion
+    withWorldStageBasis inputs $ \facts -> unless
+      (nativeProductProducer provenance == worldInputsProducer facts
+        && nativeProductProfile provenance == worldInputsProfile facts) (throwIO WorldCellCorrupt)
+    pure inputs
+  _ -> throwIO CheckedPurposeMismatch
+
 -- Projection inputs may legitimately change entry/generation/host authority.
 -- The actual compiler environment, cache references and worklist cannot change.
-prepareCompilationOriginals :: PreparedCompilation -> Maybe CompletedWorldProducts -> ProjectionContext -> Set.Set SymbolIdentity
+prepareCompilationOriginals :: PreparedCompilation -> Maybe WorldStageInputs -> ProjectionContext -> Set.Set SymbolIdentity
   -> IO ([PreparedModule],PreparedProductContext)
 prepareCompilationOriginals completion prior context external =
-  withPreparedCompilation completion $ \prepared recovery executor worklist ->
+  withPreparationInputs completion prior $ \prepared recovery executor worklist ->
     prepareOriginals prepared recovery executor worklist prior context external
 
 prepareOriginals :: PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor
-  -> Maybe OriginalProductWorklist -> Maybe CompletedWorldProducts -> ProjectionContext -> Set.Set SymbolIdentity
+  -> Maybe OriginalProductWorklist -> Maybe WorldStageInputs -> ProjectionContext -> Set.Set SymbolIdentity
   -> IO ([PreparedModule],PreparedProductContext)
 prepareOriginals prepared recovery executor worklist prior context external = do
-  forM_ prior $ \(CompletedWorldProducts previous _) -> requireWorldProductPredecessor prepared previous
   let env = prHscEnv (pprPipelineResult prepared)
       exact = compilationScope <$> preparedExactCompilation prepared
       interfaces = pprProductInterfaces prepared
@@ -354,13 +417,13 @@ prepareOriginals prepared recovery executor worklist prior context external = do
     Just completed -> prepareOriginalProductsWithWorklist completed env exact interfaces context external modules
     Nothing -> prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
       (compilerPreparedBodies recovery) (Just (compilerOriginalProjections recovery)) executor
-      (Just (prepared,completedWorldNative <$> prior))
+      prior
       env exact interfaces context external modules
 
 compileWithWorklist :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath
   -> IO (CompletedCompilerResult result, Maybe OriginalProductWorklist)
-compileWithWorklist request@(BoundCompilerRequest _ args _ _ executor _) selection retained purpose session path = do
+compileWithWorklist request@(BoundCompilerRequest _ args _ _ executor _ _) selection retained purpose session path = do
   localWorklist <- newIORef Nothing
   let completion env interfaces owner exact inputs = do
         recovery <- maybe (fail "resident completion has no selected recovery context") pure (completionRecovery inputs)
@@ -378,52 +441,56 @@ compileWithWorklist request@(BoundCompilerRequest _ args _ _ executor _) selecti
 
 compilePreparedRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO PreparedCompilation
-compilePreparedRequest request@(BoundCompilerRequest _ args admitted _ executor _) selection retained purpose session path = do
+compilePreparedRequest request@(BoundCompilerRequest _ args admitted _ executor _ _) selection retained purpose session path = do
+  authority <- acquirePreparedOutputAuthority request
   (completed,worklist) <- case (admitted,preparedOutputIntent args) of
     (AdmittedHeldCellPrepareOperation _,_) -> throwIO CheckedPurposeMismatch
     (_,NativeOriginals) -> compileWithWorklist request selection retained purpose session path
     (_,PortableExecutable) -> do
       completed <- compileBoundCompleted request selection retained purpose session path
       pure (completed,Nothing)
-  route <- preparedCompletionFor completed
-  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist route)
+  route <- preparedCompletionFor Nothing completed
+  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist route authority)
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO (PreparedCompilation,TypedSegment)
-compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _) selection retained purpose session path = do
+compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _ _) selection retained purpose session path = do
+  authority <- acquirePreparedOutputAuthority request
   -- Typed segment preparation acquires its own Session bindings during the
   -- compiler pass. It has no early original observer; projection uses the
   -- captured recovery context and the existing fallback path.
   completed <- compileBoundCompleted request selection retained purpose session path
   let result = completedCompilerResult completed
-  route <- preparedCompletionFor completed
-  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing route,
+  route <- preparedCompletionFor Nothing completed
+  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing route authority,
     preparedSegmentCaptures result)
 
 compilePreparedWorldRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult -> IO PreparedCompilation
-compilePreparedWorldRequest request@(BoundCompilerRequest _ _ _ _ executor _) selection = do
+compilePreparedWorldRequest request@(BoundCompilerRequest _ _ _ _ executor _ native) selection = do
+  authority <- acquirePreparedOutputAuthority request
   completed <- compileBoundWorldCompleted request selection
-  route <- preparedCompletionFor completed
+  route <- preparedCompletionFor native completed
   pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed)
-    executor (completedCompilerGuard completed) Nothing route)
+    executor (completedCompilerGuard completed) Nothing route authority)
 
 compilePreparedWorldSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> IO (PreparedCompilation,TypedSegment)
-compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _) selection = do
+compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _ native) selection = do
+  authority <- acquirePreparedOutputAuthority request
   completed <- compileBoundWorldCompleted request selection
   let result = completedCompilerResult completed
-  route <- preparedCompletionFor completed
+  route <- preparedCompletionFor native completed
   pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed)
-    executor (completedCompilerGuard completed) Nothing route,preparedSegmentCaptures result)
+    executor (completedCompilerGuard completed) Nothing route authority,preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
-runBoundGhc (BoundCompilerRequest scope _ admitted _ executor _) operation = do
+runBoundGhc (BoundCompilerRequest scope _ admitted _ executor _ _) operation = do
   requireCompilerExecutorOpen executor
   case admitted of AdmittedExactOperation _ _ -> pure (); _ -> throwIO CheckedPurposeMismatch
   scopedRunGhc scope operation
 
 boundWorldCellPreparation :: BoundCompilerRequest -> IO (Either WorldCellRefusal HeldWorldCellAdmission)
-boundWorldCellPreparation (BoundCompilerRequest _ _ admitted _ executor _) = do
+boundWorldCellPreparation (BoundCompilerRequest _ _ admitted _ executor _ _) = do
   requireCompilerExecutorOpen executor
   case admitted of
     AdmittedHeldCellPrepareOperation (HeldWorldCellRefused _ refusal) -> pure (Left refusal)
@@ -433,8 +500,8 @@ boundWorldCellPreparation (BoundCompilerRequest _ _ admitted _ executor _) = do
 -- Terminal output success reborrows the actual held owner. Pending completion
 -- facts carry no source tree or usable compiler capability beyond scope END.
 commitPreparedWorldDependencies :: BoundCompilerRequest -> PreparedCompilation -> IO ()
-commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executor _)
-    (PreparedCompilation _ _ issuing guard _ route) = do
+commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executor _ _)
+    (PreparedCompilation _ _ issuing guard _ route _) = do
   guard
   requireCompilerExecutorOpen issuing
   requireCompilerExecutorOpen executor
@@ -447,29 +514,31 @@ commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executo
       -- mutation. Request orchestration cannot reissue or restore that state.
         case route of
           PreparedOrdinaryCompletion -> throwIO CheckedPurposeMismatch
-          PreparedWorldCompletion world -> scopedCommitWorldDependencies scope admission (worldCompilerCompletionDependencies world)
+          PreparedWorldCompletion world _ -> scopedCommitWorldDependencies scope admission (worldCompilerCompletionDependencies (compiledWorldStageCompletion world))
     _ -> throwIO CheckedPurposeMismatch
 
-preparedCompletionFor :: CompletedCompilerResult result -> IO PreparedCompletion
-preparedCompletionFor completed = case completedCompilerWorldCompletion completed of
-  Nothing -> pure PreparedOrdinaryCompletion
-  Just world -> pure (PreparedWorldCompletion world)
+preparedCompletionFor :: Maybe NativeDemandExchange -> CompletedCompilerResult result -> IO PreparedCompletion
+preparedCompletionFor native completed = case completedCompilerWorldStage completed of
+  Just stage -> pure (PreparedWorldCompletion stage native)
+  Nothing -> case completedCompilerWorldCompletion completed of
+    Nothing -> pure PreparedOrdinaryCompletion
+    Just _ -> throwIO CheckedPurposeMismatch
 
 runBoundWorldCellPlan :: BoundCompilerRequest -> IO BS.ByteString
-runBoundWorldCellPlan (BoundCompilerRequest scope _ admitted grant executor _) = do
+runBoundWorldCellPlan (BoundCompilerRequest scope _ admitted grant executor _ _) = do
   requireCompilerExecutorOpen executor
   case admitted of
     AdmittedHeldCellPlanOperation held question -> scopedPlanWorldCell scope held grant executor question
     _ -> throwIO CheckedPurposeMismatch
 
 runBoundWorldQuery :: BoundCompilerRequest -> IO BS.ByteString
-runBoundWorldQuery (BoundCompilerRequest scope _ (AdmittedHeldQueryOperation world question) grant executor _) = do
+runBoundWorldQuery (BoundCompilerRequest scope _ (AdmittedHeldQueryOperation world question) grant executor _ _) = do
   requireCompilerExecutorOpen executor
   scopedQueryWorld scope world grant executor question
 runBoundWorldQuery _ = throwIO CheckedPurposeMismatch
 
 withBoundExactInterfaceTransaction :: BoundCompilerRequest -> (ExactInterfaceOperations -> IO a) -> IO a
-withBoundExactInterfaceTransaction (BoundCompilerRequest scope args admitted _ executor _) use = do
+withBoundExactInterfaceTransaction (BoundCompilerRequest scope args admitted _ executor _ _) use = do
   requireCompilerExecutorOpen executor
   case admitted of AdmittedExactOperation _ _ -> pure (); _ -> throwIO CheckedPurposeMismatch
   withScopedExactInterfaceTransaction scope (requestIncludes args) use
@@ -482,17 +551,141 @@ data PreparedArtifact = PreparedArtifact
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
   }
 
+-- These replies are obligations from the held Rust input owner, not new
+-- source or execution authority. Final issuance checks their captured bytes.
+data NativeDemandRefusalReason
+  = InvalidNativeWitness | OriginalUnavailable | NativeGroupUnavailable
+  | PackageProductUnavailable | NativeInputConflict | NativeAdmissionLimit
+  deriving (Show)
+
+data NativePreparationFailure
+  = NativeDemandRejected NativeDemandRefusalReason T.Text
+  | NativeReplyCorrupt String
+  | NativePackageSealConflict SymbolIdentity
+  deriving (Show)
+instance Exception NativePreparationFailure
+
+encodeNativeUses :: [(SymbolIdentity,WorldOriginalReference)] -> BS.ByteString
+encodeNativeUses uses = toStrictByteString $ array
+  [encodeString "TPNATIVEDEMAND1",list use (sortOn (\(symbol,reference) -> (reference,symbol)) uses)]
+  where
+    array fields = encodeListLen (fromIntegral (length fields)) <> mconcat fields
+    list encode values = encodeListLen (fromIntegral (length values)) <> foldMap encode values
+    use (symbol,reference) =
+      let (unit,name) = worldOriginalReferenceOwner reference
+          ((interface,interfaceScope),(original,originalScope)) = worldOriginalReferenceBindings reference
+      in array [encodeString unit,encodeString name
+        ,array [encodeBytes interface,encodeBytes interfaceScope]
+        ,array [encodeBytes original,encodeBytes originalScope],encodeSymbol symbol]
+
+type NativeOriginalUse = (SymbolIdentity,WorldOriginalReference)
+type NativeUseCoordinate = (T.Text,T.Text,(BS.ByteString,BS.ByteString),(BS.ByteString,BS.ByteString),SymbolIdentity)
+
+nativeUseCoordinate :: NativeOriginalUse -> NativeUseCoordinate
+nativeUseCoordinate (identity,reference) =
+  let (unit,name) = worldOriginalReferenceOwner reference
+      (interface,original) = worldOriginalReferenceBindings reference
+  in (unit,name,interface,original,identity)
+
+readNativeReply :: [NativeOriginalUse] -> NativeDemandReply
+  -> IO (Map.Map NativeOriginalUse (Map.Map SymbolIdentity BS.ByteString))
+readNativeReply expected reply = case reply of
+  NativeRefused bytes -> decode bytes refusal >>= \(reason,diagnostic) ->
+    throwIO (NativeDemandRejected reason diagnostic)
+  NativeResolved bytes -> decode bytes (resolved (BS.length bytes))
+  where
+    decode :: BS.ByteString -> (forall s. D.Decoder s a) -> IO a
+    decode bytes parser = case deserialiseFromBytes parser (BL.fromStrict bytes) of
+      Left failure -> throwIO (NativeReplyCorrupt (show failure))
+      Right (remaining,value) | BL.null remaining -> pure value
+      Right _ -> throwIO (NativeReplyCorrupt "trailing native reply bytes")
+    require :: Int -> D.Decoder s ()
+    require fields = D.decodeListLen >>= \actual -> unless (actual == fields) (fail "native reply field count")
+    magic :: T.Text -> D.Decoder s ()
+    magic expected = D.decodeString >>= \actual -> unless (actual == expected) (fail "native reply tag")
+    symbol :: D.Decoder s SymbolIdentity
+    symbol = do
+      require 5
+      unit <- D.decodeString
+      name <- D.decodeString
+      namespace <- D.decodeString
+      occurrence <- D.decodeString
+      kind <- D.peekTokenType
+      parent <- if kind == D.TypeNull then D.decodeNull >> pure Nothing else Just <$> D.decodeString
+      unless (all (not . T.null) [unit,name,namespace,occurrence]) (fail "empty native symbol")
+      pure (SymbolIdentity unit name namespace occurrence parent)
+    digest :: D.Decoder s BS.ByteString
+    digest = do
+      bytes <- D.decodeBytes
+      unless (BS.length bytes == 32 && BS.any (/= 0) bytes) (fail "native reply digest")
+      pure bytes
+    binding :: D.Decoder s (BS.ByteString,BS.ByteString)
+    binding = require 2 >> ((,) <$> digest <*> digest)
+    use :: D.Decoder s NativeUseCoordinate
+    use = do
+      require 5
+      unit <- D.decodeString
+      name <- D.decodeString
+      interface <- binding
+      original <- binding
+      identity <- symbol
+      pure (unit,name,interface,original,identity)
+    resolved :: Int -> D.Decoder s (Map.Map NativeOriginalUse (Map.Map SymbolIdentity BS.ByteString))
+    resolved bound = do
+      require 2
+      magic "TPNATIVEREPLY2"
+      let expectedRows = Map.toAscList (Map.fromList [(nativeUseCoordinate entry,entry) | entry <- expected])
+      count <- D.decodeListLen
+      unless (count == length expectedRows && count == length expected && count <= bound)
+        (fail "native reply use count")
+      rows <- replicateM count $ do
+        require 2
+        coordinate <- use
+        obligations <- D.decodeListLen
+        unless (obligations <= bound) (fail "native reply obligation count")
+        roots <- replicateM obligations $ do
+          require 2
+          identity <- symbol
+          seal <- digest
+          pure (identity,seal)
+        unless (roots == Set.toAscList (Set.fromList roots)
+            && Map.size (Map.fromList roots) == length roots)
+          (fail "native reply obligation order or conflict")
+        pure (coordinate,Map.fromList roots)
+      unless (map fst rows == map fst expectedRows)
+        (fail "native reply missing, foreign, duplicate or reordered use")
+      pure (Map.fromList [(entry,roots) | ((_,entry),(_,roots)) <- zip expectedRows rows])
+    refusal :: D.Decoder s (NativeDemandRefusalReason,T.Text)
+    refusal = do
+      require 3
+      magic "TPNATIVEREFUSAL1"
+      tag <- D.decodeWord
+      reason <- case tag of
+        0 -> pure InvalidNativeWitness
+        1 -> pure OriginalUnavailable
+        2 -> pure NativeGroupUnavailable
+        3 -> pure PackageProductUnavailable
+        4 -> pure NativeInputConflict
+        5 -> pure NativeAdmissionLimit
+        _ -> fail "native refusal reason"
+      diagnostic <- D.decodeString
+      pure (reason,diagnostic)
+
+data FinalProjection
+  = NativeFinal !PreparedPackageTarget !(Map.Map Module ArtifactBytes) ![SymbolIdentity]
+  | PortableFinal !WireProgram ![IssuedConstructor] ![SymbolIdentity]
+
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifacts = prepareArtifactsWithProjectionIntent Nothing NativeOriginals requireProjection
+prepareArtifacts = prepareArtifactsWithProjectionIntent Nothing requireProjection
 
 data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
 
 data PreparedArtifactOutput
-  = NativeOutputs [PreparedArtifact] (Maybe PreparedProductContext)
+  = NativeOutputs [PreparedArtifact] PreparedProductContext
   | PortableOutputs [PreparedArtifact]
 
 -- The request chooses its output contract before module completion observers
@@ -503,34 +696,35 @@ preparedOutputIntent args
   | requestPortableOutput args = PortableExecutable
   | otherwise = NativeOriginals
 
-prepareArtifactsWithIntent :: PreparedOutputIntent -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
+prepareArtifactsWithIntent :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO PreparedArtifactOutput
-prepareArtifactsWithIntent intent interfaces directory completion targets auxiliary retained hostBindings = do
-  (artifacts,products) <- prepareArtifactsWithProjectionIntent Nothing intent requireProjection
+prepareArtifactsWithIntent interfaces directory completion targets auxiliary retained hostBindings = do
+  (artifacts,products) <- prepareArtifactsWithProjectionIntent Nothing requireProjection
     interfaces directory completion targets auxiliary retained hostBindings
-  pure $ case intent of
-    NativeOriginals -> NativeOutputs artifacts products
-    PortableExecutable -> PortableOutputs artifacts
+  case preparedCompilationOutputIntent completion of
+    NativeOriginals -> NativeOutputs artifacts <$> maybe (fail "native output lacks its product owner") pure products
+    PortableExecutable -> pure (PortableOutputs artifacts)
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
   -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent Nothing NativeOriginals
+prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent Nothing
 
 prepareArtifactsWithProjectionIntent
-  :: Maybe CompletedWorldProducts -> PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
+  :: Maybe WorldStageInputs -> (forall a. Either ProjectionError a -> IO a)
   -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjectionIntent _ _ _ _ _ completion [] _ _ _ =
-  withPreparedCompilation completion (\_ _ _ _ -> pure ([], Nothing))
-prepareArtifactsWithProjectionIntent prior intent project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
-  withPreparedCompilation completion $ \prepared recoveryCaches executor _ -> do
+prepareArtifactsWithProjectionIntent inputs _ _ _ completion [] _ _ _ =
+  withPreparationInputs completion inputs (\_ _ _ _ -> pure ([], Nothing))
+prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
+  withPreparationInputs completion prior $ \prepared recoveryCaches executor _ -> do
     timing <- readTimingEnabled
-    let result = pprPipelineResult prepared
+    let intent = preparedCompilationOutputIntent completion
+        result = pprPipelineResult prepared
         hscEnv = prHscEnv result
         modules = pprModules prepared
         candidates = pprAcceptedCandidates prepared
@@ -545,17 +739,17 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
       firstTarget auxiliaryRoots (case mapMaybe hostBindingRepresentationJsonAuthority hostBindings of
         authority : _ -> Just authority
         [] -> Nothing)
-    forM_ prior $ \(CompletedWorldProducts previous _) -> requireWorldProductPredecessor prepared previous
-    let priorNative = completedWorldNative <$> prior
-    firstContext <- withStagedOriginalBindings prepared priorNative baseContext
+    let priorNative = prior >>= worldStagePriorOriginals
+    firstContext <- maybe (pure baseContext) (\inputs -> withWorldStageBindings inputs baseContext) prior
     let contextFor target = firstContext
           { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
     let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
-        externalOriginalBinders = Set.union (maybe Set.empty stagedOriginalBinders priorNative) $ Set.fromList
+        externalOriginalBinders = Set.unions
+          [maybe Set.empty stagedOriginalBinders priorNative, Map.keysSet (pprOriginalReferences prepared), Set.fromList
           ([binder | exactProduct <- exactProducts, group <- originalGroups exactProduct
             , binder <- originalBinders group]
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
-            , binder <- candidateGroupBinders group])
+            , binder <- candidateGroupBinders group])]
     (originalModules,productContext,originalBindings,admittedOriginalBinders,
       originalConstructors,originalSites,originalPackageGlobals) <- case intent of
       PortableExecutable -> do
@@ -567,7 +761,7 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
         productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared
-          (withPriorStagedOriginalProducts priorNative rawProductContext)
+          (withWorldStageInputs prior rawProductContext)
         inventory <- maybe (fail "current original admission did not issue its inventory") pure
           (preparedCurrentOriginalInventory productContext)
         originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
@@ -586,14 +780,25 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
                 [(originalOrdinal group, originalBinders group, originalGlobals group)
                  | group <- originalGroups originalProduct])
               | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
-            originalPackageGlobals = requiredOriginalPackageGlobalsWithPrior
+            originalPackageGlobals = requiredOriginalExternalGlobalsWithPrior
               originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-              (stagedOriginalPackageDemand priorNative)
+              (\identity -> case Map.lookup identity (pprOriginalReferences prepared) of
+                Just _ -> Right (Just (Set.singleton identity))
+                Nothing -> stagedOriginalExternalDemand priorNative identity)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
           originalConstructors,originalSites,originalPackageGlobals)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
-    finalCandidates <- newIORef Map.empty
-    let demandPackages entry packageRoots recovered = do
+    finalProjections <- newIORef Map.empty
+    nativeUseObligations <- newIORef Map.empty
+    nativePackageObligations <- newIORef Map.empty
+    let originalReference identity = case Map.lookup identity (pprOriginalReferences prepared) of
+          Just reference -> Just reference
+          Nothing -> stagedOriginalReference priorNative identity
+        mergePackageObligations = foldM (\known (identity,seal) -> do
+          forM_ (Map.lookup identity known) $ \old -> unless (old == seal)
+            (throwIO (NativePackageSealConflict identity))
+          pure (Map.insert identity seal known))
+        demandPackages entry packageRoots recovered = do
           let target = T.unpack (symbolOccurrence entry)
               roots = Set.toAscList (Set.fromList (map preparedRootIdentity packageRoots))
               finalContext = (withOriginals (contextFor target))
@@ -605,9 +810,74 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
           project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate))
           required <- either (ioError . userError) pure (originalPackageGlobals (candidateGlobals candidate))
-          let additions = Set.toAscList (Set.fromList required `Set.difference` Set.fromList roots)
+          let uses = Set.fromList [(identity,reference) | identity <- required
+                , reference <- maybe [] pure (originalReference identity)]
+              packages = Set.fromList [identity | identity <- required,isNothing (originalReference identity)]
+          answered <- readIORef nativeUseObligations
+          let pendingUses = Set.toAscList (uses `Set.difference` Map.keysSet answered)
+          unless (null pendingUses) $ do
+            inputs <- maybe (throwIO WorldCellUnsupported) pure prior
+            received <- exchangeWorldNativeDemand inputs (encodeNativeUses pendingUses) >>= readNativeReply pendingUses
+            known <- readIORef nativePackageObligations
+            combined <- foldM mergePackageObligations known (map Map.toAscList (Map.elems received))
+            writeIORef nativePackageObligations combined
+            -- Acquisition is stage-wide; each final projection below selects
+            -- only the entries reached from this target's actual native roots.
+            modifyIORef' nativeUseObligations (Map.union received)
+          acquired <- readIORef nativeUseObligations
+          obligations <- foldM (\selected use -> do
+            rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
+            mergePackageObligations selected (Map.toAscList rows)) Map.empty (Set.toAscList uses)
+          let additions = Set.toAscList ((packages `Set.union` Map.keysSet obligations)
+                `Set.difference` Set.fromList roots)
           if null additions then do
-            modifyIORef' finalCandidates (Map.insert entry (candidate,roots))
+            final <- case intent of
+              PortableExecutable -> do
+                (program,constructors) <- project (finalizePreparedCandidate candidate)
+                pure (PortableFinal program constructors roots)
+              NativeOriginals -> do
+                let isHome component = isHomeUnit (hsc_home_unit hscEnv)
+                      (moduleUnit (fatOriginalOwner (preparedComponentVersion component)))
+                    homeComponents = filter isHome (closureComponentSelections recovered)
+                    packageComponents = filter (not . isHome) (closureComponentSelections recovered)
+                paired <- project (projectPreparedPackageTarget hostBindings finalContext
+                  (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
+                  packageComponents (closureReachability recovered))
+                let groups = packageTargetGroups paired
+                    moduleOf identity = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
+                      (mkModuleName (T.unpack (symbolModule identity)))
+                    packageGlobals = concatMap
+                      (Execution.projectedGlobals . Execution.projectedBody . projectedGroupEncodingInput . projectedPackageEncoding) groups
+                    imported = Set.fromList (map (moduleOf . Execution.globalIdentity) packageGlobals
+                      ++ [moduleOf (Execution.globalIdentity global)
+                         | global <- programGlobals (packageTargetProgram paired)
+                         , not (isHomeUnit (hsc_home_unit hscEnv) (moduleUnit (moduleOf (Execution.globalIdentity global))))])
+                unless (all (not . isHomeUnit (hsc_home_unit hscEnv) . moduleUnit . moduleOf . Execution.globalIdentity) packageGlobals)
+                  (fail "package product imports a HOME compiler owner")
+                defining <- foldM (\known group -> do
+                  let owner = projectedPackageModule group
+                      seal = projectedPackageInterfaceSha256 group
+                  forM_ (Map.lookup owner known) $ \old -> unless (old == seal)
+                    (fail "package products disagree on their defining interface")
+                  pure (Map.insert owner seal known)) Map.empty groups
+                expected <- foldM (\known (identity,seal) -> do
+                  let owner = moduleOf identity
+                  forM_ (Map.lookup owner known) $ \old -> unless (old == seal)
+                    (throwIO (NativePackageSealConflict identity))
+                  pure (Map.insert owner seal known)) defining (Map.toAscList obligations)
+                captures <- capturePreparedPackageInterfaces hscEnv (compilerOwnerIface recoveryCaches)
+                  [(owner,Map.lookup owner expected)
+                  | owner <- Set.toAscList (Set.unions [imported,Map.keysSet defining,Map.keysSet expected])]
+                  >>= either (fail . show) pure
+                let recorded = Map.fromListWith Set.union
+                      [((packageUnit witness,packageModule witness),Set.singleton (packageSha256 witness))
+                      | evidence <- Map.elems (pprPackageImports prepared),witness <- packageInterfaces evidence]
+                forM_ (Map.toAscList captures) $ \(owner,body) ->
+                  forM_ (Map.lookup (unitString (moduleUnit owner),moduleNameString (moduleName owner)) recorded) $ \seals ->
+                    unless (seals == Set.singleton (artifactSha256 body))
+                      (fail "captured package interface differs from the actual source dependency")
+                pure (NativeFinal paired captures roots)
+            modifyIORef' finalProjections (Map.insert entry final)
             pure []
           else forM additions $ \identity -> do
             (identifier,_) <- resolvePackageGlobal hscEnv identity >>= either (ioError . userError) pure
@@ -623,10 +893,14 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
       -- original-package demand before the final candidate is flattened.
       closed <- timePhase timing "prepared_recover" (recover (projectionEntry context))
       let recovered = preparedRecoveryClosure closed
-      candidatesByTarget <- readIORef finalCandidates
-      (candidate,roots) <- maybe (fail "closed recovery did not issue its final projected candidate") pure
-        (Map.lookup (projectionEntry context) candidatesByTarget)
-      (program,constructors) <- project (finalizePreparedCandidate candidate)
+      final <- readIORef finalProjections >>= maybe
+        (fail "closed recovery did not issue its final projection") pure . Map.lookup (projectionEntry context)
+      let (program,constructors,packageGroups,roots) = case final of
+            PortableFinal output declarations required -> (output,declarations,[],required)
+            NativeFinal output _ required ->
+              let groups = packageTargetGroups output in
+              (packageTargetProgram output,packageTargetConstructors output
+                ++ concatMap projectedPackageConstructors groups,groups,required)
       reportRecoveryResiduals target (closureFailures recovered)
       when (intent == PortableExecutable) $ do
         let homeUnit = T.pack (unitString (moduleUnit targetModule))
@@ -634,7 +908,8 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
               , symbolUnit (Execution.globalIdentity global) == homeUnit]
         unless (null unresolvedHome) $
           fail ("portable output has unresolved home imports: " ++ show unresolvedHome)
-      let defined = Set.fromList
+      let defined = Set.union (Set.fromList (concatMap
+            (Execution.projectedBinders . projectedGroupEncodingInput . projectedPackageEncoding) packageGroups)) $ Set.fromList
             [identity | group <- programBindings program
             , Execution.TopBinding identity _ <- case group of
                 Execution.NonRecursive binding -> [binding]
@@ -651,13 +926,26 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
             , Tidepool.EffectSchema.ysSite site `Set.member` admitted
             ]
       allSites <- either (fail . ("conflicting executable site metadata: " ++) . show) pure
-        (Tidepool.EffectSchema.mergeYieldSites (yieldSites ++ originalSites))
+        (Tidepool.EffectSchema.mergeYieldSites
+          (yieldSites ++ concatMap projectedPackageYieldSites packageGroups ++ originalSites))
       sealedSites <- forM allSites $ \site -> do
         witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
       pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites)
-    pure (artifacts, productContext)
+    finalResults <- Map.elems <$> readIORef finalProjections
+    let packageTargets = [(target,captures) | NativeFinal target captures _ <- finalResults]
+    captures <- foldM (\known (_,additions) -> foldM (\selected (owner,body) -> do
+      forM_ (Map.lookup owner selected) $ \old -> unless (artifactSha256 old == artifactSha256 body)
+        (fail "targets disagree on their actual package interface capture")
+      pure (Map.insert owner body selected)) known (Map.toAscList additions)) Map.empty packageTargets
+    completedContext <- case intent of
+      PortableExecutable -> pure Nothing
+      NativeOriginals -> do
+        provenance <- preparedCompilationNativeProvenance completion
+        products <- maybe (fail "native projection lacks its actual product context") pure productContext
+        Just <$> retainPreparedPackageTargets provenance (map fst packageTargets) captures products
+    pure (artifacts, completedContext)
 
 -- The pure preview boundary preserves only this chosen executable-demand
 -- failure. Every other projection, source, authority, or IO failure keeps its
@@ -766,26 +1054,6 @@ data PreparedWorldCellItem = PreparedWorldCellItem
   { preparedWorldCellItemManifest :: (Word64,Word64,BS.ByteString)
   , preparedWorldCellObservation :: Maybe CellExpressionPlan
   }
-
--- Pair the successful World completion with the certification issued from it.
--- The handoff retains no HscEnv, task driver or mutable attempt. The pending
--- dependency publication remains with its existing one-shot completion owner.
-data CompletedWorldProducts = CompletedWorldProducts !WorldCompilerCompletion !StagedOriginalProducts
-
-completedWorldNative :: CompletedWorldProducts -> StagedOriginalProducts
-completedWorldNative (CompletedWorldProducts _ native) = native
-
--- This is the sole paired issuer: the certifier consumes the guarded
--- completion's own result; callers cannot supply an independent staged value.
-completeWorldProducts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
-  -> PreparedProductContext -> IO CompletedWorldProducts
-completeWorldProducts interfaces directory completion products =
-  withPreparedCompilation completion $ \prepared _ _ _ -> case completion of
-    PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world) -> do
-      staged <- writeCertifiedSegmentProducts
-        (importPaths (hsc_dflags (prHscEnv (pprPipelineResult prepared)))) interfaces directory prepared products
-      pure (CompletedWorldProducts world staged)
-    _ -> throwIO CheckedPurposeMismatch
 
 -- These outputs remain private until every admitted stage has completed. The
 -- admission owns the compiler cursor; this record owns only emitted DATA.
@@ -914,7 +1182,7 @@ prepareWorldCellQuestion bound question = do
           prepareStages preparation (Just (preparedWorldStageProducts output))
             (Set.union earlierSelected selected) (finalizedOutput:reversed)
     nextStage preparation = case bound of
-      BoundCompilerRequest scope _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
+      BoundCompilerRequest scope _ _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
     requireStage preparation = nextStage preparation >>= maybe (throwIO WorldCellCorrupt) pure
     directory = worldCellPrepareDirectory question
     text = encodeString . T.pack
@@ -980,21 +1248,21 @@ prepareWorldCellQuestion bound question = do
               (plannedItemEntry (typedItemPlan item) ++ ":"
                 ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture)))) (typedCaptureType capture)
           pure (plannedItemOrdinal (typedItemPlan item),signatures)
-        originalInterfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
-          (preparedCompilationWorldInputs completion) (completedWorldNative <$> prior) stageDirectory
+        inputs <- bindPreparedWorldInputs completion prior
+        originalInterfaces <- newPreparedWorldInterfaceArtifacts inputs stageDirectory
         let producedGenerations = Map.fromList [(preparedRootIdentity global,generation)
               | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
             retainedGenerations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         unless (Map.null (Map.intersection producedGenerations retainedGenerations))
           (throwIO WorldCellCorrupt)
         let generations = Map.union producedGenerations retainedGenerations
-        (artifacts,context) <- prepareArtifactsWithProjectionIntent prior NativeOriginals requireProjection
+        (artifacts,context) <- prepareArtifactsWithProjectionIntent (Just inputs) requireProjection
           originalInterfaces stageDirectory completion targets (standardAuxiliaryRoots binds)
           generations (typedSegmentSessionBindingRepresentations batch)
         correlated <- correlateWorldCellItems items artifacts (heldWorldCellStageItems issued) captures
           signaturesByItem
         products <- maybe (fail "world cell has no actual original inventory") pure context
-        completedProducts <- completeWorldProducts originalInterfaces stageDirectory completion products
+        completedProducts <- completeWorldProducts originalInterfaces stageDirectory inputs products
         let staged = completedWorldNative completedProducts
         preparedItemsWithInputs <- forM correlated $ \correlatedItem -> do
           let item = worldCellItemTyped correlatedItem
@@ -1075,15 +1343,15 @@ prepareWorldCellQuestion bound question = do
           (preparedCompilationPlannedDeclaration completion)
         unless (plannedModule original == reserved && plannedSource original == plannedSource submitted)
           (throwIO WorldCellCorrupt)
-        interfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
-          (preparedCompilationWorldInputs completion) (completedWorldNative <$> prior) stageDirectory
+        inputs <- bindPreparedWorldInputs completion prior
+        interfaces <- newPreparedWorldInterfaceArtifacts inputs stageDirectory
         let generations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         -- The existing original writer uses its real checking root to obtain
         -- the native inventory. No executable item or target packet is emitted.
-        (_,context) <- prepareArtifactsWithProjectionIntent prior NativeOriginals requireProjection
+        (_,context) <- prepareArtifactsWithProjectionIntent (Just inputs) requireProjection
           interfaces stageDirectory completion [scaffoldTargetName] [] generations []
         products <- maybe (fail "world declaration has no actual original inventory") pure context
-        completedProducts <- completeWorldProducts interfaces stageDirectory completion products
+        completedProducts <- completeWorldProducts interfaces stageDirectory inputs products
         let staged = completedWorldNative completedProducts
         certified <- publishStagedOriginalProducts prepared staged
         let (unit,owner) = plannedOriginalOwner inventory

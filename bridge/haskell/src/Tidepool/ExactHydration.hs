@@ -4,8 +4,8 @@
 
 module Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
-  , newOriginalInterfaceArtifactsWithSessionOutputs, newOriginalInterfaceArtifactsWithReader
-  , originalInterfaceBody, originalInterfaceBytes, originalInterfaceSha256, originalRetainedInterface, sameExactInterfaceIdentity
+  , newOriginalInterfaceArtifactsWithSessionOutputs, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup
+  , originalInterfaceBody, originalInterfaceBytes, originalInterfaceSha256, originalRetainedInterface, originalRetainedInterfaceCaptures, sameExactInterfaceIdentity
   , originalSessionInterfaces, originalProducedSessionInterfaces, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , ExactInterfaceOperations, exactInterfaceOperations, runExactInterfaceOperation
@@ -123,6 +123,7 @@ import GHC.Utils.Fingerprint (fingerprint0, fingerprintByteString, fingerprintSt
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts, mi_decls, mi_hsc_src)
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface.Internal (withCapturedIface)
 import Tidepool.ResumePackage (resolveResumeInterface)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
 import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface)
@@ -130,10 +131,9 @@ import Tidepool.FinalizedModule.Internal (serializeOriginalInterface)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
 import Numeric (showHex)
-import System.Directory (getTemporaryDirectory, removeFile, canonicalizePath)
+import System.Directory (canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
 import System.IO (fixIO)
-import System.IO (hClose, hIsClosed, openBinaryTempFile)
 import Tidepool.TurnSource (preambleImportMarker)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -971,6 +971,7 @@ instance Exception OriginalInterfaceCaptureFailure
 data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
   HscEnv (Map.Map Module FinalizedModule) (Map.Map Module (Maybe ExactIfaceArtifact,ArtifactBytes)) [OriginalSessionInterface] FilePath
   (IORef (Map.Map Module (Maybe ArtifactBytes)))
+  (Module -> Maybe (ExactIfaceArtifact,ArtifactBytes))
 
 data SessionCaptureOrigin = ImportedSessionCapture | ProducedSessionCapture
   deriving Eq
@@ -1001,7 +1002,15 @@ newOriginalInterfaceArtifactsWithReader :: (ExactIfaceArtifact -> IO ArtifactByt
   -> HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
   -> FilePath -> IO OriginalInterfaceArtifacts
-newOriginalInterfaceArtifactsWithReader readInput env finalized retained injected produced directory = do
+newOriginalInterfaceArtifactsWithReader readInput =
+  newOriginalInterfaceArtifactsWithLookup readInput (const Nothing)
+
+newOriginalInterfaceArtifactsWithLookup :: (ExactIfaceArtifact -> IO ArtifactBytes)
+  -> (Module -> Maybe (ExactIfaceArtifact,ArtifactBytes))
+  -> HscEnv -> Map.Map ModuleName FinalizedModule
+  -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
+  -> FilePath -> IO OriginalInterfaceArtifacts
+newOriginalInterfaceArtifactsWithLookup readInput borrow env finalized retained injected produced directory = do
   captures <- forM retained $ \artifact -> do
     body <- readInput artifact
     unless (artifactSha256 body == exactSha256 artifact) $
@@ -1035,14 +1044,15 @@ newOriginalInterfaceArtifactsWithReader readInput env finalized retained injecte
               && capturedSessionInterfaceEvidence selectedSnapshot == capturedSessionInterfaceEvidence snapshot
             Nothing -> False) snapshotsWithOrigin) $ throwIO ConflictingOriginalInterfaces
   let paired = [OriginalSessionInterface origin snapshot | (origin,snapshot) <- Map.elems snapshots]
-  OriginalInterfaceArtifacts env originals admitted paired directory <$> newIORef Map.empty
+  captured <- newIORef Map.empty
+  pure (OriginalInterfaceArtifacts env originals admitted paired directory captured borrow)
 
 originalSessionInterfaces :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
-originalSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _) =
+originalSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _ _) =
   [snapshot | OriginalSessionInterface ImportedSessionCapture snapshot <- selected]
 
 originalProducedSessionInterfaces :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
-originalProducedSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _) =
+originalProducedSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _ _) =
   [snapshot | OriginalSessionInterface ProducedSessionCapture snapshot <- selected]
 
 originalInterfaceBytes :: OriginalInterfaceArtifacts -> Module -> IO (Maybe BS.ByteString)
@@ -1052,14 +1062,23 @@ originalInterfaceSha256 :: OriginalInterfaceArtifacts -> Module -> IO (Maybe Str
 originalInterfaceSha256 artifacts owner = fmap artifactSha256 <$> originalInterfaceBody artifacts owner
 
 originalRetainedInterface :: OriginalInterfaceArtifacts -> Module -> Maybe (ExactIfaceArtifact,ArtifactBytes)
-originalRetainedInterface (OriginalInterfaceArtifacts _ _ retained _ _ _) owner = do
-  (descriptor,body) <- Map.lookup owner retained
-  artifact <- descriptor
-  pure (artifact,body)
+originalRetainedInterface (OriginalInterfaceArtifacts _ _ retained _ _ _ borrow) owner =
+  case Map.lookup owner retained of
+    Just (Just artifact,body) -> Just (artifact,body)
+    Just _ -> Nothing
+    Nothing -> borrow owner
+
+-- Explicit admitted input captures keep their original descriptor and bytes.
+-- Provisional HPT homes and descriptor-less session snapshots are excluded.
+originalRetainedInterfaceCaptures :: OriginalInterfaceArtifacts
+  -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+originalRetainedInterfaceCaptures (OriginalInterfaceArtifacts _ _ retained _ _ _ _) = Map.fromList
+  [((exactUnit artifact,exactModule artifact),(artifact,body))
+  | (Just artifact,body) <- Map.elems retained]
 
 originalInterfaceBody :: OriginalInterfaceArtifacts -> Module
   -> IO (Maybe ArtifactBytes)
-originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ directory captured) owner = do
+originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ directory captured borrow) owner = do
   known <- Map.lookup owner <$> readIORef captured
   case known of
     Just artifact -> pure artifact
@@ -1068,16 +1087,27 @@ originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ direc
       let matches interface = if mi_module interface == owner then Just interface else Nothing
           productInterface = Map.lookup owner originals >>= matches . hm_iface . finalizedHomeModInfo
           packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
+      retainedBody <- case Map.lookup owner retained of
+        Just (_,bytes) -> pure (Just bytes)
+        Nothing -> case borrow owner of
+          Nothing -> pure Nothing
+          Just (descriptor,bytes) -> do
+            unless (exactUnit descriptor == unitString (moduleUnit owner)
+                && exactModule descriptor == moduleNameString (moduleName owner)
+                && exactSha256 descriptor == artifactSha256 bytes) $
+              throwIO (OriginalInterfaceChanged (unitString (moduleUnit owner))
+                (moduleNameString (moduleName owner)))
+            pure (Just bytes)
       artifact <- case productInterface of
         Just _ -> do
           original <- maybe (fail "finalized interface has no semantic owner") pure (Map.lookup owner originals)
           finalized <- Just <$> captureFinalizedInterface original
-          case (snd <$> Map.lookup owner retained, finalized) of
+          case (retainedBody, finalized) of
             (Just admitted, Just bytes) | admitted /= bytes ->
               throwIO (FinalizedOriginalConflict (unitString (moduleUnit owner)) (moduleNameString (moduleName owner)))
             _ -> pure finalized
-        Nothing -> case Map.lookup owner retained of
-          Just (_,bytes) -> pure (Just bytes)
+        Nothing -> case retainedBody of
+          Just bytes -> pure (Just bytes)
           Nothing | toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env -> pure Nothing
           Nothing -> packageArtifact packageInterface
       modifyIORef' captured (Map.insert owner artifact)
@@ -1122,20 +1152,6 @@ originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ direc
                             | sameOriginal interface original -> seal bytes
                           _ -> Nothing
             _ -> pure Nothing
-
-withCapturedIface :: Bool -> String -> BS.ByteString -> (FilePath -> IO a) -> IO a
-withCapturedIface timing owner bytes consume = do
-  directory <- getTemporaryDirectory
-  bracket (openBinaryTempFile directory "tidepool-exact-iface.hi")
-    (\(path, handle) -> do
-      closed <- hIsClosed handle
-      unless closed (hClose handle)
-      removeFile path)
-    (\(path, handle) -> do
-      BS.hPut handle bytes
-      emitCount timing ("exact_iface_capture_write_bytes." ++ owner) (fromIntegral (BS.length bytes))
-      hClose handle
-      consume path)
 
 -- GHC's home-interface knot allows mutually recursive source/boot modules to
 -- resolve each other's original Names while typechecking their details.

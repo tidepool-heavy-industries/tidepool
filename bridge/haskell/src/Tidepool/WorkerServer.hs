@@ -2,17 +2,22 @@
 
 -- | Framed request completion. Rust owns processes, deadlines and retirement;
 -- this owner retains the protocol channels independently of redirected globals.
-module Tidepool.WorkerServer (WorkerResponse(..), RequestHandler, runWorkerLoop, runDirectRequest) where
+module Tidepool.WorkerServer
+  ( WorkerResponse(..), RequestHandler, runWorkerLoop, runDirectRequest
+  , NativeDemandExchange, NativeDemandReply(..), exchangeNativeDemand, requireNativeDemandOwner
+  ) where
 
-import Control.Exception (SomeException, mask, throwIO, try)
-import Control.Monad (replicateM, unless)
+import Control.Exception (SomeException, mask, throwIO, try, finally, onException)
+import Control.Concurrent (ThreadId, myThreadId)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
+import Control.Monad (replicateM, unless, when, forM_)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
 import System.IO
@@ -29,7 +34,72 @@ data WorkerResponse
   = DiagnosticResponse [Diag]
   | ExactInputsResponse EnsureExactInputsOutcome
 
-type RequestHandler = PhaseSink -> FilePath -> [String] -> IO (Completion WorkerResponse)
+type RequestHandler = PhaseSink -> Maybe NativeDemandExchange -> FilePath -> [String]
+  -> IO (Completion WorkerResponse)
+
+-- The active handler owns these channels and state. Correlation bytes grant no
+-- compiler authority; the bound request checks them against its actual inputs.
+data NativeDemandExchange = NativeDemandExchange !BS.ByteString !ThreadId !Handle !Handle
+  !(IORef Bool) !(IORef (Word64,Maybe Word64,Integer,Bool))
+
+data NativeDemandReply = NativeResolved BS.ByteString | NativeRefused BS.ByteString
+
+requireNativeDemandOwner :: NativeDemandExchange -> BS.ByteString -> BS.ByteString -> BS.ByteString -> IO ()
+requireNativeDemandOwner exchange@(NativeDemandExchange header _ _ _ _ _) admission world inputs = do
+  requireNativeExchangeOpen exchange
+  unless (BS.length admission == 32 && BS.length world == 32 && BS.length inputs == 32
+      && BS.take 96 (BS.drop 40 header) == admission <> world <> inputs) $
+    fail "worker: native demand owner differs from admitted World inputs"
+
+requireNativeExchangeOpen :: NativeDemandExchange -> IO ()
+requireNativeExchangeOpen (NativeDemandExchange _ issuing _ _ open _) = do
+  actual <- myThreadId
+  active <- readIORef open
+  unless (active && actual == issuing) (fail "worker: native demand outside its active handler")
+
+exchangeNativeDemand :: NativeDemandExchange -> Word64 -> BS.ByteString -> IO NativeDemandReply
+exchangeNativeDemand exchange@(NativeDemandExchange header _ input protocol _ state) stage payload = mask $ \restore -> do
+  requireNativeExchangeOpen exchange
+  reserved <- atomicModifyIORef' state $ \old@(sequenceNumber,previous,spent,busy) ->
+    if busy || sequenceNumber == maxBound || maybe False (> stage) previous
+        || spent + 331 + toInteger (BS.length payload) > maxResponsePayloadBytes
+      then (old,Nothing)
+      else let next = sequenceNumber + 1
+               charged = spent + 331 + toInteger (BS.length payload)
+           in ((next,Just stage,charged,True),Just (next,maxResponsePayloadBytes - charged))
+  (sequenceNumber,remaining) <- maybe (fail "worker: invalid or over-budget native demand") pure reserved
+  let poison = case exchange of NativeDemandExchange _ _ _ _ open _ -> writeIORef open False
+  restore (do
+    BS.hPut protocol (BS.singleton 4 <> header <> putU64LE stage <> putU64LE sequenceNumber <> frame payload)
+    hFlush protocol
+    replyHeader <- hGetExactly input 162
+    unless (BS.index replyHeader 0 == 5 && BS.take 144 (BS.drop 1 replyHeader) == header
+        && getU64LE (BS.take 8 (BS.drop 145 replyHeader)) == stage
+        && getU64LE (BS.take 8 (BS.drop 153 replyHeader)) == sequenceNumber) $
+      fail "worker: native reply does not match the outstanding demand"
+    let outcome = BS.index replyHeader 161
+    unless (outcome == 0 || outcome == 1) (fail "worker: invalid native reply outcome")
+    count <- getU32LE <$> hGetExactly input 4
+    when (toInteger count > remaining) (fail "worker: native reply exceeds response budget")
+    body <- hGetExactly input (fromIntegral count)
+    atomicModifyIORef' state (\(number,previous,spent,_) ->
+      ((number,previous,spent + toInteger count,False),()))
+    pure (if outcome == 0 then NativeResolved body else NativeRefused body)) `onException` poison
+
+nativeRemaining :: NativeDemandExchange -> IO Integer
+nativeRemaining exchange@(NativeDemandExchange _ _ _ _ _ state) = do
+  requireNativeExchangeOpen exchange
+  (_,_,_,busy) <- readIORef state
+  when busy (fail "worker: terminal response while native reply outstanding")
+  nativeCaptureBudget exchange
+
+-- Capture cleanup must still close/remove its files after malformed exchange
+-- framing poisoned the channel. This observation does not authorize a response.
+nativeCaptureBudget :: NativeDemandExchange -> IO Integer
+nativeCaptureBudget (NativeDemandExchange _ _ _ _ _ state) = do
+  (_,_,spent,_) <- readIORef state
+  pure (max 0 (maxResponsePayloadBytes - spent))
+
 
 data OutputChannels = OutputChannels Handle Handle
 
@@ -70,22 +140,43 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
       command <- hGetExactly stdin 1
       case BS.head command of
         0 -> pure ()
-        1 -> do
+        1 -> serve Nothing
+        6 -> do
+          header <- hGetExactly stdin 144
+          unless (BS.take 8 header == BSC.pack "TPNDX001") (fail "worker: invalid native exchange header")
+          thread <- myThreadId
+          open <- newIORef True
+          state <- newIORef (0,Nothing,0,False)
+          let exchange = NativeDemandExchange header thread stdin protocol open state
+          serve (Just exchange) `finally` writeIORef open False
+        other -> throwIO (userError ("worker: unknown request command " ++ show other))
+      where
+        serve native = do
           cwd <- decodeText <$> hGetFrame stdin
           argc <- getU32LE <$> hGetExactly stdin 4
           argv <- replicateM (fromIntegral argc) (decodeText <$> hGetFrame stdin)
-          (completed, captured) <- captureOutput channels (handler (phaseSink channels) cwd argv)
-          (code, out, err) <- renderCaptured channels completed captured
+          let captureBudget = maybe (pure maxResponsePayloadBytes) nativeCaptureBudget native
+          (completed, captured) <- captureOutputWithin captureBudget channels
+            (handler (phaseSink channels) native cwd argv)
+          forM_ native $ \(NativeDemandExchange _ _ _ _ open _) -> do
+            healthy <- readIORef open
+            unless healthy (finishCompletion completed >> fail "worker: native exchange poisoned")
+          budget <- maybe (pure maxResponsePayloadBytes) nativeRemaining native
+          (code, out, err) <- renderCapturedWithin budget channels completed captured
+          when (toInteger (BS.length out) + toInteger (BS.length err) > budget) $
+            fail "worker: terminal response exceeds cumulative native exchange budget"
           emitPhase (phaseSink channels) WritingResponse
-          BS.hPut protocol (encodeResponse (exitCodeToInt code) out err)
+          BS.hPut protocol (maybe BS.empty (const (BS.singleton 0)) native
+            <> encodeResponse (exitCodeToInt code) out err)
           hFlush protocol
           emitPhase (phaseSink channels) ResponseWritten
           unless (null (completionFailures completed)) $
             finishCompletion completed >> pure ()
           case captured of
             UnavailableCapture -> finishCompletion completed >> fail "worker capture unavailable"
-            _ -> requests channels handler
-        other -> throwIO (userError ("worker: unknown request command " ++ show other))
+            _ -> do
+              case native of Just (NativeDemandExchange _ _ _ _ open _) -> writeIORef open False; Nothing -> pure ()
+              requests channels handler
 
 -- Direct CLI shares capture, release assessment and terminal rendering with the
 -- framed owner. Main's callback includes its outer compiler-scope release.
@@ -136,6 +227,13 @@ getU32LE bytes =
   .|. (fromIntegral (BS.index bytes 2) `shiftL` 16)
   .|. (fromIntegral (BS.index bytes 3) `shiftL` 24)
 
+putU64LE :: Word64 -> BS.ByteString
+putU64LE value = BS.pack [fromIntegral (value `shiftR` (8 * offset)) | offset <- [0..7]]
+
+getU64LE :: BS.ByteString -> Word64
+getU64LE bytes = foldr (.|.) 0
+  [fromIntegral (BS.index bytes offset) `shiftL` (8 * offset) | offset <- [0..7]]
+
 frame :: BS.ByteString -> BS.ByteString
 frame bytes = putU32LE (fromIntegral (BS.length bytes)) <> bytes
 
@@ -147,7 +245,10 @@ decodeText :: BS.ByteString -> String
 decodeText = T.unpack . TE.decodeUtf8With TEE.lenientDecode
 
 captureOutput :: OutputChannels -> IO (Completion WorkerResponse) -> IO (Completion WorkerResponse, CaptureOutcome)
-captureOutput channels action = mask $ \restore -> do
+captureOutput = captureOutputWithin (pure maxResponsePayloadBytes)
+
+captureOutputWithin :: IO Integer -> OutputChannels -> IO (Completion WorkerResponse) -> IO (Completion WorkerResponse, CaptureOutcome)
+captureOutputWithin remaining channels action = mask $ \restore -> do
   opened <- try $ do
     directory <- getTemporaryDirectory
     openTempFile directory "tidepool-worker-stdout.txt"
@@ -174,7 +275,8 @@ captureOutput channels action = mask $ \restore -> do
             attemptReleases [(CaptureClose, hClose outHandle), (CaptureClose, hClose errHandle)]
           readStart <- attemptReleases
             [(CaptureRead, emitPhase (phaseSink channels) (CleanupStarted CaptureRead))]
-          readResult <- readCapturedResponse outPath errPath
+          budget <- remaining
+          readResult <- readCapturedResponse budget outPath errPath
           readEnd <- attemptReleases
             [(CaptureRead, emitPhase (phaseSink channels) (CleanupFinished CaptureRead))]
           removed <- observedRelease channels CaptureRemove $
@@ -204,7 +306,10 @@ restoreOutput (OutputChannels out err) = attemptReleases
   ]
 
 renderCaptured :: OutputChannels -> Completion WorkerResponse -> CaptureOutcome -> IO (ExitCode, BS.ByteString, BS.ByteString)
-renderCaptured channels completed captured = do
+renderCaptured = renderCapturedWithin maxResponsePayloadBytes
+
+renderCapturedWithin :: Integer -> OutputChannels -> Completion WorkerResponse -> CaptureOutcome -> IO (ExitCode, BS.ByteString, BS.ByteString)
+renderCapturedWithin budget channels completed captured = do
   case completionAsync completed of
     Just failure -> throwIO failure
     Nothing -> pure ()
@@ -216,7 +321,7 @@ renderCaptured channels completed captured = do
       (capturedOut, capturedErr) = case captured of
         Captured out err -> (out, err)
         _ -> (BS.empty, BS.empty)
-      remaining = maxResponsePayloadBytes
+      remaining = budget
         - toInteger (BS.length capturedOut) - toInteger (BS.length capturedErr)
   (code, diagnostics, human) <- renderCompletion (fmap responseDiagnostics completed) assessment
   -- Only the typed successful body supplies a control response. Capture and
@@ -246,16 +351,16 @@ responseDiagnostics (ExactInputsResponse _) = []
 maxResponsePayloadBytes :: Integer
 maxResponsePayloadBytes = 16777216
 
-readCapturedResponse :: FilePath -> FilePath -> IO (Completion (Either String (BS.ByteString, BS.ByteString)))
-readCapturedResponse outPath errPath =
+readCapturedResponse :: Integer -> FilePath -> FilePath -> IO (Completion (Either String (BS.ByteString, BS.ByteString)))
+readCapturedResponse budget outPath errPath =
   withCompletionRelease CaptureClose (openBinaryFile outPath ReadMode) hClose $ \outHandle ->
   withCompletionRelease CaptureClose (openBinaryFile errPath ReadMode) hClose $ \errHandle ->
   captureCompletion $ do
     outSize <- hFileSize outHandle
     errSize <- hFileSize errHandle
-    if outSize + errSize > maxResponsePayloadBytes
+    if outSize + errSize > budget
       then pure (Left ("compiler response capture exceeds " ++ show maxResponsePayloadBytes
-        ++ " bytes (stdout=" ++ show outSize ++ ", stderr=" ++ show errSize ++ ")"))
+        ++ " bytes remaining=" ++ show budget ++ " (stdout=" ++ show outSize ++ ", stderr=" ++ show errSize ++ ")"))
       else do
         -- Read only the measured lengths plus one growth sentinel per file.
         -- A concurrent inherited writer cannot force unbounded allocation or

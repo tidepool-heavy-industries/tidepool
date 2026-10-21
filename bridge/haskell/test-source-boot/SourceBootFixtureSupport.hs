@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module SourceBootFixtureSupport
-  ( writeExecutionScope, hasIntResultLiteral, withTiming
+  ( rootedProfilePath, rootedProfileSha256, rootedProfileIdentity, withRootedCompilerEnvironment, withQuietStdout
+  , writeExecutionScope, hasIntResultLiteral, withTiming
   , CapturedCompilerFixture, capturePreparedFixture, captureDiagnostics
   , acquireFixtureScratch, releaseFixtureScratch, releaseFixtureScratchAfterFailure
   , withScratchFailureEvidence
@@ -37,7 +38,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), makeRelative)
 import System.IO
   ( openTempFile, hClose, hFlush, hPutStr, hPutStrLn, hSeek, hFileSize, withBinaryFile
-  , IOMode(ReadMode), SeekMode(AbsoluteSeek), stderr )
+  , IOMode(ReadMode), SeekMode(AbsoluteSeek), stderr, stdout )
 import System.IO.Error (isUserError, ioeGetErrorString)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
@@ -289,3 +290,53 @@ captureDiagnostics action = mask $ \restore -> do
 
 preparedNames :: PreparedPipelineResult -> [String]
 preparedNames = map (moduleNameString . moduleName . pmModule) . pprModules
+
+
+rootedProfilePath :: String
+rootedProfilePath = "/nix/store/bfa5qsshnhgxihzxf2klvzxx0d2pass9-compiler-package-profile-v1"
+
+rootedProfileSha256 :: String
+rootedProfileSha256 = "6722c5a9ea70c599d76a874dc6c4c014d1264abd700537293f9f347ab6d745ce"
+
+rootedProfileIdentity :: String
+rootedProfileIdentity = "15663ac19c31058a9203f6404f72cad491923a1f34209bc68cff3bbbf3111880"
+
+withRootedCompilerEnvironment :: FilePath -> IO a -> IO a
+withRootedCompilerEnvironment worldDirectory action = bracket
+  (traverse (\name -> (name,) <$> lookupEnv name) names)
+  (mapM_ (\(name,value) -> maybe (unsetEnv name) (setEnv name) value)) $ \_ -> do
+    unsetEnv "LD_LIBRARY_PATH"
+    unsetEnv "LD_PRELOAD"
+    unsetEnv "LD_AUDIT"
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_PROFILE" rootedProfilePath
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256" rootedProfileSha256
+    setEnv "TIDEPOOL_COMPILER_SERVICE_EPOCH" (replicate 64 '0')
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID" (replicate 64 '0')
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID" rootedProfileIdentity
+    setEnv "TIDEPOOL_COMPILER_WORKER_INSTANCE" (replicate 64 '0')
+    setEnv "TIDEPOOL_COMPILER_WORLD_DIRECTORY" worldDirectory
+    action
+  where
+    names =
+      [ "TIDEPOOL_COMPILER_PACKAGE_PROFILE"
+      , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256"
+      , "TIDEPOOL_COMPILER_SERVICE_EPOCH"
+      , "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID"
+      , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID"
+      , "TIDEPOOL_COMPILER_WORKER_INSTANCE"
+      , "TIDEPOOL_COMPILER_WORLD_DIRECTORY"
+      , "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"
+      ]
+
+-- Rooted boot acknowledges its association on stdout. Keep that binary frame
+-- out of the test runner's protocol while the real association is exercised.
+withQuietStdout :: IO a -> IO a
+withQuietStdout action = mask $ \restore -> do
+  hFlush stdout
+  temporary <- getTemporaryDirectory
+  (path,output) <- openTempFile temporary "rooted-boot-ack"
+  let cleanup = hClose output `finally` removeFile path
+  bracket (hDuplicate stdout) hClose $ \saved -> do
+    (do hDuplicateTo output stdout
+        restore action `finally` (hFlush stdout >> hDuplicateTo saved stdout))
+      `finally` cleanup

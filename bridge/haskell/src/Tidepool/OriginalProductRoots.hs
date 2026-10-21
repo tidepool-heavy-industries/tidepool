@@ -2,7 +2,7 @@
 -- target no longer references. Their executable closure is part of admission.
 module Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
-  , requiredOriginalPackageGlobalsWithRetained, requiredOriginalPackageGlobalsWithPrior
+  , requiredOriginalPackageGlobalsWithRetained, requiredOriginalExternalGlobalsWithPrior
   , ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand ) where
 
@@ -83,17 +83,17 @@ requiredOriginalPackageGlobalsWithRetained
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
   -> Set.Set SymbolIdentity -> [GlobalDecl] -> Either String [SymbolIdentity]
 requiredOriginalPackageGlobalsWithRetained fresh cached exact retained =
-  requiredOriginalPackageGlobalsWithPrior fresh cached exact retained (const (Right Nothing))
+  requiredOriginalExternalGlobalsWithPrior fresh cached exact retained (const (Right Nothing))
 
 -- The read-only prior query stays with its certified owner. It is evaluated
 -- only for reached symbols, never flattened into this current-group index.
-requiredOriginalPackageGlobalsWithPrior
+requiredOriginalExternalGlobalsWithPrior
   :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
   -> Set.Set SymbolIdentity
   -> (SymbolIdentity -> Either String (Maybe (Set.Set SymbolIdentity)))
   -> [GlobalDecl] -> Either String [SymbolIdentity]
-requiredOriginalPackageGlobalsWithPrior fresh cached exact retained prior =
+requiredOriginalExternalGlobalsWithPrior fresh cached exact retained prior =
   -- The original inventory is immutable across target and recovery passes.
   -- Partially applying this function retains its validated binder index;
   -- each target still starts a fresh traversal of that inventory.

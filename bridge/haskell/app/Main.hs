@@ -67,7 +67,7 @@ import Tidepool.GhcPipeline
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
-  , scopedEnsureWorld
+  , scopedEnsureWorld, WorldCellRefusal(..)
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
@@ -187,8 +187,8 @@ main = do
       withResidentCompilerScopes [] $ \runRequest ->
         WorkerServer.runWorkerLoop $ \serveTransaction ->
           runRequest (pure ()) $ \scope ->
-            serveTransaction (\sink cwd argv ->
-              setCurrentDirectory cwd >> runWorkerInvocation sink scope argv)
+            serveTransaction (\sink native cwd argv ->
+              setCurrentDirectory cwd >> runWorkerInvocation sink native scope argv)
     else do
       requireObservationPackageEnvironment
       hSetEncoding stdout utf8
@@ -203,7 +203,7 @@ runDirectInvocation raw sink = do
   issued <- newIORef Nothing
   outer <- captureCompletion $ withResidentCompilerScopes [] $ \runRequest ->
     runRequest (pure ()) $ \scope -> mask $ \restore -> do
-      completed <- restore (runWorkerInvocation sink scope raw)
+      completed <- restore (runWorkerInvocation sink Nothing scope raw)
       writeIORef issued (Just completed)
       pure completed
   known <- readIORef issued
@@ -214,21 +214,24 @@ runDirectInvocation raw sink = do
       _ -> asCleanupFailures CompilerScopeRestore outer
 
 -- Direct and resident transports decode the same versioned worker payload.
-runWorkerInvocation :: PhaseSink -> CompilerScope -> [String] -> IO (Completion WorkerServer.WorkerResponse)
-runWorkerInvocation sink compilerScope raw = case workerRequestFromArgv raw of
+runWorkerInvocation :: PhaseSink -> Maybe WorkerServer.NativeDemandExchange -> CompilerScope -> [String] -> IO (Completion WorkerServer.WorkerResponse)
+runWorkerInvocation sink native compilerScope raw = case workerRequestFromArgv raw of
   Left failure -> captureCompletion (throwIO (InvalidWorkerRequest failure))
   Right Nothing -> captureCompletion (throwIO (InvalidWorkerRequest "worker requires a versioned request"))
-  Right (Just request) -> runParsedInvocation sink compilerScope request
+  Right (Just request) -> runParsedInvocation sink native compilerScope request
 
-runParsedInvocation :: PhaseSink -> CompilerScope -> WorkerRequest -> IO (Completion WorkerServer.WorkerResponse)
-runParsedInvocation _ compilerScope parsed | isJust (requestEnsureExactInputs parsed) =
+runParsedInvocation :: PhaseSink -> Maybe WorkerServer.NativeDemandExchange -> CompilerScope -> WorkerRequest -> IO (Completion WorkerServer.WorkerResponse)
+runParsedInvocation _ _ compilerScope parsed | isJust (requestEnsureExactInputs parsed) =
   captureCompletion $ case admitRequestOperation parsed of
     Right (EnsureExactInputsOperation request) -> WorkerServer.ExactInputsResponse <$> scopedEnsureWorld compilerScope request
     _ -> throwIO (InvalidWorkerRequest "invalid source-free world acquisition")
-runParsedInvocation sink compilerScope parsed = fmap WorkerServer.DiagnosticResponse <$>
+runParsedInvocation sink native compilerScope parsed = fmap WorkerServer.DiagnosticResponse <$>
   (flattenCompletion <$> captureCompletion (do
+    case (admitRequestOperation parsed,native) of
+      (Right (WorldCellPrepareOperation _),Nothing) -> throwIO WorldCellUnsupported
+      _ -> pure ()
     timing <- readTimingEnabled
-    withBoundCompilerRequest sink compilerScope parsed (dispatch timing)))
+    withBoundCompilerRequestWithNativeDemand sink native compilerScope parsed (dispatch timing)))
 
 -- Mode selection, normalized arguments and exact admission come from one owner.
 dispatch :: Bool -> BoundCompilerRequest -> IO [Diag]
@@ -473,7 +476,6 @@ processFile bound timing path = do
           [] -> maybe [] pure mTarget
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     output <- prepareArtifactsWithIntent
-      (preparedOutputIntent args)
       originalInterfaces outDir completion preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     let preparedArtifacts = case output of
@@ -486,7 +488,7 @@ processFile bound timing path = do
     void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     case output of
       NativeOutputs _ productContext -> void $ timePhase timing "module_products" $
-        writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
+        writeRequestProducts args originalInterfaces outDir prepared (Just productContext) preparedArtifacts
       PortableOutputs _ -> do
         _ <- writeDependencyEvidence outDir (preparedFreshDependencies prepared)
         writeRequestInputProof args outDir prepared

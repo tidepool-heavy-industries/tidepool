@@ -3,7 +3,7 @@
 module Tidepool.FatIface.Internal
   ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches
   , evictLoadCache, lookupLoadCache, lookupCompletedLoadCache
-  , privateComponents
+  , privateComponents, withCapturedIface
   , OwnerInterfaceContext(..), issueOwnerInterfaceContext
   ) where
 
@@ -12,13 +12,20 @@ import GHC.Core.TyCon (TyCon)
 import GHC.Types.Name (Name)
 import GHC.Types.Var (Id)
 import GHC.Unit.Types (Module)
-import GHC.Unit.Module.ModIface (ModIface)
+import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls)
+import GHC.Iface.Recomp.Binary (computeFingerprint, putNameLiterally)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Utils.Fingerprint (Fingerprint)
 
 import Control.Concurrent.MVar
   (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
-import Control.Exception (SomeException, mask, throwIO, try, uninterruptibleMask_)
+import Control.Exception (SomeException, bracket, mask, throwIO, try, uninterruptibleMask_)
+import Control.Monad (unless)
+import qualified Data.ByteString as BS
+import System.Directory (getTemporaryDirectory, removeFile)
+import System.IO (openBinaryTempFile, hIsClosed, hClose)
+import Tidepool.Timing (emitCount)
+import Tidepool.ArtifactBytes (ArtifactBytes)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -30,15 +37,20 @@ data OwnerInterfaceContext = OwnerInterfaceContext
   , ownerInterfaceVersion :: !(Module, Fingerprint)
   , ownerInterfaceModIface :: ModIface
   , ownerInterfaceLocation :: ModLocation
+  , ownerInterfaceBytes :: Maybe ArtifactBytes
+  , ownerInterfaceCapturedCore :: Maybe Fingerprint
   , ownerInterfaceTyCons :: [TyCon]
   , ownerInterfaceEntries :: Map.Map Name Id
   }
 
 issueOwnerInterfaceContext :: Module -> Fingerprint -> ModIface -> ModLocation -> [TyCon]
-  -> Map.Map Name Id -> IO OwnerInterfaceContext
-issueOwnerInterfaceContext owner fingerprint iface location tycons entries = do
+  -> Map.Map Name Id -> Maybe ArtifactBytes -> IO OwnerInterfaceContext
+issueOwnerInterfaceContext owner fingerprint iface location tycons entries capturedBytes = do
   identity <- newUnique
-  pure (OwnerInterfaceContext identity (owner,fingerprint) iface location tycons entries)
+  core <- case capturedBytes of
+    Nothing -> pure Nothing
+    Just _ -> traverse (computeFingerprint putNameLiterally) (mi_extra_decls iface)
+  pure (OwnerInterfaceContext identity (owner,fingerprint) iface location capturedBytes core tycons entries)
 
 data Entry value = Cached value | Loading (MVar (Maybe value))
 data Selection value = UseCached value | AwaitLoad (MVar (Maybe value)) | StartLoad (MVar (Maybe value))
@@ -148,3 +160,17 @@ lookupLoadCache cache@(LoadCache ref) key load = mask $ \restore -> do
               _ -> entries
             putMVar completion (Just value)
           pure value
+
+withCapturedIface :: Bool -> String -> BS.ByteString -> (FilePath -> IO a) -> IO a
+withCapturedIface timing owner bytes consume = do
+  directory <- getTemporaryDirectory
+  bracket (openBinaryTempFile directory "tidepool-exact-iface.hi")
+    (\(path, handle) -> do
+      closed <- hIsClosed handle
+      unless closed (hClose handle)
+      removeFile path)
+    (\(path, handle) -> do
+      BS.hPut handle bytes
+      emitCount timing ("exact_iface_capture_write_bytes." ++ owner) (fromIntegral (BS.length bytes))
+      hClose handle
+      consume path)
