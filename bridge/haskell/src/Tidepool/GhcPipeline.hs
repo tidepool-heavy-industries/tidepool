@@ -1531,7 +1531,8 @@ projectWorldQualifiedSources entries lexical requested validated selectedKeys = 
   let previous = Map.fromList [(key artifact,(artifact,edges))
         | (artifact,edges) <- worldLexicalImportGraph lexical]
       key artifact = (exactUnit artifact,exactModule artifact)
-      imports = validatedOriginalSourceImports validated
+      sourceModules = validatedOriginalSourceModules validated
+      imports = Map.map validatedSourceImports sourceModules
       roots = requested `Set.intersection` selectedKeys
       visit seen [] = Right seen
       visit seen (owner:rest)
@@ -1568,18 +1569,19 @@ projectWorldQualifiedSources entries lexical requested validated selectedKeys = 
     let current = validatedOriginalEvidence validated
         modules = [node | node <- dependencyModules current
           , (dependencyModuleUnit node,dependencyModuleName node) `Set.member` reached]
-        paths = Set.fromList (map dependencyModuleSource modules)
+        checkedSources = Map.restrictKeys sourceModules reached
         referenced = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
           | node <- modules,edge <- dependencyModuleImports node]
         evidence = current
-          {dependencySources=filter ((`Set.member` paths) . dependencySourcePath) (dependencySources current)
+          {dependencySources=map validatedSourceProof (Map.elems checkedSources)
           ,dependencyModules=modules
           ,dependencyResolutions=filter (\resolution ->
             (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,dependencyResolutionBoot resolution)
               `Set.member` referenced) (dependencyResolutions current)}
     unless (Set.fromList [(dependencyModuleUnit node,dependencyModuleName node) | node <- modules] == reached
-        && all (\node -> any ((== dependencyModuleSource node) . dependencySourcePath)
-          (dependencySources evidence)) modules)
+        && Map.keysSet checkedSources == reached
+        && all (\node -> maybe False ((== dependencyModuleSource node) . validatedSourceLogicalPath)
+          (Map.lookup (dependencyModuleUnit node,dependencyModuleName node) checkedSources)) modules)
       (Left "qualified source lost its authenticated source evidence")
     pure (Just (WorldQualifiedSourceImports (mkModuleGraph nodes) evidence rows))
 
@@ -2921,7 +2923,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldObservationSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
     WorldCellNameSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
   setSession current
-  importBasis <- qualifyWorldImportSources pendingImports
+  importBasis@(WorldImportBasis _ lexicalImports) <- qualifyWorldImportSources pendingImports
+  liftIO (emitCount timing "world.cell.qualified_source_owners" (toInteger (sum
+    [length rows | WorldQualifiedSourceLexicalImports (WorldQualifiedSourceImports _ _ rows) <- lexicalImports])))
   qualified <- getSession
   imported <- liftIO (hydrateWorldImportBasis importBasis qualified `catch` importFailure)
   setSession imported
@@ -9434,11 +9438,19 @@ captureHeldWorldSourceSelection owner facts privateInputs imported (WorldPrefixL
     pure (WorldSourceSelection (Just (SourceSelectedOriginals claims evidence)) imports
       (Map.elems typeEntries) selectedProofs (Just canonical))
 
+-- The logical module path and its canonical byte observation are paired at
+-- validation; their spellings need not coincide when a source path is aliased.
+data ValidatedSourceModule = ValidatedSourceModule
+  { validatedSourceLogicalPath :: FilePath
+  , validatedSourceProof :: DependencySource
+  , validatedSourceImports :: [(DependencyQualifier,String,Bool,Maybe String)]
+  }
+
 data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
   , validatedOriginalEvidence :: DependencyEvidence
   , validatedOriginalExactImports :: Set.Set (DependencyQualifier,String,Bool)
-  , validatedOriginalSourceImports :: Map.Map (String,String) [(DependencyQualifier,String,Bool,Maybe String)]
+  , validatedOriginalSourceModules :: Map.Map (String,String) ValidatedSourceModule
   , validatedOriginalInputs :: Maybe HydratedExactInterfaces
   }
 
@@ -9585,7 +9597,8 @@ validateCanonicalSourceInputs worldOnly verifiedInputs proofs interfaces inputAr
       UpToDateItem _ -> pure ()
       OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key
         (OriginalInterfaceRecompileRequired (ExecutionSourceInterfaceReason reason))))
-    pure (key,Set.toAscList (Set.fromList currentImports),Set.fromList [(qualifier,name,boot)
+    pure (key,ValidatedSourceModule (dependencyModuleSource node) sourceProof
+      (Set.toAscList (Set.fromList currentImports)),Set.fromList [(qualifier,name,boot)
       | (qualifier,name,boot,Just unit) <- currentImports
       , Map.member (unit,name) exactLocations])
   let exactImports = Set.unions [imports | (_,_,imports) <- qualifiedImports]
