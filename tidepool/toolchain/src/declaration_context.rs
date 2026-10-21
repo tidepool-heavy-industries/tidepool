@@ -658,20 +658,20 @@ impl IssuedOriginalOutput {
 #[derive(Clone)]
 pub(crate) struct CompletedNativeProductAvailability {
     row: Arc<NativeTransportAvailability>,
-    own: crate::artifact_inventory::IssuedNativeOffer,
+    own: Arc<crate::artifact_inventory::NativeOfferContribution>,
 }
 
 impl std::fmt::Debug for CompletedNativeProductAvailability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompletedNativeProductAvailability")
-            .field("original", &self.own.original())
+            .field("original", &self.own.offer().original())
             .finish()
     }
 }
 
 impl CompletedNativeProductAvailability {
     pub(crate) fn own_offer(&self) -> &crate::artifact_inventory::IssuedNativeOffer {
-        &self.own
+        self.own.offer()
     }
 
     pub(crate) fn row(&self) -> &Arc<NativeTransportAvailability> {
@@ -679,7 +679,7 @@ impl CompletedNativeProductAvailability {
     }
 
     fn matches_direct_canonical_binding(&self, namespace: &ArtifactView) -> bool {
-        self.own.matches_direct_canonical_binding(
+        self.own.offer().matches_direct_canonical_binding(
             self.row.original_artifact_id(),
             self.row.canonical,
             namespace,
@@ -691,12 +691,13 @@ impl CompletedNativeProductAvailability {
         key: NativeGroupKey,
     ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
         self.own
+            .offer()
             .proof()
             .into_iter()
             .flat_map(|proof| proof.selection.snapshot().roots.keys())
             .filter_map(move |root| match root {
                 crate::artifact_inventory::ArtifactBindingNode::Group(group)
-                    if self.own.original() == key.artifact
+                    if self.own.offer().original() == key.artifact
                         && group.binding.artifact() == key.artifact
                         && group.original_ordinal == key.original_ordinal =>
                 {
@@ -706,6 +707,44 @@ impl CompletedNativeProductAvailability {
             })
     }
 
+    /// A prior program Source consumes only this producer's own root proof.
+    /// Availability inherited through another contribution cannot select it.
+    pub(crate) fn choose_own_group(
+        &self,
+        key: NativeGroupKey,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Option<ChosenNativeGroupSupport>, CompileError> {
+        let budget = NativeDemandBudget(Some(operation));
+        budget.checkpoint()?;
+        let roots = self
+            .own
+            .offer()
+            .proof()
+            .map_or(0, |proof| proof.selection.snapshot().roots.len());
+        operation
+            .charge(roots)
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let mut groups = self.groups(key);
+        let Some(binding) = groups.next() else {
+            return Ok(None);
+        };
+        if groups.next().is_some() {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: key.artifact,
+                },
+            ));
+        }
+        if !self.own.contains_group(binding) {
+            return Err(failure("produced Source root exceeds its own contribution"));
+        }
+        budget.reserve::<ChosenNativeGroupSupport>(1)?;
+        Ok(Some(ChosenNativeGroupSupport {
+            binding,
+            contribution: Arc::clone(&self.own),
+        }))
+    }
+
     pub(crate) fn support(
         &self,
         key: NativeGroupKey,
@@ -713,7 +752,7 @@ impl CompletedNativeProductAvailability {
     ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
         self.groups(key)
             .any(|root| root == group)
-            .then_some(&self.own)
+            .then_some(self.own.offer())
     }
 }
 
@@ -2363,11 +2402,11 @@ impl RequestNativeAvailability {
             .map(|id| (*id, Vec::new()))
             .collect::<BTreeMap<_, Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>>>();
         let mut full = BTreeSet::new();
-        let mut own = BTreeSet::new();
+        let mut own = BTreeMap::new();
         for offer in validated.offers() {
             budget.checkpoint()?;
             let id = offer.original();
-            if !roots.contains(&id) || !own.insert(id) {
+            if !roots.contains(&id) || own.contains_key(&id) {
                 return Err(failure(
                     "current cohort has a competing own availability offer",
                 ));
@@ -2381,6 +2420,11 @@ impl RequestNativeAvailability {
                     .contribution_for(roots)?
                     .ok_or_else(|| failure("current cohort lost its checked own contribution"))?,
             );
+            budget.reserve::<(
+                ArtifactId,
+                Arc<crate::artifact_inventory::NativeOfferContribution>,
+            )>(1)?;
+            own.insert(id, Arc::clone(&contribution));
             budget.reserve::<Arc<crate::artifact_inventory::NativeOfferContribution>>(1)?;
             availability
                 .get_mut(&id)
@@ -2402,7 +2446,7 @@ impl RequestNativeAvailability {
                     .push(Arc::clone(&contribution));
             }
         }
-        if &own != roots {
+        if !own.keys().eq(roots.iter()) {
             return Err(failure("current cohort omitted an own availability offer"));
         }
         let role_originals = roles
@@ -2441,16 +2485,15 @@ impl RequestNativeAvailability {
         }
         let native_availability = Self::from_rows(Arc::new(rows))?;
         let mut completed = BTreeMap::new();
-        for own in validated.offers() {
+        for (id, own) in own {
             budget.checkpoint()?;
-            let id = own.original();
             let row = native_availability
                 .issued_row(id)
                 .ok_or_else(|| failure("current native product lacks its issued row"))?;
             budget.reserve::<CompletedNativeProductAvailability>(1)?;
             let receipt = Arc::new(CompletedNativeProductAvailability {
                 row: Arc::clone(row),
-                own: own.clone(),
+                own,
             });
             if completed.insert(id, receipt).is_some() {
                 return Err(admission_failure(

@@ -3155,6 +3155,27 @@ impl<'a> CurrentProductRef<'a> {
                 "Source availability binder membership",
             )));
         }
+        if let Some(native) =
+            native.filter(|native| matches!(native.origin, ReceiptNativeOrigin::PriorStageProduct))
+        {
+            let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+                return Err(evidence(CertificationError::Mismatch(
+                    "prior Source lacks physical completion",
+                )));
+            };
+            return Ok(
+                match receipt.choose_own_group(
+                    NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: *original_ordinal,
+                    },
+                    operation,
+                )? {
+                    Some(support) => CurrentSourceDependency::Issued(support),
+                    None => CurrentSourceDependency::Unavailable,
+                },
+            );
+        }
         let source = self.request_inputs().ok_or_else(|| {
             evidence(CertificationError::Mismatch(
                 "Source availability lacks its request input owner",
@@ -16018,6 +16039,47 @@ pub(crate) mod tests {
             publication.produced_availability().unwrap(),
             &receipt
         ));
+        for ordinal in [2, 4, 5] {
+            let key = NativeGroupKey {
+                artifact: fresh_id,
+                original_ordinal: ordinal,
+            };
+            let selected = receipt.choose_own_group(key, &operation).unwrap().unwrap();
+            assert_eq!(
+                receipt.groups(key).collect::<Vec<_>>(),
+                vec![selected.binding()]
+            );
+            assert!(selected
+                .contribution()
+                .offer()
+                .same_issuance(receipt.own_offer()));
+        }
+        for ordinal in [3, 6, 7] {
+            assert!(receipt
+                .choose_own_group(
+                    NativeGroupKey {
+                        artifact: fresh_id,
+                        original_ordinal: ordinal,
+                    },
+                    &operation
+                )
+                .unwrap()
+                .is_none());
+        }
+        assert!(
+            receipt
+                .choose_own_group(
+                    NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: 7,
+                    },
+                    &operation
+                )
+                .unwrap()
+                .is_none(),
+            "dependency custody is not an own root"
+        );
+
         let expected_roots = [2, 4, 5]
             .into_iter()
             .map(|ordinal| {
@@ -16164,6 +16226,19 @@ pub(crate) mod tests {
             .native_closure()
             .selected_native_groups()
             .is_empty());
+        assert!(empty_publication
+            .produced_availability()
+            .unwrap()
+            .choose_own_group(
+                NativeGroupKey {
+                    artifact: empty_id,
+                    original_ordinal: 17
+                },
+                &operation,
+            )
+            .unwrap()
+            .is_none());
+
         assert!(empty_publication.products()[0]
             .original_native()
             .unwrap()
