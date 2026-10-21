@@ -69,6 +69,224 @@ one row or merge child choices because its product hash matches.
   unchanged format remains valid. TPGRP payload bytes need not change merely
   because a separate linkage receipt does.
 
+## 1a. P supplement — frozen occurrence/linkage contract (2026-10-21)
+
+Authored by role P after tracing the producer/consumer at worker base
+`0cfb964739`. This is the concrete fill-in of §1's "Facts the concrete contract
+must fill in". It freezes the wire, lifetime, version and identity rules and
+the producer -> decoder -> install controls. P1/P2/P3 implement against it and
+do not relax it; any change returns to S/P review.
+
+### Trace verdict: where the relation is lost
+
+Haskell pairs a target with its exact package products in
+`PreparedPackageTarget` (`ExecutionProjection.hs:947`), built in
+`projectPreparedPackageTarget` (`ExecutionProjection.hs:953`) where exported
+binder uniqueness is enforced per projection (`ExecutionProjection.hs:970`).
+`CompilerRequest.hs` stores the paired result as `NativeFinal` per projection
+entry and, at `CompilerRequest.hs:936-947`, drops the entry key and flattens:
+
+```haskell
+finalResults <- Map.elems <$> readIORef finalProjections
+let packageTargets = [(target,captures) | NativeFinal target captures _ <- finalResults]
+...
+Just <$> retainPreparedPackageTargets provenance (map fst packageTargets) captures products
+```
+
+`retainPreparedPackageTargets` (`CompilerProducts.hs:504`) performs the loss:
+`groups = concatMap packageTargetGroups targets` (`CompilerProducts.hs:514`)
+flattens every target's `ProjectedPackageGroup` into one list, encodes each as
+an envelope (`CompilerProducts.hs:523-527`) and deduplicates writes by envelope
+SHA (`CompilerProducts.hs:532`). The returned `PreparedPackageOutputs`
+(`CompilerProducts.hs:495`) keeps only envelope files and a
+`(unit,module) -> interface capture` map. Both target-to-occurrence membership
+and occurrence-to-occurrence import order are gone at this point.
+
+Fresh HOME certification resolves package imports independently:
+`CertifiedProducts.hs:290` `resolvePackage` looks up `(unit,module)` in
+`capturedPackages` and returns a `PackageImportRoot`, which `packageOwner`
+(`CertifiedProducts.hs:832`) records as `PackageOwner unit module sha`. That is
+module plus interface seal only, so it cannot name one of two bodies sharing a
+module and seal.
+
+Rust admission consumes the ambiguous remnant in `compiler_projection.rs:1046`
+`package_target(global, seal)`: it filters fresh products by
+`defining_interface().sha256() == seal` plus exported symbol, then falls back to
+a seal+symbol search over inherited `IssuedPackageCodeGraph`s
+(`compiler_projection.rs:1069-1078`), refusing "competing captured code
+products" when two bodies match. This is the exact downstream ambiguity this
+contract removes.
+
+### Occurrence coordinate and lifetime
+
+- The **envelope SHA** (`sha256(encodePackageGroup ...)`, the retained filename
+  and `PackageProductOutput.sha256`) is the producer-visible immutable payload
+  identity within one completed output. It is unique per distinct encoded
+  package body but is **not** a selection/binding identity: the same envelope
+  can be certified under different ordered import seals and therefore yield
+  different `ArtifactId`s.
+- An **occurrence row** is a receipt-scoped record
+  `{ envelope_sha256, unit, module, defining_interface_sha256,
+  defining_version_sha256, imports }`. Rows are ordered by `envelope_sha256`.
+- `Link = Local { envelope_sha256 }` (an exact fresh occurrence in this same
+  output) or `Inherited` (an exact already-issued occurrence; see below).
+- A local occurrence reference is valid only under the authenticated output
+  that issued the manifest. The manifest never becomes durable authority;
+  runtime binding authority stays with `IssuedPackageCodeGraph` /
+  `ScopeProofV3`. `Link::Inherited` is a demand marker, never an
+  `ArtifactBinding`-shaped record written by Haskell: the exact binding is
+  resolved on the Rust side from the exact inherited graphs already carried in
+  that completion, or refused.
+
+### Two kinds of collision, one coordinate
+
+| History | What differs | What the contract does |
+|---|---|---|
+| Two targets, same symbol/seal, different bodies | Same defining interface seal; different envelope SHA | Distinct `OccurrenceRow`s by envelope SHA; each target's `target_roots` names its own `Local` |
+| Transitive A -> B with a competing B | A's ordered child slot points at one B, another target supplies the other B | A's `imports` names B's exact envelope SHA; the other B stays custody but is never selected |
+| Same payload under two child histories | Same envelope SHA, different ordered import seals (or same seals, different child bodies) | Refused at the `PackageCodePlan` key (`ArtifactId`) unless per-projection scopes make them distinct; see residual gates |
+
+### Wire and version
+
+- Add a required field `package_links` (the occurrence/linkage manifest) to the
+  completed-product receipt and bump the receipt layout once, atomically:
+  - Haskell encode `CertifiedProducts.hs:520-541` (`TPCERT`, current version 11)
+    gains one payload element for both the `"ordinary"` and
+    `"segment-originals"` variants.
+  - Rust decode `decode_receipt_value_in` (`certified_products.rs`, array
+    lengths 9/8 today) accepts only the new length and refuses the old length
+    as `Receipt("complete product output variant")`.
+- Reject any receipt lacking the manifest; do not reconstruct choices for
+  backward compatibility. `TPPACKAGEGROUP1`/TPGRP envelope bytes, the
+  `tidepool.package-code-product.v1` product hash (`package_code.rs:559,655,777`)
+  and `ArtifactDescriptor::package_code` (`artifact_inventory.rs:1974`) are
+  unchanged.
+- Already-issued graphs whose persisted format is unchanged remain valid and
+  are reborrowed through `from_issued` (`artifact_inventory.rs:23310`).
+
+### Manifest shape (one paired value)
+
+```text
+PackageLinks {
+  version: u8 = 1,
+  occurrences: [OccurrenceRow],              # ordered by envelope_sha256
+  target_roots: Map<String, [Link]>,         # key = CertifiedReceipt.targets key;
+                                             # one Link per non-HOME package
+                                             # global in that target's program
+                                             # order
+  home_roots: Map<(String,String), [Link]>,  # key = fresh HOME group (unit,module);
+                                             # one Link per package global in
+                                             # that group's program order
+}
+OccurrenceRow {
+  envelope_sha256: [u8;32],
+  unit: String, module: String,
+  defining_interface_sha256: [u8;32],
+  defining_version_sha256: [u8;32],
+  imports: [Link],                           # length == code.globals().len()
+}
+```
+
+`occurrences` holds every fresh package product in this output, emitted beside
+the existing flattened `package_products` list (same dedup by envelope SHA),
+not as a replacement. The `imports`, `target_roots` and `home_roots` lists are
+the single paired value that writers encode and Rust decodes; there is no
+independent zip or lookup that callers must keep in agreement. A `Link::Local`
+targets an `envelope_sha256` present in `occurrences`; a `Link::Inherited`
+carries no digest and must never be resolved by search.
+
+### Producer rules
+
+- Build links inside `retainPreparedPackageTargets` from each
+  `PreparedPackageTarget.packageTargetGroups` **before** the `concatMap` at
+  `CompilerProducts.hs:514`, where the ordered groups are still paired.
+- Target slot order is the package globals of `packageTargetProgram` in program
+  order (the non-HOME globals computed at `CompilerRequest.hs:855-867`), not an
+  arbitrary map order.
+- Occurrence import slot order is `projectedGlobals (projectedBody group)` for
+  that group's `ProjectedGroupEvidence`, matching
+  `CertifiedPackageCodeProduct.code().globals()` order.
+- Fresh HOME roots: each fresh HOME group's package imports resolve through the
+  same per-target occurrence map that issued them; they are not derived from a
+  target-only map or a global `(unit,module)` interface lookup. P1 carries the
+  paired value into `encodeCertifiedOriginalProductsWithPrior` beside
+  `packageProducts`/`capturedPackages` (`CertifiedProducts.hs:286-297`).
+- A cache/dedup map may share encoded bytes; it must not erase projection
+  membership, slot multiplicity, selected children, or original order. Refuse
+  at the owning construction boundary (typed failure) if a demanded link cannot
+  be issued; never emit an incomplete optional manifest with a Rust fallback.
+
+### Decoder checks (typed refusals at one boundary)
+
+1. Manifest present at the new version; every `Link::Local` envelope SHA is
+   present in `occurrences` (out-of-range/missing = refusal).
+2. `occurrences` envelope SHAs equal the authenticated `package_products`
+   envelope SHAs (crossed-scope/foreign occurrence = refusal).
+3. `occurrences[i].imports.len() == product.code().globals().len()`;
+   `target_roots[k].len()` equals that target's package requirement count;
+   `home_roots[k].len()` equals that HOME group's package global count.
+4. Occurrence owner, defining interface and defining version must equal the
+   authenticated product owner, `defining_interface()` and defining version; a
+   Local ref whose envelope matches but whose owner or defining seal disagrees
+   is a crossed-scope refusal.
+5. `Link::Inherited` resolves only to the exact held binding already carried in
+   the inherited completions for that slot; retained HOME rows pass their prior
+   imports through unchanged. Absent or more than one exact held binding is a
+   refusal, never seal+symbol first-match.
+6. Keep every existing check at conversion/install: producer/profile match
+   (`compiler_projection.rs:1037` `check_product`), `validate_export`
+   (`artifact_inventory.rs:22881`), `validate_import` (`artifact_inventory.rs:22925`),
+   `PackageGroupCode::admit` (`execution_schema.rs:1363`),
+   `ProjectedGroup::validate_code_owner` (`execution_schema.rs:1229`), envelope
+   authentication (`package_code.rs:707-738`), and the `issue` ImportCount /
+   ConflictingPlan / AmbiguousInheritance refusals (`artifact_inventory.rs:22961+`).
+
+### Install and recovery
+
+- The decoder turns each `OccurrenceRow` into
+  `PackageCodePlan { product, imports: [PackageCodeTarget] }` where
+  `Link::Local` becomes `PackageCodeTarget::Planned(product.artifact_id())` and
+  `Link::Inherited` becomes `PackageCodeTarget::Held(exact_binding)`.
+  `IssuedPackageCodeGraph::issue` (`artifact_inventory.rs:22961`) still owns
+  selection, reuse and `ScopeProofV3` issuance. The seal+symbol
+  `package_target` search (`compiler_projection.rs:1046-1080`) and its
+  competing-product failure are deleted with their callers.
+- Recovery reborrows exact rows through `from_issued`
+  (`artifact_inventory.rs:23310`); it never reconstructs a plan from a
+  latest-head inventory or a `(seal, symbol)` lookup.
+
+### Controls (producer -> decoder -> install)
+
+- Two targets with the same symbol/seal but different bodies, reversed target
+  order; each target uses its own body after installation (executed or typed
+  selection evidence, not just a matching digest).
+- Package A imports B while another target supplies a competing B; assert the
+  transitive choice.
+- Repeated slots and byte-identical shared leaves keep slot multiplicity while
+  sharing bytes; distinct child histories remain distinct bindings.
+- Fresh HOME imports and retained historical HOME imports select correctly.
+- Wrong projection, unissued/missing/out-of-range link, changed owner/export/
+  representation/signature/evaluatedness, and producer/profile mismatch refuse
+  before installation with precise typed causes.
+- Recover two issued histories and select each separately after disposable
+  producer outputs are removed.
+- A regression to `(seal, symbol)` or first-match must fail these tests; the
+  negative oracle is independent of the repaired selector.
+
+### Explicit residual gates for S/P review
+
+- `PackageCodePlan` remains keyed by `ArtifactId` (`artifact_inventory.rs:22814`,
+  issue at `artifact_inventory.rs:22961`). Equal payload with different ordered
+  children in one `issue` call is still `ConflictingPlan`. Per-projection
+  issuance scopes are expected to avoid this; if one real projection needs two
+  such occurrences, P stops and brings the graph-owner extension to S/P review
+  before widening the key.
+- The exact `Link::Inherited` representation (whether a fresh occurrence may
+  import an inherited terminal at all, or inherited subtrees always pass
+  through a retained parent row) is confirmed by P1's trace against the
+  recovery/reuse path before P2 freezes the decoder; either way the decoder
+  must not re-introduce seal+symbol search.
+
 ## 2. A storage path is not a new interface selection
 
 Existing certified interface/custody owners authenticate bytes and selected
