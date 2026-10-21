@@ -3216,7 +3216,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     }];
     let observed =
         AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
-    let demanded = inputs
+    let demanded = acquisition_inputs
         .artifacts()
         .inventory()
         .select_native_target(
