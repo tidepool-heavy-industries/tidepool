@@ -6257,6 +6257,28 @@ pub(super) mod tests {
         assert!(engine.unpin(bootstrap));
     }
 
+    pub(in crate::session) fn compile_source_publication_fixture(
+    ) -> &'static crate::RuntimePreparedTargets {
+        static TARGETS: std::sync::OnceLock<crate::RuntimePreparedTargets> =
+            std::sync::OnceLock::new();
+        TARGETS.get_or_init(|| {
+            tidepool_testing::eval_harness::require_extract();
+            tidepool_testing::with_settlement(|settlement| {
+                crate::compile_runtime_targets(
+                    &tidepool_toolchain::artifacts::CompileInvocation {
+                        source: include_str!("../../tests/fixtures/SourcePublication.hs"),
+                        targets: &["result"],
+                        include: &[tidepool_testing::eval_harness::prelude_path()],
+                        fallback_module_name: "SourcePublication",
+                    },
+                    |_, _, _| {},
+                    settlement,
+                )
+            })
+            .expect("compile the actual source publication producer")
+        })
+    }
+
     pub(in crate::session) fn install_source_publication_fixture(
         session: &mut super::super::PersistentSession,
         scope: tidepool_codegen::scope::ScopeId,
@@ -6264,22 +6286,9 @@ pub(super) mod tests {
         ProgramId,
         tidepool_codegen::binding_table::SourceScopeAdmission,
     ) {
-        tidepool_testing::eval_harness::require_extract();
-        let targets = tidepool_testing::with_settlement(|settlement| {
-            crate::compile_runtime_targets(
-                &tidepool_toolchain::artifacts::CompileInvocation {
-                    source: include_str!("../../tests/fixtures/SourcePublication.hs"),
-                    targets: &["result"],
-                    include: &[tidepool_testing::eval_harness::prelude_path()],
-                    fallback_module_name: "SourcePublication",
-                },
-                |_, _, _| {},
-                settlement,
-            )
-        })
-        .expect("compile the actual source publication producer");
+        let targets = compile_source_publication_fixture();
         let (program, admission, _) = session
-            .install_runtime_target_in(scope, &targets, "result")
+            .install_runtime_target_in(scope, targets, "result")
             .expect("install the same complete producer in its actual target scope")
             .into_parts();
         assert!(

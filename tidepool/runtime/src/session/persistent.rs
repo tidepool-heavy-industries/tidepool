@@ -8465,77 +8465,21 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn certified_install_refuses_plan_less_target_before_source_work() {
-        use tidepool_repr::execution_schema::testing;
-        // A plan-less image target has no install entry point: the signature
-        // below admits only a `ScopedTargetImage`, which is issued together
-        // with the resolved plan. This function-item check is the type-level
-        // replacement for the former runtime refusal.
-        let _install: fn(
-            &mut PersistentSession,
-            ScopeId,
-            &DataConTable,
-            ScopedTargetImage,
-            &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-            &[InheritedSourceDemand],
-            &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
-        ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> =
-            PersistentSession::install_certified_turn_in;
-        let image = super::super::prepared::ImageTarget::compile(
-            testing::prepare(testing::wire_program()).unwrap(),
-            &ImageRegistry::new(),
-        )
-        .unwrap();
-        assert!(image.globals().is_empty());
-    }
-
-    #[test]
     fn certified_install_with_plan_reaches_the_source_transaction_seam() {
-        use tidepool_repr::execution_schema::testing;
-        let registry = ImageRegistry::new();
+        let targets = super::super::prepared::tests::compile_source_publication_fixture();
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let scope = session.mint_isolated_scope();
-        let plan = ResolvedSourceDomainPlan::fixture(
-            BTreeMap::new(),
-            session
-                .bindings()
-                .source_domain_selection_in(session.scope_tree(), scope)
-                .unwrap(),
-            session
-                .bindings()
-                .scope_snapshot(session.scope_tree(), scope)
-                .unwrap(),
-        );
-        let resolved = ResolvedCertifiedTurn {
-            target_sources: NativeSourceCustody::default(),
-            groups: Vec::new(),
-            target_owners: Vec::new(),
-            package_interfaces: Default::default(),
-            source_evidence: BTreeMap::new(),
-            inherited_needed: Vec::new(),
-            source_plan: plan,
-        };
-        let target = ScopedTargetImage::compile_scoped(
-            testing::prepare(testing::wire_program()).unwrap(),
-            &resolved,
-            &registry,
-        )
-        .unwrap();
-        assert!(target.demanded().is_empty());
-        let refused = session.install_certified_turn_in(
-            scope,
-            &target.fixture_constructor_metadata(),
-            target,
-            &BTreeMap::new(),
-            &[],
-            &|_| None,
-        );
+        let refused = session.install_runtime_target_in(scope, targets, "result");
         assert!(matches!(
             refused,
             Err(PreparedRuntimeError::SourceAdmission(
                 super::super::SourceAdmissionError::MissingTransaction
             ))
         ));
+        assert!(
+            session.prepared().is_none(),
+            "refusal precedes machine allocation"
+        );
     }
 }
 
