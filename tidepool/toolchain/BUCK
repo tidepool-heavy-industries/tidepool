@@ -107,6 +107,7 @@ rust_filegroup(
         "tests/fixtures/world-native/SelectionTemplate.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs",
         "tests/fixtures/world-native/SelectionUnused.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs",
         "tests/fixtures/world-native/SelectionUsed.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs",
+        "tests/fixtures/world-native/StageInputG.hs": "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -254,6 +255,7 @@ rust_filegroup(
         "tests/fixtures/world-native/SelectionTemplate.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs",
         "tests/fixtures/world-native/SelectionUnused.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs",
         "tests/fixtures/world-native/SelectionUsed.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs",
+        "tests/fixtures/world-native/StageInputG.hs": "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -402,6 +404,7 @@ rust_filegroup(
         "tests/fixtures/world-native/SelectionTemplate.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs",
         "tests/fixtures/world-native/SelectionUnused.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs",
         "tests/fixtures/world-native/SelectionUsed.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs",
+        "tests/fixtures/world-native/StageInputG.hs": "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -584,6 +587,7 @@ rust_filegroup(
         "tests/fixtures/world-native/SelectionTemplate.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs",
         "tests/fixtures/world-native/SelectionUnused.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs",
         "tests/fixtures/world-native/SelectionUsed.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs",
+        "tests/fixtures/world-native/StageInputG.hs": "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -790,6 +794,7 @@ rust_filegroup(
         "tests/fixtures/world-native/SelectionTemplate.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs",
         "tests/fixtures/world-native/SelectionUnused.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs",
         "tests/fixtures/world-native/SelectionUsed.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs",
+        "tests/fixtures/world-native/StageInputG.hs": "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -995,6 +1000,7 @@ rust_filegroup(
         "tests/fixtures/world-native/SelectionTemplate.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs",
         "tests/fixtures/world-native/SelectionUnused.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs",
         "tests/fixtures/world-native/SelectionUsed.hs": "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs",
+        "tests/fixtures/world-native/StageInputG.hs": "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -2020,6 +2026,7 @@ filegroup(
         "tidepool/toolchain/tests/fixtures/world-native/SelectionTemplate.hs": "tests/fixtures/world-native/SelectionTemplate.hs",
         "tidepool/toolchain/tests/fixtures/world-native/SelectionUnused.hs": "tests/fixtures/world-native/SelectionUnused.hs",
         "tidepool/toolchain/tests/fixtures/world-native/SelectionUsed.hs": "tests/fixtures/world-native/SelectionUsed.hs",
+        "tidepool/toolchain/tests/fixtures/world-native/StageInputG.hs": "tests/fixtures/world-native/StageInputG.hs",
         "tidepool/toolchain/tests/prepared_fixture.rs": "tests/prepared_fixture.rs",
     },
     visibility = ["PUBLIC"],
