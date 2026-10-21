@@ -13854,6 +13854,11 @@ pub(crate) mod tests {
             .unwrap();
         let mut validation = PackageInterfaceValidation::default();
         let sources = membership.overlay(&request.groups, &operation).unwrap();
+        // Observe custody independently of the request's bounded execution
+        // permission before constructing a fresh unused sibling dependency.
+        let held_groups = source.artifacts().original_group_bindings(&operation).unwrap();
+        eprintln!("latent_original_pair original={original:?} held_groups={held_groups:?} selected={:?}",
+            source.artifacts().capture_graph_selection().native_groups);
         for (ordinal, permitted) in [(7, true), (11, false)] {
             let binder = testing::identity("BoundOriginal", &format!("entry_{ordinal}"));
             let receipt = ReceiptImportOwner::OriginalBinding {
