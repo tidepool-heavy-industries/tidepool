@@ -12378,10 +12378,10 @@ fn validate_original_interface_owner_closure(
     Ok(())
 }
 
-/// Bind a target's declared globals to the same compiler transaction's
-/// source inventory. Retained identities remain unresolved until runtime
-/// checks their lexical scope and assigns authoritative session IDs.
-pub fn certify_target_owners(
+/// Refine raw target-owner observations independently of native target selection.
+/// These component checks cannot construct a physical cohort or target slots.
+#[cfg(test)]
+pub(crate) fn certify_target_owners(
     prepared: &PreparedProgram,
     accepted: &[AcceptedGlobal],
     groups: &[PendingCertifiedGroup],
@@ -12398,6 +12398,7 @@ pub fn certify_target_owners(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn certify_target_owners_with_validation(
     prepared: &PreparedProgram,
     accepted: &[AcceptedGlobal],
@@ -12417,9 +12418,8 @@ pub(crate) fn certify_target_owners_with_validation(
     )
 }
 
-/// Authenticate ordinary and checked-wrapper target imports from full immutable
-/// source membership. Executable admission belongs to the inventory and selected
-/// certifier; a checked target also supplies its independently issued entry root.
+/// Check raw target observations against full immutable source membership.
+#[cfg(test)]
 pub(crate) fn certify_target_available_owners_with_validation(
     prepared: &PreparedProgram,
     accepted: &[AcceptedGlobal],
@@ -12435,6 +12435,7 @@ pub(crate) fn certify_target_available_owners_with_validation(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn certify_target_available_owners_from_membership_with_validation(
     prepared: &PreparedProgram,
     accepted: &[AcceptedGlobal],
@@ -12455,6 +12456,7 @@ pub(crate) fn certify_target_available_owners_from_membership_with_validation(
     )
 }
 
+#[cfg(test)]
 fn certify_target_owners_from_sources(
     prepared: &PreparedProgram,
     accepted: &[AcceptedGlobal],
