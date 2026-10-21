@@ -13,7 +13,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
 import System.IO (stderr)
-import Control.Monad ((>=>), forM, forM_, unless, void)
+import Control.Monad ((>=>), forM, forM_, unless, void, when)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import qualified Data.ByteString.Lazy as BL
