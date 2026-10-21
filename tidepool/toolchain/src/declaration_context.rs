@@ -11728,9 +11728,14 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 .get(&compiler_owner)
                 .is_none_or(|role| role.interface() != row.certified_interface().artifact_id())
             {
-                return Err(failure(
-                    "checked World value interface differs from its primary compiler role",
-                ));
+                let role = roles.get(&compiler_owner);
+                return Err(failure(format_args!(
+                    "checked World value interface differs from its primary compiler role: stage={}, owner={compiler_owner:?}, checked_interface={:?}, primary_interface={:?}, primary_original={:?}",
+                    self.binding.stage.index(),
+                    row.certified_interface().artifact_id(),
+                    role.map(CompilerInputRole::interface),
+                    role.and_then(CompilerInputRole::original),
+                )));
             }
             // Checked value types are compiler inputs even when the value is
             // unused. Keep their issued binding without granting source imports
