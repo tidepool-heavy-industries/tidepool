@@ -444,6 +444,8 @@ pub enum SessionError {
     WorldCellSuccessorCapabilityMissing { ordinal: usize },
     #[error("world execution public semantic base changed before atomic installation")]
     WorldCellPublicationBaseStale,
+    #[error("private publication has no completed checked cell or unchanged compiler basis")]
+    WorldCellPublicationIncomplete,
     #[error("live value module {0:?} has no retained compiler-certified interface")]
     MissingRetainedValueInterface(SessionModule),
     #[error("compiler world cannot capture generic source binding {id:?} in {module:?} (scope={scope:?})")]

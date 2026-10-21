@@ -4126,13 +4126,19 @@ impl PersistentSession {
         .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let prepared = match &ticket.intent {
             super::PublicationIntent::Final(intent) => match intent.world_native_snapshots() {
-                Some((admitted, completed)) => self
+                Some((_admitted, completed)) => self
                     .bindings
                     .prepare_world_execution_selection(
                         &self.scopes,
                         ticket.private_scope,
                         ticket.public_scope,
-                        admitted,
+                        // A concurrent parked cell must promote onto the
+                        // latest public source selection, not the frozen
+                        // admission baseline. The visibility/currentness
+                        // checks above already rebase when the public advanced
+                        // after this restage; the frozen admission snapshot is
+                        // only the pre-publication birth record.
+                        &ticket.semantic.expected_public.source_selection,
                         completed,
                         prepared,
                     )
@@ -4218,18 +4224,37 @@ impl PersistentSession {
                         .map_err(SessionError::from)
                 })
                 .transpose()?;
-            let successor = public.world.promote_private_bindings(
-                &world.association.world,
-                &world.private.world,
-                ticket.public_scope.0,
-                declaration,
-                projection.visible_changes().map(|(name, entry)| {
-                    (
-                        name.0.as_str(),
-                        entry.map(|entry| (entry.id, entry.scope.0)),
-                    )
-                }),
-            )?;
+            let successor = match &world.progress {
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Unchanged => {
+                    // The private execution borrowed the public World and
+                    // added no compiler facts. Keep the latest public product;
+                    // a newer public successor must not be rolled back to the
+                    // older borrowed base. A declaration publication without
+                    // a checked successor is a separate progress form with no
+                    // owner here; it is refused rather than silently dropped.
+                    if declaration.is_some() {
+                        return Err(SessionError::WorldCellPublicationIncomplete);
+                    }
+                    public.world.clone()
+                }
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked => {
+                    public.world.promote_private_bindings(
+                        &world.association.world,
+                        &world.private.world,
+                        ticket.public_scope.0,
+                        declaration,
+                        projection.visible_changes().map(|(name, entry)| {
+                            (
+                                name.0.as_str(),
+                                entry.map(|entry| (entry.id, entry.scope.0)),
+                            )
+                        }),
+                    )?
+                }
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Incomplete => {
+                    return Err(SessionError::WorldCellPublicationIncomplete);
+                }
+            };
             let bindings = self
                 .bindings
                 .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
