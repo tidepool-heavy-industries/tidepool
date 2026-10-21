@@ -6581,27 +6581,16 @@ fn original_reference_payload_membership<'a>(
                 OriginalMembershipFailure::OriginalBytes(product.owner().clone()),
             ))
         })?;
-    // GHC 9.12 resolves a re-exported symbol to its defining site, so the
-    // decoded demand may name the defining module while this original's
-    // authenticated witness groups record the same occurrence at the
-    // exporting module identity. Membership authority remains the witness's
-    // issued groups: match the exact binder first, then the same occurrence
-    // re-expressed at this nominal reference's own identity. A demand for an
-    // occurrence the witness never issued still refuses.
-    let reexported = tidepool_repr::execution_schema::SymbolIdentity {
-        unit: unit.to_owned(),
-        module: module.to_owned(),
-        ..binder.clone()
-    };
+    // Membership authority is the witness's issued groups: the binder is
+    // matched by its exact identity there. A demand for an occurrence the
+    // witness never issued still refuses.
     let mut ordinal = None;
     for group in witness.groups.iter() {
         crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
         if let Some(operation) = operation {
             operation.charge(group.group.binders().len())?;
         }
-        if group.group.binders().contains(binder)
-            || group.group.binders().contains(&reexported)
-        {
+        if group.group.binders().contains(binder) {
             if ordinal.replace(group.group.original_ordinal()).is_some() {
                 return Err(CertificationError::OriginalMembership(Box::new(
                     OriginalMembershipFailure::AmbiguousSymbol {
