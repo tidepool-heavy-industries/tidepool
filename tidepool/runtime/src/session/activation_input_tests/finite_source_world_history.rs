@@ -421,6 +421,14 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         serde_json::to_vec_pretty(&producer_record).unwrap(),
     )
     .unwrap();
+    let consumed_sources = producer_output.join("consumed-sources.json");
+    if consumed_sources.try_exists().unwrap() {
+        std::fs::copy(
+            &consumed_sources,
+            artifact_root.join("finite-producer-consumed-sources.json"),
+        )
+        .unwrap();
+    }
     std::fs::remove_dir_all(&producer_output).unwrap();
     assert!(!producer_output.try_exists().unwrap());
     std::fs::write(
