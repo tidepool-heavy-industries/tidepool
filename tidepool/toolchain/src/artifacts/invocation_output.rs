@@ -1075,15 +1075,18 @@ mod tests {
             .expect("actual finite native package output through common admission");
         assert_eq!(executions, 1);
         let completed = |target: &str| {
-            output.targets[target]
-                .native_inputs
-                .as_ref()
-                .expect("finite target has its actual native inputs")
-                .completed_selection()
-                .expect("finite target has its coissued completion")
+            Arc::clone(
+                output.targets[target]
+                    .native_inputs
+                    .as_ref()
+                    .expect("finite target has its actual native inputs")
+                    .completed_selection()
+                    .expect("finite target has its coissued completion"),
+            )
         };
         let first = completed("first");
         let second = completed("second");
+        drop(output);
         let package_bindings = |selection: &crate::artifact_inventory::CompletedNativeSelection| {
             let mut products = BTreeMap::<_, BTreeSet<_>>::new();
             for binding in selection.completion().package_bindings() {
@@ -1092,8 +1095,8 @@ mod tests {
             }
             products
         };
-        let first_packages = package_bindings(first);
-        let second_packages = package_bindings(second);
+        let first_packages = package_bindings(&first);
+        let second_packages = package_bindings(&second);
         assert!(
             !first_packages.is_empty(),
             "reverse must use actual package code"
@@ -1134,6 +1137,27 @@ mod tests {
                 .iter()
                 .all(|left| { second.target_imports().iter().all(|right| left != right) }),
             "independent target slots retain their own exact Source/Package export values"
+        );
+        let later = crate::artifact_inventory::CompilerSourceSupport::empty()
+            .with_native_selection_completion(&first)
+            .unwrap()
+            .with_native_selection_completion(&second)
+            .unwrap();
+        let package_ids = first_packages
+            .keys()
+            .chain(second_packages.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        drop(first);
+        drop(second);
+        assert_eq!(
+            later
+                .artifacts()
+                .entries_for_artifacts(&package_ids)
+                .unwrap()
+                .len(),
+            package_ids.len(),
+            "later projection owns every actual package payload after its original parent drops"
         );
     }
 
