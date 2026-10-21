@@ -11,6 +11,16 @@ use tidepool_toolchain::certified_products::SelectedNativeImport;
 use tidepool_toolchain::checked_cell::CheckedItemKind;
 
 pub(super) fn run() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "off,tidepool::artifact_inventory::ambiguity_trace=debug",
+        ))
+        .finish();
+    tracing::subscriber::with_default(subscriber, run_history);
+}
+
+fn run_history() {
     tidepool_testing::eval_harness::require_extract();
     let diagnostic_root = PathBuf::from(
         std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
