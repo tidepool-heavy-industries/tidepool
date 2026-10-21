@@ -4957,6 +4957,59 @@ mod tests {
     }
 
     #[test]
+    fn canonical_recovery_requires_exact_package_interface_references() {
+        let root = tempfile::tempdir().unwrap();
+        let interface_bytes = b"canonical-only".to_vec();
+        let digest = Sha256::digest(&interface_bytes).into();
+        let interface = crate::certified_products::fixture_interface_bytes(
+            [1; 32],
+            "home",
+            "CanonicalOnly",
+            interface_bytes,
+            package_witness("home", "CanonicalOnly", &digest, vec![]),
+        );
+        let reference = materialize_module_interface(
+            root.path(),
+            &interface,
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Durable,
+        )
+        .unwrap();
+        assert!(reference.package_interfaces.is_empty());
+        assert!(interface.matches_recovery_reference(&reference));
+        let restored = recover_module_interface(
+            root.path(),
+            &reference,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(restored, interface);
+
+        let mut old = serde_json::to_value(&reference).unwrap();
+        old.as_object_mut().unwrap().remove("package_interfaces");
+        assert!(serde_json::from_value::<RecoveryModuleInterfaceRef>(old).is_err());
+
+        let mut unrelated = reference;
+        unrelated
+            .package_interfaces
+            .push(crate::certified_products::RecoveryPackageInterfaceRef {
+                unit: "foreign".into(),
+                module: "Unrelated".into(),
+                path: PathBuf::from("package-code/unrelated.hi"),
+                sha256: [9; 32],
+            });
+        assert!(!interface.matches_recovery_reference(&unrelated));
+        assert!(matches!(
+            recover_module_interface(
+                root.path(),
+                &unrelated,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
+    }
+
+    #[test]
     fn materialized_pair_is_confined_and_checksum_verified() {
         let run = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
