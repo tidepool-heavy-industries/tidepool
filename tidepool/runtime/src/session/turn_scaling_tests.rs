@@ -3501,9 +3501,26 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         let retained = evidence.join(output.file_name().unwrap());
         std::fs::create_dir(&retained).unwrap();
         std::fs::write(retained.join("transaction.json"), transaction).unwrap();
-        let consumed = output.join("consumed-sources.json");
+        for filename in [
+            "consumed-sources.json",
+            "compiler-request.bin",
+            "compiler-cwd.bin",
+            "compiler.stderr",
+        ] {
+            let source = output.join(filename);
+            if source.try_exists().unwrap() {
+                std::fs::copy(&source, retained.join(filename)).unwrap();
+            }
+        }
+        let consumed = output.join("consumed-sources");
         if consumed.try_exists().unwrap() {
-            std::fs::copy(&consumed, retained.join("consumed-sources.json")).unwrap();
+            let destination = retained.join("consumed-sources");
+            std::fs::create_dir(&destination).unwrap();
+            for source in std::fs::read_dir(consumed).unwrap() {
+                let source = source.unwrap();
+                assert!(source.file_type().unwrap().is_file());
+                std::fs::copy(source.path(), destination.join(source.file_name())).unwrap();
+            }
         }
         disposable_outputs.push(output.clone());
     }
