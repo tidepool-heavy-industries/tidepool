@@ -3501,6 +3501,7 @@ impl ReceiptNativeSelection {
 enum ReceiptNativeOrigin {
     Input,
     NewProduct,
+    PriorStageProduct,
 }
 
 #[derive(Clone, Debug)]
@@ -3743,7 +3744,10 @@ impl CertifiedSourceSelection {
         else {
             return Ok(None);
         };
-        if matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+        if matches!(
+            native.origin,
+            ReceiptNativeOrigin::NewProduct | ReceiptNativeOrigin::PriorStageProduct
+        ) {
             return Ok(None);
         }
         let refusal = |reason| CertificationError::InputDecision {
@@ -3852,10 +3856,12 @@ impl CertifiedSourceSelection {
             let Some(original) = role.original() else {
                 continue;
             };
-            let Some(crate::artifact_inventory::ArtifactEntry {
-                payload: crate::artifact_inventory::ArtifactPayload::Original(product),
-                ..
-            }) = metadata.retained.artifacts.get(&original).map(Arc::as_ref)
+            let entry = metadata
+                .retained
+                .artifacts
+                .get(&original)
+                .ok_or(CertificationError::Mismatch("request original payload"))?;
+            let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload
             else {
                 return Err(CertificationError::Mismatch("request original payload"));
             };
@@ -3872,11 +3878,16 @@ impl CertifiedSourceSelection {
                     "request original compiler owner",
                 ));
             }
-            native.origin = ReceiptNativeOrigin::Input;
-            native.availability =
-                ReceiptNativeAvailability::Issued(inputs.native_availability(original).ok_or(
-                    CertificationError::Mismatch("request original availability"),
-                )?);
+            if let Some(receipt) = inputs.produced_source(entry)? {
+                native.origin = ReceiptNativeOrigin::PriorStageProduct;
+                native.availability = ReceiptNativeAvailability::Completed(Arc::clone(receipt));
+            } else {
+                native.origin = ReceiptNativeOrigin::Input;
+                native.availability =
+                    ReceiptNativeAvailability::Issued(inputs.native_availability(original).ok_or(
+                        CertificationError::Mismatch("request original availability"),
+                    )?);
+            }
         }
         Ok(selected)
     }
@@ -4031,6 +4042,67 @@ impl CertifiedSourceSelection {
             ));
         }
         Ok((entry, *original_ordinal))
+    }
+
+    /// Prior-stage Source selects only the actual producer's own completed
+    /// offer. Initial request inputs cannot acquire this provenance.
+    pub(crate) fn target_prior_produced_group(
+        &self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        entry: &Arc<crate::artifact_inventory::ArtifactEntry>,
+    ) -> CertResult<Option<crate::declaration_context::ChosenNativeGroupSupport>> {
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch(
+                "prior Source original payload",
+            ));
+        };
+        let Some(ReceiptSourceSelection::Native { native, .. }) = self
+            .modules
+            .get(&(product.owner().unit.clone(), product.owner().module.clone()))
+        else {
+            return Ok(None);
+        };
+        if !matches!(native.origin, ReceiptNativeOrigin::PriorStageProduct) {
+            return Ok(None);
+        }
+        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+            return Err(CertificationError::Mismatch(
+                "prior Source lacks physical completion",
+            ));
+        };
+        if native.owner != *product.owner()
+            || native.original_artifact_id()? != entry.descriptor.id
+            || key.artifact != entry.descriptor.id
+            || receipt
+                .row()
+                .target_original(product.owner())
+                .is_none_or(|issued| issued.as_ref() != entry.as_ref())
+        {
+            return Err(CertificationError::Mismatch(
+                "prior Source differs from its produced owner",
+            ));
+        }
+        let mut groups = receipt.groups(key);
+        let binding = groups.next().ok_or(CertificationError::Mismatch(
+            "prior Source group was not issued",
+        ))?;
+        if groups.next().is_some() {
+            return Err(CertificationError::Mismatch(
+                "prior Source has competing own issuers",
+            ));
+        }
+        if receipt.support(key, binding).is_none() {
+            return Err(CertificationError::Mismatch(
+                "prior Source lost its own contribution",
+            ));
+        }
+        receipt
+            .row()
+            .exact_group_support(binding)
+            .map(Some)
+            .ok_or(CertificationError::Mismatch(
+                "prior Source lost its exact issued group",
+            ))
     }
 
     /// Same-program source provenance is lent only by an actual produced body

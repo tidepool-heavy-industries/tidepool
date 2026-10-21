@@ -245,6 +245,15 @@ pub(super) fn select_target_group(
             if let Some(current) = selection.current_product(key, &entry).map_err(evidence)? {
                 let (binding, offer) = completed_target_group(&current, physical)?;
                 (binding, offer, true)
+            } else if let Some(chosen) = selection
+                .target_prior_produced_group(key, &entry)
+                .map_err(evidence)?
+            {
+                (
+                    chosen.binding(),
+                    chosen.contribution().offer().clone(),
+                    false,
+                )
             } else {
                 let binding = verified_root_choice(selection, key, product.owner(), &entry)?;
                 let support = selection
