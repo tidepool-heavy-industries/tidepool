@@ -150,9 +150,12 @@ missing-binding diagnostics are pending; no selection guard is relaxed.
 
 The rooted cold recovery target initially refused before compilation because its
 legacy fixture lacked the actual source transaction and published World owner.
-Its migration to the existing captured World fixture has compiled, but actual
-cold recovery remains unqualified. Earlier intermediate observations do not
-qualify either complete history, catalog production or a frozen bundle.
+After migration, its actual run crosses those checks and reaches the World's
+explicit expression-reservation refusal. The reservation owner lacks a
+service-issued collision witness; the finite history also has a later expression
+cell that remains unexecuted. A named-result cold control can qualify recovery
+separately, but cannot establish expression-frontdoor support. Both complete
+histories, catalog production and a frozen bundle remain unqualified.
 
 ## Remaining route disposition
 
