@@ -1138,6 +1138,40 @@ mod tests {
                 .all(|left| { second.target_imports().iter().all(|right| left != right) }),
             "independent target slots retain their own exact Source/Package export values"
         );
+        let roots = first
+            .target_imports()
+            .iter()
+            .filter_map(|import| match import {
+                crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                    binding, ..
+                } => Some(binding.binding()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!roots.is_empty());
+        let operation = InventoryOperation::new(Default::default());
+        let package_only = crate::artifact_inventory::IssuedPackageCodeGraph::from_issued(
+            first.completion().artifacts(),
+            &roots,
+            &operation,
+        )
+        .unwrap();
+        assert_eq!(package_only.roots(), roots.as_slice());
+        let package_snapshot = package_only.artifacts().capture_graph_selection();
+        assert!(package_snapshot.namespace.is_empty());
+        assert!(package_snapshot.roots.is_empty());
+        assert!(package_snapshot.native_groups.is_empty());
+        assert_eq!(
+            package_snapshot
+                .bindings
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            first_packages
+                .values()
+                .flat_map(|bindings| bindings.iter().copied())
+                .collect::<BTreeSet<_>>()
+        );
         let later = crate::artifact_inventory::CompilerSourceSupport::empty()
             .with_native_selection_completion(&first)
             .unwrap()
@@ -1158,6 +1192,21 @@ mod tests {
                 .len(),
             package_ids.len(),
             "later projection owns every actual package payload after its original parent drops"
+        );
+        drop(later);
+        let retained_package_only = crate::artifact_inventory::ArtifactInventory::default()
+            .empty_view()
+            .retain_custody(package_only.artifacts())
+            .unwrap();
+        drop(package_only);
+        let first_package_ids = first_packages.keys().copied().collect::<BTreeSet<_>>();
+        assert_eq!(
+            retained_package_only
+                .entries_for_artifacts(&first_package_ids)
+                .unwrap()
+                .len(),
+            first_package_ids.len(),
+            "actual package-only payload custody survives later projection"
         );
     }
 
