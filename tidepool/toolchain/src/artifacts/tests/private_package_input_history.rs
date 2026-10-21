@@ -303,17 +303,13 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             && binder == &literal() && *interface_digest == witness.sha256));
 
     let producer = CanonicalProducerIdentity::from_producer_bytes(&PRODUCER).sha256();
-    let view = crate::declaration_context::certified_product_artifact_view_with_validation(
-        producer,
-        &issued.recovery_products,
-        &issued.module_interfaces,
-        &issued.value_interfaces,
-        None,
-        NativeArtifactDemand::AllGroups,
-        &mut PackageInterfaceValidation::default(),
-    )
-    .unwrap();
-    let private = OriginalCompilerInputs::from_selection(&issued.source_selection, &view).unwrap();
+    let private = issued
+        .original_inputs
+        .as_ref()
+        .expect("completed products retain their actual physical inputs")
+        .as_ref()
+        .clone();
+    let view = private.issued_artifacts().clone();
     let public = Arc::new(
         ExactDeclarationContext::from_authenticated_interfaces(
             producer,

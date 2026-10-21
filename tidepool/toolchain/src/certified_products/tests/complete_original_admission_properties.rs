@@ -126,6 +126,16 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
         )
         .unwrap();
     let selection = fixed.source_selection().clone();
+    let completion = {
+        let native = selection
+            .native_selections()
+            .find(|native| &native.owner == authored.owner())
+            .unwrap();
+        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+            panic!("the physical issuer completed the authored original");
+        };
+        Arc::downgrade(receipt)
+    };
     drop(projected);
     let mut sources = vec![(&authored, 3)];
     if explicit_dependency {
@@ -263,12 +273,12 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     }
     let (last_inventory, last) = recover(&current);
     drop(current);
-    assert_ne!(
-        inventory.node_count(),
-        0,
-        "the completed selection retains its physical proof until released"
-    );
+    // Completed availability retains immutable proof custody, not live views.
+    assert_eq!(inventory.node_count(), 0);
+    assert!(completion.upgrade().is_some());
+    assert!(selection.permits_native_group(authored_id, authored.owner(), ORDINALS[0]));
     drop(selection);
+    assert!(completion.upgrade().is_none());
     assert_eq!(groups(&last), expected_groups);
     assert_eq!(explicit_roots(&last), expected_roots);
     assert_eq!(inventory.node_count(), 0);
