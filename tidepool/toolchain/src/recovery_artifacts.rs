@@ -2149,65 +2149,6 @@ fn prepare_owned_directory(
     Ok(canonical_owned)
 }
 
-/// Seal a validated source-less Joined interface in the run's durable root.
-pub fn materialize_joined_interface(
-    recovery_root: &Path,
-    toolchain_identity_sha256: [u8; 32],
-    unit: &str,
-    module: &str,
-    interface_source: &Path,
-    skinny_iface_sha256: [u8; 32],
-) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
-    materialize_joined_interface_with_validation(
-        recovery_root,
-        toolchain_identity_sha256,
-        unit,
-        module,
-        interface_source,
-        skinny_iface_sha256,
-        &mut PackageInterfaceValidation::default(),
-    )
-}
-
-pub(crate) fn materialize_joined_interface_with_validation(
-    recovery_root: &Path,
-    toolchain_identity_sha256: [u8; 32],
-    unit: &str,
-    module: &str,
-    interface_source: &Path,
-    skinny_iface_sha256: [u8; 32],
-    validation: &mut PackageInterfaceValidation,
-) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
-    if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
-        return Err(RecoveryArtifactError::InvalidReference);
-    }
-    let bytes = read_checked(
-        interface_source,
-        &skinny_iface_sha256,
-        PACKAGE_INTERFACE_LIMIT,
-        validation,
-    )?;
-    let package_imports_source = package_sidecar_path(interface_source);
-    let package_imports = read_package_imports(
-        &package_imports_source,
-        None,
-        unit,
-        module,
-        &skinny_iface_sha256,
-        validation,
-    )?;
-    materialize_owned_join(
-        recovery_root,
-        toolchain_identity_sha256,
-        unit,
-        module,
-        &bytes,
-        &package_imports,
-        validation,
-        MaterializationMode::Durable,
-    )
-}
-
 /// Interface files carry no native or lexical role authority. Only the caller's
 /// authenticated owner determines which contract consumes them.
 pub(crate) struct MaterializedInterfaceFiles {
@@ -3546,7 +3487,12 @@ mod tests {
             fs::write(package_sidecar_path(&iface), package_witness("home", "Joined", &digest,
                 vec![["package-unit".into(), "Package".into(), package.display().to_string(), hex(&package_digest)]]
             )).unwrap();
-            let reference = materialize_joined_interface(run.path(), [1; 32], "home", "Joined", &iface, digest).unwrap();
+            let interface = CertifiedJoinedInterface::from_certification(
+                [1; 32], "home".into(), "Joined".into(),
+                fs::read(&iface).unwrap(), fs::read(package_sidecar_path(&iface)).unwrap(),
+            ).unwrap();
+            drop(source);
+            let reference = interface.materialize(run.path()).unwrap();
             let mut capture_work = RecoveryArtifactWork::default();
             let (_, observations) = capture_recovery_artifact_observations(run.path(), &mut capture_work,
                 |verification| verification.verify_join(&reference)
@@ -5160,10 +5106,17 @@ mod tests {
         let run = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
         let iface = source.path().join("Join.hi");
-        let digest = write_interface_and_sidecar(&iface, "home", "Joined", b"joined");
-        let reference =
-            materialize_joined_interface(run.path(), [1; 32], "home", "Joined", &iface, digest)
-                .unwrap();
+        write_interface_and_sidecar(&iface, "home", "Joined", b"joined");
+        let interface = CertifiedJoinedInterface::from_certification(
+            [1; 32],
+            "home".into(),
+            "Joined".into(),
+            fs::read(&iface).unwrap(),
+            fs::read(package_sidecar_path(&iface)).unwrap(),
+        )
+        .unwrap();
+        drop(source);
+        let reference = interface.materialize(run.path()).unwrap();
         let verified = verify_materialized_join(run.path(), &reference).unwrap();
         assert_eq!(verified.interface_bytes, b"joined");
         assert!(!verified.package_imports_bytes.is_empty());
@@ -5227,8 +5180,16 @@ mod tests {
             ),
             Err(RecoveryArtifactError::InvalidReference)
         ));
+        let interface = CertifiedJoinedInterface::from_certification(
+            [1; 32],
+            "home".into(),
+            "A".into(),
+            fs::read(&iface).unwrap(),
+            fs::read(package_sidecar_path(&iface)).unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
-            materialize_joined_interface(run.path(), [1; 32], "home", "A", &iface, iface_sha256),
+            interface.materialize(run.path()),
             Err(RecoveryArtifactError::InvalidReference)
         ));
         assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
