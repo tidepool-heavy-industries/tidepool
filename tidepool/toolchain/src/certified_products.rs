@@ -2878,6 +2878,7 @@ pub(crate) struct CertifiedSourceSelection {
 /// A physically bound product of this selection's completed compiler request.
 /// Its constructor checks current origin independently of issued availability;
 /// inherited native support cannot construct this borrow.
+#[derive(Clone, Copy)]
 pub(crate) struct CurrentProductRef<'a> {
     selection: &'a CertifiedSourceSelection,
     native: &'a ReceiptNativeSelection,
@@ -2886,6 +2887,133 @@ pub(crate) struct CurrentProductRef<'a> {
 }
 
 impl<'a> CurrentProductRef<'a> {
+    pub(crate) fn nominal_imports(&self) -> CertResult<&'a [ReceiptImportOwner]> {
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &self.entry.payload
+        else {
+            return Err(CertificationError::Mismatch("current native payload kind"));
+        };
+        original_native_group_imports(product, self.ordinal)
+            .ok_or(CertificationError::Mismatch("current native group witness"))
+    }
+
+    pub(crate) fn operation(&self) -> Option<&'a InventoryOperation> {
+        self.selection
+            .original_bindings
+            .as_ref()
+            .map(|selection| selection.authenticated.operation.as_ref())
+    }
+
+    /// Only actual current-cohort Source membership can extend this traversal.
+    /// Inherited sources retain their already sealed dependency proof.
+    pub(crate) fn current_source_child(
+        &self,
+        reference: &ReceiptImportOwner,
+        entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
+            crate::artifact_inventory::ArtifactId,
+        >,
+    ) -> CertResult<Option<CurrentProductRef<'a>>> {
+        let ReceiptImportOwner::Source {
+            unit,
+            module,
+            module_version,
+            original_ordinal,
+            binder,
+        } = reference
+        else {
+            return Err(CertificationError::Mismatch(
+                "current Source reference kind",
+            ));
+        };
+        let owner = self.selection.receipt_source_owner(
+            unit,
+            module,
+            module_version.as_ref(),
+            *original_ordinal,
+        )?;
+        if binder.unit != *unit || binder.module != *module {
+            return Err(CertificationError::Mismatch("current Source binder owner"));
+        }
+        let Some(native) = self
+            .selection
+            .modules
+            .get(&(unit.clone(), module.clone()))
+            .and_then(ReceiptSourceSelection::native)
+            .filter(|native| matches!(native.origin, ReceiptNativeOrigin::NewProduct))
+        else {
+            return Ok(None);
+        };
+        if &native.owner != owner {
+            return Err(CertificationError::Mismatch("current Source sealed owner"));
+        }
+        let ReceiptOriginalIdentity::Bound(artifact) = native.original else {
+            return Err(CertificationError::Mismatch(
+                "current Source original identity",
+            ));
+        };
+        let entry = entries.get(&artifact).ok_or(CertificationError::Mismatch(
+            "current Source payload missing",
+        ))?;
+        let child = self
+            .selection
+            .current_product(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact,
+                    original_ordinal: *original_ordinal,
+                },
+                entry,
+            )?
+            .ok_or(CertificationError::Mismatch(
+                "current Source outside output cohort",
+            ))?;
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch("current Source payload kind"));
+        };
+        if !product
+            .original_native()
+            .filter(|witness| witness.matches_original(product))
+            .and_then(|witness| witness.group(*original_ordinal))
+            .is_some_and(|group| group.group.binders().contains(binder))
+        {
+            return Err(CertificationError::Mismatch(
+                "current Source binder membership",
+            ));
+        }
+        Ok(Some(child))
+    }
+
+    /// Availability does not select the references executed by this stage.
+    pub(crate) fn require_actual_stage_original_use(
+        &self,
+        reference: &ReceiptImportOwner,
+    ) -> CertResult<()> {
+        let selected =
+            self.selection
+                .original_bindings
+                .as_ref()
+                .ok_or(CertificationError::Mismatch(
+                    "current Original use lacks its input owner",
+                ))?;
+        let operation = selected.authenticated.operation.as_ref();
+        let permitted = match &selected.execution {
+            OriginalBindingExecution::WorldStage(_) => {
+                selected.executable_group(reference, operation)?.is_some()
+            }
+            OriginalBindingExecution::Acquired(_) => {
+                selected.executable(reference, operation)?.is_some()
+            }
+            OriginalBindingExecution::MetadataOnly => {
+                selected.executable(reference, operation)?;
+                false
+            }
+        };
+        if !permitted {
+            return Err(CertificationError::Mismatch(
+                "current Original use exceeds actual stage demand",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn key(&self) -> crate::artifact_inventory::NativeGroupKey {
         crate::artifact_inventory::NativeGroupKey {
             artifact: self.entry.descriptor.id,
