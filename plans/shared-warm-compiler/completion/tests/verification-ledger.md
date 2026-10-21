@@ -127,22 +127,32 @@ with unchanged images/residency plus independent fresh-B execution. Both report
 process/compiler cleanup confirmed and diagnostics incomplete. These are scoped
 controls, not full launch or the finite → public World journey.
 
-The runtime finite frontier is still an executed failure. At
-`bc6b018052bf2185c8f00d8233cbb6d35843fe1a`, with diagnostic source
-`a5002d3a955116964bd4af71d4d49e41837c0934`, the
-[runtime handoff](/srv/swarm/evidence/inanna/g2-common-native-installer-20261020/overnight-runtime-handoff.json)
-records 1 failed history (exit 101, process/compiler cleanup confirmed): the first public
-B executes/displays 42 and publishes,
-exact package bindings/ordered children remain unchanged, but public selected
-package-root domains are empty. The reviewed transactional selection repair
-`9e998a113e31f5c94b26d3142fad8ed002c231f0` advances past that observation, then
-fails while forcing the retained package root with `UnknownProgram(1520)`.
-Its [counted report](/srv/swarm/evidence/inanna/g2-history-tests-20261020/runs/9e998a113e/finite/da655f02a032183e95c87e77053c3ff53d731d57b3eec8b0b62a70bf13475a09.json)
-records executed 1, failed 1, exit 101 and confirmed process/compiler cleanup.
-The follow-up diagnostic observes a valid evaluated native handle whose defining
-program has retired. Native-instance handle custody is under repair; generic
-retained-value collection remains a separate contract. Earlier failures and
-successful intermediate observations do not qualify the history or bundle.
+The runtime finite frontier remains an executed failure. The exact reviewed
+World-selection transfer `9e998a113e31f5c94b26d3142fad8ed002c231f0` preserves
+the admitted domain through private execution and publication. Native-instance
+program custody `c36174148eed0bb6519339f72cf5829264287eb6` then preserves the
+defining program after a pure CAF updates to a foreign constructor. Its real
+CAF/release control and six neighboring GC/rollback/cleanup controls pass;
+ordinary startup and captured-A cutoff controls separately pass. The finite
+history now executes/displays 42, publishes and reads the retained public CAF.
+
+The next cell exposed a legitimate visible checked TYPE row absent from the
+World primary declaration/source namespace. Repair `c6b134bff8` projects only
+actual stage-owned checked TYPE interfaces into a temporary compiler basis;
+it leaves the World primary and native decisions unchanged. Toolchain/runtime
+production and test compilation pass (Build `f22cce60`), two TYPE/conflict
+controls pass (Build `de21c23a`) and the real mixed World case passes (Build
+`32743815`). The actual finite rerun at `4b148ba0bc` clears the missing-role
+refusal, but fails at a separate acquired-view selection guard. Its
+[counted report](/srv/swarm/evidence/inanna/g2-history-tests-20261020/runs/4b148ba0bc/finite/da655f02a032183e95c87e77053c3ff53d731d57b3eec8b0b62a70bf13475a09.json)
+records executed 1, failed 1 and confirmed process/compiler cleanup. Exact
+missing-binding diagnostics are pending; no selection guard is relaxed.
+
+The rooted cold recovery target initially refused before compilation because its
+legacy fixture lacked the actual source transaction and published World owner.
+Its migration to the existing captured World fixture has compiled, but actual
+cold recovery remains unqualified. Earlier intermediate observations do not
+qualify either complete history, catalog production or a frozen bundle.
 
 ## Remaining route disposition
 
