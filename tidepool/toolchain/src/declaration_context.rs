@@ -2303,6 +2303,107 @@ impl RequestNativeAvailability {
         Ok(Self(Arc::new(rows), facts.clone()))
     }
 
+    /// Transfer one checked physical cohort without qualifying its immutable
+    /// dependency graphs against a later namespace or widening its own subset.
+    fn from_current_cohort(
+        physical: &ArtifactView,
+        validated: crate::artifact_inventory::ValidatedFreshNativeAvailability,
+        roles: &CompilerInputProjection,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<CompletedRequestNativeAvailability, CompileError> {
+        let artifacts = physical.retain_issued_offer_custody(validated.offers().iter().cloned())?;
+        let metadata = artifacts.metadata_snapshot();
+        let roots = validated.roots();
+        let budget = NativeDemandBudget(Some(operation));
+        budget.reserve::<(ArtifactId, [usize; 4])>(roots.len())?;
+        let mut availability = roots
+            .iter()
+            .map(|id| (*id, Vec::new()))
+            .collect::<BTreeMap<_, Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>>>();
+        let mut full = BTreeSet::new();
+        let mut own = BTreeSet::new();
+        for offer in validated.offers() {
+            budget.checkpoint()?;
+            let id = offer.original();
+            if !roots.contains(&id) || !own.insert(id) {
+                return Err(failure(
+                    "current cohort has a competing own availability offer",
+                ));
+            }
+            if offer.is_full() {
+                budget.reserve::<ArtifactId>(1)?;
+                full.insert(id);
+            }
+            let contribution = Arc::new(
+                offer
+                    .contribution_for(roots)?
+                    .ok_or_else(|| failure("current cohort lost its checked own contribution"))?,
+            );
+            budget.reserve::<Arc<crate::artifact_inventory::NativeOfferContribution>>(1)?;
+            availability
+                .get_mut(&id)
+                .expect("checked cohort root")
+                .push(Arc::clone(&contribution));
+            for dependency in contribution.originals() {
+                budget.checkpoint()?;
+                if *dependency == id {
+                    continue;
+                }
+                budget.reserve::<(
+                    ArtifactId,
+                    Arc<crate::artifact_inventory::NativeOfferContribution>,
+                    [usize; 4],
+                )>(1)?;
+                availability
+                    .entry(*dependency)
+                    .or_default()
+                    .push(Arc::clone(&contribution));
+            }
+        }
+        if &own != roots {
+            return Err(failure("current cohort omitted an own availability offer"));
+        }
+        let role_originals = roles
+            .roles()
+            .iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
+        let mut rows = imbl::OrdMap::new();
+        for (id, contributions) in availability {
+            budget.checkpoint()?;
+            let original = metadata
+                .artifacts
+                .get(&id)
+                .ok_or_else(|| failure("current cohort lost its exact original custody"))?;
+            if !matches!(original.payload, ArtifactPayload::Original(_)) {
+                return Err(failure("current cohort availability is not an Original"));
+            }
+            budget.reserve::<NativeTransportAvailability>(1)?;
+            let row = Arc::new(NativeTransportAvailability {
+                canonical: NativeTransportAvailability::canonical_for(original)?,
+                original: Arc::clone(original),
+                mode: if full.contains(&id) {
+                    NativeTransportMode::Full
+                } else {
+                    NativeTransportMode::IssuedGroups
+                },
+                classification: if role_originals.contains(&id) {
+                    NativeInputClassification::CompilerRole
+                } else {
+                    NativeInputClassification::PrivateInput
+                },
+                contributions: contributions.into(),
+            });
+            row.validate_full_evidence()?;
+            rows.insert(id, row);
+        }
+        Ok(CompletedRequestNativeAvailability {
+            artifacts,
+            native_availability: Self::from_rows(Arc::new(rows))?,
+            native_offers: validated.into_offers(),
+        })
+    }
+
     fn issue_checked_fragment(
         namespace: &CompilerInputProjection,
         artifacts: &ArtifactView,
