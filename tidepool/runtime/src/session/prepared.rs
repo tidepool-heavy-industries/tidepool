@@ -4964,33 +4964,15 @@ pub(super) mod tests {
                         )
                         .unwrap(),
                     );
-                    let resolved = raw
-                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
-                        .unwrap();
-                    let (program, _, sources) = raw
-                        .install_native_turn_in(scope, &products.artifacts.table, resolved)
-                        .unwrap()
-                        .into_parts();
-                    assert!(matches!(
-                        sources.require_unique(site),
-                        Err(
-                            super::super::resident::ResidentError::MissingOriginalSource {
-                                known_origins: 0,
-                                ..
-                            }
-                        )
-                    ));
-                    assert!(matches!(
-                        raw.prepared().unwrap().programs[&program]
-                            .native_sources
-                            .require_unique(site),
-                        Err(
-                            super::super::resident::ResidentError::MissingOriginalSource {
-                                known_origins: 0,
-                                ..
-                            }
-                        )
-                    ));
+                    let before = raw.residency();
+                    assert!(
+                        matches!(
+                            raw.resolve_native_turn_in(scope, &code, plan, &|_| None),
+                            Err(PreparedRuntimeError::CertifiedTargetOwners)
+                        ),
+                        "raw compiler products carry no checked runtime source owner"
+                    );
+                    assert_eq!(raw.residency(), before);
                 },
             )
             .unwrap()
@@ -5609,7 +5591,9 @@ pub(super) mod tests {
                 assert_eq!(session.bindings().source_instances_in(session.scope_tree(), scope).len(),
                     source_keys.len());
                 let before = session.residency().unwrap();
-                let invalid = session.resolve_native_turn_in(scope, &code, plan.clone(), &|_| None).unwrap();
+                let invalid = session.resolve_closed_turn_in(scope,
+                    &ClosedInstantiationPlan::restrict(plan.clone()).unwrap(),
+                    &super::super::resident::CapturedSourceOrigin::from_runtime_targets(targets)).unwrap();
                 let invalid_scope = tidepool_codegen::scope::ScopeId(u64::MAX);
                 assert!(matches!(session.install_native_turn_in(invalid_scope, compiled.table(), invalid),
                     Err(PreparedRuntimeError::SourceAdmission(
@@ -5617,7 +5601,9 @@ pub(super) mod tests {
                     )) if scope == invalid_scope));
                 assert_ne!(session.bindings().scope_snapshot(session.scope_tree(), foreign_scope).unwrap(),
                     session.bindings().scope_snapshot(session.scope_tree(), scope).unwrap());
-                let crossed = session.resolve_native_turn_in(scope, &code, plan.clone(), &|_| None).unwrap();
+                let crossed = session.resolve_closed_turn_in(scope,
+                    &ClosedInstantiationPlan::restrict(plan.clone()).unwrap(),
+                    &super::super::resident::CapturedSourceOrigin::from_runtime_targets(targets)).unwrap();
                 assert!(matches!(session.install_native_turn_in(foreign_scope, compiled.table(), crossed),
                     Err(PreparedRuntimeError::SourceScopeAdmission)));
                 assert_eq!(session.residency().unwrap(), before);
