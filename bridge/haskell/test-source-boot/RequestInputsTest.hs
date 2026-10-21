@@ -103,6 +103,7 @@ import Tidepool.ExtractRequest
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..)
   , StructuredInspection(..), StructuredNameScope(..), StructuredNameNamespace(..), InspectionProvenance(..)
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
+import Tidepool.TypedSegment (typedSegmentPlanItems, TypedItemPlan(..), TypedItemBody(..))
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
   , scopedEnsureWorld, scopedReadExactScope, scopedCompileWorldCell, scopedPrepareWorldCellStage, scopedValidateWorldCell
@@ -1953,8 +1954,12 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               stage <- scopedPrepareWorldCellStage compiler admitted >>= maybe
                 (fail "expression admission lost its real rendered stage") pure
               issued <- maybe (fail "expression stage has no typed source") pure (heldWorldCellStageTypedSource stage)
-              unless ("__tidepool_segment_probe_1X" `isInfixOf` preparedTypedSegmentSource issued)
-                (fail "generated expression helper shadowed an unused imported export")
+              -- Helpers are sealed in the plan and introduced by the parsed
+              -- lowering; the pre-lowering source carries only its plan digest.
+              let probes = [probe | item <- typedSegmentPlanItems (preparedTypedSegmentPlan issued)
+                    , plannedItemOrdinal item == 1, ObservationItem probe _ <- [plannedItemBody item]]
+              unless (probes == ["__tidepool_segment_probe_1X"])
+                (fail ("generated expression helper shadowed an unused imported export: " ++ show probes))
               -- This checks the actual generated stage, without issuing native
               -- products or claiming runtime capture/reservation authority.
               _ <- scopedCompileWorldCell compiler admitted CheckedEnvironment Set.empty
