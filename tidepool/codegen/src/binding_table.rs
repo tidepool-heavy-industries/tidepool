@@ -52,7 +52,7 @@ use std::sync::{Arc, Weak};
 use rpds::{HashTrieMapSync, HashTrieSetSync};
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
-use crate::prepared_program::{GroupInstanceId, SourceBinder, SourceInstanceLease};
+use crate::prepared_program::{GroupInstanceId, NativeInstanceLease};
 use crate::scope::{ScopeId, ScopeTree};
 
 /// Identity of one immutable value-binding view captured for a child scope.
@@ -421,24 +421,23 @@ impl SourceSelectionView {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourceLeaseKey {
     pub instance: GroupInstanceId,
-    pub binder: Arc<SourceBinder>,
+    pub value: tidepool_repr::execution_schema::ValueId,
 }
 
 impl SourceLeaseKey {
     #[must_use]
-    pub fn of(lease: &SourceInstanceLease) -> Self {
+    pub fn of(lease: &NativeInstanceLease) -> Self {
         Self {
             instance: lease.instance(),
-            binder: Arc::new(lease.binder().clone()),
+            value: lease.value(),
         }
     }
 }
 
-fn same_source_lease(left: &SourceInstanceLease, right: &SourceInstanceLease) -> bool {
+fn same_source_lease(left: &NativeInstanceLease, right: &NativeInstanceLease) -> bool {
     left.instance() == right.instance()
-        && left.owner() == right.owner()
-        && left.original_ordinal() == right.original_ordinal()
-        && left.binder() == right.binder()
+        && left.binding_key() == right.binding_key()
+        && left.export() == right.export()
         && left.value() == right.value()
         && left.handle() == right.handle()
         && left.entry_signature() == right.entry_signature()
@@ -478,14 +477,14 @@ impl<'a> IntoIterator for &'a SourceScopeAdmission {
 
 struct ScopedSourceLease {
     owner: ScopeId,
-    token: SourceInstanceLease,
+    token: NativeInstanceLease,
     shares: usize,
     owner_retired: bool,
 }
 
 pub struct ScopeDrain {
     pub bindings: Vec<BindingEntry>,
-    pub source_instances: Vec<SourceInstanceLease>,
+    pub source_instances: Vec<NativeInstanceLease>,
 }
 
 #[derive(Debug)]
@@ -1749,8 +1748,8 @@ impl BindingTable {
         &mut self,
         tree: &ScopeTree,
         scope: ScopeId,
-        token: SourceInstanceLease,
-    ) -> Result<SourceLeaseKey, SourceInstanceLease> {
+        token: NativeInstanceLease,
+    ) -> Result<SourceLeaseKey, NativeInstanceLease> {
         let domain = self
             .source_selection
             .get(&scope)
@@ -1764,8 +1763,8 @@ impl BindingTable {
         tree: &ScopeTree,
         scope: ScopeId,
         domain: crate::prepared_program::SourceInstanceDomain,
-        token: SourceInstanceLease,
-    ) -> Result<SourceLeaseKey, SourceInstanceLease> {
+        token: NativeInstanceLease,
+    ) -> Result<SourceLeaseKey, NativeInstanceLease> {
         if !tree.is_live(scope) {
             return Err(token);
         }
@@ -1802,8 +1801,8 @@ impl BindingTable {
         &mut self,
         tree: &ScopeTree,
         scope: ScopeId,
-        tokens: Vec<SourceInstanceLease>,
-    ) -> Result<Vec<SourceLeaseKey>, Vec<SourceInstanceLease>> {
+        tokens: Vec<NativeInstanceLease>,
+    ) -> Result<Vec<SourceLeaseKey>, Vec<NativeInstanceLease>> {
         let mut seen = HashSet::new();
         if !tree.is_live(scope)
             || tokens.iter().any(|token| {
@@ -1829,15 +1828,15 @@ impl BindingTable {
         &mut self,
         tree: &ScopeTree,
         scope: ScopeId,
-        tokens: Vec<crate::prepared_program::SourceInstanceAttachment>,
+        tokens: Vec<crate::prepared_program::NativeInstanceAttachment>,
         machine: &crate::prepared_program::PreparedMachine<'_>,
-    ) -> Result<SourceScopeAdmission, Vec<crate::prepared_program::SourceInstanceAttachment>> {
+    ) -> Result<SourceScopeAdmission, Vec<crate::prepared_program::NativeInstanceAttachment>> {
         if !tree.is_live(scope) {
             return Err(tokens);
         }
         let empty = SourceSelectionView::for_scope(scope);
         let view = self.source_selection.get(&scope).unwrap_or(&empty);
-        let mut physical = HashMap::<SourceLeaseKey, &SourceInstanceLease>::new();
+        let mut physical = HashMap::<SourceLeaseKey, &NativeInstanceLease>::new();
         let mut entries = Vec::new();
         for (domain, record) in view.domains.iter() {
             for key in record.selected.iter() {
@@ -1858,17 +1857,19 @@ impl BindingTable {
                 return Err(tokens);
             }
             let key = SourceLeaseKey::of(token);
-            if let Some(demand) = attachment.demand() {
-                let anchor_key = SourceLeaseKey::of(demand.anchor());
+            if let Some(anchor) = attachment.anchor() {
+                let anchor_key = SourceLeaseKey::of(anchor);
                 let selected = view
                     .domains
                     .get(&domain)
                     .is_some_and(|record| record.selected.contains(&anchor_key));
                 if !selected
-                    || self
-                        .source_instances
-                        .get(&anchor_key)
-                        .is_none_or(|anchor| !same_source_lease(&anchor.token, demand.anchor()))
+                    || self.source_instances.get(&anchor_key).is_none_or(|anchor| {
+                        !same_source_lease(
+                            &anchor.token,
+                            attachment.anchor().expect("anchor branch"),
+                        )
+                    })
                 {
                     return Err(tokens);
                 }
@@ -1885,7 +1886,7 @@ impl BindingTable {
             physical.insert(key, token);
             entries.push((domain, token));
         }
-        if crate::prepared_program::SourceDomainSelection::validate(
+        if crate::prepared_program::NativeDomainSelection::validate(
             view.current,
             |domain| view.domains.contains_key(domain),
             view.domains
@@ -1947,8 +1948,8 @@ impl BindingTable {
         &mut self,
         tree: &ScopeTree,
         scope: ScopeId,
-        tokens: Vec<SourceInstanceLease>,
-    ) -> Result<SourceScopeAdmission, Vec<SourceInstanceLease>> {
+        tokens: Vec<NativeInstanceLease>,
+    ) -> Result<SourceScopeAdmission, Vec<NativeInstanceLease>> {
         let keys = self.register_source_instances_in(tree, scope, tokens)?;
         Ok(SourceScopeAdmission {
             scope: Some(scope),
@@ -1962,7 +1963,7 @@ impl BindingTable {
         &mut self,
         scope: ScopeId,
         admission: &SourceScopeAdmission,
-    ) -> Option<Vec<SourceInstanceLease>> {
+    ) -> Option<Vec<NativeInstanceLease>> {
         if admission.scope != Some(scope)
             || admission
                 .rolled_back
@@ -2014,28 +2015,66 @@ impl BindingTable {
         Some(released)
     }
 
+    pub fn retained_native_sibling_attachment(
+        &self,
+        domain: crate::prepared_program::SourceInstanceDomain,
+        anchor: &NativeInstanceLease,
+        value: tidepool_repr::execution_schema::ValueId,
+    ) -> Option<crate::prepared_program::NativeInstanceAttachment> {
+        let retained_anchor = &self
+            .source_instances
+            .get(&SourceLeaseKey::of(anchor))?
+            .token;
+        if !same_source_lease(retained_anchor, anchor) {
+            return None;
+        }
+        let token = &self
+            .source_instances
+            .get(&SourceLeaseKey {
+                instance: anchor.instance(),
+                value,
+            })?
+            .token;
+        if token.binding_key() != anchor.binding_key() {
+            return None;
+        }
+        Some(
+            crate::prepared_program::NativeInstanceAttachment::from_anchor(
+                domain,
+                token.clone(),
+                anchor.clone(),
+            ),
+        )
+    }
+
     /// An exact existing sibling root can be attached to a second captured
     /// domain only through its already selected physical group anchor.
     pub fn retained_source_sibling_attachment(
         &self,
         demand: &crate::prepared_program::InheritedSourceDemand,
-    ) -> Option<crate::prepared_program::SourceInstanceAttachment> {
-        let anchor = self
-            .source_instances
-            .get(&SourceLeaseKey::of(demand.anchor()))?;
-        if !same_source_lease(&anchor.token, demand.anchor()) {
+    ) -> Option<crate::prepared_program::NativeInstanceAttachment> {
+        let anchor = self.source_instances.get(&SourceLeaseKey {
+            instance: demand.anchor().instance(),
+            value: demand.anchor().value(),
+        })?;
+        if !same_source_lease(
+            &anchor.token,
+            &NativeInstanceLease::Home(demand.anchor().clone()),
+        ) {
             return None;
         }
         let key = SourceLeaseKey {
             instance: demand.anchor().instance(),
-            binder: Arc::new(demand.binder().clone()),
+            value: demand.value(),
         };
-        let token = &self.source_instances.get(&key)?.token;
+        let NativeInstanceLease::Home(token) = &self.source_instances.get(&key)?.token else {
+            return None;
+        };
         (token.owner() == demand.owner()
             && token.original_ordinal() == demand.original_ordinal()
             && token.value() == demand.value())
         .then(|| {
-            crate::prepared_program::SourceInstanceAttachment::inherited(demand, token.clone()).ok()
+            crate::prepared_program::NativeInstanceAttachment::inherited(demand, token.clone()).ok()
         })
         .flatten()
     }
@@ -2047,7 +2086,7 @@ impl BindingTable {
         &mut self,
         scope: ScopeId,
         keys: &[SourceLeaseKey],
-    ) -> Option<Vec<SourceInstanceLease>> {
+    ) -> Option<Vec<NativeInstanceLease>> {
         let mut seen = HashSet::new();
         if keys.iter().any(|key| {
             !seen.insert(key.clone())
@@ -2099,7 +2138,7 @@ impl BindingTable {
         &self,
         tree: &ScopeTree,
         scope: ScopeId,
-    ) -> Vec<SourceInstanceLease> {
+    ) -> Vec<NativeInstanceLease> {
         let mut keys: Vec<_> = self
             .source_instance_keys_in(tree, scope)
             .into_iter()
@@ -2107,7 +2146,7 @@ impl BindingTable {
         keys.sort_by(|left, right| {
             left.instance
                 .cmp(&right.instance)
-                .then_with(|| left.binder.cmp(&right.binder))
+                .then_with(|| left.value.cmp(&right.value))
         });
         keys.into_iter()
             .map(|key| {
@@ -2128,7 +2167,7 @@ impl BindingTable {
         &self,
         tree: &ScopeTree,
         scope: ScopeId,
-    ) -> Vec<SourceInstanceLease> {
+    ) -> Vec<NativeInstanceLease> {
         let mut keys: Vec<_> = self
             .selected_source_keys_in(tree, scope)
             .iter()
@@ -2171,6 +2210,35 @@ impl BindingTable {
             .collect()
     }
 
+    /// Observe the canonical descriptor already held by this table. Recovery
+    /// encoding cannot reconstruct a lease from a physical key.
+    pub fn native_instance(&self, key: &SourceLeaseKey) -> Option<&NativeInstanceLease> {
+        self.source_instances.get(key).map(|record| &record.token)
+    }
+
+    pub fn native_domain_selection_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Result<crate::prepared_program::NativeDomainSelection, BindingPromotionError> {
+        if self.scope_witness(tree, scope).is_none() {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let empty = SourceSelectionView::for_scope(scope);
+        let view = self.source_selection.get(&scope).unwrap_or(&empty);
+        let entries = self.source_domain_entries_in(tree, scope, view)?;
+        crate::prepared_program::NativeDomainSelection::new(
+            view.current,
+            |domain| view.domains.contains_key(domain),
+            view.domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .map(|origin| origin.domain),
+            entries,
+        )
+        .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
+    }
+
     /// Freeze exact original-owner origins and their retained mutable choices.
     /// Every returned lease is backed by this scope's current physical custody.
     pub fn source_domain_selection_in(
@@ -2201,7 +2269,10 @@ impl BindingTable {
                 .collect(),
             entries
                 .into_iter()
-                .map(|(domain, lease)| (domain, lease.clone())),
+                .filter_map(|(domain, lease)| match lease {
+                    NativeInstanceLease::Home(home) => Some((domain, home.clone())),
+                    NativeInstanceLease::Package(_) => None,
+                }),
         )
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
     }
@@ -2217,7 +2288,7 @@ impl BindingTable {
         let empty = SourceSelectionView::for_scope(scope);
         let view = self.source_selection.get(&scope).unwrap_or(&empty);
         let entries = self.source_domain_entries_in(tree, scope, view)?;
-        crate::prepared_program::SourceDomainSelection::validate(
+        crate::prepared_program::NativeDomainSelection::validate(
             view.current,
             |domain| view.domains.contains_key(domain),
             view.domains
@@ -2226,6 +2297,7 @@ impl BindingTable {
                 .map(|origin| origin.domain),
             entries,
         )
+        .map(|_| ())
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
     }
 
@@ -2237,7 +2309,7 @@ impl BindingTable {
     ) -> Result<
         Vec<(
             crate::prepared_program::SourceInstanceDomain,
-            &'a SourceInstanceLease,
+            &'a NativeInstanceLease,
         )>,
         BindingPromotionError,
     > {
@@ -2382,7 +2454,7 @@ impl BindingTable {
         }
     }
 
-    fn release_source_shares(&mut self, keys: HashSet<SourceLeaseKey>) -> Vec<SourceInstanceLease> {
+    fn release_source_shares(&mut self, keys: HashSet<SourceLeaseKey>) -> Vec<NativeInstanceLease> {
         let mut released = Vec::new();
         for key in keys {
             let lease = self
@@ -3383,7 +3455,7 @@ impl BindingTable {
         source_instances.sort_by(|left, right| {
             left.instance()
                 .cmp(&right.instance())
-                .then_with(|| left.binder().cmp(right.binder()))
+                .then_with(|| left.value().cmp(&right.value()))
         });
         ScopeDrain {
             bindings: released,
@@ -3764,7 +3836,7 @@ impl BindingTable {
         self.tips.get(&scope).map(|tip| tip.id)
     }
 
-    fn release_tip(&mut self, scope: ScopeId) -> (Vec<BindingEntry>, Vec<SourceInstanceLease>) {
+    fn release_tip(&mut self, scope: ScopeId) -> (Vec<BindingEntry>, Vec<NativeInstanceLease>) {
         let Some(tip) = self.tips.remove(&scope) else {
             return (Vec::new(), Vec::new());
         };
@@ -3937,7 +4009,7 @@ impl BindingTable {
     fn release_chunks(
         &mut self,
         chunk: Arc<BindingLeaseChunk>,
-    ) -> (Vec<BindingEntry>, Vec<SourceInstanceLease>) {
+    ) -> (Vec<BindingEntry>, Vec<NativeInstanceLease>) {
         let mut pending = vec![chunk];
         let mut bindings = Vec::new();
         let mut sources = Vec::new();

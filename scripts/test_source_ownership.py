@@ -97,6 +97,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
     ('tidepool-runtime', frozenset({
         'tidepool/runtime/src/retained_core_receive_tests.rs',
         'tidepool/runtime/src/typed_receive_test_support.rs',
+        'tidepool/runtime/src/session/activation_input_tests/finite_source_world_history.rs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
         'tidepool/runtime/src/session/registry_properties.rs',
@@ -150,6 +151,12 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
     })),
     ('exomonad-host', frozenset({
         'exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs',
+        'exomonad/host/src/actor_host/fixtures/ordinary_history_binding.hs',
+        'exomonad/host/src/actor_host/fixtures/ordinary_history_declaration.hs',
+        'exomonad/host/src/actor_host/fixtures/ordinary_history_empty_import.hs',
+        'exomonad/host/src/actor_host/fixtures/ordinary_history_later_use.hs',
+        'exomonad/host/src/actor_host/fixtures/ordinary_history_mixed.hs',
+        'exomonad/host/src/actor_host/fixtures/ordinary_history_retained.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_spawn.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_join.hs',
         'exomonad/host/src/actor_host/fixtures/deepseek_offline_cleanup.hs',
@@ -220,6 +227,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'exomonad/host/src/actor_host/restart_effect_once.hs',
     })),
     ('tidepool-runtime', frozenset({
+        'tidepool/runtime/tests/fixtures/PackageCafIsolation.hs',
         'tidepool/runtime/tests/fixtures/RetainedReceiveOwner.hs',
         'tidepool/runtime/tests/fixtures/RetainedReceiveSupport.hs',
         'tidepool/runtime/tests/fixtures/RetainedReceiveProbe.hs',

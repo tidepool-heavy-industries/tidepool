@@ -3,6 +3,7 @@
 //! not JIT/compiler work, other threads, peak memory, or allocator metadata.
 
 use super::*;
+use crate::prepared_program::SourceBinder;
 use crate::prepared_program::{
     BatchLeaseRequest, BatchProgram, DemandedImage, GroupInventory, ImageRegistry,
     PreparedCallOptions, PreparedMachine, PreparedMachineOptions, PreparedResult,
@@ -362,7 +363,27 @@ impl Scenario {
                     })
                     .collect(),
                 (0..count)
-                    .map(|index| BatchLeaseRequest::for_demanded(index, image, binder).unwrap())
+                    .map(|index| {
+                        BatchLeaseRequest::for_home(
+                            index,
+                            &image,
+                            crate::prepared_program::NativeHomeBinding {
+                                issuer: crate::prepared_program::NativeArtifactBinding {
+                                    artifact: [1; 32],
+                                    selection: [2; 32],
+                                },
+                                original_ordinal: image.group().original_ordinal(),
+                            },
+                            image.domain(),
+                            image
+                                .group()
+                                .exported_values()
+                                .find(|(identity, _)| *identity == &binder.binder)
+                                .unwrap()
+                                .1,
+                        )
+                        .unwrap()
+                    })
                     .collect(),
             )
             .unwrap();
@@ -419,7 +440,7 @@ impl Scenario {
         scenario
     }
 
-    fn release_sources(&mut self, sources: Vec<SourceInstanceLease>) {
+    fn release_sources(&mut self, sources: Vec<NativeInstanceLease>) {
         for token in sources {
             assert!(self.machine.release(token.handle()));
         }
@@ -707,7 +728,25 @@ fn native_retraction_does_not_extend_last_owner_through_new_captures() {
                 image: Arc::clone(image.image()),
                 imports: vec![],
             }],
-            vec![BatchLeaseRequest::for_demanded(0, &image, &binder).unwrap()],
+            vec![BatchLeaseRequest::for_home(
+                0,
+                &image,
+                crate::prepared_program::NativeHomeBinding {
+                    issuer: crate::prepared_program::NativeArtifactBinding {
+                        artifact: [1; 32],
+                        selection: [2; 32],
+                    },
+                    original_ordinal: image.group().original_ordinal(),
+                },
+                image.domain(),
+                image
+                    .group()
+                    .exported_values()
+                    .find(|(identity, _)| *identity == &binder.binder)
+                    .unwrap()
+                    .1,
+            )
+            .unwrap()],
         )
         .unwrap();
     let token = receipt.leases.into_iter().next().unwrap();

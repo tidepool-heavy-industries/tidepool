@@ -14940,6 +14940,13 @@ impl CertifiedArtifactGroupBindings {
         self.imports.get(&binding).map(AsRef::as_ref)
     }
 
+    pub(crate) fn shared_imports(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&Arc<[crate::certified_products::SelectedNativeImport]>> {
+        self.imports.get(&binding)
+    }
+
     pub(crate) fn matches_view(&self, view: &ArtifactView) -> bool {
         self.view.matches_view(view)
     }
