@@ -91,6 +91,59 @@ Haskell's active quiescence callback and final Rust certification must consume
 this same owner-derived data. No nested compilation or frontend replay. A newly
 reached binder sharing an existing package group is legitimate demand progress.
 
+### Joined stage and nominal-reference migration
+
+Complete this as one producer/consumer migration. Removing receipt-derived
+demand alone is unsafe while module certification eagerly converts every
+Original reference into an executable import. Keep ordered nominal requirements
+with each authenticated group; project executable imports only when that exact
+parent group is selected. Do not retain a whole request or metadata map per group.
+
+The private stage constructor must first prove that its checked stage was
+actually emitted by the same program and reservation. Only then does absence
+from the demand record mean an empty initial native selection. An unknown stage,
+an empty selection and acquired-but-unexecuted permission are distinct states.
+Initial historical choices remain bound to the initial acquisition; current
+source/TYPE support and prior sealed targets come from the actual predecessor.
+Do not weaken same-owner guards to join those independently authoritative facts.
+
+HOME6 already encodes the exact Original interface binding, Original binding,
+and symbol. Finish that variant's semantics in the unreleased matched G2 reader
+and writer; no new wire tuple, default or compatibility fallback is needed.
+Keep membership and local byte authentication separate from permission to select
+the referenced group. Existing package-interface custody remains independently
+owned and versioned as described above.
+
+Extend the existing hidden-custody traversal to retain exact binding nodes for
+nominal requirements. Payload IDs are insufficient: a historical binding can
+share its payload with a different currently selected binding. A payload-level
+`initial.contains(id)` exclusion must not drop that historical node. Use the
+existing custody roots and cold verifier, not a parallel map or new graph label.
+Publication must retain actual issued nodes instead of resolving every ordinal
+again against a selected carrier. Current Source requirements retain their
+separate source-validation rules.
+
+A complete body census does not prove Full executable availability. Preserve
+existing Empty/Partial/Full distinctions; selected groups require their actual
+issued closure, while unselected nominal metadata retains custody without
+acquiring execution. If current publication promises cannot express that
+distinction, resolve the promise at its owner before changing consumers.
+
+Required joined evidence includes an unused authenticated but unpermitted
+Original reference; selected historical G-old beside same-interface G-new;
+the same payload under distinct binding scopes; actual multiple World stages;
+parent-only projection and cold recovery after disposable predecessor removal.
+Assert exact old execution, no native permission from metadata, refusal of an
+unknown stage/foreign acquisition, and unchanged prior state on refusal.
+Component passes do not replace this real producer-to-runtime history.
+
+`original_reference_boundary` owns the nominal group/HOME/requirement relation,
+exact custody, cold checks and availability migration. `stage_input_design`
+owns the private World stage composition and deletion of receipt-wide demand
+reconstruction. They share one contract and join on one feature branch before
+root integration. Review the private owner shape before changing all consumers;
+compile each coherent slice early. Neither half is independently G2-complete.
+
 ## 3. Completion survives every successful item
 
 Add immutable `IssuedNativeSelectionCompletion` to existing
