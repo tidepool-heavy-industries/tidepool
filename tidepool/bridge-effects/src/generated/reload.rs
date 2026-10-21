@@ -240,14 +240,14 @@ pub enum RlOperationalSettlement {
     ReloadOperationalUnsettled(RlRetirementObligation, Vec<RlRetirementObligation>),
 }
 
-/// Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Source outcome, operational settlement and primary/secondary causes are independent observations. Inspect the owning operation and resource records for detailed retained obligations.
+/// Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. An absent source outcome means it was not observed; it does not establish that A is fenced or reopened, or that B was published. Blockers list actual observations, not an assertion that an unavailable census was empty. Source outcome, operational settlement and primary/secondary causes are independent observations. Inspect the owning operation and resource records for detailed retained obligations.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 #[haskell(name = "ReloadRetirementReceipt")]
 pub struct RlRetirementReceipt {
     pub previous: SrRevision,
     pub candidate: SrRevision,
     pub operation: Option<RlOperation>,
-    pub state: RlRetirementState,
+    pub state: Option<RlRetirementState>,
     pub blockers: Vec<RlBlocker>,
     pub outcomes: Vec<RlResourceOutcome>,
     pub surface: RlSurfaceDiff,

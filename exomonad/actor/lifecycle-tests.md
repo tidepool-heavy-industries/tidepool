@@ -19,7 +19,7 @@ or mutable-state isolation histories.
 | Body refusal and linked cancelled body | An executed body returns its own refusal and obligations; this is not command nonstart. |
 | Native recovery of linked result | Native cleanup consumes the same actual body result, preserving physical obligations. |
 | Crossed source receipts and partial reopening | Only the same reservation's source receipt can discharge it; partial A restoration remains refused. |
-| Lost body delivery after visibility | A compact visibility observation does not confirm publication or notify the lifecycle. The core retains the guard, both source gates stay closed, and notification remains unconfirmed. |
+| Captured-A refusal followed by lost body delivery | The generic candidate retains A. Its actual typed failure must name that same fenced source before the result is discarded. Compact failure metadata cannot authorize reopening: the core retains the guard, both source gates stay closed, and notification remains unconfirmed. |
 
 Retain these component controls when changing the publication protocol. A
 component pass does not establish successful hosted Reload, force, complete
@@ -50,3 +50,8 @@ body can discharge. The test creates neither a predecessor nor a cutoff.
 The host's coherent reload histories use the real source staging owner and the
 authored tool. The frozen-source history must execute a new B cell after A's
 cutoff and a later disk C edit; a publication receipt alone is insufficient.
+The caller-loss history waits for the real operation's confirmed B receipt before
+dropping its unconsumed reply receiver, then observes the retained receipt and
+executes B. This does not deterministically exercise a failed sender. The private
+notification component separately counts attempts at the actual lifecycle send
+boundary, including repeated observation after confirmed recipient shutdown.

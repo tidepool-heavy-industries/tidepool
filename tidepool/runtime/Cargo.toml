@@ -42,6 +42,7 @@ static_assertions.workspace = true
 rpds = "=1.2.1"
 
 [dev-dependencies]
+rustix = { version = "1", features = ["process"] }
 proptest.workspace = true
 tidepool-test-data.workspace = true
 tidepool-testing.workspace = true

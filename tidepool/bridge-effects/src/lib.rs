@@ -683,7 +683,7 @@ mod context_constructor_tests {
                 modules: vec![],
             },
             operation: Some(operation),
-            state: RlRetirementState::ReloadAReopened,
+            state: Some(RlRetirementState::ReloadAReopened),
             blockers: vec![
                 RlBlocker::ReloadResourceBlocker(
                     resource.clone(),
@@ -758,20 +758,21 @@ mod context_constructor_tests {
         let mut encoded_cases = vec![];
         let mut decoded_cases = vec![];
         for (state, outcomes) in cases {
-            receipt.state = state;
+            receipt.state = Some(state);
             receipt.primary = Some(match &receipt.state {
-                RlRetirementState::ReloadAReopened => RlCause {
+                Some(RlRetirementState::ReloadAReopened) => RlCause {
                     kind: RlCauseKind::ReloadRetirementBlocked,
                     detail: "known live blocker".into(),
                 },
-                RlRetirementState::ReloadRetirementFenced(_) => RlCause {
+                Some(RlRetirementState::ReloadRetirementFenced(_)) => RlCause {
                     kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
                     detail: "cleanup owner retained".into(),
                 },
-                RlRetirementState::ReloadBPublished(_, _) => RlCause {
+                Some(RlRetirementState::ReloadBPublished(_, _)) => RlCause {
                     kind: RlCauseKind::ReloadContinuationFailed,
                     detail: "receipt display failed after commit".into(),
                 },
+                None => unreachable!("this history supplies an observed source state"),
             });
             receipt.secondary = vec![RlCause {
                 kind: RlCauseKind::ReloadContinuationFailed,
@@ -858,12 +859,15 @@ mod context_constructor_tests {
                 .unwrap();
         assert_ne!(decoded_first, decoded_other);
         for state in [
-            RlRetirementState::ReloadAReopened,
-            RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadResourceCleanup),
-            RlRetirementState::ReloadBPublished(
+            None,
+            Some(RlRetirementState::ReloadAReopened),
+            Some(RlRetirementState::ReloadRetirementFenced(
+                RlRetirementStage::ReloadResourceCleanup,
+            )),
+            Some(RlRetirementState::ReloadBPublished(
                 vec!["Changed".into()],
                 vec!["projection repair".into()],
-            ),
+            )),
         ] {
             receipt.state = state;
             for settlement in &settlements {

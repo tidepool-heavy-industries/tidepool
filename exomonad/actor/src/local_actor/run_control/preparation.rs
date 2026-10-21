@@ -85,13 +85,16 @@ pub(super) struct PublicationWriter {
     observer: ActorPublicationAttemptObserver,
     control: RactorRef<RunControlMessage>,
     #[cfg(test)]
-    lose_delivery_after_completion: bool,
+    lose_delivery_after_completion: Option<tidepool_codegen::scope::ScopeId>,
 }
 
 impl PublicationWriter {
     #[cfg(test)]
-    pub(super) fn lose_delivery_after_completion_for_test(mut self) -> Self {
-        self.lose_delivery_after_completion = true;
+    pub(super) fn lose_delivery_after_completion_for_test(
+        mut self,
+        captured_source: tidepool_codegen::scope::ScopeId,
+    ) -> Self {
+        self.lose_delivery_after_completion = Some(captured_source);
         self
     }
 
@@ -123,11 +126,36 @@ impl PublicationWriter {
                 PublicationTerminalObservation::Completed { outcome }
             }
         };
+        #[cfg(test)]
+        if let Some(expected) = self.lose_delivery_after_completion {
+            let PublicationDelivery::Observed { body } = &delivery else {
+                panic!("captured-A refusal control requires an executed body");
+            };
+            let ActorGenerationPublicationBodyCompletion::Observed {
+                outcome: Err(error),
+                ..
+            } = body.completion()
+            else {
+                panic!("captured-A publication must fail before visibility");
+            };
+            match error.publication_failure_cause() {
+                crate::resident_workbench::ActorPublicationFailureCause::SourceAdmission(
+                    tidepool_runtime::session::SourceAdmissionError::Closed {
+                        scope,
+                        phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. },
+                    },
+                ) => assert_eq!(
+                    scope, expected,
+                    "the failed source must be the same captured A"
+                ),
+                actual => panic!("expected exact fenced captured A, observed {actual:?}"),
+            }
+        }
         // Publish compact completion before either the oneshot receiver or
         // the serial owner can wake. The actual delivery remains owned here.
         let _ = self.terminal.set(observed);
         #[cfg(test)]
-        if self.lose_delivery_after_completion {
+        if self.lose_delivery_after_completion.is_some() {
             eprintln!("publication delivery-loss control: {observed:?}");
             if let PublicationDelivery::Observed { body } = &delivery {
                 let detail = match body.completion() {
@@ -225,7 +253,7 @@ impl PublicationTransfer {
             observer,
             control,
             #[cfg(test)]
-            lose_delivery_after_completion: false,
+            lose_delivery_after_completion: None,
         };
         (writer, receiver, terminal)
     }

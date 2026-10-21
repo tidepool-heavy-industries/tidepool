@@ -62,7 +62,7 @@ main = do
         ]
       receiptWith settlement state effects = ReloadRetirement (ReloadRetirementReceipt
         (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
-        (Just operation) state blockers effects diff (Just (primaryFor state)) (secondaryFor state) settlement)
+        (Just operation) (Just state) blockers effects diff (Just (primaryFor state)) (secondaryFor state) settlement)
       receipt = receiptWith ReloadOperationalSettled
       primaryFor state = case state of
         ReloadAReopened -> ReloadCause ReloadRetirementBlocked "known live blocker"
@@ -145,8 +145,20 @@ main = do
     Success _ -> fail "unsettled accepted without its mandatory first obligation"
   let noCause = ReloadRetirement (ReloadRetirementReceipt
         (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
-        (Just operation) ReloadAReopened [] [] diff Nothing [] outstanding)
+        (Just operation) (Just ReloadAReopened) [] [] diff Nothing [] outstanding)
       noCauseSummary = reloadPresenter (Right noCause)
+      unobserved = ReloadRetirement (ReloadRetirementReceipt
+        (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
+        (Just operation) Nothing [] [] diff Nothing [] outstanding)
+      unobservedSummary = reloadPresenter (Right unobserved)
+  assert (fromJSON (toJSON unobserved) == Success unobserved)
+    "unobserved source outcome did not roundtrip"
+  assert ("source outcome was not observed" `T.isInfixOf` unobservedSummary
+    && "Operational obligations unsettled" `T.isInfixOf` unobservedSummary
+    && not ("remains fenced" `T.isInfixOf` unobservedSummary)
+    && not ("frozen-A reopened" `T.isInfixOf` unobservedSummary)
+    && not ("Published source frozen-B" `T.isInfixOf` unobservedSummary))
+    "unobserved source outcome fabricated a source transition"
   assert ("frozen-A reopened" `T.isInfixOf` noCauseSummary
     && "Operational obligations unsettled" `T.isInfixOf` noCauseSummary
     && not ("Operational obligations settled" `T.isInfixOf` noCauseSummary))

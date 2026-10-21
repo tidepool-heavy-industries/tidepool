@@ -82,6 +82,8 @@ pub struct LifecycleHandle {
     address: RactorRef<LifecycleCommand>,
     observations: watch::Receiver<LifecycleSnapshot>,
     hosted_cell: HostedCellSlot,
+    #[cfg(test)]
+    publication_notification_attempts: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The adapter implements this using its owning durable Store and exact binding.
@@ -488,6 +490,8 @@ impl LifecycleHandle {
             address,
             observations: observe,
             hosted_cell: Arc::new(HostedCellPublications::default()),
+            #[cfg(test)]
+            publication_notification_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -724,6 +728,15 @@ impl LifecycleHandle {
             .await
             .expect("lifecycle stop completes");
         assert_eq!(self.address.get_status(), ractor::ActorStatus::Stopped);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_publication_notification_attempts(&self, expected: usize) {
+        assert_eq!(
+            self.publication_notification_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            expected,
+        );
     }
 
     pub(crate) fn run_finalized(&self) -> bool {

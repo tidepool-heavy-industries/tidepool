@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-This map describes source at `cb01e4c2dd53b25fe67e389d753be367acf88514`
+This map describes source at `b856a75d5c7ba344632e1935d3c4c4d5192ea5b8`
 (2026-10-20), on `integration/compiler-query-warm-final`. It separates the
 implemented path from accepted G2 work still being received. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -41,6 +41,25 @@ completion, then replaces the continuation after the final checkpoint. Selected
 source-owner support uses a persistent set. Its accounting charges logical new
 keys, not all internal persistent-tree allocations or process memory.
 
+[CertifiedPackageCodeProduct](../tidepool/toolchain/src/certified_products/package_code.rs)
+retains the authenticated envelope SHA-256 separately from its ordered-import
+product identity. Materialization uses that envelope digest; restoration checks
+the referenced bytes and reconstructs the same identities. Issuance also retains
+the private artifact descriptor. Inventory insertion, package-plan identity and
+native completion lookup reuse it instead of rebuilding it. This trades retained
+descriptor/owner storage for removed query work; no timing improvement is inferred.
+
+Original/Canonical products now retain exact package-interface byte custody.
+[PackageInterfaceCustody](../tidepool/toolchain/src/certified_products/package_code.rs)
+captures admitted output bytes or independently verified package selections;
+its subset operations preserve exact owner/seal obligations without granting
+compiler roles or executable demand. During HOME recovery,
+[ParsedHomeCertification](../tidepool/toolchain/src/certified_products.rs) decodes
+the certificate once, exposes package seals for custody restoration, then moves
+the same witness into verified ownership after authentication. The production
+[recovery reader](../tidepool/toolchain/src/recovery_artifacts.rs) consumes that
+parsed owner; the former two-decode receiving path is no longer current.
+
 The actor entry points are in
 [resident_workbench.rs](../exomonad/actor/src/resident_workbench.rs):
 `actor_compile_view` captures the runtime view with source inputs;
@@ -67,6 +86,7 @@ These reports describe execution and resource settlement independently.
 | Exact compiler roles and selected interfaces | [CompilerSourceSupport / CompilerInputProjection](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) | Lexical visibility, native body demand or live value access merely from TYPE inputs |
 | Immutable graph and exact historical binding | [Exact context](../tidepool/toolchain/src/exact_context.rs), [artifact inventory](../tidepool/toolchain/src/artifact_inventory.rs) | Selection of every retained alternative; logical/image equality cannot replace issued binding identity |
 | Physical bytes and acquisition lifetime | Artifact views, captured compiler outputs and retained image plans | Compiler roles, executable roots or runtime instance authority |
+| Joined interface materialization | [CertifiedJoinedInterface::materialize](../tidepool/toolchain/src/recovery_artifacts.rs) consumes its owned interface/sidecar bytes; raw path-based Joined materialization APIs have been removed | Capture of every external package root named by that sidecar, or native/source authority from interface bytes |
 | Native availability versus demand | `IssuedNativeOffer`, `RequestNativeAvailability`, `ResolvedNativeDemand` in [declaration_context.rs](../tidepool/toolchain/src/declaration_context.rs) | Full permission from partial offers, or execution from an authenticated but unselected dependency |
 | Completed native selection | [IssuedNativeSelectionCompletion](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs): HOME rows, exact package graph bindings and retained requirements, separately from Original certificates | Promotion of nominal compiler metadata into executable demand; package code is an explicit artifact kind, not a compiler-namespace owner |
 | Runtime instance and source permission | [BindingTable](../tidepool/codegen/src/binding_table.rs), source/target leases and checked runtime admission | Reuse of another installation's mutable state because immutable code is shared |
@@ -92,6 +112,13 @@ of reconstructing them from module names, generation labels or retained catalogs
   calls `ReceiptNativeInputDemand::from_products` and `demand_inputs` against
   advancing prefix inputs. Initial acquisition batches are retained separately;
   their existence does not establish that downstream admission reuses them.
+- **Accumulated completion work:** `NativeSelectionCompletions::append` in
+  [compiler_projection.rs](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs)
+  now indexes owners by completion identity and exact HOME row conflicts by
+  `NativeGroupBinding`, avoiding the prior scan through retained owners.
+  Incoming rows still require checks. `with_native_completion_refs` and
+  `refreshed_native_facts` each fold accumulated completion custody; those folds
+  remain, and no end-to-end timing saving is established.
 - **Captured/open package imports:** `install_certified_turn` in
   [prepared.rs](../tidepool/runtime/src/session/prepared.rs) checks
   `self.code_exports` before target definitions for `ImportOwner::Package`.
@@ -117,8 +144,8 @@ remaining boundary, rather than treating every part of G2 as absent from source.
 | Boundary | Accepted remaining contract |
 |---|---|
 | World demand consumption | Consume the actual initial acquisition/stage owners together with advancing source/TYPE prefix facts and captured source closure. Preserve latent exact requirements and nominal metadata separately from executable choices; remove receipt-based demand reconstruction. Atomic prefix and persistent predecessor support are already implemented. |
-| Runtime cutover | Captured/open installation, `code_exports` and RetainedPackage routes still require their own cutover; the implemented closed product/image pair and domain-owned installer do not prove those routes migrated. |
-| Package custody | Original/Canonical obligation capture and acquired package graph repairs remain receiving work. Joined/Value producers in [SessionArtifacts](../bridge/haskell/src/Tidepool/SessionArtifacts.hs) and [DeclarationJoin](../bridge/haskell/src/Tidepool/DeclarationJoin.hs) observe pinned installed external package roots; their owned interface/sidecar bytes do not imply ownership of every referenced package body. No captured-path defect or complete TYPE/recovery qualification is established for those producers by this map. |
+| Runtime cutover | Common installation and once-only issuance remain feature work. Captured/open installation, `code_exports` and RetainedPackage routes still require their own cutover; the implemented closed product/image pair and domain-owned installer do not prove those routes migrated. |
+| Custody qualification | Original/Canonical custody and parsed HOME authentication are integrated source; exact joined ordinary-workflow qualification remains open. Joined/Value producers in [SessionArtifacts](../bridge/haskell/src/Tidepool/SessionArtifacts.hs) and [DeclarationJoin](../bridge/haskell/src/Tidepool/DeclarationJoin.hs) observe pinned installed external package roots; their owned interface/sidecar bytes do not imply ownership of every referenced package body. No captured-path defect or complete TYPE/recovery qualification is established for those producers by this map. |
 | Native build qualification | Native build actions require `bind_owned` and the declared compiler-service deployment through [package qualification](../build/package/qualification.py); portable actions remain direct. Owner-specific diagnostics and pre-cleanup child observation are implemented. Actual catalog production and exact frozen-bundle qualification remain separate execution gates. |
 | Joined ordinary workflow | Follow real finite source → installer → public World → repeated package-using cells; retire A and execute a new B cell while retaining genuine captured-A refusal. Qualify discovery, private inputs, default reload and caller loss, then selected Persona startup and real DeepSeek smoke on one frozen bundle. |
 
@@ -135,6 +162,10 @@ separates semantic, work-counter, performance, frozen-release and deployment
 claims. Use [package qualification](../build/package/README.md) for exact bundle
 acceptance. Earlier finite-path inventories and checkpoint prose remain in Git;
 they do not describe current pending work.
+Cold reacquisition and producer removal are separate observations. A removal
+control must observe the actual scoped producer root; a synthetic source token's
+parent directory cannot establish that the producer's artifacts were removed.
+Earlier canonical cold-check results do not qualify that removal boundary.
 
 Historical measurements remain available in the private
 [b108 stage table](/srv/swarm/evidence/inanna/overnight-release-20261018/compiler-work-invariant-atlas-joined-v2-b108-actual/STAGE-TABLE.md),

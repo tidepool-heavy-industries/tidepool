@@ -169,11 +169,13 @@ pub(super) fn reload_disposition(
                 return WorkbenchOperationDisposition::Unknown;
             }
             match &receipt.state {
-                RlRetirementState::ReloadRetirementFenced(_) => {
+                None | Some(RlRetirementState::ReloadRetirementFenced(_)) => {
                     WorkbenchOperationDisposition::Unknown
                 }
-                RlRetirementState::ReloadBPublished(..) => WorkbenchOperationDisposition::Committed,
-                RlRetirementState::ReloadAReopened => {
+                Some(RlRetirementState::ReloadBPublished(..)) => {
+                    WorkbenchOperationDisposition::Committed
+                }
+                Some(RlRetirementState::ReloadAReopened) => {
                     if receipt.outcomes.iter().any(|outcome| {
                         matches!(&outcome.stop, RlStopOutcome::ReloadStopConfirmed)
                             || matches!(&outcome.cleanup, RlCleanupOutcome::ReloadCleanupConfirmed)
@@ -458,19 +460,22 @@ mod tests {
         };
         let explicit_settlement = [
             (
-                retirement(State::ReloadAReopened, Settlement::ReloadOperationalSettled),
+                retirement(
+                    Some(State::ReloadAReopened),
+                    Settlement::ReloadOperationalSettled,
+                ),
                 WorkbenchOperationDisposition::Rejected,
             ),
             (
                 retirement(
-                    State::ReloadBPublished(vec![], vec![]),
+                    Some(State::ReloadBPublished(vec![], vec![])),
                     Settlement::ReloadOperationalSettled,
                 ),
                 WorkbenchOperationDisposition::Committed,
             ),
             (
                 retirement(
-                    State::ReloadAReopened,
+                    Some(State::ReloadAReopened),
                     Settlement::ReloadOperationalUnsettled(
                         Obligation::ReloadPhysicalCleanupObligation(
                             Observation::ReloadObligationUnconfirmed,
@@ -482,7 +487,7 @@ mod tests {
             ),
             (
                 retirement(
-                    State::ReloadBPublished(vec![], vec![]),
+                    Some(State::ReloadBPublished(vec![], vec![])),
                     Settlement::ReloadOperationalUnsettled(
                         Obligation::ReloadOriginalRetirementObligation(
                             Observation::ReloadObligationRefused,
@@ -490,6 +495,10 @@ mod tests {
                         vec![],
                     ),
                 ),
+                WorkbenchOperationDisposition::Unknown,
+            ),
+            (
+                retirement(None, Settlement::ReloadOperationalSettled),
                 WorkbenchOperationDisposition::Unknown,
             ),
         ];

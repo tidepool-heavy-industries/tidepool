@@ -3,6 +3,9 @@
 #[path = "activation_input_tests/finite_source_world_history.rs"]
 mod finite_source_world_history;
 
+#[path = "activation_input_tests/compiler_end_history.rs"]
+mod compiler_end_history;
+
 use super::*;
 use crate::session::{
     insert_preamble_imports, resident_cell_check_template, resident_workbench_templates,
@@ -1223,15 +1226,13 @@ fn check_fixture_cell(
         .expect("check fixture bindings through runtime admission")
 }
 
-fn try_check_fixture_cell(
+fn plan_fixture_cell(
     resident: &mut TestSession,
     recipe: &InputRecipe,
     source: &str,
     execution: Arc<crate::session::PrivateExecutionAdmission>,
-    declaration_count: usize,
-) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
+) -> Arc<crate::session::RuntimeCellAdmission> {
     use crate::session::TemplateSelector;
-    let _ = declaration_count;
     let imports = SourceImports::new();
     let template =
         resident_cell_check_template(&recipe.preamble, &recipe.row, &imports.template_text());
@@ -1266,10 +1267,22 @@ fn try_check_fixture_cell(
         .unwrap();
     let plan = turn::finish_world_cell_plan_admitted(settled)
         .expect("parse fixture through its actual World");
-    let admission = source_action(resident, |resident, _| {
+    source_action(resident, |resident, _| {
         resident.admit_world_planned_cell_for_execution(execution, plan)
     })
-    .unwrap();
+    .unwrap()
+}
+
+fn try_check_fixture_cell(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    source: &str,
+    execution: Arc<crate::session::PrivateExecutionAdmission>,
+    declaration_count: usize,
+) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
+    let _ = declaration_count;
+    let admission = plan_fixture_cell(resident, recipe, source, execution);
+    let original = resident.public_source.original_source().clone();
     let prepared = original
         .with_source_compiler_transaction(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
