@@ -633,6 +633,10 @@ impl std::fmt::Debug for CompletedNativeProductAvailability {
 }
 
 impl CompletedNativeProductAvailability {
+    pub(crate) fn own_offer(&self) -> &crate::artifact_inventory::IssuedNativeOffer {
+        &self.own
+    }
+
     pub(crate) fn row(&self) -> &Arc<NativeTransportAvailability> {
         &self.row
     }

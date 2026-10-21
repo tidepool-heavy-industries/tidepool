@@ -3193,6 +3193,67 @@ impl IssuedNativeOffer {
         self.0.original
     }
 
+    /// Reopen this producer's exact offered subset as future input choices.
+    /// The physical cohort must retain the same direct carrier pair; broader
+    /// custody and alternative offers cannot add a root to this projection.
+    pub(crate) fn produced_publication_view(
+        &self,
+        physical: &ArtifactView,
+    ) -> Result<ArtifactView, CompileError> {
+        if !Arc::ptr_eq(
+            &physical.lease.inventory.0,
+            &self.0.custody.lease.inventory.0,
+        ) {
+            return Err(failure("produced publication belongs to another inventory"));
+        }
+        let carrier = physical
+            .lease
+            .selection
+            .namespace
+            .get(&self.0.original)
+            .copied()
+            .ok_or_else(|| failure("produced publication lacks its direct body binding"))?;
+        let canonical = physical
+            .lease
+            .selection
+            .namespace
+            .get(&self.0.interface)
+            .copied()
+            .ok_or_else(|| failure("produced publication lacks its direct canonical binding"))?;
+        if !self.matches_direct_canonical_binding(self.0.original, self.0.interface, physical) {
+            return Err(failure(
+                "produced publication changed its exact carrier pair",
+            ));
+        }
+        let snapshot = if let Some(proof) = self.proof() {
+            if proof.selection.snapshot().namespace.get(&self.0.original) != Some(&carrier)
+                || proof.selection.snapshot().namespace.get(&self.0.interface) != Some(&canonical)
+                || proof.selection.snapshot().roots.keys().any(|root| {
+                    !matches!(root, ArtifactBindingNode::Group(group)
+                        if group.binding.artifact() == self.0.original)
+                })
+            {
+                return Err(failure(
+                    "produced publication differs from its own offered roots",
+                ));
+            }
+            Arc::clone(proof.selection.snapshot())
+        } else {
+            let mut snapshot = (*self.0.custody.lease.selection).clone();
+            snapshot.namespace.insert(self.0.original, carrier);
+            snapshot.namespace.insert(self.0.interface, canonical);
+            snapshot
+                .roots
+                .insert(ArtifactBindingNode::Artifact(carrier), ());
+            Arc::new(snapshot)
+        };
+        let retained = physical.retain_issued_offer_custody(std::iter::once(self.clone()))?;
+        retained.select_issued(
+            vec![self.0.original, self.0.interface],
+            &ExactArtifactSelection::from_snapshot(snapshot),
+        )
+    }
+
     pub(crate) fn proof(&self) -> Option<&NativeOriginalRequirement> {
         match &self.0.body {
             NativeOfferBody::Empty => None,

@@ -4253,11 +4253,28 @@ impl CompilerSourceSupport {
             originals,
             &self.input_decisions,
         )?;
+        let produced = originals.produced_availability();
+        let availability = if let Some(receipt) = produced {
+            match self.native_availability.merge(
+                &crate::declaration_context::RequestNativeAvailability::from_issued_rows([
+                    Arc::clone(receipt.row()),
+                ])?,
+            )? {
+                crate::declaration_context::NativeAvailabilityMerge::Unchanged(rows)
+                | crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => rows,
+            }
+        } else {
+            self.native_availability.clone()
+        };
         Self::new_with_native_facts(
             projection,
             artifacts,
-            self.native_offers.iter().cloned(),
-            self.native_availability.clone(),
+            self.native_offers.iter().cloned().chain(
+                produced
+                    .into_iter()
+                    .map(|receipt| receipt.own_offer().clone()),
+            ),
+            availability,
             decisions,
             self.native_fact_owner.as_ref(),
             self.native_completions.clone(),

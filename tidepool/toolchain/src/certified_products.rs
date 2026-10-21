@@ -3365,9 +3365,16 @@ pub(crate) struct SelectedOriginalClosure {
     products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     selected: Vec<crate::artifact_inventory::ArtifactId>,
     native_closure: crate::artifact_inventory::ArtifactView,
+    produced: Option<Arc<crate::declaration_context::CompletedNativeProductAvailability>>,
 }
 
 impl SelectedOriginalClosure {
+    pub(crate) fn produced_availability(
+        &self,
+    ) -> Option<&Arc<crate::declaration_context::CompletedNativeProductAvailability>> {
+        self.produced.as_ref()
+    }
+
     pub(crate) fn contains_original(
         &self,
         original: crate::artifact_inventory::ArtifactId,
@@ -4341,6 +4348,55 @@ impl CertifiedSourceSelection {
         self.selected_original_closure_inner(view, None, None)
     }
 
+    /// Transfer only the actual producer's known native subset into future
+    /// compiler-input choices. Publication does not execute these groups in the
+    /// current stage, and unoffered body metadata supplies no additional choice.
+    pub(crate) fn produced_authored_original_publication(
+        &self,
+        physical: crate::declaration_context::PhysicalCohortInputs<'_>,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> CertResult<SelectedOriginalClosure> {
+        let view = physical.artifacts();
+        let produced =
+            self.produced_source_receipt(owner, view)?
+                .ok_or(CertificationError::Mismatch(
+                    "authored publication lacks its actual producer",
+                ))?;
+        let original = produced.row().original_artifact_id();
+        let entry = view
+            .observed_payload(&original)
+            .ok_or(CertificationError::Mismatch(
+                "authored publication lost its produced body",
+            ))?;
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch(
+                "authored publication body kind",
+            ));
+        };
+        let native_closure = produced
+            .own_offer()
+            .produced_publication_view(view)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        if native_closure.entries().iter().any(|entry| {
+            entry.descriptor.owner.unit == owner.unit
+                && entry.descriptor.owner.module == crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE
+        }) {
+            return Err(CertificationError::Mismatch(
+                "authored original closure retains its transient probe",
+            ));
+        }
+        let closure = SelectedOriginalClosure {
+            products: vec![product.clone()],
+            selected: vec![original],
+            native_closure,
+            produced: Some(produced),
+        };
+        closure
+            .validate_with(&mut PackageInterfaceValidation::default())
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        Ok(closure)
+    }
+
     /// Certify the complete newly authored original. Inherited compiler offers
     /// retain their issued native demand; they are dependencies, not new roots.
     pub(crate) fn selected_authored_original_closure(
@@ -4447,6 +4503,7 @@ impl CertifiedSourceSelection {
                 .collect(),
             selected: selected_ids,
             native_closure,
+            produced: None,
         };
         closure
             .validate_with(&mut PackageInterfaceValidation::default())
