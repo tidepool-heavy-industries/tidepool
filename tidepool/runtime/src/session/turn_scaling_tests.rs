@@ -3143,8 +3143,13 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
 
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("HistoricalOriginalG.hs");
-    let original_source = include_str!("fixtures/historical-original-g.hs");
+    std::fs::write(
+        root.path().join("HistoricalOriginalG.hs"),
+        include_str!("fixtures/historical-original-g.hs"),
+    )
+    .unwrap();
+    let source = root.path().join("HistoricalOriginalH.hs");
+    let original_source = include_str!("fixtures/historical-original-h.hs");
     std::fs::write(&source, original_source).unwrap();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
@@ -3210,16 +3215,27 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
                 matches!(import, SelectedNativeImport::Source { binding, .. }
                     if *binding == child.binding())
             }));
+            let implementation = selected
+                .groups()
+                .find(|row| row.group().owner().module == "HistoricalOriginalH")
+                .expect("the original child retains its actual implementation dependency");
+            assert!(child.imports().iter().any(|import| {
+                matches!(import, SelectedNativeImport::Source { binding, .. }
+                    if *binding == implementation.binding())
+            }));
             historical = Some((
                 reader.binding(),
                 reader.group().owner().clone(),
                 child.binding(),
                 child.group().owner().clone(),
+                implementation.binding(),
+                implementation.group().owner().clone(),
             ));
         },
     )
     .unwrap();
-    let (reader_binding, reader_owner, old_binding, old_owner) = historical.unwrap();
+    let (reader_binding, reader_owner, old_binding, old_owner, old_impl_binding, old_impl_owner) =
+        historical.unwrap();
     let view = resident.compile_view_in(public).unwrap();
     let context = view.exact_declaration_context().unwrap();
     let descriptors = context.artifact_view().descriptors();
@@ -3250,7 +3266,7 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
             })
     }));
 
-    let current_source = original_source.replace("g = 41", "g = 99");
+    let current_source = original_source.replace("h = 41", "h = 99");
     assert_ne!(current_source, original_source);
     std::fs::write(&source, current_source).unwrap();
     let mut include = effects.include_paths().to_vec();
@@ -3293,8 +3309,27 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         old_owner.skinny_iface_sha256,
         current_owner.skinny_iface_sha256
     );
-    assert_ne!(old_owner.product_sha256, current_owner.product_sha256);
+    let current_implementation = current_products
+        .groups()
+        .find(|row| row.group().owner().module == "HistoricalOriginalH")
+        .unwrap();
+    let current_impl_owner = current_implementation.group().owner();
+    assert!(current_child.imports().iter().any(|import| {
+        matches!(import, SelectedNativeImport::Source { binding, .. }
+            if *binding == current_implementation.binding())
+    }));
+    assert_ne!(
+        old_impl_owner.product_sha256,
+        current_impl_owner.product_sha256
+    );
+    assert_ne!(old_impl_binding, current_implementation.binding());
     assert_ne!(old_binding, current_child.binding());
+    eprintln!(
+        "historical-original G_payload_equal={} old_G={old_binding:?} current_G={:?} old_H={old_impl_binding:?} current_H={:?}",
+        old_owner.product_sha256 == current_owner.product_sha256,
+        current_child.binding(),
+        current_implementation.binding(),
+    );
     assert_eq!(
         current
             .run("__prepared", 1024 * 1024, &mut frunk::HNil, &(), |_| {})
@@ -3329,11 +3364,32 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
                                 if *binding == old_binding)
                         }));
                     }
+                    if row.binding() == old_binding {
+                        assert!(row.imports().iter().any(|import| {
+                            matches!(import, SelectedNativeImport::Source { binding, .. }
+                                if *binding == old_impl_binding)
+                        }));
+                    }
                     if row.group().owner().module == "HistoricalOriginalG"
-                        && row.group().owner().product_sha256 == current_owner.product_sha256
+                        && row.binding() != old_binding
                     {
-                        selected_current = true;
-                        assert_ne!(row.binding(), old_binding);
+                        let current_import = row.imports().iter().find_map(|import| {
+                            let SelectedNativeImport::Source { binding, .. } = import else {
+                                return None;
+                            };
+                            selected.groups().find(|child| {
+                                child.binding() == *binding
+                                    && child.group().owner().module == "HistoricalOriginalH"
+                            })
+                        });
+                        if let Some(implementation) = current_import {
+                            assert_eq!(
+                                implementation.group().owner().product_sha256,
+                                current_impl_owner.product_sha256,
+                            );
+                            assert_ne!(implementation.binding(), old_impl_binding);
+                            selected_current = true;
+                        }
                     }
                 }
             }

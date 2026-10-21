@@ -1,5 +1,7 @@
 module HistoricalOriginalG (g) where
 
+import HistoricalOriginalH (h)
+
 {-# NOINLINE g #-}
 g :: Int
-g = 41
+g = h
