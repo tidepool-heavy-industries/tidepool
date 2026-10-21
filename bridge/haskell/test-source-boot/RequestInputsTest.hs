@@ -1851,8 +1851,8 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
 worldCellAdmissionParse :: IO ()
 worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel _scopePath -> do
     let collisionModule = BS8.unlines ["module WorldObservationNames where"
-          ,"observation1, observation3_unit, __tidepool_segment_probe_1 :: Int"
-          ,"observation1 = 1", "observation3_unit = 3", "__tidepool_segment_probe_1 = 9"]
+          ,"observation0_unit, observation1, observation3_unit, __tidepool_segment_probe_1 :: Int"
+          ,"observation0_unit = 0", "observation1 = 1", "observation3_unit = 3", "__tidepool_segment_probe_1 = 9"]
     (packetPath,_primary) <- writeWorldCellAdmissionPacketWithSources handles work producer profile contextParcel
       [("WorldObservationNames.hs",collisionModule)
       ,("WorldCancellationNames.hs","module WorldCancellationNames where\ncancellationName :: Int\ncancellationName = 1\n")]
@@ -1956,6 +1956,8 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                   _ -> fail "rendered expression plan lost an issued name"
                 _ -> fail "rendered expression plan lost its names table"
               _ -> fail "rendered expression plan is malformed"
+            unless (map fst renderedNames == [0,1] && lookup 0 renderedNames /= Just "observation0")
+              (fail "expression observation companion shadowed an unused imported export")
             let renderedPrepare = WorldCellPrepareRequest identity reference renderedRecipe Nothing renderedBytes
                   (BS.replicate 32 10) 17
                   [(fromIntegral ordinal,PlannedExpression (101+fromIntegral ordinal) name) | (ordinal,name) <- renderedNames]
@@ -1977,21 +1979,6 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               completed <- prepareWorldCell request >>= either (fail . show) pure
               unless (length completed == 1) (fail "two expressions lost their single typed producer stage")
               mapM_ (commitPreparedWorldDependencies request) completed
-            let cancellationRecipe = recipe
-                  {worldCellTemplate=T.unpack (T.replace "{{CELL_IMPORTS}}"
-                    "import WorldCancellationNames\n{{CELL_IMPORTS}}" (T.pack template))
-                  ,worldCellSource="(1 :: Int)"}
-                cancellationQuestion = planRequest {worldCellPlanRecipe=cancellationRecipe}
-                issueCancellation = do
-                  args <- decodeWorldArgs [WorldCellPlan cancellationQuestion]
-                  (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldCellPlan
-            fired <- newIORef False
-            interrupted <- try (withDiagnosticCountFault "world.cell.name_scope_ready" fired
-              (throwIO ThreadKilled) issueCancellation) :: IO (Either AsyncException BS.ByteString)
-            reached <- readIORef fired
-            unless (reached && case interrupted of Left ThreadKilled -> True; _ -> False)
-              (fail "expression plan did not propagate cancellation before dependency commitment")
-            _ <- issueCancellation
             slots <- scopedRunGhc compiler $ do
               environment <- getSession
               plan <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment)
@@ -2360,6 +2347,41 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
             unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
                 (const False) crossed)
               (fail "another compiler scope consumed the original scope's admission")
+          let original = heldWorldCellQuestion admission
+              originalRecipe = worldCellPrepareRecipe original
+              reference = worldCellPrepareRealization original
+              cancellationRecipe = originalRecipe
+                {worldCellTemplate=T.unpack (T.replace "{{CELL_IMPORTS}}"
+                  "import WorldCancellationNames\n{{CELL_IMPORTS}}" (T.pack (worldCellTemplate originalRecipe)))
+                ,worldCellSource="(1 :: Int)"}
+              cancellationQuestion = WorldCellPlanRequest identity reference cancellationRecipe Nothing
+                (work </> "cancellation-plan.cbor")
+              acquire compiler = do
+                ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (ResidentExactInputs reference))
+                case ready of
+                  ExactInputsReady actual realization _ | actual == identity && realization == reference -> pure ()
+                  _ -> fail "expression cancellation control lost its exact held realization"
+              issueCancellation compiler = do
+                args <- decodeWorldArgs [WorldCellPlan cancellationQuestion]
+                (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldCellPlan
+          fired <- newIORef False
+          ((interrupted,poisoned),cancelledLog) <- captureDiagnostics $ runScope (pure ()) $ \compiler -> do
+            acquire compiler
+            interrupted <- try (withDiagnosticCountFault "world.cell.name_scope_ready" fired
+              (throwIO ThreadKilled) (issueCancellation compiler)) :: IO (Either AsyncException BS.ByteString)
+            poisoned <- try (scopedRunGhc compiler (pure ())) :: IO (Either InputRejection ())
+            pure (interrupted,poisoned)
+          hPutStrLn stderr cancelledLog
+          reached <- readIORef fired
+          unless (reached && case interrupted of Left ThreadKilled -> True; _ -> False)
+            (fail "expression plan did not propagate cancellation before dependency commitment")
+          unless (case poisoned of Left CompilerTransactionFailed -> True; _ -> False)
+            (fail "cancelled expression plan allowed its failed compiler phase to resume")
+          let completedCounts = counterValues "worlds.completed_source_modules" cancelledLog
+          unless (length completedCounts >= 2 && head completedCounts == last completedCounts)
+            (fail "cancelled expression plan committed a source module to the held World")
+          -- Recovery opens a fresh phase; the poisoned phase is never retried.
+          runScope (pure ()) $ \compiler -> acquire compiler >> void (issueCancellation compiler)
       outcome `seq` pure ()
       forM_ ["CacheEntry","CacheEven","CacheOdd"] $ \name ->
         unless (counterValues ("world.cell.source_frontends.main:" ++ name) diagnostics == [1])
