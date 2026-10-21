@@ -57,19 +57,22 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExactScope
   ( ExactScope , scopeProducts, scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , WorldOriginalReference, worldOriginalReferenceOwner, worldOriginalReferenceBindings
-  , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256, originalGroupFromProjected )
+  , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256, originalGroupFromProjected
+  , canonicalInterfaceInput, canonicalProofOriginalBody )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
-  ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
+  ( PackageImportRoot(..), PackageImportEvidence(..), packageImportRoot, validatePackageImportRoot
+  , decodeCapturedPackageImports )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), OriginalInterfaceArtifacts, originalInterfaceSha256 )
 import Tidepool.FinalizedModule (homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
+  ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals
+  , finalizedLocalAdmissions, localFinalizedPackageEvidence )
 import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
 
@@ -429,9 +432,22 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         pure (target, sequence globals)
       certifyLocalPackageExports env resolvePackage packageRef (map snd targets)
       observedPackages <- readIORef packageRef
-      let selectedPackages = observedPackages ++
+      -- Canonical sidecars also own direct TYPE-only and reexport-facade
+      -- imports. They need byte custody even when native groups never name
+      -- them. Keep their sealed origin paths in the sidecar itself.
+      retainedPackages <- forM (Map.elems retained) $ \proof -> do
+        let (iface,path,seal) = canonicalInterfaceInput proof
+        body <- canonicalProofOriginalBody proof path seal
+        pure (decodeCapturedPackageImports iface (artifactBytes body))
+      let sidecarPackages = map localFinalizedPackageEvidence
+            (Map.elems (finalizedLocalAdmissions finalized))
+            ++ [packages | Right packages <- retainedPackages]
+          selectedPackages = observedPackages ++
             [(unit,name,path,T.pack (artifactSha256 body))
             | ((unit,name),(path,body)) <- Map.toAscList capturedPackages]
+            ++ [(T.pack (packageUnit root),T.pack (packageModule root)
+                ,packagePath root,T.pack (packageSha256 root))
+               | packages <- sidecarPackages, root <- packageInterfaces packages]
       owned <- case outputRoot of
         Nothing -> pure (Right (selectedPackages,[]))
         Just root -> fmap (fmap (\(captures,writes) ->
@@ -465,6 +481,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
       emitCount timing "certified_package_captured_interface_bytes"
         (sum [fromIntegral (BS.length bytes) | (_,bytes) <- packageInterfaceWrites])
       let failures = either (:[]) (const []) owned
+            ++ [reason | Left reason <- retainedPackages]
             ++ [errorText | (_, _, Left errorText) <- modules]
             ++ [errorText | (_, Left errorText) <- targetRows]
             ++ ["package interface changed during certification" | not packagesValid]
@@ -846,7 +863,7 @@ captureSelectedPackageWitnesses outDir captured witnesses = do
       initial = Map.fromList [(T.pack (artifactSha256 body),body) | (_,body) <- Map.elems captured]
       conflicts = Map.intersectionWith (\options (_,body) ->
         any ((/= T.pack (artifactSha256 body)) . snd) (Set.toList options)) selected captured
-  if or (Map.elems conflicts) || any ((/= 1) . Set.size) (Map.elems selected)
+  if or (Map.elems conflicts) || any ((/= 1) . Set.size . Set.map snd) (Map.elems selected)
     then pure (Left "package owner selected more than one interface")
     else do
       result <- foldM capture (Right (Map.empty,initial)) (Map.toAscList selected)
