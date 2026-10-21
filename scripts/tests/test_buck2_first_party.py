@@ -740,6 +740,34 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.assertNotIn(generic_loader, service["resource_env"])
             self.assertNotIn(generic_loader, service["env"])
 
+    def test_package_source_history_owns_service_and_keeps_fixture_out_of_production(self):
+        self.write("tidepool/runtime/src/lib.rs", "mod session;\n")
+        self.write("tidepool/runtime/src/session/mod.rs",
+                   "#[cfg(test)]\nmod activation_input_tests;\n")
+        self.write("tidepool/runtime/src/session/activation_input_tests.rs",
+                   "mod finite_source_world_history;\n")
+        module = "src/session/activation_input_tests/finite_source_world_history.rs"
+        fixture = "tests/fixtures/PackageCafIsolation.hs"
+        self.write("tidepool/runtime/" + module,
+                   'const SOURCE: &str = include_str!("../../../tests/fixtures/PackageCafIsolation.hs");\n')
+        self.write("tidepool/runtime/" + fixture, "module PackageCafIsolation where\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, groups = self.groups("tidepool/runtime")
+        for path in (module, fixture):
+            self.assertNotIn(path, groups["tidepool_runtime_sources"])
+            self.assertIn(path, groups["tidepool_runtime_unit_tests_sources"])
+        service = self.rule("tidepool/runtime", "runtime_package_source_history_test", "tidepool_rust_test_cases")
+        test = "session::resident::activation_input_tests::finite_source_world_history::finite_source_original_feeds_public_world_cells_after_prior_cutoff"
+        self.assertEqual(service["exact_tests"], [test])
+        self.assertEqual(service["expected_count"], 1)
+        self.assertTrue(service["ignored"])
+        self.assertEqual(service["case_compiler_modes"], {test: "owned-resident"})
+        self.assertEqual(service["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+        self.assertIn("//build/package:compiler_service_deployment", service["resources"])
+        self.assertNotIn("//build/package:compiler_deployment", service["resources"])
+
     def test_registered_inline_toolchain_fixture_stays_in_unit_inputs(self):
         self.write("tidepool/toolchain/src/declaration_join.rs",
                    '#[cfg(test)]\nmod authored_tests {\n'

@@ -1827,6 +1827,21 @@ tidepool_buildscript_run(
                     runtime_arguments(host_env, host_resources, host_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                package_history = "session::resident::activation_input_tests::finite_source_world_history::finite_source_original_feeds_public_world_cells_after_prior_cutoff"
+                package_env, package_resources, package_worker = compiler_service_test_inputs(
+                    package_name, "runtime_package_source_history_test"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_package_source_history_test",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([package_history], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 900,", "    test_rule_timeout_ms = 960000,",
+                    '    case_compiler_modes = {' + json.dumps(package_history) + ': "owned-resident"},',
+                    runtime_arguments(package_env, package_resources, package_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 for world_target, world_tests in [
                     ("actor_compiler_world_queries_test", [

@@ -1,5 +1,7 @@
 //! Real parked inputs through thin original-type issuance and affine mounting.
 
+mod finite_source_world_history;
+
 use super::*;
 use crate::session::{
     insert_preamble_imports, resident_cell_check_template, resident_workbench_templates,
@@ -101,7 +103,15 @@ impl TestSession {
 
     fn bootstrap_world(&mut self, recipe: &InputRecipe) {
         let source = self.public_source.clone();
-        let scope = self.public_scope();
+        self.bootstrap_world_in(recipe, &source);
+    }
+
+    fn bootstrap_world_in(
+        &mut self,
+        recipe: &InputRecipe,
+        source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    ) {
+        let scope = source.scope();
         let admitted = self
             .resident
             .capture_inspection_world_in(scope, &recipe.reference, source.original_source())
