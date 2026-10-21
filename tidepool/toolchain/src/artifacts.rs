@@ -3629,13 +3629,9 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self._resolved.artifacts()
     }
 
-    /// Ordered links selected by this target issuer. Package entries remain
-    /// obligations until an executable completion supplies actual code bindings.
-    /// Closed preparation cannot substitute a live retained binding.
-    pub fn target_link_requirements(
-        &self,
-    ) -> Result<&'a [certified_products::SelectedNativeImport], CompileError> {
-        self._resolved.target_link_requirements()
+    /// All ordered target slots, including ordinary live capture requirements.
+    pub fn target_requirements(&self) -> &'a [certified_products::SelectedNativeTargetImport] {
+        self._resolved.target_requirements()
     }
 
     pub fn target(&self) -> PhysicalCurrentNativeTarget<'a> {

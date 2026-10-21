@@ -7716,6 +7716,18 @@ pub enum SelectedNativeImport {
     },
 }
 
+/// One ordered final-target slot. A direct live capture is a requirement for
+/// the ordinary BindingEntry consumer, not an issued native dependency edge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectedNativeTargetImport {
+    Source {
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        value: tidepool_repr::execution_schema::ValueId,
+    },
+    RetainedCapture { identity: SymbolIdentity, generation: u64 },
+    Package { identity: SymbolIdentity, interface_digest: [u8; 32] },
+}
+
 pub(crate) struct SelectedScopeCertification {
     pub(crate) additional: Vec<(
         crate::artifact_inventory::NativeGroupBinding,
@@ -19933,12 +19945,23 @@ pub(crate) mod tests {
         let issued_groups = crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
             &target, None, &mut validation,
         ).unwrap();
+        let issued_groups = Arc::new(issued_groups);
+        let capture_identity = testing::identity("Values", "value");
+        let mixed_target = admitted_target.for_ordinary_target(vec![
+            source(&g, 7),
+            PendingImportOwner::Retained { identity: capture_identity.clone(), generation: 4 },
+        ]).unwrap().with_certified_groups(Arc::clone(&issued_groups)).unwrap();
+        let mixed = mixed_target.resolve_sources().unwrap();
+        assert!(matches!(mixed.target_requirements(), [
+            SelectedNativeTargetImport::Source { binding, .. },
+            SelectedNativeTargetImport::RetainedCapture { identity, generation: 4 },
+        ] if *binding == fresh_g && identity == &capture_identity));
         let certified_target = admitted_target.bind_target(None, imports.to_vec())
-            .with_certified_groups(Arc::new(issued_groups)).unwrap();
+            .with_certified_groups(issued_groups).unwrap();
         let linked_target = certified_target.resolve_sources().unwrap();
-        assert!(matches!(linked_target.target_link_requirements().unwrap(), [
-            SelectedNativeImport::Source { binding: first, .. },
-            SelectedNativeImport::Source { binding: second, .. },
+        assert!(matches!(linked_target.target_requirements(), [
+            SelectedNativeTargetImport::Source { binding: first, .. },
+            SelectedNativeTargetImport::Source { binding: second, .. },
         ] if *first == fresh_g && *second == fresh_j));
         assert!(matches!(linked_target.group_imports(fresh_j).unwrap(),
             [SelectedNativeImport::Source { binding, .. }] if *binding == old_r));

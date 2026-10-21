@@ -18,7 +18,7 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{
     CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
-    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion, CompletedNativeSelection,
+    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion, CompletedNativeSelection, CompletedNativeTargetImport,
 };
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
@@ -520,10 +520,9 @@ impl TargetNativeInputs {
             ));
         }
         let mut links = Vec::with_capacity(self.imports().len());
-        let mut needs_retained_owner = false;
         for import in self.imports() {
             crate::host_work::checkpoint()?;
-            use crate::certified_products::{PendingImportOwner, SelectedNativeImport};
+            use crate::certified_products::{PendingImportOwner, SelectedNativeTargetImport};
             match import {
                 PendingImportOwner::Source { owner, original_ordinal, binder } => {
                     // These roots were chosen by this target's admission. A
@@ -541,15 +540,20 @@ impl TargetNativeInputs {
                     let value = row.group().exported_values()
                         .find_map(|(identity, value)| (identity == binder).then_some(value))
                         .ok_or_else(|| failure("target source slot lacks its authenticated export"))?;
-                    links.push(SelectedNativeImport::Source { binding, value });
+                    links.push(SelectedNativeTargetImport::Source { binding, value });
                 }
                 PendingImportOwner::Package { binder, interface_digest, .. } => {
-                    links.push(SelectedNativeImport::Package {
+                    links.push(SelectedNativeTargetImport::Package {
                         identity: binder.clone(), interface_digest: *interface_digest,
                     });
                 }
-                PendingImportOwner::Retained { .. } | PendingImportOwner::RetainedPackage { .. } => {
-                    needs_retained_owner = true;
+                PendingImportOwner::Retained { identity, generation } => {
+                    links.push(SelectedNativeTargetImport::RetainedCapture {
+                        identity: identity.clone(), generation: *generation,
+                    });
+                }
+                PendingImportOwner::RetainedPackage { .. } => {
+                    return Err(failure("target contains obsolete live package input"));
                 }
             }
         }
@@ -557,9 +561,7 @@ impl TargetNativeInputs {
             target: self,
             completed: None,
             groups,
-            links: if needs_retained_owner { TargetNativeLinks::RetainedInputs } else {
-                TargetNativeLinks::Immutable(links.into())
-            },
+            links: links.into(),
         })
     }
 
@@ -662,13 +664,7 @@ pub(crate) struct CertifiedTargetNativeInputs {
     completed: Option<Arc<CompletedNativeSelection>>,
     target: TargetNativeInputs,
     groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
-    links: TargetNativeLinks,
-}
-
-#[derive(Debug)]
-enum TargetNativeLinks {
-    Immutable(Arc<[crate::certified_products::SelectedNativeImport]>),
-    RetainedInputs,
+    links: Arc<[crate::certified_products::SelectedNativeTargetImport]>,
 }
 
 impl std::ops::Deref for CertifiedTargetNativeInputs {
@@ -721,7 +717,7 @@ impl CertifiedTargetNativeInputs {
 pub(crate) struct ResolvedNativeSourceTarget<'a> {
     target: ResolvedNativeTarget<'a>,
     groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
-    links: &'a TargetNativeLinks,
+    links: &'a [crate::certified_products::SelectedNativeTargetImport],
     completed: Option<&'a Arc<CompletedNativeSelection>>,
 }
 
@@ -735,15 +731,8 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         self.completed
     }
 
-    pub(crate) fn target_link_requirements(
-        &self,
-    ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
-        match self.links {
-            TargetNativeLinks::Immutable(links) => Ok(links),
-            TargetNativeLinks::RetainedInputs => Err(failure(
-                "closed target requires actual retained input ownership",
-            )),
-        }
+    pub(crate) fn target_requirements(&self) -> &'a [crate::certified_products::SelectedNativeTargetImport] {
+        self.links
     }
 
     pub(crate) fn group_imports(
