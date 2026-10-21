@@ -1415,7 +1415,7 @@ readWorldImportBasis owner environment facts intents parsed = do
           | (unitString (moduleUnit actual),moduleNameString (moduleName actual)) == key
           , isJust (ml_hs_file location) -> case worldTypeEntryEvidence entry of
               ModuleInterfaceEvidence proof | isSourceOriginal (canonicalOrigin proof) -> pure (Just key)
-              _ -> unsupported
+              evidence -> unsupported "current source qualification" key evidence
         _ -> do
           unless (not (any (\(name,raw,boot) ->
               let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
@@ -1433,15 +1433,25 @@ readWorldImportBasis owner environment facts intents parsed = do
           entry <- maybe (throwIO (WorldInputsFailure WorldInputsCorrupt
             "carried import lost its selected TYPE closure owner")) pure (Map.lookup key entries)
           imports <- case worldTypeEntryEvidence entry of
-            ModuleInterfaceEvidence proof -> maybe unsupported pure (canonicalSourceImports proof)
-            _ -> unsupported
+            evidence@(ModuleInterfaceEvidence proof) -> maybe
+              (unsupported "lexical closure" key evidence) pure (canonicalSourceImports proof)
+            evidence -> unsupported "lexical closure" key evidence
           let edges = Set.toAscList (Set.fromList [(unit,name) | (_,name,_,Just unit) <- imports])
           unless (all (`Map.member` entries) edges) $
             throwIO (WorldInputsFailure WorldInputsCorrupt "carried lexical import lacks its exact TYPE association")
           remaining <- lexicalClosure entries (Set.insert key visited) (edges ++ rest)
           pure ((worldTypeEntryArtifact entry,edges):remaining)
-    unsupported = throwIO (WorldInputsFailure WorldInputsCorrupt
-      "carried import lacks canonical source-import provenance")
+    unsupported :: String -> (String,String) -> ExactInterfaceEvidence -> IO value
+    unsupported stage (unit,name) evidence = throwIO (WorldInputsFailure WorldInputsCorrupt
+      ("carried import lacks canonical source-import provenance; phase=" ++ stage
+        ++ "; owner=" ++ boundedDiagnosticText 2048 (unit ++ ":" ++ name)
+        ++ "; evidence=" ++ case evidence of
+          ModuleInterfaceEvidence proof -> case canonicalOrigin proof of
+            SourceOriginal _ -> "module/source-original missing imports"
+            NativeAuthoredDeclaration _ -> "module/native-authored-declaration"
+          LocalNativeDeclarationEvidence _ -> "local-native-declaration"
+          LexicalJoinEvidence -> "lexical-join"
+          CheckedValueEvidence -> "checked-value"))
 
 worldImportEntries :: WorldImportBasis -> [WorldTypeClosureEntry]
 worldImportEntries (WorldImportBasis entries _ _) = Map.elems entries
