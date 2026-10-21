@@ -6350,6 +6350,10 @@ fn compile_invocation_inner(
             &target_imports,
             &validation.inventory,
         )?;
+        let mut inherited_completion_support = compiler_inputs
+            .as_ref()
+            .map(|inputs| inputs.compiler_source_support().clone())
+            .unwrap_or_else(crate::artifact_inventory::CompilerSourceSupport::empty);
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -6371,23 +6375,22 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                target.native_inputs = Some(
-                    admitted_targets
-                        .for_ordinary_target(target.pending_imports.clone())?
-                        .with_certified_groups(Arc::clone(&selected_groups))?
-                        .complete_native_selection(
-                            target.prepared.prepared(),
-                            &native_output,
-                            &package_products,
-                            compiler_inputs
-                                .as_ref()
-                                .map(|inputs| inputs.compiler_source_support())
-                                .unwrap_or(
-                                    &crate::artifact_inventory::CompilerSourceSupport::empty(),
-                                ),
-                            &validation.inventory,
-                        )?,
-                );
+                let native_inputs = admitted_targets
+                    .for_ordinary_target(target.pending_imports.clone())?
+                    .with_certified_groups(Arc::clone(&selected_groups))?
+                    .complete_native_selection(
+                        target.prepared.prepared(),
+                        &native_output,
+                        &package_products,
+                        &inherited_completion_support,
+                        &validation.inventory,
+                    )?;
+                let completed = native_inputs.completed_selection().ok_or_else(|| {
+                    CompileError::ExtractFailed("finite target lacks its issued completion".into())
+                })?;
+                inherited_completion_support =
+                    inherited_completion_support.with_native_selection_completion(completed)?;
+                target.native_inputs = Some(native_inputs);
             }
         }
         timing::record_stage_with_owners(
