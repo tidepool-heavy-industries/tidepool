@@ -920,7 +920,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         certify_target_owners_with_validation(
             &target,
             &globals,
-            &selected.groups,
+            &[],
             &selected.source_selection,
             &packages,
             &mut validation,
