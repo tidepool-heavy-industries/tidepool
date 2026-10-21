@@ -257,17 +257,15 @@ pub(super) fn select_target_group(
                 ));
             }
             if let Some(current) = selection.current_product(key, &entry).map_err(evidence)? {
-                let (binding, offer) = completed_target_group(&current, physical)?;
+                let completed = current.completed_for_target(physical)?;
+                let (binding, offer) = completed_target_group(&completed)?;
                 (binding, offer, true)
-            } else if let Some(chosen) = selection
+            } else if let Some(completed) = selection
                 .target_prior_produced_group(key, &entry)
                 .map_err(evidence)?
             {
-                (
-                    chosen.binding(),
-                    chosen.contribution().offer().clone(),
-                    false,
-                )
+                let (binding, offer) = completed_target_group(&completed)?;
+                (binding, offer, false)
             } else {
                 let binding = verified_root_choice(selection, key, product.owner(), &entry)?;
                 let support = selection
@@ -284,21 +282,19 @@ pub(super) fn select_target_group(
     retain_target_group(state, physical, binding, offer, current, incoming)
 }
 
-fn completed_target_group<'a>(
-    current: &crate::certified_products::CurrentProductRef<'a>,
-    physical: &'a ArtifactView,
+fn completed_target_group(
+    completed: &crate::certified_products::CompletedTargetProductRef<'_>,
 ) -> Result<(NativeGroupBinding, IssuedNativeOffer), CompileError> {
-    let completed = current.completed_for_target(physical)?;
     let mut bindings = completed.groups();
     let binding = bindings
         .next()
-        .ok_or_else(|| failure("target current group was not issued"))?;
+        .ok_or_else(|| failure("target produced group was not issued"))?;
     if bindings.next().is_some() {
-        return Err(failure("target current group has competing own issuers"));
+        return Err(failure("target produced group has competing own issuers"));
     }
     let offer = completed
         .support(binding)
-        .ok_or_else(|| failure("target current group lost its own contribution"))?
+        .ok_or_else(|| failure("target produced group lost its own contribution"))?
         .clone();
     Ok((binding, offer))
 }
@@ -318,7 +314,8 @@ pub(super) fn select_target_entry(
         .current_product(key, payload)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
         .ok_or_else(|| failure("typed target entry is outside its physical output cohort"))?;
-    let (binding, offer) = completed_target_group(&current, physical)?;
+    let completed = current.completed_for_target(physical)?;
+    let (binding, offer) = completed_target_group(&completed)?;
     retain_target_group(state, physical, binding, offer, true, incoming)
 }
 

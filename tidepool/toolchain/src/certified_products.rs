@@ -2957,29 +2957,26 @@ pub(crate) struct CurrentProductRef<'a> {
     ordinal: u32,
 }
 
-/// A current group's own issued proof. This borrow cannot represent a body
-/// awaiting physical issuance or an inherited input's broader availability.
-pub(crate) struct CompletedCurrentProductRef<'a> {
-    current: CurrentProductRef<'a>,
+/// One actual produced group's own completed proof. Current acquisition checks
+/// its stage ceiling first; prior-stage acquisition checks its carried producer.
+/// An inherited input's broader availability cannot construct this borrow.
+pub(crate) struct CompletedTargetProductRef<'a> {
+    key: crate::artifact_inventory::NativeGroupKey,
     receipt: &'a crate::declaration_context::CompletedNativeProductAvailability,
 }
 
-impl<'a> CompletedCurrentProductRef<'a> {
-    pub(crate) fn current(&self) -> &CurrentProductRef<'a> {
-        &self.current
-    }
-
+impl<'a> CompletedTargetProductRef<'a> {
     pub(crate) fn groups(
         &self,
     ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
-        self.receipt.groups(self.current.key())
+        self.receipt.groups(self.key)
     }
 
     pub(crate) fn support(
         &self,
         binding: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
-        self.receipt.support(self.current.key(), binding)
+        self.receipt.support(self.key, binding)
     }
 }
 
@@ -2995,15 +2992,15 @@ impl<'a> CurrentProductRef<'a> {
         entries: &'a impl crate::artifact_inventory::ArtifactEntryMap<
             crate::artifact_inventory::ArtifactId,
         >,
-    ) -> Result<CompletedCurrentProductRef<'a>, crate::CompileError> {
+    ) -> Result<CompletedTargetProductRef<'a>, crate::CompileError> {
         crate::declaration_context::validate_current_stage_native_inputs(self, entries)?;
         let ReceiptNativeAvailability::Completed(receipt) = &self.native.availability else {
             return Err(crate::CompileError::CompilerEvidence(Box::new(
                 CertificationError::Mismatch("target current product lacks physical completion"),
             )));
         };
-        Ok(CompletedCurrentProductRef {
-            current: *self,
+        Ok(CompletedTargetProductRef {
+            key: self.key(),
             receipt,
         })
     }
@@ -4045,11 +4042,11 @@ impl CertifiedSourceSelection {
 
     /// Prior-stage Source selects only the actual producer's own completed
     /// offer. Initial request inputs cannot acquire this provenance.
-    pub(crate) fn target_prior_produced_group(
-        &self,
+    pub(crate) fn target_prior_produced_group<'a>(
+        &'a self,
         key: crate::artifact_inventory::NativeGroupKey,
         entry: &Arc<crate::artifact_inventory::ArtifactEntry>,
-    ) -> CertResult<Option<crate::declaration_context::ChosenNativeGroupSupport>> {
+    ) -> CertResult<Option<CompletedTargetProductRef<'a>>> {
         let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
             return Err(CertificationError::Mismatch(
                 "prior Source original payload",
@@ -4081,27 +4078,7 @@ impl CertifiedSourceSelection {
                 "prior Source differs from its produced owner",
             ));
         }
-        let mut groups = receipt.groups(key);
-        let binding = groups.next().ok_or(CertificationError::Mismatch(
-            "prior Source group was not issued",
-        ))?;
-        if groups.next().is_some() {
-            return Err(CertificationError::Mismatch(
-                "prior Source has competing own issuers",
-            ));
-        }
-        if receipt.support(key, binding).is_none() {
-            return Err(CertificationError::Mismatch(
-                "prior Source lost its own contribution",
-            ));
-        }
-        receipt
-            .row()
-            .exact_group_support(binding)
-            .map(Some)
-            .ok_or(CertificationError::Mismatch(
-                "prior Source lost its exact issued group",
-            ))
+        Ok(Some(CompletedTargetProductRef { key, receipt }))
     }
 
     /// Same-program source provenance is lent only by an actual produced body
