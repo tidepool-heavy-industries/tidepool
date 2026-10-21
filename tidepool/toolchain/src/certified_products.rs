@@ -23634,6 +23634,175 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn target_order_preserves_distinct_symbols_from_one_actual_group() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+        use tidepool_repr::execution_schema::{
+            Group, HeapRhs, ModuleVersion, RawModuleProduct, ValueId,
+        };
+
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(mut first) = wire.bindings.remove(0) else {
+            unreachable!()
+        };
+        first.identity = testing::identity("OrderedExports", "first");
+        first.binding.rhs = HeapRhs::Bytes(vec![1]);
+        let mut second = first.clone();
+        second.identity.occurrence = "second".into();
+        second.binding.id = ValueId(1);
+        second.binding.rhs = HeapRhs::Bytes(vec![2]);
+        wire.bindings = vec![Group::Recursive(vec![first, second])];
+        wire.expressions.nodes.clear();
+        let group = testing::projected_group(wire, 7).unwrap();
+        let symbols = group.binders().to_vec();
+        let interface = vec![0x42];
+        let bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: "fixture".into(),
+                module: "OrderedExports".into(),
+                interface: interface.clone(),
+                groups: vec![group.clone()],
+            }]);
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "OrderedExports".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: sha(&interface),
+            product_sha256: sha(&bytes),
+        };
+        let pending = PendingCertifiedGroup {
+            owner: owner.clone(),
+            origin: ProductOrigin::Fresh,
+            group: Arc::new(group),
+            imports: Arc::from([]),
+        };
+        let seal = encode_home_certification(&owner, &[pending], &BTreeMap::new()).unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            "fixture",
+            "OrderedExports",
+            &interface,
+            vec![],
+        );
+        let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            bytes,
+            package_bytes,
+            seal,
+        );
+        let product = fixture_finalized_product(product, [2; 32]);
+        let native = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &native.payload else {
+            unreachable!()
+        };
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![native.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let selection = CertifiedSourceSelection::from_projected_originals(
+            std::slice::from_ref(product),
+            &validation.inventory,
+        )
+        .unwrap();
+        let fixed = inventory
+            .bind_segment(&physical, vec![native.clone()], &selection, &mut validation)
+            .unwrap();
+        let physical = fixed.physical_inputs().issued_artifacts();
+        let selection = fixed.source_selection();
+        let definitions = original_native_group_definitions(product, 7).unwrap();
+        let contracts = definitions
+            .export_contracts()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(contracts.len(), 2);
+        let before = inventory.metrics().issued_scope_nodes;
+        let mut selected_values = Vec::new();
+        for order in [[0usize, 1], [1, 0]] {
+            let accepted = order
+                .iter()
+                .map(|index| {
+                    let symbol = &symbols[*index];
+                    let contract = contracts
+                        .iter()
+                        .find(|contract| contract.identity == symbol)
+                        .unwrap();
+                    AcceptedGlobal {
+                        identity: symbol.clone(),
+                        rep: contract.rep,
+                        entry_signature: contract.entry_signature.cloned(),
+                        required_evaluated: contract.evaluated,
+                        owner: ReceiptImportOwner::Source {
+                            unit: product.owner().unit.clone(),
+                            module: product.owner().module.clone(),
+                            module_version: Some(product.owner().module_version.clone()),
+                            original_ordinal: 7,
+                            binder: symbol.clone(),
+                        },
+                    }
+                })
+                .collect::<Vec<_>>();
+            let prepared = prepared_target_fixture(&accepted);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let target = inventory
+                .select_native_target(
+                    physical,
+                    selection,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .unwrap();
+            let groups =
+                crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+                    target.artifacts(),
+                    None,
+                    &mut validation,
+                )
+                .unwrap();
+            let target = target.with_certified_groups(Arc::new(groups)).unwrap();
+            let resolved = target.resolve_sources().unwrap();
+            assert_eq!(resolved.groups().len(), 1);
+            let values = resolved
+                .target_requirements()
+                .iter()
+                .map(|link| {
+                    let SelectedNativeTargetImport::Source { binding, value } = link else {
+                        panic!("actual Source slot")
+                    };
+                    (*binding, *value)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(values.len(), 2);
+            assert_eq!(values[0].0, values[1].0);
+            assert_eq!(
+                values.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
+                order
+                    .map(|index| ValueId(u32::try_from(index).unwrap()))
+                    .to_vec()
+            );
+            selected_values.push(values);
+            assert_eq!(
+                inventory.metrics().issued_scope_nodes,
+                before,
+                "target borrows completed occurrences"
+            );
+        }
+        assert_eq!(
+            selected_values[0].iter().rev().copied().collect::<Vec<_>>(),
+            selected_values[1]
+        );
+    }
+
+    #[test]
     fn selected_fresh_candidates_preserve_origin_and_full_native_bytes() {
         use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeGroupKey};
         let original = full_native_fixture("FreshSubset", vec![(8, vec![]), (11, vec![])], 7);
