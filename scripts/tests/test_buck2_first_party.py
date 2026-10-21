@@ -1754,6 +1754,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                        'toolchain_retained_entry_refusal_test'):
             native = self.rule('tidepool/toolchain', target, 'tidepool_rust_test_cases')
             self.assertEqual(native['expected_count'], 1)
+            if target == 'toolchain_retained_entry_refusal_test':
+                self.assertFalse(native.get('ignored', False))
             self.assertEqual(native['case_compiler_modes'],
                              {name: 'owned-resident' for name in native['exact_tests']})
             self.assertEqual(native['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],

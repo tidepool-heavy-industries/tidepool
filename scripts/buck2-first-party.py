@@ -2151,7 +2151,7 @@ tidepool_buildscript_run(
                 '    name = "toolchain_retained_entry_refusal_test",',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [" + json.dumps(retained_case) + "],",
-                "    expected_count = 1,", "    ignored = True,",
+                "    expected_count = 1,",
                 "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                 '    case_compiler_modes = {' + json.dumps(retained_case) + ': "owned-resident"},',
                 runtime_arguments(env, resources, worker),
