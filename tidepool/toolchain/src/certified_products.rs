@@ -15153,9 +15153,23 @@ pub(crate) mod tests {
             let products = [7, 9].map(|version| full_native_fixture("MembershipHistory",
                 ordinals.iter().map(|ordinal| (*ordinal, vec![])).collect(), version));
             assert_ne!(products[0].owner(), products[1].owner());
+            let inventory = crate::artifact_inventory::ArtifactInventory::default();
+            let mut basis_view = inventory.empty_view();
+            for product in &products {
+                let entry = Arc::new(crate::artifact_inventory::ArtifactEntry::original(
+                    product.module_interface().unwrap().producer_sha256(), product.clone(),
+                ).unwrap());
+                let sibling = inventory.admit_recovery_selection(
+                    &inventory.empty_view(), vec![entry], &BTreeSet::new(),
+                ).unwrap();
+                basis_view = basis_view.retain_custody(&sibling).unwrap();
+            }
+            let metadata = crate::artifact_inventory::CompilerInputProjection::default()
+                .project_metadata(basis_view.metadata_snapshot()).unwrap();
+            let basis = metadata.original_source_membership_basis();
             let retained = RetainedOriginalSources::default();
             let operation = Arc::new(InventoryOperation::new(Default::default()));
-            let original = retained.admit(&products, &operation).unwrap();
+            let original = retained.admit(&basis, &products, &operation).unwrap();
             let expected = products.iter().flat_map(|product| ordinals.iter().map(move |ordinal| (
                 product.owner().clone(), *ordinal,
                 testing::identity("MembershipHistory", &format!("entry_{ordinal}")),
@@ -15166,7 +15180,7 @@ pub(crate) mod tests {
                 let product = &products[index % products.len()];
                 let selected = product.original_native().unwrap().groups[..count].iter()
                     .map(|group| group.admitted(product.original_native().unwrap()).unwrap()).collect::<Vec<_>>();
-                let membership = retained.admit(&products, &operation).unwrap();
+                let membership = retained.admit(&basis, &products, &operation).unwrap();
                 assert!(Arc::ptr_eq(&original, &membership));
                 let overlay = membership.overlay(&selected, &operation).unwrap();
                 assert_eq!(overlay.groups.len(), count);
@@ -15178,14 +15192,14 @@ pub(crate) mod tests {
                     assert!(membership.overlay(&[foreign], &operation).is_err());
                     assert!(membership.overlay(&[group.clone(), group.clone()], &operation).is_err());
                 }
-                assert!(matches!(retained.admit(&products[..1], &operation),
+                assert!(matches!(retained.admit(&basis, &products[..1], &operation),
                     Err(CertificationError::OriginalMembership(reason))
                         if *reason == OriginalMembershipFailure::MissingOwner(products[1].owner().clone())));
                 overlay_calls += 1;
             }
             let fresh = Arc::new(InventoryOperation::new(Default::default()));
             let recovered = recovered_witness_fixtures(&products).into_iter().map(|row| row.product).collect::<Vec<_>>();
-            let next = retained.admit(&recovered, &fresh).unwrap();
+            let next = retained.admit(&basis, &recovered, &fresh).unwrap();
             assert!(!Arc::ptr_eq(&original, &next));
             assert_eq!(next.sources.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>(), expected);
             let weak = Arc::downgrade(&next);
@@ -19597,14 +19611,29 @@ pub(crate) mod tests {
     #[test]
     fn retained_original_membership_reuses_only_its_admission_and_exact_bytes() {
         let product = full_native_fixture("Membership", vec![(8, vec![]), (11, vec![])], 7);
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let entry = Arc::new(
+            crate::artifact_inventory::ArtifactEntry::original(
+                product.module_interface().unwrap().producer_sha256(),
+                product.clone(),
+            )
+            .unwrap(),
+        );
+        let basis_view = inventory
+            .admit_recovery_selection(&inventory.empty_view(), vec![entry], &BTreeSet::new())
+            .unwrap();
+        let metadata = crate::artifact_inventory::CompilerInputProjection::default()
+            .project_metadata(basis_view.metadata_snapshot())
+            .unwrap();
+        let basis = metadata.original_source_membership_basis();
         let retained = RetainedOriginalSources::default();
         let operation = Arc::new(InventoryOperation::new(Default::default()));
         let first = retained
-            .admit(std::slice::from_ref(&product), &operation)
+            .admit(&basis, std::slice::from_ref(&product), &operation)
             .unwrap();
         let charged = operation.work_usage().unwrap();
         let repeated = retained
-            .admit(std::slice::from_ref(&product), &operation)
+            .admit(&basis, std::slice::from_ref(&product), &operation)
             .unwrap();
         assert!(Arc::ptr_eq(&first, &repeated));
         let observed = operation.work_usage().unwrap();
@@ -19627,7 +19656,7 @@ pub(crate) mod tests {
             Arc::ptr_eq(
                 &first,
                 &retained
-                    .admit(&[independently_recovered], &operation)
+                    .admit(&basis, &[independently_recovered], &operation)
                     .unwrap()
             ),
             "equal authenticated bytes may be independently recovered"
@@ -19658,18 +19687,20 @@ pub(crate) mod tests {
                 "overlay never modifies retained membership"
             );
         }
-        assert!(matches!(retained.admit(&[], &operation),
+        assert!(matches!(retained.admit(&basis, &[], &operation),
             Err(CertificationError::OriginalMembership(reason))
                 if *reason == OriginalMembershipFailure::MissingOwner(product.owner().clone())));
         assert!(
-            matches!(retained.admit(&[product.clone(), product.clone()], &operation),
+            matches!(retained.admit(&basis, &[product.clone(), product.clone()], &operation),
             Err(CertificationError::OriginalMembership(reason))
                 if *reason == OriginalMembershipFailure::DuplicateOwner(product.owner().clone()))
         );
         let other = full_native_fixture("Membership", vec![(8, vec![]), (11, vec![])], 9);
-        assert!(matches!(retained.admit(&[other.clone()], &operation),
+        assert!(
+            matches!(retained.admit(&basis, &[other.clone()], &operation),
             Err(CertificationError::OriginalMembership(reason))
-                if *reason == OriginalMembershipFailure::UnexpectedOwner(other.owner().clone())));
+                if *reason == OriginalMembershipFailure::UnexpectedOwner(other.owner().clone()))
+        );
         let altered = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
@@ -19677,14 +19708,14 @@ pub(crate) mod tests {
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         );
-        assert!(matches!(retained.admit(&[altered], &operation),
+        assert!(matches!(retained.admit(&basis, &[altered], &operation),
             Err(CertificationError::OriginalMembership(reason))
                 if *reason == OriginalMembershipFailure::OriginalBytes(product.owner().clone())));
         assert!(
             Arc::ptr_eq(
                 &first,
                 &retained
-                    .admit(std::slice::from_ref(&product), &operation)
+                    .admit(&basis, std::slice::from_ref(&product), &operation)
                     .unwrap()
             ),
             "refusal preserves the prior issued membership"
@@ -19695,13 +19726,13 @@ pub(crate) mod tests {
         }));
         assert!(
             retained
-                .admit(std::slice::from_ref(&product), &exhausted)
+                .admit(&basis, std::slice::from_ref(&product), &exhausted)
                 .is_err(),
             "a new admission cannot borrow another operation's paid budget"
         );
         let fresh = Arc::new(InventoryOperation::new(Default::default()));
         let next = retained
-            .admit(std::slice::from_ref(&product), &fresh)
+            .admit(&basis, std::slice::from_ref(&product), &fresh)
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &next));
         assert!(fresh.work_usage().unwrap().0 > 0);
@@ -19717,6 +19748,21 @@ pub(crate) mod tests {
     #[test]
     fn retained_original_membership_charges_independently_recovered_bytes() {
         let product = full_native_fixture("RecoveredMembership", vec![(8, vec![])], 7);
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let entry = Arc::new(
+            crate::artifact_inventory::ArtifactEntry::original(
+                product.module_interface().unwrap().producer_sha256(),
+                product.clone(),
+            )
+            .unwrap(),
+        );
+        let basis_view = inventory
+            .admit_recovery_selection(&inventory.empty_view(), vec![entry], &BTreeSet::new())
+            .unwrap();
+        let metadata = crate::artifact_inventory::CompilerInputProjection::default()
+            .project_metadata(basis_view.metadata_snapshot())
+            .unwrap();
+        let basis = metadata.original_source_membership_basis();
         let independently_recovered = recovered_witness_fixtures(std::slice::from_ref(&product))
             .remove(0)
             .product;
@@ -19735,11 +19781,11 @@ pub(crate) mod tests {
         let measured = RetainedOriginalSources::default();
         let measurement = Arc::new(InventoryOperation::new(Default::default()));
         measured
-            .admit(std::slice::from_ref(&product), &measurement)
+            .admit(&basis, std::slice::from_ref(&product), &measurement)
             .unwrap();
         let construction_work = measurement.work_usage().unwrap().0;
         measured
-            .admit(std::slice::from_ref(&product), &measurement)
+            .admit(&basis, std::slice::from_ref(&product), &measurement)
             .unwrap();
         let census_work = measurement.work_usage().unwrap().0 - construction_work;
         assert!(census_work > 0);
@@ -19750,10 +19796,10 @@ pub(crate) mod tests {
             ..Default::default()
         }));
         let first = retained
-            .admit(std::slice::from_ref(&product), &pointer_budget)
+            .admit(&basis, std::slice::from_ref(&product), &pointer_budget)
             .unwrap();
         let repeated = retained
-            .admit(std::slice::from_ref(&product), &pointer_budget)
+            .admit(&basis, std::slice::from_ref(&product), &pointer_budget)
             .unwrap();
         assert!(Arc::ptr_eq(&first, &repeated));
         assert_eq!(pointer_budget.work_usage().unwrap().1, 0);
@@ -19765,9 +19811,10 @@ pub(crate) mod tests {
                 ..Default::default()
             }));
             let first = retained
-                .admit(std::slice::from_ref(&product), &recovery_budget)
+                .admit(&basis, std::slice::from_ref(&product), &recovery_budget)
                 .unwrap();
             let recovered = retained.admit(
+                &basis,
                 std::slice::from_ref(&independently_recovered),
                 &recovery_budget,
             );
