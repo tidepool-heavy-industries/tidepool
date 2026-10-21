@@ -3546,6 +3546,12 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
+    pub fn completed_selection(
+        &self,
+    ) -> Option<&'a Arc<crate::artifact_inventory::CompletedNativeSelection>> {
+        self._resolved.completed_selection()
+    }
+
     pub(crate) fn acquired_artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
         self._resolved.artifacts()
     }

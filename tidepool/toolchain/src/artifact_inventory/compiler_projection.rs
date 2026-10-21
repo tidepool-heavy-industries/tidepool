@@ -437,6 +437,9 @@ impl CompletedNativeSelection {
     pub fn target_imports(&self) -> &[CompletedNativeImport] {
         &self.target_imports
     }
+    pub fn group_imports(&self, binding: NativeGroupBinding) -> Option<&[CompletedNativeImport]> {
+        self.completion.rows.get(&binding).map(|row| row.imports.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Default)]

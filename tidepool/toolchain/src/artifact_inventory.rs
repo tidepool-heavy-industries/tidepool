@@ -711,6 +711,7 @@ impl CertifiedTargetNativeInputs {
             target: self.target.resolve()?,
             groups: &self.groups,
             links: &self.links,
+            completed: self.completed.as_ref(),
         })
     }
 }
@@ -720,6 +721,7 @@ pub(crate) struct ResolvedNativeSourceTarget<'a> {
     target: ResolvedNativeTarget<'a>,
     groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
     links: &'a TargetNativeLinks,
+    completed: Option<&'a Arc<CompletedNativeSelection>>,
 }
 
 impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
@@ -728,6 +730,10 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn completed_selection(&self) -> Option<&'a Arc<CompletedNativeSelection>> {
+        self.completed
+    }
+
     pub(crate) fn target_link_requirements(
         &self,
     ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
