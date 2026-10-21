@@ -1,20 +1,38 @@
 module LoggingTest (runLoggingTests) where
 
-import Control.Exception (bracket, try)
+import Control.Exception
+  ( AsyncException(ThreadKilled), ErrorCall(..), Exception(..), IOException
+  , asyncExceptionFromException, asyncExceptionToException, bracket, throw, throwIO
+  , try )
 import Control.Monad (unless)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.Int (Int64)
 import Data.List (isInfixOf)
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory (doesPathExist, getTemporaryDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO
-  ( Handle, IOMode(WriteMode), hClose, openTempFile, readFile', withFile )
+  ( Handle, IOMode(WriteMode), hClose, openTempFile, readFile', stderr, withFile )
+import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.Logging
+
+-- Cancellation can be wrapped by an application-specific exception type.
+data WrappedCancellation = WrappedCancellation deriving (Eq, Show)
+instance Exception WrappedCancellation where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
 
 runLoggingTests :: IO ()
 runLoggingTests = do
   checkLevels
-  checkRendering
+  checkEmission
+  checkEscaping
+  checkBoundedValue
+  checkFieldCap
   checkHandles
   checkEnvironment
+  checkDisabledLaziness
+  checkAsyncEscape
+  checkPartialAcquireCleanup
 
 checkLevels :: IO ()
 checkLevels = do
@@ -32,36 +50,65 @@ checkLevels = do
       && logLevelFromName "unknown" == LogOff)
     (fail "logging level parsing changed")
 
-checkRendering :: IO ()
-checkRendering = do
-  let rendered = renderLogEvent 7 LogTrace "compiler.world" "world.cell.stage"
-        [ ("stage", LogText "declaration-inputs-refused")
-        , ("count", LogInteger 2)
-        , ("ok", LogBool True)
-        , ("missing", LogNull)
-        , ("stage", LogText "ignored duplicate")
-        ]
+-- Observe the real emission path, not a re-implemented renderer: the record
+-- lands in a scratch sink and its encoding is checked there.
+checkEmission :: IO ()
+checkEmission = withScratch $ \path -> do
+  let logger = newLogger "compiler.world" LogTrace
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogTrace "world.cell.stage"
+      [ ("stage", LogText "declaration-inputs-refused")
+      , ("count", LogInteger 2)
+      , ("ok", LogBool True)
+      , ("missing", LogNull)
+      , ("stage", LogText "ignored duplicate")
+      ]
+  rendered <- readFile' path
   unless (all (`isInfixOf` rendered)
       [ "\"schema\":1"
       , "\"level\":\"trace\""
       , "\"target\":\"compiler.world\""
       , "\"event\":\"world.cell.stage\""
-      , "\"observed_ns\":7"
+      , "\"observed_ns\":"
       , "\"stage\":\"declaration-inputs-refused\""
       , "\"count\":2"
       , "\"ok\":true"
       , "\"missing\":null"
       ] && not ("ignored duplicate" `isInfixOf` rendered))
     (fail "structured logging encoding changed")
-  let escaped = renderLogEvent 9 LogDebug "quote\"target" "line\nbreak"
-        [("detail", LogText "quote\" slash\\ newline\n")]
+
+checkEscaping :: IO ()
+checkEscaping = withScratch $ \path -> do
+  let logger = newLogger "quote\"target" LogDebug
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogDebug "line\nbreak"
+      [("detail", LogText "quote\" slash\\ newline\n")]
+  escaped <- readFile' path
   unless (all (`isInfixOf` escaped)
       ["quote\\\"target", "line\\nbreak", "quote\\\" slash\\\\ newline\\n"])
     (fail "structured logging did not JSON-escape fields")
-  let bounded = renderLogEvent 11 LogTrace "target" "bounded"
-        [("detail", LogText (replicate 4097 'x'))]
+
+checkBoundedValue :: IO ()
+checkBoundedValue = withScratch $ \path -> do
+  let logger = newLogger "target" LogTrace
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogTrace "bounded"
+      [("detail", LogText (replicate 4097 'x'))]
+  bounded <- readFile' path
   unless (("\"detail\":\"" ++ replicate 4096 'x' ++ "…\"") `isInfixOf` bounded)
     (fail "structured logging did not bound field values")
+
+checkFieldCap :: IO ()
+checkFieldCap = withScratch $ \path -> do
+  let logger = newLogger "target" LogTrace
+      overflow = [("field" ++ show index, LogInteger index) | index <- [1 .. 40 :: Int64]]
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogTrace "field-cap" overflow
+  capped <- readFile' path
+  unless ("\"omitted_fields\":8" `isInfixOf` capped)
+    (fail "field cap did not report the omitted field count")
+  unless ("field32" `isInfixOf` capped && not ("field33" `isInfixOf` capped))
+    (fail "field cap kept or dropped the wrong fields")
 
 checkHandles :: IO ()
 checkHandles = do
@@ -90,26 +137,81 @@ checkEnvironment = do
     configured <- readLogger "tidepool.compiler"
     unless (not (loggerEnabled configured LogError)) (fail "invalid TIDEPOOL_LOG did not fail closed")
 
+-- A disabled trace must not construct or render its fields: the level check
+-- precedes the clock read, rendering and exception boundary.
+checkDisabledLaziness :: IO ()
+checkDisabledLaziness = do
+  let disabled = newLogger "tidepool.compiler" LogOff
+      forced = LogText (error "disabled trace forced a field" :: String)
+  outcome <- trySynchronous
+    (logEventTo stderr disabled LogTrace "lazy-disabled" [("boom", forced)] :: IO ())
+  unless (either (const False) (const True) outcome)
+    (fail "disabled trace forced an expensive field")
+
+-- A field whose rendering throws a wrapped asynchronous exception must escape
+-- the emission boundary: the ordinary-failure catch rethrows SomeAsyncException.
+checkAsyncEscape :: IO ()
+checkAsyncEscape = withScratch $ \path -> do
+  let logger = newLogger "tidepool.compiler" LogTrace
+      escaping = LogText (throw WrappedCancellation :: String)
+  withFile path WriteMode $ \handle -> do
+    escaped <- try (logEventTo handle logger LogTrace "async-escape" [("detail", escaping)] :: IO ())
+      :: IO (Either WrappedCancellation ())
+    unless (either (== WrappedCancellation) (const False) escaped)
+      (fail "wrapped asynchronous exception was swallowed by the emission path")
+
+-- The opened (path, handle) pair is owned before the extra close step runs, so
+-- a failure or asynchronous exception during that step still removes the
+-- scratch file and re-raises the original exception.
+checkPartialAcquireCleanup :: IO ()
+checkPartialAcquireCleanup = do
+  ordinaryPath <- newIORef Nothing
+  let ordinaryClose (path, _) =
+        writeIORef ordinaryPath (Just path) >> throwIO (ErrorCall "acquired close failed")
+  ordinary <- try (withOwnedTemp "logging-acquire" ordinaryClose (\_ _ -> pure ()))
+    :: IO (Either ErrorCall ())
+  case ordinary of
+    Left _ -> do
+      Just path <- readIORef ordinaryPath
+      removed <- doesPathExist path
+      unless (not removed) (fail "partially acquired scratch file was not removed")
+    Right () -> fail "ordinary close failure did not propagate"
+  asyncPath <- newIORef Nothing
+  let asyncClose (path, _) = writeIORef asyncPath (Just path) >> throwIO ThreadKilled
+  async <- try (withOwnedTemp "logging-async-acquire" asyncClose (\_ _ -> pure ()))
+    :: IO (Either AsyncException ())
+  case async of
+    Left ThreadKilled -> do
+      Just path <- readIORef asyncPath
+      removed <- doesPathExist path
+      unless (not removed)
+        (fail "partially acquired scratch file was not removed under async cancellation")
+    _ -> fail "async exception during acquisition did not escape"
+
 withClosedHandle :: (Handle -> IO a) -> IO a
-withClosedHandle use = bracket acquire release (use . snd)
-  where
-    acquire = do
-      temporary <- getTemporaryDirectory
-      (path, handle) <- openTempFile temporary "logging-closed"
-      hClose handle
-      pure (path, handle)
-    release (path, handle) = do
-      _ <- try (hClose handle) :: IO (Either IOError ())
-      removeFile path
+withClosedHandle use = withOwnedTemp "logging-closed" (hClose . snd) (\_ handle -> use handle)
 
 withScratch :: (FilePath -> IO a) -> IO a
-withScratch = bracket acquire removeFile
+withScratch use = withOwnedTemp "logging-output" (hClose . snd) (\path _ -> use path)
+
+-- Acquire a scratch (path, handle) pair, run the caller's transition (usually
+-- closing the handle), then run the consumer. The pair is owned by the release
+-- action from the moment it opens, so the extra close step cannot leak the path
+-- if it fails or is interrupted.
+withOwnedTemp
+  :: String
+  -> ((FilePath, Handle) -> IO ())
+  -> (FilePath -> Handle -> IO a)
+  -> IO a
+withOwnedTemp template close use = do
+  temporary <- getTemporaryDirectory
+  bracket (openTempFile temporary template) release $ \(path, handle) -> do
+    close (path, handle)
+    use path handle
   where
-    acquire = do
-      temporary <- getTemporaryDirectory
-      (path, handle) <- openTempFile temporary "logging-output"
-      hClose handle
-      pure path
+    release (path, handle) = do
+      _ <- try (hClose handle) :: IO (Either IOException ())
+      removeFile path
 
 withEnv :: String -> String -> IO a -> IO a
 withEnv name value action = bracket (lookupEnv name) restore $ \_ -> setEnv name value >> action
