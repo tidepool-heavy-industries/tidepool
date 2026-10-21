@@ -107,6 +107,36 @@ fn assert_same_package_instance(previous: &HeldPackageCaf, current: &HeldPackage
     );
 }
 
+fn assert_unchanged_public_caf<'a>(
+    current: &'a BTreeMap<CafKey, HeldPackageCaf>,
+    key: CafKey,
+    previous: &HeldPackageCaf,
+) -> &'a HeldPackageCaf {
+    let NativeInstanceLease::Package(expected) = &previous.lease else {
+        unreachable!()
+    };
+    // This fixture never changes the package selection. An old held root must
+    // not conceal an additional installation of that same immutable image.
+    let matching = current
+        .iter()
+        .filter(|((_, value), actual)| {
+            let NativeInstanceLease::Package(actual) = &actual.lease else {
+                return false;
+            };
+            *value == key.1 && Arc::ptr_eq(expected.image().image(), actual.image().image())
+        })
+        .collect::<Vec<_>>();
+    let [(actual_key, actual)] = matching.as_slice() else {
+        panic!("unchanged public B must select one physical CAF for this image: {matching:?}");
+    };
+    assert_eq!(
+        **actual_key, key,
+        "the SAME issued package binding must survive each B item"
+    );
+    assert_same_package_instance(previous, actual);
+    actual
+}
+
 #[test]
 #[ignore = "requires the rooted runtime_package_source_history_test resources"]
 fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
@@ -300,8 +330,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         43,
     );
     let public_second = observed_package_cafs(&mut resident, public_b);
-    assert_same_package_instance(first_caf, &public_second[&forced_key]);
-    assert!(public_second[&forced_key].evaluated);
+    assert!(assert_unchanged_public_caf(&public_second, forced_key, first_caf).evaluated);
     let cutoff = source_a.source_admission().fence_if_idle().unwrap();
     assert!(cutoff
         .retire(
@@ -322,8 +351,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         44,
     );
     let public_after_cutoff = observed_package_cafs(&mut resident, public_b);
-    assert_same_package_instance(first_caf, &public_after_cutoff[&forced_key]);
-    assert!(public_after_cutoff[&forced_key].evaluated);
+    assert!(assert_unchanged_public_caf(&public_after_cutoff, forced_key, first_caf).evaluated);
     eprintln!(
         "PACKAGE_CAF_HISTORY {:?} I_A={:?} I_B={:?} public_B={:?}",
         forced_key,
