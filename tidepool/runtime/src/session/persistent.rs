@@ -7209,7 +7209,7 @@ mod checkpoint_scope_tests {
         use super::super::prepared::tests::compile_source_publication_fixture;
         let targets = compile_source_publication_fixture();
         let compiled =
-            super::super::CompiledTurn::from_runtime_target(&targets.artifacts, "result").unwrap();
+            super::super::turn::CompiledTurn::from_runtime_target(targets, "result").unwrap();
         let code = compiled.code();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
@@ -7289,7 +7289,7 @@ mod checkpoint_scope_tests {
         use super::super::prepared::tests::compile_source_publication_fixture;
         let targets = compile_source_publication_fixture();
         let compiled =
-            super::super::CompiledTurn::from_runtime_target(&targets.artifacts, "result").unwrap();
+            super::super::turn::CompiledTurn::from_runtime_target(targets, "result").unwrap();
         let code = compiled.code();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());

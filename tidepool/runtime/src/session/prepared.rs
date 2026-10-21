@@ -6383,6 +6383,14 @@ pub(super) mod tests {
     ) {
         let placement = (scope != tidepool_codegen::scope::ScopeId::ROOT)
             .then(|| session.prepared_lexical_scope_lease(scope).unwrap());
+        if session.source_transaction.is_some() {
+            // The production installer validates the ambient owner against targets.source.
+            let (program, admission, _) = session
+                .install_runtime_target_in(scope, targets, target)
+                .expect("ambient transaction must own the actual compiled source")
+                .into_parts();
+            return (program, admission, placement);
+        }
         let settled = session
             .with_source_compiler_transaction(
                 targets.source.clone(),
@@ -6547,7 +6555,7 @@ pub(super) mod tests {
         let scope = source.scope();
         let foreign_scope = foreign.scope();
         let settled = session.with_source_compiler_transaction(
-            source.original_source().clone(),
+            targets.source.clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(), None, |_| {},
             |session, _| {
