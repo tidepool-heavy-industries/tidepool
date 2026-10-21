@@ -2377,9 +2377,13 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
             (fail "expression plan did not propagate cancellation before dependency commitment")
           unless (case poisoned of Left CompilerTransactionFailed -> True; _ -> False)
             (fail "cancelled expression plan allowed its failed compiler phase to resume")
-          let completedCounts = counterValues "worlds.completed_source_modules" cancelledLog
-          unless (length completedCounts >= 2 && head completedCounts == last completedCounts)
-            (fail "cancelled expression plan committed a source module to the held World")
+          let marker = "tidepool-count name=world.cell.name_scope_ready"
+              (beforeFault,fromFault) = T.breakOn marker (T.pack cancelledLog)
+              beforeCounts = counterValues "worlds.completed_source_modules" (T.unpack beforeFault)
+              afterCounts = counterValues "worlds.completed_source_modules" (T.unpack fromFault)
+          unless (not (T.null fromFault) && not (null beforeCounts) && not (null afterCounts)
+              && all (== last beforeCounts) afterCounts)
+            (fail "cancelled expression plan lost its settlement observations or committed a source module")
           -- Recovery opens a fresh phase; the poisoned phase is never retried.
           runScope (pure ()) $ \compiler -> acquire compiler >> void (issueCancellation compiler)
       outcome `seq` pure ()
