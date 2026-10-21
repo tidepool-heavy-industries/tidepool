@@ -1,13 +1,16 @@
 //! Finite source publication and later cells use the actual B source owner.
 use super::*;
 use std::collections::BTreeMap;
-use tidepool_codegen::prepared_program::{NativeBindingKey, NativeInstanceLease};
+use tidepool_codegen::prepared_program::{
+    NativeBindingKey, NativeInstanceLease, SourceInstanceDomain,
+};
 use tidepool_repr::execution_schema::{Group, HeapRhs, UpdatePolicy, ValueId};
 
 type CafKey = (NativeBindingKey, ValueId);
 
 #[derive(Debug)]
 struct HeldPackageCaf {
+    domain: SourceInstanceDomain,
     lease: NativeInstanceLease,
     pointer: usize,
     evaluated: bool,
@@ -17,20 +20,17 @@ fn observed_package_cafs(
     resident: &mut TestSession,
     scope: ScopeId,
 ) -> BTreeMap<CafKey, HeldPackageCaf> {
-    let snapshot = resident
-        .public_visibility_snapshot_in(scope)
-        .expect("the actual installation/public scope is still live");
-    let leases = snapshot
-        .source_instances
+    let selection = resident
+        .state
+        .bindings()
+        .native_domain_selection_in(resident.state.scope_tree(), scope)
+        .expect("the actual source owner issues its selected native domain");
+    let domain = selection.current();
+    let leases = selection
+        .roots()
         .iter()
-        .map(|key| {
-            resident
-                .state
-                .bindings()
-                .native_instance(key)
-                .expect("each issued physical key retains its actual native lease")
-                .clone()
-        })
+        .filter(|(key, _)| key.domain == domain)
+        .map(|(_, lease)| lease.clone())
         .collect::<Vec<_>>();
     let mut observations = BTreeMap::<CafKey, HeldPackageCaf>::new();
     for lease in leases {
@@ -77,6 +77,7 @@ fn observed_package_cafs(
             observations.insert(
                 key,
                 HeldPackageCaf {
+                    domain,
                     lease: lease.clone(),
                     pointer: observed.pointer,
                     evaluated: observed.evaluated,
@@ -88,6 +89,7 @@ fn observed_package_cafs(
 }
 
 fn assert_same_package_instance(previous: &HeldPackageCaf, current: &HeldPackageCaf) {
+    assert_eq!(previous.domain, current.domain);
     assert_eq!(previous.lease.binding_key(), current.lease.binding_key());
     assert_eq!(
         previous.lease.instance(),
@@ -224,6 +226,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     );
     for (key, a) in &initial_a {
         let b = &initial_b[key];
+        assert_ne!(a.domain, b.domain);
         assert_ne!(a.lease.instance(), b.lease.instance());
         assert_ne!(
             a.pointer, b.pointer,
@@ -283,6 +286,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         .get(&forced_key)
         .expect("the first B cell demands the SAME issued package CAF binding");
     assert!(first_caf.evaluated);
+    assert_ne!(first_caf.domain, forced_b[&forced_key].domain);
     assert_ne!(
         first_caf.lease.instance(),
         forced_b[&forced_key].lease.instance(),
