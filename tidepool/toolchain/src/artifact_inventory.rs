@@ -7916,6 +7916,14 @@ impl ArtifactView {
         original_group_children_in_scope(&state, &self.read_projection(&state).nodes, group, operation)
     }
 
+    pub(crate) fn acquired_original_group_carrier_pair(
+        &self,
+        group: NativeGroupBinding,
+        canonical: ArtifactId,
+    ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+        native_availability::acquired_carrier_pair(self, group, canonical)
+    }
+
     pub(crate) fn acquired_original_group_retained_binding(
         &self,
         group: NativeGroupBinding,

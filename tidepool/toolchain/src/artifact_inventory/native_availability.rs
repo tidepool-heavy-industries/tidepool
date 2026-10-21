@@ -889,6 +889,30 @@ pub(super) fn issued_carrier_pair(
     support.carrier_pair(group, canonical)
 }
 
+pub(super) fn acquired_carrier_pair(
+    parent: &ArtifactView,
+    group: NativeGroupBinding,
+    canonical: ArtifactId,
+) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+    let state = parent.lease.inventory.0.lock().expect("inventory lock");
+    let owned = &parent.read_projection(&state).nodes;
+    if !owned.contains(&InventoryNodeKey::Group(group)) {
+        return Err(failure("native carrier query lacks exact acquired group"));
+    }
+    let support = NativeSupportRef {
+        snapshot: &parent.lease.selection,
+        payloads: &parent.lease.payloads,
+        offer: None,
+    };
+    let pair = support.carrier_pair(group, canonical)?;
+    if !owned.contains(&InventoryNodeKey::Artifact(pair.0))
+        || !owned.contains(&InventoryNodeKey::Artifact(pair.1))
+    {
+        return Err(failure("native carrier pair is outside acquired custody"));
+    }
+    Ok(pair)
+}
+
 pub(super) fn bind_certified_input_demand(
     state: &mut InventoryState,
     parent: &ArtifactView,
@@ -1436,6 +1460,28 @@ thread_local! {
 }
 
 impl NativeOfferContribution {
+    pub(crate) fn group_carrier_pair(
+        &self,
+        group: NativeGroupBinding,
+        canonical: ArtifactId,
+    ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+        if !self.contains_group(group) {
+            return Err(failure("native carrier query exceeds its contribution"));
+        }
+        let support = NativeSupportRef {
+            snapshot: &self.offer.0.custody.lease.selection,
+            payloads: &self.offer.0.custody.lease.payloads,
+            offer: Some(&self.offer),
+        };
+        let pair = support.carrier_pair(group, canonical)?;
+        if !self.reachable.contains(&InventoryNodeKey::Artifact(pair.0))
+            || !self.reachable.contains(&InventoryNodeKey::Artifact(pair.1))
+        {
+            return Err(failure("native carrier pair exceeds its contribution"));
+        }
+        Ok(pair)
+    }
+
     #[cfg(test)]
     pub(crate) fn take_group_binding_scope_visits() -> usize {
         GROUP_BINDING_SCOPE_VISITS.with(|work| work.replace(0))

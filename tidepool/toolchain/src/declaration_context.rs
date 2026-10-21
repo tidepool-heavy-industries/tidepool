@@ -3091,7 +3091,7 @@ impl DemandNativeInputs {
         let mut available = BTreeMap::new();
         let mut selected_contributions = Vec::new();
         let mut retained_bindings = BTreeSet::new();
-        for (key, chosen) in roots {
+        for chosen in roots.into_values() {
             budget.checkpoint()?;
             let binding = chosen.binding();
             budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;

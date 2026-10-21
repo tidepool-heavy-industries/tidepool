@@ -1031,7 +1031,16 @@ impl AuthenticatedOriginalGroup {
     ) -> CertResult<Vec<PendingImportOwner>> {
         self.imports
             .iter()
-            .map(|reference| match reference {
+            .map(|reference| self.source_import(reference, witness))
+            .collect()
+    }
+
+    fn source_import(
+        &self,
+        reference: &ReceiptImportOwner,
+        witness: &OriginalNativeWitness,
+    ) -> CertResult<PendingImportOwner> {
+        match reference {
                 ReceiptImportOwner::Source {
                     unit,
                     module,
@@ -1085,8 +1094,7 @@ impl AuthenticatedOriginalGroup {
                 ReceiptImportOwner::RetainedPackage { .. } => Err(CertificationError::Mismatch(
                     "retained package owner removed",
                 )),
-            })
-            .collect()
+            }
     }
 }
 
@@ -8396,6 +8404,11 @@ pub(crate) struct SelectedScopeCertification {
         BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
 }
 
+struct CheckedSelectedImports {
+    pending: Arc<[PendingImportOwner]>,
+    selected: Arc<[SelectedNativeImport]>,
+}
+
 type OriginalGroupFacts<'a> = BTreeMap<
     crate::artifact_inventory::NativeGroupKey,
     (&'a AuthenticatedOriginalGroup, &'a OriginalNativeWitness),
@@ -8414,6 +8427,25 @@ pub(crate) enum SelectedOriginalGroupScope<'a> {
 }
 
 impl SelectedOriginalGroupScope<'_> {
+    fn carrier_pair(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        canonical: crate::artifact_inventory::ArtifactId,
+    ) -> Result<
+        (
+            crate::artifact_inventory::ArtifactBinding,
+            crate::artifact_inventory::ArtifactBinding,
+        ),
+        crate::CompileError,
+    > {
+        match self {
+            Self::View(view) | Self::Acquired { view, .. } => {
+                view.acquired_original_group_carrier_pair(binding, canonical)
+            }
+            Self::Contribution(proof) => proof.group_carrier_pair(binding, canonical),
+        }
+    }
+
     fn bindings(
         &self,
         operation: &InventoryOperation,
@@ -8655,16 +8687,7 @@ impl<'a> OriginalValidationInventory<'a> {
                 artifact: binding.binding.artifact(),
                 original_ordinal: binding.original_ordinal,
             };
-            let (original, witness) = self.selected_facts[&key];
-            if let Some(group) = current.get(&binding) {
-                if original.owner != group.owner
-                    || !(Arc::ptr_eq(&original.group, &group.group)
-                        || original.group == group.group)
-                    || original.source_imports(witness)?.as_slice() != group.imports()
-                {
-                    return Err(CertificationError::Mismatch("shared original home groups"));
-                }
-            }
+            let (original, _) = self.selected_facts[&key];
             let children = scope
                 .children(binding, &operation)
                 .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
@@ -8681,6 +8704,15 @@ impl<'a> OriginalValidationInventory<'a> {
                 .ok_or(CertificationError::Mismatch(
                     "selected scope lost its ordered imports",
                 ))?;
+            if let Some(group) = current.get(&binding) {
+                if original.owner != group.owner
+                    || !(Arc::ptr_eq(&original.group, &group.group)
+                        || original.group == group.group)
+                    || imports.pending.as_ref() != group.imports()
+                {
+                    return Err(CertificationError::Mismatch("shared original home groups"));
+                }
+            }
             if native_use == OriginalNativeUse::SelectedGroups {
                 operation.reserve::<(
                     crate::artifact_inventory::NativeGroupBinding,
@@ -8688,13 +8720,18 @@ impl<'a> OriginalValidationInventory<'a> {
                 )>(1)?;
                 let product = match current.get(&binding) {
                     Some(group) => (*group).clone(),
-                    None => original.admitted(witness)?,
+                    None => PendingCertifiedGroup {
+                        origin: original.origin,
+                        owner: original.owner.clone(),
+                        group: Arc::clone(&original.group),
+                        imports: Arc::clone(&imports.pending),
+                    },
                 };
                 rows.insert(
                     binding,
                     Arc::new(IssuedSelectedNativeGroup {
                         product: Arc::new(product),
-                        imports: imports.into(),
+                        imports: imports.selected,
                     }),
                 );
             }
@@ -8730,6 +8767,78 @@ impl<'a> OriginalValidationInventory<'a> {
     }
 
     #[track_caller]
+    fn selected_original_import(
+        &self,
+        reference: &ReceiptImportOwner,
+        originals: &OriginalGroupFacts<'_>,
+        children: &[crate::artifact_inventory::NativeGroupBinding],
+        scope: SelectedOriginalGroupScope<'_>,
+        operation: &InventoryOperation,
+    ) -> CertResult<(
+        PendingImportOwner,
+        crate::artifact_inventory::NativeGroupBinding,
+    )> {
+        use crate::artifact_inventory::NativeGroupKey;
+        let ReceiptImportOwner::OriginalBinding {
+            unit,
+            module,
+            interface,
+            original,
+            binder,
+        } = reference
+        else {
+            return Err(CertificationError::Mismatch(
+                "selected Original reference kind",
+            ));
+        };
+        let mut selected = None;
+        for child in children
+            .iter()
+            .filter(|child| child.binding.artifact() == original.artifact)
+        {
+            crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+            operation.charge(1)?;
+            let key = NativeGroupKey {
+                artifact: child.binding.artifact(),
+                original_ordinal: child.original_ordinal,
+            };
+            let (group, _) = originals.get(&key).ok_or(CertificationError::Mismatch(
+                "selected Original child witness",
+            ))?;
+            if !group.group.binders().contains(binder) {
+                continue;
+            }
+            if group.owner.unit != *unit || group.owner.module != *module {
+                return Err(CertificationError::Mismatch("selected Original owner"));
+            }
+            let pair = scope
+                .carrier_pair(*child, interface.artifact)
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+            if pair != (*original, *interface) {
+                continue;
+            }
+            if selected.replace((*child, *group)).is_some() {
+                return Err(CertificationError::Mismatch(
+                    "selected Original has competing exact issuers",
+                ));
+            }
+        }
+        let (binding, group) = selected.ok_or(CertificationError::Mismatch(
+            "selected Original lacks its exact pair and symbol",
+        ))?;
+        charge_symbol(operation, binder)?;
+        operation.charge(group.owner.unit.len() + group.owner.module.len())?;
+        Ok((
+            PendingImportOwner::Source {
+                owner: group.owner.clone(),
+                original_ordinal: binding.original_ordinal,
+                binder: binder.clone(),
+            },
+            binding,
+        ))
+    }
+
+    #[track_caller]
     fn validate_imports(
         &self,
         key: &crate::artifact_inventory::NativeGroupKey,
@@ -8741,7 +8850,7 @@ impl<'a> OriginalValidationInventory<'a> {
             SelectedOriginalGroupScope<'_>,
         )>,
         validation: &mut PackageInterfaceValidation,
-    ) -> CertResult<Option<Vec<SelectedNativeImport>>> {
+    ) -> CertResult<Option<CheckedSelectedImports>> {
         use crate::artifact_inventory::NativeGroupKey;
         let (group, witness) = originals[key];
         let native_ids = &self.native_ids;
@@ -8754,15 +8863,44 @@ impl<'a> OriginalValidationInventory<'a> {
                 .reserve::<SelectedNativeImport>(group.imports().len().saturating_mul(3))?;
         }
         let mut resolved = children.map(|_| Vec::new());
-        for import in &group.source_imports(witness)? {
-            match import {
+        let mut pending = Vec::new();
+        if children.is_some() {
+            validation
+                .inventory
+                .reserve::<PendingImportOwner>(group.imports().len())?;
+        }
+        for reference in group.imports() {
+            let (import, exact_original) = match reference {
+                ReceiptImportOwner::OriginalBinding { .. } => {
+                    let (_, children, scope) = children.ok_or(CertificationError::Mismatch(
+                        "Original requires an exact selected scope",
+                    ))?;
+                    let (owner, binding) = self.selected_original_import(
+                        reference,
+                        originals,
+                        children,
+                        scope,
+                        &validation.inventory,
+                    )?;
+                    (owner, Some(binding))
+                }
+                _ => (group.source_import(reference, witness)?, None),
+            };
+            match &import {
                 PendingImportOwner::Source {
                     owner,
                     original_ordinal,
                     binder,
                 } => {
-                    let (required, selected_child) = match children {
-                        Some((_, children, _)) => {
+                    let (required, selected_child) = match (exact_original, children) {
+                        (Some(binding), _) => (
+                            NativeGroupKey {
+                                artifact: binding.binding.artifact(),
+                                original_ordinal: binding.original_ordinal,
+                            },
+                            Some(binding),
+                        ),
+                        (None, Some((_, children, _))) => {
                             let mut matching = children.iter().filter(|child| {
                                 let child_key = NativeGroupKey {
                                     artifact: child.binding.artifact(),
@@ -8795,7 +8933,7 @@ impl<'a> OriginalValidationInventory<'a> {
                                 Some(*child),
                             )
                         }
-                        None => (
+                        (None, None) => (
                             NativeGroupKey {
                                 artifact: *native_ids.get(owner).ok_or_else(|| {
                                     source_closure_mismatch(
@@ -8902,7 +9040,7 @@ impl<'a> OriginalValidationInventory<'a> {
                         validation,
                     )?;
                     if let Some(resolved) = &mut resolved {
-                        if matches!(import, PendingImportOwner::RetainedPackage { .. }) {
+                        if matches!(&import, PendingImportOwner::RetainedPackage { .. }) {
                             return Err(CertificationError::Mismatch(
                                 "cache-only retained package import",
                             ));
@@ -8935,8 +9073,14 @@ impl<'a> OriginalValidationInventory<'a> {
                     }
                 }
             }
+            if children.is_some() {
+                pending.push(import);
+            }
         }
-        Ok(resolved)
+        Ok(resolved.map(|selected| CheckedSelectedImports {
+            pending: pending.into(),
+            selected: selected.into(),
+        }))
     }
 }
 
