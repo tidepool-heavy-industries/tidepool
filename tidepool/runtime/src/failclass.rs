@@ -87,7 +87,6 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::MissingPublishedCompilerWorld(_)
         | SessionError::UncertifiedCompilerWorldDeclaration(_)
         | SessionError::WorldCellRequiresServicePreparation
-        | SessionError::WorldCellExpressionReservationUnsupported { .. }
         | SessionError::WorldCellCheckedProgramCapabilityMissing
         | SessionError::WorldCellSuccessorCapabilityMissing { .. }
         | SessionError::WorldCellPublicationBaseStale

@@ -438,8 +438,6 @@ pub enum SessionError {
     UncertifiedCompilerWorldDeclaration(ScopeId),
     #[error("world-owned execution requires service cell preparation")]
     WorldCellRequiresServicePreparation,
-    #[error("world cell item {ordinal} requires an observation-name reservation")]
-    WorldCellExpressionReservationUnsupported { ordinal: usize },
     #[error("world execution requires a SAME-certified checked World CellProgram capability")]
     WorldCellCheckedProgramCapabilityMissing,
     #[error("world cell item {ordinal} requires a SAME-certified per-item successor capability")]

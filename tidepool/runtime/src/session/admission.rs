@@ -5414,16 +5414,14 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        // Naming an expression capture must not enumerate historical names.
-        // A service-owned collision witness is required before this path grows.
-        if let Some(item) = plan
-            .items()
-            .iter()
-            .find(|item| item.kind() == Kind::Expression)
-        {
-            return Err(SessionError::WorldCellExpressionReservationUnsupported {
-                ordinal: item.index(),
-            });
+        // The held compiler issues fresh expression names. Check that witness
+        // before reserving generations; runtime never scans historical names.
+        for item in plan.items() {
+            if item.kind() == Kind::Expression
+                && plan.expression_observation_name(item.index()).is_none()
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
         }
         let store = self.held_admission_store()?;
         let declaration_count = plan
@@ -5458,7 +5456,11 @@ impl PersistentSession {
         for item in plan.items() {
             let mut bindings = Vec::new();
             bindings
-                .try_reserve_exact(item.binders().len())
+                .try_reserve_exact(if item.kind() == Kind::Expression {
+                    1
+                } else {
+                    item.binders().len()
+                })
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
             expected_bindings.push(bindings);
         }
@@ -5510,9 +5512,25 @@ impl PersistentSession {
                     Slot::Bind { value }
                 }
                 Kind::Expression => {
-                    return Err(SessionError::WorldCellExpressionReservationUnsupported {
-                        ordinal: item.index(),
-                    })
+                    let capture = next_value;
+                    next_value += 1;
+                    let observation_name = plan
+                        .expression_observation_name(item.index())
+                        .ok_or(SessionError::StaleStagedDeclaration)?
+                        .to_owned();
+                    let module =
+                        tidepool_repr::SessionModule::val(Generation(capture)).module_name();
+                    let id = tidepool_repr::SessionVarId::from_extract(
+                        tidepool_codegen::prepared_program::session_var_id(
+                            &module,
+                            &observation_name,
+                        ),
+                    );
+                    expected.push((observation_name.clone(), id));
+                    Slot::Expression {
+                        capture,
+                        observation_name,
+                    }
                 }
             };
             slots.push(slot);
