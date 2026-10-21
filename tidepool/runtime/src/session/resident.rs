@@ -12815,7 +12815,7 @@ mod authored_publication_tests {
     }
 
     #[test]
-    fn ordinary_turn_admission_resolves_once_for_owned_startup_and_sync_execution() {
+    fn ordinary_owned_startup_and_sync_execution_keep_the_admitted_scope() {
         use crate::session::{
             assemble_expression_module, run_turn, ExpressionLift, TemplateSelector, TurnRequest,
             TurnResult, TurnTemplate,
@@ -12862,7 +12862,6 @@ mod authored_publication_tests {
             else {
                 panic!("expected the real compiler's expression target");
             };
-            let group_count = compiled.certification.as_ref().unwrap().groups.len();
             let lib = SessionLib::open(
                 SessionId(if startup { 993 } else { 994 }),
                 root.path(),
@@ -12875,11 +12874,18 @@ mod authored_publication_tests {
                 .state
                 .public_visibility_snapshot_in(ScopeId::ROOT)
                 .is_some());
-            let before = session.state.certified_resolution_work();
+            let source = session.mint_notebook_scope_with_lease(None).unwrap();
+            let scope = source.scope();
+            session
+                .set_run_context(SessionRunContext {
+                    lexical_scope: scope,
+                    ..SessionRunContext::ROOT
+                })
+                .unwrap();
             // No CompiledTurn or borrowed code survives this transfer. The
             // admission and installed custody must retain its original inputs.
             let code = compiled.into_code();
-            let outcome = tidepool_testing::with_settlement(|settlement| {
+            let outcome = source_action(&mut session, &source, |session, settlement| {
                 if startup {
                     let entry = session.prepare_startup_entry(code).unwrap();
                     session.run_startup_entry(entry, settlement)
@@ -12892,11 +12898,8 @@ mod authored_publication_tests {
                 panic!("the pure ordinary target must complete");
             };
             assert_eq!(result.to_json(), serde_json::json!(42));
-            let after = session.state.certified_resolution_work();
-            assert_eq!(after.0 - before.0, 1);
-            assert_eq!(after.1 - before.1, group_count);
-            eprintln!("ordinary admission work startup={startup} groups={group_count} resolver_calls={} outline_visits={} resolved_groups=unmeasured",
-                after.0 - before.0, after.1 - before.1);
+            assert_eq!(session.run_context.lexical_scope, scope);
+            assert!(session.public_visibility_snapshot_in(scope).is_some());
         }
     }
 

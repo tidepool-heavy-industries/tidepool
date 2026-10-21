@@ -3785,6 +3785,39 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
                 panic!("actual custom display remains available")
             }
         };
+    let ActivationRendererNative::Renderable(bundle) = &compiled.renderer.native else {
+        panic!("renderable native custody")
+    };
+    let before_images =
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+    let before_fault = resident.residency();
+    let refused = source_action(&mut resident, |resident, _| {
+        resident.admit_turn_code_with_images_in(
+            compiled.admission().scope_lease.scope(),
+            fixture.producer.code(),
+            TurnInstallationAdmission::Compilation,
+            Some(bundle),
+        )
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(ResidentError::Prepared(
+                PreparedRuntimeError::MissingPreparedNativeImage
+            ))
+        ),
+        "a real separately issued producer cannot use the renderer's native plan"
+    );
+    assert_eq!(
+        resident.residency(),
+        before_fault,
+        "a mismatched native plan publishes no program or mutable instance"
+    );
+    assert_eq!(
+        before_images,
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+        "Ready plan refusal never compiles"
+    );
     let ResidentOutcome::Completed { result, .. } =
         source_action(&mut resident, |resident, settlement| {
             resident.run_activation_preview(compiled, settlement)
@@ -4100,34 +4133,6 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     assert!(
         !compiled.admission().is_consumed(),
         "authored-turn refusal must not spend the affine preview admission"
-    );
-    let before_fault = resident.residency();
-    let refused = source_action(&mut resident, |resident, _| {
-        resident.admit_turn_code_with_images_in(
-            compiled.admission().scope_lease.scope(),
-            fixture.producer.code(),
-            TurnInstallationAdmission::Compilation,
-            Some(bundle),
-        )
-    });
-    assert!(
-        matches!(
-            refused,
-            Err(ResidentError::Prepared(
-                PreparedRuntimeError::MissingPreparedNativeImage
-            ))
-        ),
-        "a real separately issued producer cannot use the renderer's native plan"
-    );
-    assert_eq!(
-        resident.residency(),
-        before_fault,
-        "a mismatched native plan publishes no program or mutable instance"
-    );
-    assert_eq!(
-        before,
-        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
-        "Ready plan refusal never compiles"
     );
     let ResidentOutcome::Completed { result, .. } =
         source_action(&mut resident, |resident, settlement| {
