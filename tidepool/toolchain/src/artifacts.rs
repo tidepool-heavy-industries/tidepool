@@ -2486,8 +2486,8 @@ impl SelectedModuleCandidateOffer {
         run: &tidepool_extract_cmd::ExtractRun,
         deployment: &crate::toolchain::AdmittedCompilerDeployment,
     ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
-        let turn: Arc<[u8]> =
-            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
+        let acquisition = invocation_output::extract_turn(run, deployment, directory)?;
+        let turn = acquisition.turn_owned()?;
         let value = crate::checked_cell::decode(&turn)?;
         let row = crate::checked_cell::row(&value, 2)?;
         let (source, site_observations) = match crate::checked_cell::string(&row[0])? {
@@ -2507,24 +2507,11 @@ impl SelectedModuleCandidateOffer {
             }
         };
         let sites = decode_turn_yield_sites(site_observations)?;
-        let native = invocation_output::extract_native(
-            run,
-            deployment,
-            directory,
-            &invocation_output::InvocationOutputLayout::original(&["__prepared"])?,
-            &mut |_, _, _| {},
-            |_, _| {},
-        )?;
-        let targets = native.bundle.targets();
-        let [target] = targets.as_slice() else {
-            return Err(CompileError::ExtractFailed(
-                "native turn output target count".into(),
-            ));
-        };
+        let native = acquisition.complete()?;
         let mut output = ProgramNativeOutput {
             directory: directory.to_path_buf(),
             target: Arc::new(tidepool_repr::execution_schema::parse_program(
-                &target.prepared_bytes,
+                native.bundle.prepared(),
                 &crate::prepared_artifact::production_requirements()?,
                 DecodeLimits::default(),
             )?),

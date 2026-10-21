@@ -14,6 +14,7 @@ enum Artifact {
     Metadata,
     Prepared(String),
     YieldSites(Option<String>),
+    Turn,
     ModuleProducts,
     ModulePackageImports,
     CertifiedProducts,
@@ -28,6 +29,7 @@ impl Artifact {
             Self::Prepared(target) => super::prepared_artifact_name(target),
             Self::YieldSites(Some(target)) => format!("{target}.asks.json"),
             Self::YieldSites(None) => "asks.json".into(),
+            Self::Turn => "turn.cbor".into(),
             Self::ModuleProducts => "module-products.cbor".into(),
             Self::ModulePackageImports => "module-package-imports.cbor".into(),
             Self::CertifiedProducts => "certified-products.cbor".into(),
@@ -40,6 +42,8 @@ impl Artifact {
 pub(crate) struct NativeOutput;
 pub(crate) struct PortableOutput;
 pub(crate) struct OriginalOutput;
+pub(super) struct TurnOutput;
+struct TurnResult;
 
 pub(crate) struct InvocationOutputLayout<P = NativeOutput> {
     artifacts: Vec<Artifact>,
@@ -164,6 +168,7 @@ impl<P> InvocationOutputLayout<P> {
             let limit = match artifact {
                 Artifact::Prepared(_) => DecodeLimits::default().max_bytes,
                 Artifact::PortableReceipt => b"TPPORTABLEOUTPUT1\n".len(),
+                Artifact::Turn => 32 << 20,
                 _ => operation.limits().max_bytes,
             };
             let bytes =
@@ -212,6 +217,22 @@ impl<P> InvocationOutputBundle<P> {
         &self.operation
     }
 
+    pub(crate) fn bytes_len(&self) -> u64 {
+        self.artifacts
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum()
+    }
+}
+
+mod sidecar_purpose {
+    pub trait Sealed {}
+    impl Sealed for super::NativeOutput {}
+    impl Sealed for super::OriginalOutput {}
+    impl Sealed for super::PortableOutput {}
+}
+
+impl<P: sidecar_purpose::Sealed> InvocationOutputBundle<P> {
     pub(crate) fn targets(&self) -> Vec<RawTargetOutput> {
         let multi = self
             .artifacts
@@ -235,12 +256,11 @@ impl<P> InvocationOutputBundle<P> {
             })
             .collect()
     }
+}
 
-    pub(crate) fn bytes_len(&self) -> u64 {
-        self.artifacts
-            .iter()
-            .map(|(_, bytes)| bytes.len() as u64)
-            .sum()
+impl InvocationOutputBundle<TurnOutput> {
+    pub(super) fn prepared(&self) -> &[u8] {
+        self.get(&Artifact::Prepared("__prepared".into()))
     }
 }
 
@@ -420,11 +440,77 @@ mod native_purpose {
     pub trait Sealed {}
     impl Sealed for super::NativeOutput {}
     impl Sealed for super::OriginalOutput {}
+    impl Sealed for super::TurnOutput {}
 }
 
 pub(super) trait NativeOutputPurpose: native_purpose::Sealed {}
 impl NativeOutputPurpose for NativeOutput {}
 impl NativeOutputPurpose for OriginalOutput {}
+impl NativeOutputPurpose for TurnOutput {}
+
+/// A successful turn first yields its actual result kind. Declaration results
+/// have no program sidecars; executable results complete this same acquisition.
+pub(super) struct TurnAcquisition<'a> {
+    bundle: InvocationOutputBundle<TurnResult>,
+    deployment: &'a crate::toolchain::AdmittedCompilerDeployment,
+    root: &'a Path,
+}
+
+impl TurnAcquisition<'_> {
+    pub(super) fn turn_owned(&self) -> Result<Arc<[u8]>, CompileError> {
+        let bytes = self.bundle.get(&Artifact::Turn);
+        self.bundle
+            .operation()
+            .charge(bytes.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        Ok(bytes.as_slice().into())
+    }
+
+    pub(super) fn complete(self) -> Result<CompletedNativeOutputBundle<TurnOutput>, CompileError> {
+        let layout = InvocationOutputLayout::<TurnOutput> {
+            artifacts: vec![
+                Artifact::Metadata,
+                Artifact::Prepared("__prepared".into()),
+                Artifact::CertifiedProducts,
+            ],
+            purpose: PhantomData,
+        };
+        let mut bundle = layout.read(self.root, Arc::clone(self.bundle.operation()))?;
+        bundle.artifacts.extend(self.bundle.artifacts);
+        let association = self
+            .deployment
+            .package_source_association()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed(
+                    "native output requires an admitted package service profile".into(),
+                )
+            })?;
+        capture_native_bundle(
+            bundle,
+            self.root,
+            self.deployment.producer_identity,
+            *association.profile_id(),
+            self.root,
+        )
+    }
+}
+
+pub(super) fn extract_turn<'a>(
+    run: &tidepool_extract_cmd::ExtractRun,
+    deployment: &'a crate::toolchain::AdmittedCompilerDeployment,
+    root: &'a Path,
+) -> Result<TurnAcquisition<'a>, CompileError> {
+    let layout = InvocationOutputLayout::<TurnResult> {
+        artifacts: vec![Artifact::Turn],
+        purpose: PhantomData,
+    };
+    let bundle = super::extract_and_read(run, root, &layout, &mut |_, _, _| {}, |_, _| {})?;
+    Ok(TurnAcquisition {
+        bundle,
+        deployment,
+        root,
+    })
+}
 
 /// Keep the actual completed transaction, selected deployment, physical root,
 /// decoded receipt and its captured members together at the compile front door.
@@ -835,6 +921,99 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+    fn admitted_turn_uses_inline_sites_and_keeps_declarations_without_programs() {
+        for (kind, source, template, executable) in [
+            (
+                "expr",
+                "41 :: Int",
+                include_str!("../../tests/fixtures/invocation-output/NativeTurnExpr.hs"),
+                true,
+            ),
+            (
+                "decl",
+                "answer :: Int\nanswer = 41",
+                include_str!("../../tests/fixtures/invocation-output/NativeTurnDecl.hs"),
+                false,
+            ),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let input = scratch.path().join("turn.txt");
+            let template_path = scratch.path().join("template.hs");
+            std::fs::write(&input, source).unwrap();
+            std::fs::write(&template_path, template).unwrap();
+            let includes = [scratch.path().to_owned()];
+            let (endpoint, mut command) = crate::toolchain::bind_extract_endpoint().unwrap();
+            let deployment = endpoint.deployment().clone();
+            let offer = crate::artifacts::ModuleCandidateOffer::select_admitted(
+                &endpoint,
+                &includes,
+                scratch.path(),
+            )
+            .unwrap();
+            command
+                .input(&input)
+                .turn()
+                .target("__prepared")
+                .turn_template(kind, &template_path)
+                .turn_verdict(kind)
+                .turn_out(scratch.path().join("turn.cbor"))
+                .output_dir(scratch.path())
+                .includes(&includes)
+                .session_root(scratch.path())
+                .bind_gen(1);
+            let applied = offer
+                .prepare_admitted_turn(command, scratch.path())
+                .unwrap();
+            let mut closes = Vec::new();
+            let output = applied
+                .execute_admitted_turn(endpoint, &mut |close| closes.push(close))
+                .expect("actual turn output through its completed acquisition");
+            assert!(
+                output.compiler_output().status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.compiler_output().stderr)
+            );
+            assert!(matches!(
+                closes.as_slice(),
+                [tidepool_extract_cmd::CompilerTransactionClose::Clean]
+            ));
+            assert!(output.turn_bytes().is_some());
+            assert_eq!(output.native_output().is_some(), executable);
+            assert!(
+                !output.directory().join("asks.json").exists(),
+                "turn sites are inline"
+            );
+            assert_eq!(
+                output
+                    .directory()
+                    .join("__prepared.prepared.cbor")
+                    .is_file(),
+                executable
+            );
+            if let Some(native) = output.native_output() {
+                assert!(native.products().is_some());
+                let operation = Arc::new(InventoryOperation::new(Default::default()));
+                assert!(
+                    matches!(
+                        InvocationOutputLayout::original(&["__prepared"]).unwrap()
+                            .read(output.directory(), operation),
+                        Err(CompileError::MissingOutput(path)) if path == output.directory().join("asks.json")
+                    ),
+                    "standalone originals still require their separate sites"
+                );
+                std::fs::remove_file(output.directory().join("meta.cbor")).unwrap();
+                let partial = extract_turn(&output.run, &deployment, output.directory()).unwrap();
+                assert!(
+                    matches!(partial.complete(), Err(CompileError::MissingOutput(path))
+                    if path == output.directory().join("meta.cbor")),
+                    "failed executable completion issues no native output owner"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cancelled_runtime_compile_refuses_before_worker_submission() {
         use tidepool_extract_cmd::{
             with_compiler_transaction_cancellable, CompilerTransactionCancellation,
@@ -869,6 +1048,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
     fn finite_package_targets_reuse_exact_bindings_without_crossing_target_slots() {
         let root = tempfile::tempdir().unwrap();
         let includes = [root.path().to_owned()];
@@ -879,11 +1059,19 @@ mod tests {
             fallback_module_name: "NativePackageTargets",
         };
         let mut executions = 0;
-        let output =
-            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
+        let mut closes = Vec::new();
+        let output = crate::artifacts::compile_invocation(
+            &invocation,
+            |stage, _, _| {
                 executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
-            })
-            .expect("actual finite native package output through common admission");
+            },
+            &mut |close| closes.push(close),
+        )
+        .expect("actual finite native package output through common admission");
+        assert!(matches!(
+            closes.as_slice(),
+            [tidepool_extract_cmd::CompilerTransactionClose::Clean]
+        ));
         assert_eq!(executions, 1);
         let completed = |target: &str| {
             output.targets[target]
@@ -949,6 +1137,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
     fn runtime_targets_complete_through_physical_output_with_native_products() {
         let root = tempfile::tempdir().unwrap();
         let includes = [root.path().to_owned()];
@@ -959,11 +1148,19 @@ mod tests {
             fallback_module_name: "NativeTargets",
         };
         let mut executions = 0;
-        let output =
-            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
+        let mut closes = Vec::new();
+        let output = crate::artifacts::compile_invocation(
+            &invocation,
+            |stage, _, _| {
                 executions += usize::from(stage == crate::timing::STAGE_EXTRACT_SPAWN);
-            })
-            .expect("actual runtime compile through the physical output owner");
+            },
+            &mut |close| closes.push(close),
+        )
+        .expect("actual runtime compile through the physical output owner");
+        assert!(matches!(
+            closes.as_slice(),
+            [tidepool_extract_cmd::CompilerTransactionClose::Clean]
+        ));
         assert_eq!(executions, 1);
         assert_eq!(
             output
