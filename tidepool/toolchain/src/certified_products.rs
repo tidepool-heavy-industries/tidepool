@@ -15350,29 +15350,37 @@ pub(crate) mod tests {
         assert_eq!(held_groups.len(), 1);
         assert_eq!(held_groups[0].binding.artifact(), original.artifact);
         assert_eq!(held_groups[0].original_ordinal, 7);
-        let fresh = fixture_finalized_product_with_requirements(
-            full_native_fixture(
+        let cohort = |local_owner: &CachedHomeOwner| {
+            let external = |ordinal| PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder: testing::identity("BoundOriginal", &format!("entry_{ordinal}")),
+            };
+            let local = |ordinal| PendingImportOwner::Source {
+                owner: local_owner.clone(),
+                original_ordinal: ordinal,
+                binder: testing::identity("LatentSiblingConsumer", &format!("entry_{ordinal}")),
+            };
+            original_groups_fixture(
                 "LatentSiblingConsumer",
                 vec![
-                    (
-                        2,
-                        vec![PendingImportOwner::Source {
-                            owner: product.owner().clone(),
-                            original_ordinal: 7,
-                            binder: testing::identity("BoundOriginal", "entry_7"),
-                        }],
-                    ),
-                    (
-                        3,
-                        vec![PendingImportOwner::Source {
-                            owner: product.owner().clone(),
-                            original_ordinal: 11,
-                            binder: testing::identity("BoundOriginal", "entry_11"),
-                        }],
-                    ),
+                    (2, vec![external(7)]),
+                    (3, vec![external(11)]),
+                    (4, vec![local(5)]),
+                    (5, vec![local(4)]),
+                    (6, vec![local(7), local(3)]),
+                    (7, vec![local(6)]),
                 ],
                 8,
-            ),
+                &BTreeMap::new(),
+            )
+        };
+        // Native bytes determine the owner independently of the HOME import
+        // coordinates. Re-encode those untrusted coordinates with that actual
+        // owner before physical admission, including the local cycles.
+        let draft = cohort(product.owner());
+        let fresh = fixture_finalized_product_with_requirements(
+            cohort(draft.owner()),
             producer,
             Some(BTreeMap::from([(
                 (owner.unit.clone(), owner.module.clone()),
@@ -15404,8 +15412,12 @@ pub(crate) mod tests {
         )
         .unwrap();
         let row = issued.native_availability().issued_row(fresh_id).unwrap();
-        assert!(row.permits(2));
-        assert!(!row.permits(3));
+        for ordinal in [2, 4, 5] {
+            assert!(row.permits(ordinal), "supported local closure {ordinal}");
+        }
+        for ordinal in [3, 6, 7] {
+            assert!(!row.permits(ordinal), "unavailable local closure {ordinal}");
+        }
         assert!(row
             .offers()
             .all(|offer| offer.full_qualification().is_none()));
@@ -30760,6 +30772,65 @@ None,
             .unwrap();
         assert_eq!(restored.capture_graph_selection(), graph);
         assert!(restored.selected_native_groups().is_empty());
+
+        // A separately issued scope selects the same child's payload. That
+        // execution does not replace the old exact metadata binding in Parent.
+        let noise = Arc::new(ArtifactEntry::canonical(fixture_module_interface(
+            producer,
+            "fixture",
+            "ScopeNoise",
+            BTreeMap::new(),
+        )));
+        let alternate = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::clone(&child), noise],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let alternate = inventory
+            .admit_shared(&alternate, vec![Arc::clone(&child)])
+            .unwrap();
+        let alternate_graph = alternate.capture_graph_selection();
+        let new_binding = alternate_graph
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == child.descriptor.id)
+            .copied()
+            .unwrap();
+        assert_ne!(new_binding, original);
+        let with_old_metadata = alternate.retain_custody(&child_view).unwrap();
+        let with_parent = inventory
+            .admit_shared_with_demand(
+                &with_old_metadata,
+                vec![Arc::clone(&parent)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projected = with_parent
+            .select_publication_roots(
+                parent.descriptor.id,
+                vec![parent.descriptor.id, child.descriptor.id],
+            )
+            .unwrap();
+        let projected_graph = projected.capture_graph_selection();
+        assert!(projected_graph.bindings.contains(&original));
+        assert!(projected_graph.bindings.contains(&new_binding));
+        assert!(!projected_graph.native_groups.is_empty());
+        assert!(projected_graph
+            .native_groups
+            .iter()
+            .all(|group| group.binding.artifact() == child.descriptor.id));
+        let fresh = ArtifactInventory::default();
+        let restored = fresh
+            .recover_selection(
+                &fresh.empty_view(),
+                projected.entries(),
+                &projected_graph,
+                &projected.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(restored.capture_graph_selection(), projected_graph);
 
         // Omitting metadata custody does not alter any selected outgoing row;
         // the full nominal witness independently detects the lost exact pair.
