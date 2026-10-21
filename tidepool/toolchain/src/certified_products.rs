@@ -15516,9 +15516,8 @@ pub(crate) mod tests {
             .available_original_sources(std::slice::from_ref(product), &operation)
             .unwrap();
         let sources = membership.overlay(&request.groups, &operation).unwrap();
-        // This partial issuer owns 7's graph, not merely a Full carrier with a
-        // narrower execution choice. Code membership for 11 cannot invent its
-        // absent dependency proof, even for an unused fresh sibling body.
+        // Availability may issue a fresh sibling whose exact child proof is
+        // held, while preserving the other sibling as nominal metadata only.
         let held_groups = source
             .artifacts()
             .original_group_bindings(&operation)
@@ -15569,20 +15568,21 @@ pub(crate) mod tests {
             .bind_produced_originals(&IssuedGroupCandidates::bind(Arc::from([]), &[fresh]).unwrap())
             .unwrap();
         let before = source.artifacts().capture_graph_selection();
-        let refused = OriginalCompilerInputs::issue_segment_native_availability(
+        let fresh_id = fresh_entry.descriptor.id;
+        let issued = OriginalCompilerInputs::issue_segment_native_availability(
             &mut fresh_selection,
             source.artifacts(),
             vec![fresh_entry],
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-        );
-        assert!(
-            matches!(refused,
-            Err(crate::CompileError::ArtifactInventory(ref error))
-                if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact: original.artifact, original_ordinal: 11,
-                }),
-            "unused sibling still needs its actual child proof: {refused:?}"
-        );
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                Arc::clone(&operation),
+            ),
+        ).unwrap();
+        let row = issued.native_availability().issued_row(fresh_id).unwrap();
+        assert!(row.permits(2));
+        assert!(!row.permits(3));
+        assert!(row.offers().all(|offer| offer.full_qualification().is_none()));
+        assert!(issued.issued_artifacts().observed_payload(&fresh_id).unwrap()
+            .native_group_ordinals.contains(&3));
         assert_eq!(source.artifacts().capture_graph_selection(), before);
         let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
         for (reference, ordinal) in references.into_iter().zip([7, 11]) {
