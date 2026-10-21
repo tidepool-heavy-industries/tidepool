@@ -553,9 +553,6 @@ impl TargetNativeInputs {
                         identity: identity.clone(), generation: *generation,
                     });
                 }
-                PendingImportOwner::RetainedPackage { .. } => {
-                    return Err(failure("target contains obsolete live package input"));
-                }
             }
         }
         Ok(CertifiedTargetNativeInputs {
@@ -2025,29 +2022,9 @@ pub struct NativeBindingRequirement {
     pub generation: u64,
 }
 
-/// A package export required by one original native group. Its interface
-/// witness certifies the owner; activation still requires its exact live lease.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct RetainedPackageDependency {
-    pub dependent_ordinal: u32,
-    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
-    pub generation: u64,
-    pub interface_digest: [u8; 32],
-}
-
-/// A selected external package obligation, rooted at its demanding original.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct NativePackageRequirement {
-    pub artifact_id: ArtifactId,
-    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
-    pub generation: u64,
-    pub interface_digest: [u8; 32],
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeRequirements {
     pub bindings: Vec<NativeBindingRequirement>,
-    pub packages: Vec<NativePackageRequirement>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2272,7 +2249,6 @@ pub(crate) struct NativeInventoryFacts {
     pub(crate) native_requirements: BTreeMap<u32, Vec<(ExactModuleIdentity, ArtifactDependency)>>,
     pub(crate) native_owners: BTreeMap<ExactModuleIdentity, NativeOwnerKey>,
     pub(crate) native_group_ordinals: BTreeSet<u32>,
-    pub(crate) retained_packages: Vec<RetainedPackageDependency>,
 }
 impl std::ops::Deref for ArtifactEntry {
     type Target = NativeInventoryFacts;
@@ -5959,7 +5935,6 @@ fn native_requirements_for_exact_groups_in_custody(
     Ok((
         NativeRequirements {
             bindings: requirements.bindings.into_iter().collect(),
-            packages: requirements.packages.into_iter().collect(),
         },
         groups,
     ))
@@ -6091,7 +6066,6 @@ fn original_group_retained_binding_in_scope(
 #[derive(Default)]
 struct NativeRequirementCollector {
     bindings: BTreeSet<NativeBindingRequirement>,
-    packages: BTreeSet<NativePackageRequirement>,
 }
 
 fn native_groups_in_custody(
@@ -6135,19 +6109,7 @@ fn native_groups_in_custody(
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
         // Payload membership is an issued-view invariant even when only groups
         // are requested; keep these lookups independent of fact collection.
-        let payload = &payloads[&key.binding.artifact()];
-        if let Some(requirements) = requirements.as_deref_mut() {
-            for package in &payload.retained_packages {
-                if key.original_ordinal == package.dependent_ordinal {
-                    requirements.packages.insert(NativePackageRequirement {
-                        artifact_id: key.binding.artifact(),
-                        identity: package.identity.clone(),
-                        generation: package.generation,
-                        interface_digest: package.interface_digest,
-                    });
-                }
-            }
-        }
+        let _payload = &payloads[&key.binding.artifact()];
         for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
             match label {
                 ArtifactDependency::NativeGroup { .. } => {
@@ -22047,44 +22009,22 @@ mod tests {
     }
     #[test]
     fn selected_initial_group_excludes_later_captures_and_accepts_issued_empty_group() {
-        use crate::certified_products::{PackageInterfaceWitness, PendingImportOwner};
+        use crate::certified_products::PendingImportOwner;
         use tidepool_repr::execution_schema::testing;
 
-        let package_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(package_file.path(), b"selected package interface").unwrap();
-        let package_digest = digest(b"selected package interface");
-        let package_identity = |occurrence: &str| {
-            let mut identity = testing::identity("Package", occurrence);
-            identity.unit = "package-unit".into();
-            identity
-        };
-        let packages = BTreeMap::from([(
-            ("package-unit".into(), "Package".into()),
-            PackageInterfaceWitness {
-                selected_path: package_file.path().to_path_buf(),
-                sha256: package_digest,
-            },
-        )]);
         let capture = |occurrence: &str, generation| PendingImportOwner::Retained {
             identity: testing::identity("Values", occurrence),
             generation,
         };
-        let package = |occurrence: &str, generation| PendingImportOwner::RetainedPackage {
-            unit: "package-unit".into(),
-            module: "Package".into(),
-            binder: package_identity(occurrence),
-            generation,
-            interface_digest: package_digest,
-        };
         let product = crate::certified_products::tests::original_groups_fixture(
             "Segment",
             vec![
-                (3, vec![capture("first", 4), package("first", 0)]),
-                (11, vec![capture("later", 9), package("later", 7)]),
+                (3, vec![capture("first", 4)]),
+                (11, vec![capture("later", 9)]),
                 (29, Vec::new()),
             ],
             1,
-            &packages,
+            &BTreeMap::new(),
         );
         let segment = ArtifactEntry::original(
             [2; 32],
@@ -22122,15 +22062,6 @@ mod tests {
             }]
         );
         assert_eq!(
-            first.packages,
-            vec![NativePackageRequirement {
-                artifact_id: segment_id,
-                identity: package_identity("first"),
-                generation: 0,
-                interface_digest: package_digest,
-            }]
-        );
-        assert_eq!(
             view.native_requirements_from_roots(&[group(29)]).unwrap(),
             NativeRequirements::default()
         );
@@ -22143,7 +22074,6 @@ mod tests {
             .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(segment_id)])
             .unwrap();
         assert_eq!(all.bindings.len(), 2);
-        assert_eq!(all.packages.len(), 2);
         assert_eq!(
             all,
             view.native_requirements_from_roots(&[group(3), group(11), group(29)])
@@ -22268,67 +22198,6 @@ mod tests {
         drop(selected);
         drop(admitted);
         assert_eq!(inventory.node_count(), 0);
-    }
-
-    #[test]
-    fn native_package_obligations_follow_selected_groups_without_package_artifact_nodes() {
-        let inventory = ArtifactInventory::default();
-        let package_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(package_file.path(), b"native package interface").unwrap();
-        let package_digest = digest(b"native package interface");
-        let packages = BTreeMap::from([(
-            ("ghc-internal".into(), "GHC.Internal.Base".into()),
-            crate::certified_products::PackageInterfaceWitness {
-                selected_path: package_file.path().to_path_buf(),
-                sha256: package_digest,
-            },
-        )]);
-        let package =
-            |occurrence: &str| crate::certified_products::PendingImportOwner::RetainedPackage {
-                unit: "ghc-internal".into(),
-                module: "GHC.Internal.Base".into(),
-                binder: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "ghc-internal".into(),
-                    module: "GHC.Internal.Base".into(),
-                    namespace: "value".into(),
-                    occurrence: occurrence.into(),
-                    record_parent: None,
-                },
-                generation: 0,
-                interface_digest: package_digest,
-            };
-        let helper = issued_native_groups(
-            "Helper",
-            vec![(7, vec![package("map")]), (8, vec![package("foldr")])],
-            &[],
-            &packages,
-        );
-        let root = issued_native_groups(
-            "Root",
-            vec![(2, vec![issued_source(&helper, 7)])],
-            &[],
-            &BTreeMap::new(),
-        );
-        let root_id = root.descriptor.id;
-        let helper_id = helper.descriptor.id;
-        let view = inventory
-            .admit(&inventory.empty_view(), vec![root, helper])
-            .unwrap();
-        let requirements = view
-            .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(root_id)])
-            .unwrap();
-        assert!(requirements.bindings.is_empty());
-        assert_eq!(requirements.packages.len(), 1);
-        assert_eq!(requirements.packages[0].artifact_id, helper_id);
-        assert_eq!(requirements.packages[0].identity.occurrence, "map");
-        assert_eq!(
-            view.native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(helper_id)])
-                .unwrap()
-                .packages
-                .len(),
-            2
-        );
-        assert_eq!(inventory.metrics().nodes, 7);
     }
 }
 

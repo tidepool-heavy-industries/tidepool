@@ -2530,7 +2530,6 @@ fn check_cold_native_projection(
         }])
         .unwrap();
     prop_assert_eq!(requirements.bindings, catalog.bindings_for(&root_groups(0)));
-    prop_assert!(requirements.packages.is_empty());
     prop_assert_eq!(
         groups,
         catalog.selection(&catalog.group_closure(&root_groups(0)))

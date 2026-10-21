@@ -73,13 +73,6 @@ pub enum PendingImportOwner {
         identity: SymbolIdentity,
         generation: u64,
     },
-    RetainedPackage {
-        unit: String,
-        module: String,
-        binder: SymbolIdentity,
-        generation: u64,
-        interface_digest: [u8; 32],
-    },
     Package {
         unit: String,
         module: String,
@@ -107,13 +100,6 @@ pub enum ReceiptImportOwner {
     Retained {
         identity: SymbolIdentity,
         generation: u64,
-    },
-    RetainedPackage {
-        unit: String,
-        module: String,
-        binder: SymbolIdentity,
-        generation: u64,
-        interface_digest: [u8; 32],
     },
     Package {
         unit: String,
@@ -779,12 +765,6 @@ impl CertifiedSegmentOriginals {
                     module,
                     interface_digest,
                     ..
-                }
-                | ReceiptImportOwner::RetainedPackage {
-                    unit,
-                    module,
-                    interface_digest,
-                    ..
                 } => (&owner.0, &owner.1, &witness.sha256) == (unit, module, interface_digest),
                 _ => false,
             });
@@ -1106,11 +1086,7 @@ impl AuthenticatedOriginalGroup {
                     unit: unit.clone(),
                     module: module.clone(),
                     binder: binder.clone(),
-                    interface_digest: *interface_digest,
-                }),
-                ReceiptImportOwner::RetainedPackage { .. } => Err(CertificationError::Mismatch(
-                    "retained package owner removed",
-                )),
+                })
             }
     }
 }
@@ -1317,7 +1293,6 @@ fn retain_authenticated_original_native(
             })
             .collect(),
         native_group_ordinals: native_requirements.group_ordinals.clone(),
-        retained_packages: native_requirements.retained_packages.clone(),
     };
     validation.inventory.reserve::<((String,String),[u8;32])>(witness.packages.len())?;
     for owner in witness.packages.keys() { validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()))?; }
@@ -1813,18 +1788,6 @@ fn validate_global_witness(
             generation,
         } => {
             identity == &declaration.identity
-                && declaration.required_generation == Some(*generation)
-        }
-        ReceiptImportOwner::RetainedPackage {
-            unit,
-            module,
-            binder,
-            generation,
-            ..
-        } => {
-            binder == &declaration.identity
-                && &binder.unit == unit
-                && &binder.module == module
                 && declaration.required_generation == Some(*generation)
         }
         ReceiptImportOwner::Source { binder, .. }
@@ -2636,12 +2599,6 @@ fn global_payload_copy_bytes(global: &AcceptedGlobal) -> CertResult<usize> {
             ..
         }
         | ReceiptImportOwner::Package {
-            unit,
-            module,
-            binder,
-            ..
-        }
-        | ReceiptImportOwner::RetainedPackage {
             unit,
             module,
             binder,
@@ -5953,30 +5910,6 @@ fn resolve_receipt_owner_with_validation(
             identity,
             generation,
         }),
-        ReceiptImportOwner::RetainedPackage {
-            unit,
-            module,
-            binder,
-            generation,
-            interface_digest,
-        } => {
-            validate_package_owner(
-                &unit,
-                &module,
-                &binder,
-                &interface_digest,
-                sources,
-                packages,
-                validation,
-            )?;
-            Ok(PendingImportOwner::RetainedPackage {
-                unit,
-                module,
-                binder,
-                generation,
-                interface_digest,
-            })
-        }
         ReceiptImportOwner::Package {
             unit,
             module,
@@ -6685,20 +6618,6 @@ fn value_import(owner: &ReceiptImportOwner) -> Value {
             value_identity(identity),
             Value::Integer((*generation).into()),
         ]),
-        ReceiptImportOwner::RetainedPackage {
-            unit,
-            module,
-            binder,
-            generation,
-            interface_digest,
-        } => value_array([
-            value_text("retained-package"),
-            value_text(unit),
-            value_text(module),
-            value_text(hex(interface_digest)),
-            value_identity(binder),
-            Value::Integer((*generation).into()),
-        ]),
         ReceiptImportOwner::Package {
             unit,
             module,
@@ -6769,12 +6688,6 @@ fn charge_global(operation: &InventoryOperation, global: &AcceptedGlobal) -> Cer
             module,
             binder,
             ..
-        }
-        | ReceiptImportOwner::RetainedPackage {
-            unit,
-            module,
-            binder,
-            ..
         } => {
             operation.charge(
                 unit.len()
@@ -6815,9 +6728,6 @@ fn encode_home_witness_with_operation(
             charge_symbol(operation, binder)?;
         }
         for global in globals {
-            if matches!(global.owner, ReceiptImportOwner::RetainedPackage { .. }) {
-                return Err(CertificationError::Receipt("retained package owner removed"));
-            }
             charge_global(operation, global)?;
         }
     }
@@ -7066,13 +6976,6 @@ fn decode_home_witness_with_operation(
                     module,
                     interface_digest,
                     binder,
-                }
-                | ReceiptImportOwner::RetainedPackage {
-                    unit,
-                    module,
-                    interface_digest,
-                    binder,
-                    ..
                 } => {
                     let key = (unit.clone(), module.clone());
                     if packages.get(&key).map(|witness| witness.sha256) != Some(*interface_digest)
@@ -7208,13 +7111,6 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
                     module,
                     interface_digest,
                     binder,
-                }
-                | ReceiptImportOwner::RetainedPackage {
-                    unit,
-                    module,
-                    interface_digest,
-                    binder,
-                    ..
                 } => {
                     let key = (unit.clone(), module.clone());
                     if witness.packages.get(&key).map(|witness| witness.sha256)
@@ -7732,7 +7628,6 @@ pub(crate) struct CertifiedNativeRequirements {
         crate::declaration_join::ExactModuleIdentity,
         crate::artifact_inventory::ArtifactDependency,
     )>,
-    pub retained_packages: Vec<crate::artifact_inventory::RetainedPackageDependency>,
 }
 
 fn charge_native_requirements(
@@ -7762,12 +7657,7 @@ fn charge_native_requirements(
             }
         }
     }
-    operation.reserve::<crate::artifact_inventory::RetainedPackageDependency>(
-        requirements.retained_packages.len(),
-    )?;
-    for package in &requirements.retained_packages {
-        charge_symbol(operation, &package.identity)?;
-    }
+
     Ok(())
 }
 
@@ -7797,7 +7687,6 @@ fn certified_native_requirements_with_operation(
 fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNativeRequirements {
     use crate::artifact_inventory::ArtifactDependency;
     let mut requirements = Vec::new();
-    let mut retained_packages = Vec::new();
     for (dependent_ordinal, _, globals) in &witness.groups {
         for global in globals {
             let (owner, dependency) = match &global.owner {
@@ -7832,20 +7721,6 @@ fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNat
                         record_parent: identity.record_parent.clone(),
                     },
                 ),
-                ReceiptImportOwner::RetainedPackage {
-                    binder,
-                    generation,
-                    interface_digest,
-                    ..
-                } => {
-                    retained_packages.push(crate::artifact_inventory::RetainedPackageDependency {
-                        dependent_ordinal: *dependent_ordinal,
-                        identity: binder.clone(),
-                        generation: *generation,
-                        interface_digest: *interface_digest,
-                    });
-                    continue;
-                }
                 // Full Original requirements remain borrowed from the same witness;
                 // Source adjacency cannot represent their exact pair or binding scope.
                 ReceiptImportOwner::OriginalBinding { .. } => continue,
@@ -7856,8 +7731,6 @@ fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNat
     }
     requirements.sort();
     requirements.dedup();
-    retained_packages.sort();
-    retained_packages.dedup();
     CertifiedNativeRequirements {
         group_ordinals: witness
             .groups
@@ -7865,7 +7738,6 @@ fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNat
             .map(|(ordinal, _, _)| *ordinal)
             .collect(),
         artifact_edges: requirements,
-        retained_packages,
     }
 }
 
@@ -8177,19 +8049,6 @@ fn nominal_pending_groups(
                         binder: binder.clone(),
                         interface_digest: *interface_digest,
                     },
-                    PendingImportOwner::RetainedPackage {
-                        unit,
-                        module,
-                        binder,
-                        generation,
-                        interface_digest,
-                    } => ReceiptImportOwner::RetainedPackage {
-                        unit: unit.clone(),
-                        module: module.clone(),
-                        binder: binder.clone(),
-                        generation: *generation,
-                        interface_digest: *interface_digest,
-                    },
                 })
                 .collect();
             Arc::new(AuthenticatedOriginalGroup {
@@ -8325,8 +8184,7 @@ fn issue_home_certification_with_validation(
                         return Err(CertificationError::Mismatch("ambiguous home source owner"));
                     }
                 }
-                ReceiptImportOwner::Package { unit, module, .. }
-                | ReceiptImportOwner::RetainedPackage { unit, module, .. } => {
+                ReceiptImportOwner::Package { unit, module, .. } => {
                     let key = (unit.clone(), module.clone());
                     witness.packages.insert(
                         key.clone(),
@@ -8607,9 +8465,7 @@ fn validate_owned_originals_with_validation(
     }
     for group in current_groups {
         for import in group.imports() {
-            if let PendingImportOwner::Package { unit, module, .. }
-            | PendingImportOwner::RetainedPackage { unit, module, .. } = import
-            {
+            if let PendingImportOwner::Package { unit, module, .. } = import {
                 if homes.contains_key(&(unit.clone(), module.clone())) {
                     return Err(CertificationError::Mismatch(
                         "home owner downgraded to package",
@@ -8632,9 +8488,7 @@ fn validate_owned_originals_with_validation(
         // package downgrades.
         for group in &result {
             for import in group.imports() {
-                if let PendingImportOwner::Package { unit, module, .. }
-                | PendingImportOwner::RetainedPackage { unit, module, .. } = import
-                {
+                if let PendingImportOwner::Package { unit, module, .. } = import {
                     if homes.contains_key(&(unit.clone(), module.clone())) {
                         return Err(CertificationError::Mismatch(
                             "home owner downgraded to package",
@@ -8730,13 +8584,6 @@ fn validate_owned_originals_with_validation(
                         module,
                         binder,
                         interface_digest,
-                    }
-                    | PendingImportOwner::RetainedPackage {
-                        unit,
-                        module,
-                        binder,
-                        interface_digest,
-                        ..
                     } => {
                         if homes.contains_key(&(unit.clone(), module.clone())) {
                             return Err(CertificationError::Mismatch(
@@ -9455,13 +9302,6 @@ impl<'a> OriginalValidationInventory<'a> {
                     module,
                     binder,
                     interface_digest,
-                }
-                | PendingImportOwner::RetainedPackage {
-                    unit,
-                    module,
-                    binder,
-                    interface_digest,
-                    ..
                 } => {
                     validation.inventory.charge(unit.len() + module.len())?;
                     if home_modules.contains(&(unit.clone(), module.clone()))
@@ -9481,11 +9321,6 @@ impl<'a> OriginalValidationInventory<'a> {
                         validation,
                     )?;
                     if let Some(resolved) = &mut resolved {
-                        if matches!(&import, PendingImportOwner::RetainedPackage { .. }) {
-                            return Err(CertificationError::Mismatch(
-                                "cache-only retained package import",
-                            ));
-                        }
                         charge_symbol(&validation.inventory, binder)?;
                         resolved.push(SelectedNativeImport::Package {
                             identity: binder.clone(),
@@ -9866,9 +9701,7 @@ fn authenticate_original_imports(
     for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
         let mut imports = Vec::with_capacity(globals.len());
         for (declaration, selected) in group.globals().iter().zip(globals) {
-            if let ReceiptImportOwner::Package { unit, module, .. }
-            | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
-            {
+            if let ReceiptImportOwner::Package { unit, module, .. } = &selected.owner {
                 if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
                     return Err(CertificationError::Mismatch(
                         "home owner downgraded to package",
@@ -10022,9 +9855,7 @@ fn certify_inherited_inventory_with_validation<W: Borrow<HomeCertification>>(
                 .iter()
                 .zip(globals)
                 .map(|(declaration, selected)| {
-                    if let ReceiptImportOwner::Package { unit, module, .. }
-                    | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
-                    {
+                    if let ReceiptImportOwner::Package { unit, module, .. } = &selected.owner {
                         if homes.contains_key(&(unit.clone(), module.clone())) {
                             return Err(CertificationError::Mismatch(
                                 "home owner downgraded to package",
@@ -12850,8 +12681,7 @@ pub(crate) mod tests {
             .flat_map(|module| &module.groups)
             .flat_map(|group| &group.globals)
             .filter_map(|global| match &global.owner {
-                ReceiptImportOwner::Package { unit, module, .. }
-                | ReceiptImportOwner::RetainedPackage { unit, module, .. } => Some((unit, module)),
+                ReceiptImportOwner::Package { unit, module, .. } => Some((unit, module)),
                 _ => None,
             })
             .collect();
@@ -13260,9 +13090,6 @@ pub(crate) mod tests {
                 identity,
                 generation,
             } => (identity.clone(), Some(*generation)),
-            PendingImportOwner::RetainedPackage {
-                binder, generation, ..
-            } => (binder.clone(), Some(*generation)),
         };
         wire.globals.push(GlobalDecl {
             identity,
@@ -13594,9 +13421,6 @@ pub(crate) mod tests {
                                 identity,
                                 generation,
                             } => (identity, Some(*generation)),
-                            PendingImportOwner::RetainedPackage {
-                                binder, generation, ..
-                            } => (binder, Some(*generation)),
                         };
                         GlobalDecl {
                             identity: identity.clone(),
@@ -15573,16 +15397,23 @@ pub(crate) mod tests {
             &mut fresh_selection,
             source.artifacts(),
             vec![fresh_entry],
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
-                Arc::clone(&operation),
-            ),
-        ).unwrap();
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+                &operation,
+            )),
+        )
+        .unwrap();
         let row = issued.native_availability().issued_row(fresh_id).unwrap();
         assert!(row.permits(2));
         assert!(!row.permits(3));
-        assert!(row.offers().all(|offer| offer.full_qualification().is_none()));
-        assert!(issued.issued_artifacts().observed_payload(&fresh_id).unwrap()
-            .native_group_ordinals.contains(&3));
+        assert!(row
+            .offers()
+            .all(|offer| offer.full_qualification().is_none()));
+        assert!(issued
+            .issued_artifacts()
+            .observed_payload(&fresh_id)
+            .unwrap()
+            .native_group_ordinals
+            .contains(&3));
         assert_eq!(source.artifacts().capture_graph_selection(), before);
         let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
         for (reference, ordinal) in references.into_iter().zip([7, 11]) {
@@ -18028,7 +17859,6 @@ pub(crate) mod tests {
             // require another actual input issuer and must fail this premise.
             assert!(support_entry.requirements.is_empty());
             let requirements = original_native_requirements(support_product).unwrap();
-            assert!(requirements.retained_packages.is_empty());
             assert!(requirements
                 .artifact_edges
                 .iter()
@@ -23833,7 +23663,6 @@ pub(crate) mod tests {
                     .cloned()
                     .collect::<BTreeSet<_>>()
             );
-            assert_eq!(entry.retained_packages, native.retained_packages);
         }
         let groups = certify_owned_products_with_validation(
             &products,
@@ -29780,8 +29609,7 @@ None,
                     }),
                     8 => match &mut right.owner {
                         ReceiptImportOwner::Source { original_ordinal, .. } => *original_ordinal += 1,
-                        ReceiptImportOwner::Retained { generation, .. }
-                        | ReceiptImportOwner::RetainedPackage { generation, .. } => *generation += 1,
+                        ReceiptImportOwner::Retained { generation, .. } => *generation += 1,
                         ReceiptImportOwner::Package { interface_digest, .. } => interface_digest[0] ^= 1,
                         ReceiptImportOwner::OriginalBinding { original, .. } => original.artifact.0[0] ^= 1,
                     },
@@ -29789,14 +29617,12 @@ None,
                         ReceiptImportOwner::Source { module_version, .. } => *module_version = None,
                         ReceiptImportOwner::Retained { identity, .. } => identity.module.push('x'),
                         ReceiptImportOwner::Package { module, .. }
-                        | ReceiptImportOwner::RetainedPackage { module, .. }
                         | ReceiptImportOwner::OriginalBinding { module, .. } => module.push('x'),
                     },
                     10 => right.owner = ReceiptImportOwner::Retained { identity: right.identity.clone(), generation: 999 },
                     _ => match &mut right.owner {
                         ReceiptImportOwner::Source { binder, .. }
-                        | ReceiptImportOwner::Package { binder, .. }
-                        | ReceiptImportOwner::RetainedPackage { binder, .. } => binder.occurrence.push('x'),
+                        | ReceiptImportOwner::Package { binder, .. } => binder.occurrence.push('x'),
                         ReceiptImportOwner::OriginalBinding { original, .. } => original.selection.0[0] ^= 1,
                         ReceiptImportOwner::Retained { identity, .. } => identity.occurrence.push('x'),
                     },

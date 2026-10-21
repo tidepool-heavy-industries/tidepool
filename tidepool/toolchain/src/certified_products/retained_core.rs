@@ -155,21 +155,6 @@ fn edge_value(
             value_identity(binder),
             package_path(unit, module, interface_digest)?,
         ]),
-        PendingImportOwner::RetainedPackage {
-            unit,
-            module,
-            binder,
-            generation,
-            interface_digest,
-        } => value_array([
-            value_text("retained-package"),
-            value_text(unit),
-            value_text(module),
-            value_text(hex(interface_digest)),
-            value_identity(binder),
-            Value::Integer((*generation).into()),
-            package_path(unit, module, interface_digest)?,
-        ]),
     })
 }
 
@@ -363,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn promotion_identity_binds_package_seal_path_and_retained_package_generation() {
+    fn promotion_identity_binds_package_seal_and_path() {
         let identity = binder("pkg", "Package", "value");
         let package = PendingImportOwner::Package {
             unit: "pkg".into(),
@@ -404,31 +389,6 @@ mod tests {
         assert_ne!(
             module_versions(&nodes, &packages).unwrap()[&key("A")],
             original
-        );
-        nodes.get_mut(&key("A")).unwrap().groups.insert(
-            2,
-            vec![PendingImportOwner::RetainedPackage {
-                unit: "pkg".into(),
-                module: "Package".into(),
-                binder: identity,
-                interface_digest: [9; 32],
-                generation: 1,
-            }],
-        );
-        let generation_one = module_versions(&nodes, &packages).unwrap()[&key("A")].clone();
-        let PendingImportOwner::RetainedPackage { generation, .. } = &mut nodes
-            .get_mut(&key("A"))
-            .unwrap()
-            .groups
-            .get_mut(&2)
-            .unwrap()[0]
-        else {
-            unreachable!()
-        };
-        *generation = 2;
-        assert_ne!(
-            module_versions(&nodes, &packages).unwrap()[&key("A")],
-            generation_one
         );
     }
 }
