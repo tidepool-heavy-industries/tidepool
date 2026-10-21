@@ -2074,7 +2074,11 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
             .unwrap();
         assert!(matches!(
             error.downcast_ref::<crate::certified_products::CertificationError>(),
-            Some(crate::certified_products::CertificationError::StaleEvidence)
+            Some(
+                crate::certified_products::CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+                )
+            )
         ));
     }
 }

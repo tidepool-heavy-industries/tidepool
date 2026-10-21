@@ -2707,11 +2707,7 @@ pub(crate) fn package_validation_error(
         {
             CertificationError::Interrupted(error)
         }
-        error @ (crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_)
-        | crate::recovery_artifacts::RecoveryArtifactError::CompletedSourceEvidence {
-            ..
-        }) => CertificationError::CapturedModulePayload(error),
-        _ => CertificationError::StaleEvidence,
+        error => CertificationError::CapturedModulePayload(error),
     }
 }
 
@@ -12065,7 +12061,9 @@ pub(crate) mod tests {
         std::fs::write(&path, b"changed interface").unwrap();
         assert!(matches!(
             certify_target_package_interfaces(&target, &packages),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -22812,7 +22810,9 @@ pub(crate) mod tests {
                     std::slice::from_ref(&product),
                     &mut PackageInterfaceValidation::default(),
                 ),
-                Err(CertificationError::StaleEvidence)
+                Err(CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+                ))
             ));
             std::fs::write(&first, [0x43]).unwrap();
             assert_eq!(
@@ -22945,7 +22945,9 @@ pub(crate) mod tests {
                 consumer,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
         assert!(matches!(
             certify_owned_products_with_validation(
@@ -22953,7 +22955,9 @@ pub(crate) mod tests {
                 &[],
                 &mut PackageInterfaceValidation::default()
             ),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -23140,7 +23144,9 @@ pub(crate) mod tests {
         std::fs::write(path, [0x43]).unwrap();
         assert!(matches!(
             validate_home_certification(&sealed, &a),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -29044,20 +29050,60 @@ None,
             ..InventoryDecodeLimits::default()
         }));
         let mut limited = PackageInterfaceValidation::with_inventory(operation);
+        let error = verify_package_interface(&mut limited, &witness).unwrap_err();
         assert!(matches!(
-            verify_package_interface(&mut limited, &witness),
-            Err(CertificationError::CapturedModulePayload(
+            &error,
+            CertificationError::CapturedModulePayload(
                 crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(
                     crate::recovery_artifacts::RecoveryAdmissionFailure::Decode(
                         tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
                     )
                 )
-            ))
+            )
         ));
+        let classified = crate::failclass::classify_compile(
+            &crate::CompileError::CompilerEvidence(Box::new(error)),
+        );
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::Budget {
+                    resource: "work".into()
+                },
+            })
+        );
+        let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let outcome = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || verify_package_interface(&mut PackageInterfaceValidation::default(), &witness),
+        );
+        assert_eq!(
+            outcome.close,
+            tidepool_extract_cmd::CompilerTransactionClose::NotStarted
+        );
+        let error = outcome.action.unwrap_err();
+        assert!(
+            matches!(&error, CertificationError::Interrupted(error) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        let classified = crate::failclass::classify_compile(
+            &crate::CompileError::CompilerEvidence(Box::new(error)),
+        );
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::Interrupted,
+            })
+        );
         std::fs::write(path, b"changed interface").unwrap();
         assert!(matches!(
             verify_package_interface(&mut PackageInterfaceValidation::default(), &witness),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -29089,7 +29135,9 @@ None,
         std::fs::write(&selected_path, b"changed interface").unwrap();
         assert!(matches!(
             resolve_receipt_owner(import, &SourceGroupMap::new(), &packages),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
     #[test]
