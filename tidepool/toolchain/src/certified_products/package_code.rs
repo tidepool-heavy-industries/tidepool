@@ -393,7 +393,13 @@ impl CertifiedPackageCodeProduct {
             interface,
             &operation,
         )?;
-        verify_package_interface(validation, interface)?;
+        validation
+            .verify_captured(
+                &interface.selected_path,
+                &interface.sha256,
+                defining_interface.bytes(),
+            )
+            .map_err(package_validation_error)?;
         operation.reserve::<[u8; 32]>(code.globals().len())?;
         operation.reserve::<Arc<CertifiedPackageCodeInterface>>(code.globals().len())?;
         let mut import_interface_witnesses = Vec::with_capacity(code.globals().len());
@@ -415,22 +421,25 @@ impl CertifiedPackageCodeProduct {
                 .ok_or(CertificationError::Mismatch(
                     "package code import interface",
                 ))?;
-            validate_package_owner(
+            let witness = package_owner_witness(
                 &global.identity.unit,
                 &global.identity.module,
                 &global.identity,
                 &witness.sha256,
                 &SourceGroupMap::new(),
                 &receipt.packages,
-                validation,
             )?;
-            import_interface_witnesses.push(CertifiedPackageCodeInterface::from_native_output(
+            let captured = CertifiedPackageCodeInterface::from_native_output(
                 program,
                 &global.identity.unit,
                 &global.identity.module,
                 witness,
                 &operation,
-            )?);
+            )?;
+            validation
+                .verify_captured(&witness.selected_path, &witness.sha256, captured.bytes())
+                .map_err(package_validation_error)?;
+            import_interface_witnesses.push(captured);
             import_interfaces.push(witness.sha256);
         }
         // Import seals are part of product identity. Exact dependency binding
