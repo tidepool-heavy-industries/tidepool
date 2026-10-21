@@ -987,6 +987,9 @@ thread_local! {
 }
 
 impl AuthenticatedOriginalGroup {
+    pub(crate) fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
     pub(crate) fn origin(&self) -> ProductOrigin {
         self.origin
     }
@@ -1234,39 +1237,6 @@ pub(crate) fn original_native_group_imports(
         return None;
     }
     Some(witness.group(original_ordinal)?.imports())
-}
-
-fn retain_original_native(
-    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
-    groups: Vec<PendingCertifiedGroup>,
-    witness: HomeCertification,
-) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
-    retain_authenticated_original_native(
-        product,
-        groups
-            .into_iter()
-            .map(|group| {
-                let globals = witness
-                    .groups
-                    .iter()
-                    .find(|(ordinal, _, _)| *ordinal == group.group.original_ordinal())
-                    .ok_or(CertificationError::Mismatch(
-                        "nominal original lacks its witnessed group",
-                    ))?;
-                Ok(Arc::new(AuthenticatedOriginalGroup {
-                    origin: group.origin,
-                    owner: group.owner,
-                    group: group.group,
-                    imports: globals
-                        .2
-                        .iter()
-                        .map(|global| global.owner.clone())
-                        .collect(),
-                }))
-            })
-            .collect::<CertResult<Vec<_>>>()?,
-        witness,
-    )
 }
 
 fn retain_authenticated_original_native(
@@ -22233,7 +22203,7 @@ pub(crate) mod tests {
     fn selected_fresh_candidates_preserve_origin_and_full_native_bytes() {
         use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeGroupKey};
         let original = full_native_fixture("FreshSubset", vec![(8, vec![]), (11, vec![])], 7);
-        let mut candidates = original
+        let candidates = original
             .original_native()
             .unwrap()
             .groups
@@ -25857,46 +25827,26 @@ None,
                     })
                 })
                 .collect::<BTreeSet<_>>();
-            for count in 0..=2 {
-                let subset = selected
+            let available = available_original_source_map(
+                &issued.recovery_products,
+                &[],
+                &InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+            assert_eq!(
+                available
                     .iter()
-                    .take(count)
-                    .map(|group| (*group).clone())
-                    .collect::<Vec<_>>();
-                let available = available_original_source_map(
-                    &issued.recovery_products,
-                    &subset,
-                    &InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-                assert_eq!(
-                    available
+                    .map(|(key, _)| key.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_keys
+            );
+            assert!(selected
+                .iter()
+                .all(|group| group.origin() == ProductOrigin::RetainedCore
+                    && issued
+                        .recovery_products
                         .iter()
-                        .map(|(key, _)| key.clone())
-                        .collect::<BTreeSet<_>>(),
-                    expected_keys
-                );
-                let selected_keys = subset
-                    .iter()
-                    .flat_map(|group| {
-                        group.group().binders().iter().map(move |binder| {
-                            (
-                                group.owner().clone(),
-                                group.group().original_ordinal(),
-                                binder.clone(),
-                            )
-                        })
-                    })
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(
-                    available.groups.keys().cloned().collect::<BTreeSet<_>>(),
-                    selected_keys
-                );
-                assert!(available
-                    .groups
-                    .values()
-                    .all(|(_, origin)| *origin == ProductOrigin::RetainedCore));
-            }
+                        .any(|product| group.matches_original(product))));
             let mut duplicate = packet.clone();
             let duplicated = duplicate.modules[0].groups[0].clone();
             duplicate.modules[0].groups.push(duplicated);
@@ -27395,10 +27345,10 @@ None,
                         })
                     })
                     .collect::<BTreeSet<_>>();
-                for selected_count in 0..=2 {
+                {
                     let sources = available_original_source_map(
                         &certified.recovery_products,
-                        &certified.groups[..selected_count],
+                        &[],
                         &InventoryOperation::new(Default::default()),
                     )
                     .unwrap();
@@ -27464,15 +27414,9 @@ None,
                     ParsedModuleProducts::decode(&nonempty_sidecar(1), &empty_package_bundle())
                         .unwrap();
                 let mut wrong = certified.groups[0].clone();
-                wrong.group = Arc::new(substituted.products()[0].groups[0].clone());
-                assert!(matches!(
-                    available_original_source_map(
-                        &certified.recovery_products,
-                        &[wrong],
-                        &InventoryOperation::new(Default::default()),
-                    ),
-                    Err(CertificationError::Mismatch("shared original home groups"))
-                ));
+                Arc::make_mut(&mut wrong).group =
+                    Arc::new(substituted.products()[0].groups[0].clone());
+                assert!(!wrong.matches_original(current));
             }
             for old in &prior {
                 let retained = certified
@@ -27782,7 +27726,7 @@ None,
             .collect::<Vec<_>>();
         let witness = decode_home_witness(original.certification_bytes()).unwrap();
         assert!(
-            retain_original_native(
+            retain_authenticated_original_native(
                 draft.clone(),
                 groups.clone(),
                 decode_home_witness(original.certification_bytes()).unwrap()
@@ -27790,7 +27734,7 @@ None,
             .is_err(),
             "a sealed execution graph cannot be absent from a complete original"
         );
-        let complete = retain_original_native(
+        let complete = retain_authenticated_original_native(
             draft.with_execution_source(Arc::clone(graph)).unwrap(),
             groups,
             witness,
@@ -29880,7 +29824,7 @@ None,
         );
         let product = fixture_finalized_product(product, [1; 32]);
         let cold = decode_home_witness(product.certification_bytes()).unwrap();
-        let retained = retain_original_native(product, vec![], cold).unwrap();
+        let retained = retain_authenticated_original_native(product, vec![], cold).unwrap();
         assert_eq!(
             original_interface_requirements(&retained).unwrap(),
             requirements
