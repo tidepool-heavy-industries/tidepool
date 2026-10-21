@@ -244,12 +244,19 @@ impl ClosedInstantiationPlan {
         if has_retained_inputs(selection) {
             return Ok(None);
         }
-        let native = NativeInstantiationPlan::prepare_code(code, registry)?;
+        Self::restrict(Arc::new(NativeInstantiationPlan::prepare_code(code, registry)?))
+    }
+
+    /// Restrict this exact prepared plan without rebuilding its imports or images.
+    pub(in crate::session) fn restrict(
+        native: Arc<NativeInstantiationPlan>,
+    ) -> Result<Option<Self>, PreparedRuntimeError> {
+        if has_retained_inputs(&native.selection) {
+            return Ok(None);
+        }
         BatchProgram::validate_closed(&native.closed_batch()?)
             .map_err(PreparedRuntimeError::Install)?;
-        Ok(Some(Self {
-            native: Arc::new(native),
-        }))
+        Ok(Some(Self { native }))
     }
 
     fn target_definition(&self) -> ClosedNativeDefinition<'_> {
