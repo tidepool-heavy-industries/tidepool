@@ -6984,10 +6984,11 @@ mod checkpoint_scope_tests {
     #[test]
     fn nested_authored_domains_keep_unmaterialized_capture_after_origin_retirement() {
         use super::super::prepared::tests::{
-            certified_source_group_modules, install_selected_groups_fixture,
-            prepare_selected_groups_fixture,
+            authored_domain_fixture, authored_domain_owner, install_runtime_fixture_in,
         };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let targets = authored_domain_fixture();
+        let d_owner = authored_domain_owner("SourceDomainD");
+        let e_owner = authored_domain_owner("SourceDomainE");
         for reversed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let recovery =
@@ -6995,41 +6996,30 @@ mod checkpoint_scope_tests {
             let mut session = publication_session(&recovery, root.path(), 825);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             let d = session.mint_detached_scope(public).unwrap();
-            let groups = [
-                certified_source_group_modules("D", "d1", 1, "Support", "support"),
-                certified_source_group_modules("D", "d2", 2, "Support", "support"),
-                certified_source_group_modules("E", "e1", 1, "D", "d1"),
-                certified_source_group_modules("E", "e2", 2, "D", "d2"),
-                certified_source_group_modules("Support", "support", 5, "Support", "support"),
-            ];
-            let source = |module, name| SourceBinder {
-                version: ModuleVersion([1; 32]),
-                binder: testing::identity(module, name),
-            };
-            mint_fixture_origin(&mut session, d, groups[0].owner().clone());
+            mint_fixture_origin(&mut session, d, d_owner.clone());
             let e = session.mint_detached_scope(d).unwrap();
             assert!(
                 selected_sources(&session, e).is_empty(),
                 "D is unmaterialized at capture"
             );
-            mint_fixture_origin(&mut session, e, groups[2].owner().clone());
-            let (td, kd) =
-                install_selected_groups_fixture(&mut session, d, &groups, source("D", "d1"));
-            let (te, ke) =
-                install_selected_groups_fixture(&mut session, e, &groups, source("E", "e1"));
+            mint_fixture_origin(&mut session, e, e_owner.clone());
+            let (td, kd, _placement_d) =
+                install_runtime_fixture_in(&mut session, d, targets, "dFirst");
+            let (te, ke, _placement_e) =
+                install_runtime_fixture_in(&mut session, e, targets, "eFirst");
             let support_a = selected_sources(&session, d)
                 .into_iter()
-                .find(|lease| lease.owner().module == "Support")
+                .find(|lease| lease.owner().module == "SourceDomainSupport")
                 .unwrap();
             let support_b = selected_sources(&session, e)
                 .into_iter()
-                .find(|lease| lease.owner().module == "Support")
+                .find(|lease| lease.owner().module == "SourceDomainSupport")
                 .unwrap();
             assert_ne!(support_a.instance(), support_b.instance());
             let publications = if reversed {
-                vec![(e, &ke, groups[2].owner()), (d, &kd, groups[0].owner())]
+                vec![(e, &ke, &e_owner), (d, &kd, &d_owner)]
             } else {
-                vec![(d, &kd, groups[0].owner()), (e, &ke, groups[2].owner())]
+                vec![(d, &kd, &d_owner), (e, &ke, &e_owner)]
             };
             for (scope, keys, owner) in publications {
                 let prepared = session
@@ -7051,61 +7041,45 @@ mod checkpoint_scope_tests {
             session.retire_scope(d);
             session.retire_scope(e);
             let later = session.mint_detached_scope(public).unwrap();
-            let (target, evidence, inherited) = prepare_selected_groups_fixture(
-                &session,
-                later,
-                &groups,
-                &[source("D", "d2"), source("E", "e2")],
-            );
-            let root_domain = target.source_plan().target[&source("D", "d2")].domain;
-            let e_domain = target.source_plan().target[&source("E", "e2")].domain;
-            assert_ne!(root_domain, e_domain);
-            let d2: Vec<_> = target
-                .demanded()
-                .iter()
-                .filter(|image| image.group().owner().module == "D")
-                .collect();
-            assert_eq!(d2.len(), 2);
-            assert!(
-                Arc::ptr_eq(d2[0].image(), d2[1].image()),
-                "immutable D2 image is shared"
-            );
-            let selection = session
+            let (late_d, _, _placement_late_d) =
+                install_runtime_fixture_in(&mut session, later, targets, "dLater");
+            let (late_e, _, _placement_late_e) =
+                install_runtime_fixture_in(&mut session, later, targets, "eLater");
+            let selected = session
                 .bindings
-                .source_domain_selection_in(&session.scopes, later)
+                .native_domain_selection_in(&session.scopes, later)
                 .unwrap();
-            for image in d2 {
-                let key = image
-                    .qualified_source(&source("Support", "support"))
-                    .unwrap();
-                let selected = &selection.inherited()[&key];
-                assert_eq!(
-                    selected.handle(),
-                    if image.domain() == root_domain {
-                        support_a.handle()
-                    } else {
-                        support_b.handle()
-                    }
-                );
+            let d_domain = selected
+                .domain_for_owner(selected.current(), &d_owner)
+                .unwrap();
+            let e_domain = selected
+                .domain_for_owner(selected.current(), &e_owner)
+                .unwrap();
+            assert_ne!(d_domain, e_domain);
+            for (domain, expected) in [(d_domain, &support_a), (e_domain, &support_b)] {
+                assert!(selected
+                    .roots()
+                    .iter()
+                    .any(|(key, lease)| key.domain == domain
+                        && lease.handle() == expected.handle()
+                        && lease.instance() == expected.instance()));
             }
-            let (mixed, _, _) = session
-                .install_certified_turn_in(
-                    later,
-                    &target.fixture_constructor_metadata(),
-                    target,
-                    &evidence,
-                    &inherited,
-                    &|_| None,
-                )
-                .unwrap()
-                .into_parts();
             let d2_leases: Vec<_> = selected_sources(&session, later)
                 .into_iter()
-                .filter(|lease| lease.owner().module == "D" && lease.original_ordinal() == 2)
+                .filter(|lease| {
+                    lease.owner().module == "SourceDomainD"
+                        && lease.binder().binder.occurrence == "d2"
+                })
                 .collect();
             assert_eq!(d2_leases.len(), 2);
             assert_ne!(d2_leases[0].instance(), d2_leases[1].instance());
-            assert!(session.prepared_mut().unwrap().unpin(mixed));
+            assert_eq!(
+                d2_leases[0].binding(),
+                d2_leases[1].binding(),
+                "same issued D2 product through distinct actual domains"
+            );
+            assert!(session.prepared_mut().unwrap().unpin(late_d));
+            assert!(session.prepared_mut().unwrap().unpin(late_e));
             session.retire_scope(later);
             session.retire_scope(public);
             session
