@@ -22257,10 +22257,7 @@ mod package_code {
             let prepared = scope_proof::prepare_install(&state, witness)?;
             validate_existing_rows(&state, &bound)?;
             scope_proof::install(&mut state, prepared);
-            let roots = roots
-                .iter()
-                .map(resolve)
-                .collect::<Result<Vec<_>, _>>()?;
+            let roots = roots.iter().map(resolve).collect::<Result<Vec<_>, _>>()?;
             let parents = vec![Arc::clone(&acquired.lease)];
             let custody = roots
                 .iter()
@@ -22405,6 +22402,74 @@ mod package_code {
                 roots: roots.into(),
                 rows,
             }))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn package_graph_requires_acquired_package_rows_and_refuses_atomically() {
+            let inventory = ArtifactInventory::default();
+            let empty = inventory.empty_view();
+            let operation =
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+            let before = empty.capture_graph_selection();
+            let scopes = inventory.0.lock().unwrap().selection_plans.len();
+            let absent = ArtifactId([91; 32]);
+            let missing = IssuedPackageCodeGraph::issue(
+                &empty,
+                vec![],
+                vec![PackageCodeTarget::Fresh(absent)],
+                &[],
+                &operation,
+            )
+            .unwrap_err();
+            assert!(matches!(missing, CompileError::ArtifactInventory(error)
+            if error.failure == ArtifactInventoryFailure::PackageCode {
+                artifact: absent, reason: PackageCodeRefusal::MissingProduct,
+            }));
+            assert_eq!(empty.capture_graph_selection(), before);
+            assert_eq!(inventory.0.lock().unwrap().selection_plans.len(), scopes);
+            let no_packages =
+                IssuedPackageCodeGraph::issue(&empty, vec![], vec![], &[], &operation).unwrap();
+            assert!(no_packages.roots().is_empty());
+            assert_eq!(no_packages.bindings().len(), 0);
+            assert!(no_packages
+                .artifacts()
+                .capture_graph_selection()
+                .namespace
+                .is_empty());
+            assert!(no_packages
+                .artifacts()
+                .capture_graph_selection()
+                .roots
+                .is_empty());
+            let canonical =
+                ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "fixture",
+                    "PackageInterfaceOnly",
+                    BTreeMap::new(),
+                ));
+            let view = inventory.admit(&empty, vec![canonical]).unwrap();
+            let selected = view.capture_graph_selection();
+            let binding = selected.namespace[0];
+            let wrong_kind =
+                IssuedPackageCodeGraph::from_issued(&view, &[binding], &operation).unwrap_err();
+            assert!(matches!(wrong_kind, CompileError::ArtifactInventory(error)
+            if error.failure == ArtifactInventoryFailure::PackageCode {
+                artifact: binding.artifact, reason: PackageCodeRefusal::WrongKind,
+            }));
+            let unacquired =
+                IssuedPackageCodeGraph::from_issued(&empty, &[binding], &operation).unwrap_err();
+            assert!(matches!(unacquired, CompileError::ArtifactInventory(error)
+            if error.failure == ArtifactInventoryFailure::PackageCode {
+                artifact: binding.artifact,
+                reason: PackageCodeRefusal::MissingBinding { binding },
+            }));
+            assert_eq!(view.capture_graph_selection(), selected);
         }
     }
 }
