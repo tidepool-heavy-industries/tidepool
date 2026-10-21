@@ -14500,9 +14500,10 @@ pub(crate) mod tests {
             extended.metadata(&references[1])
         );
         // Independent issuer scopes for equal payloads remain distinct metadata custody.
-        let receiving = inventory
+        let receiving_inventory = acquisition.artifacts().inventory();
+        let receiving = receiving_inventory
             .admit_recovery_selection(
-                &inventory.empty_view(),
+                &receiving_inventory.empty_view(),
                 vec![entry.clone(), other_entry.clone()],
                 &BTreeSet::from([NativeGroupKey {
                     artifact: entry.descriptor.id,
