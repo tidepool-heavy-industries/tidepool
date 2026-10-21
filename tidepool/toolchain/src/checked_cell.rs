@@ -5739,9 +5739,7 @@ mod tests {
             ReceiptImportOwner,
         };
         use crate::recovery_artifacts::PackageInterfaceValidation;
-        use tidepool_repr::execution_schema::{
-            testing, GlobalDecl, Group, ModuleVersion, RuntimeRep,
-        };
+        use tidepool_repr::execution_schema::{testing, GlobalDecl, Group, ModuleVersion, RuntimeRep};
         let products = ["Authored", "Wrapper"]
             .iter()
             .map(|module| {
@@ -5915,19 +5913,6 @@ mod tests {
             },
         }];
         let mut validation = PackageInterfaceValidation::default();
-        let original_groups = certified_products::certify_owned_products_with_validation(
-            &products.iter().collect::<Vec<_>>(),
-            &[],
-            &mut validation,
-        )
-        .unwrap();
-        certified_products::certify_target_owners(
-            &target,
-            &accepted,
-            &original_groups,
-            &BTreeMap::new(),
-        )
-        .unwrap();
         let entries = products
             .iter()
             .cloned()
@@ -5976,41 +5961,32 @@ mod tests {
         let observed =
             AuthenticatedTargetImports::issue(&authored_target, &[], &validation.inventory)
                 .unwrap();
+        let wrong_body = inventory
+            .select_native_target(
+                physical,
+                fixed.source_selection(),
+                observed,
+                Some(changed_entry),
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .map(|_| ());
         assert!(
-            inventory
-                .select_native_target(
-                    physical,
-                    fixed.source_selection(),
-                    observed,
-                    Some(changed_entry),
-                    None,
-                    &[],
-                    &BTreeMap::new(),
-                    &mut validation,
-                )
-                .is_err(),
-            "same entry symbol with a different target body cannot borrow its typed entry"
+            matches!(&wrong_body, Err(CompileError::ExtractFailed(detail))
+                if detail == "artifact inventory: typed target entry belongs to another prepared target"),
+            "same entry symbol cannot borrow a different target body; actual={wrong_body:?}",
         );
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
             before.issued_scope_nodes
         );
         let authored_only = authored_admission.artifacts();
-        let authored_groups =
-            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
-                &authored_only,
-                None,
-                &mut validation,
-            )
-            .unwrap();
-        assert_eq!(authored_groups.len(), 1);
-        assert!(certified_products::certify_target_owners(
-            &target,
-            &accepted,
-            &authored_groups,
-            &BTreeMap::new()
-        )
-        .is_err());
+        assert_eq!(
+            authored_only.selected_native_groups(),
+            BTreeSet::from([entry.native_group_key()]),
+        );
         assert!(
             AuthenticatedTargetImports::issue(&target, &[], &validation.inventory).is_err(),
             "the wrapper's declared import cannot disappear from its observation"
@@ -6057,15 +6033,7 @@ mod tests {
                 "available sibling groups cannot issue completion authority"
             );
         }
-        let groups =
-            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
-                &complete,
-                None,
-                &mut validation,
-            )
-            .unwrap();
-        certified_products::certify_target_owners(&target, &accepted, &groups, &BTreeMap::new())
-            .unwrap();
+        let scopes_before_mutations = inventory.metrics().issued_scope_nodes;
         for mutation in 0..4 {
             let mut invalid = accepted.clone();
             let ReceiptImportOwner::Source {
@@ -6088,14 +6056,46 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(certified_products::certify_target_owners(
-                &target,
-                &invalid,
-                &original_groups,
-                &BTreeMap::new(),
-            )
-            .is_err());
+            let observed =
+                AuthenticatedTargetImports::issue(&target, &invalid, &validation.inventory);
+            if mutation == 3 {
+                assert!(matches!(
+                    observed,
+                    Err(certified_products::CertificationError::Mismatch(
+                        "global owner"
+                    ))
+                ));
+                continue;
+            }
+            let denied = inventory
+                .select_native_target(
+                    physical,
+                    fixed.source_selection(),
+                    observed.unwrap(),
+                    Some(entry.clone()),
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .map(|_| ());
+            let expected = match mutation {
+                0 => "source module version",
+                1 => "source outside compiler selection",
+                2 => "target Source exact native membership",
+                _ => unreachable!(),
+            };
+            assert!(
+                matches!(&denied, Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), certified_products::CertificationError::Mismatch(actual)
+                        if *actual == expected)),
+                "mutation={mutation}, actual={denied:?}",
+            );
         }
+        assert_eq!(
+            inventory.metrics().issued_scope_nodes,
+            scopes_before_mutations,
+        );
         let missing_inventory = ArtifactInventory::default();
         let missing_view = missing_inventory
             .admit_shared_with_demand(
