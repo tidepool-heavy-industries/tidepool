@@ -1002,6 +1002,14 @@ impl PersistentSession {
         targets: &crate::RuntimePreparedTargets,
         name: &str,
     ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
+        let source = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let target = (scope != ScopeId::ROOT)
+            .then(|| self.source_lease_in(scope))
+            .transpose()?;
+        source.admit_original(&targets.source, target)?;
         let compiled = super::turn::CompiledTurn::from_runtime_target(targets, name)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         let plan = super::prepared::ClosedInstantiationPlan::prepare(
@@ -8481,9 +8489,11 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn certified_install_with_plan_reaches_the_source_transaction_seam() {
+        use tidepool_codegen::prepared_program::CompiledProgram;
         let targets = super::super::prepared::tests::compile_source_publication_fixture();
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let scope = session.mint_isolated_scope();
+        let before_images = CompiledProgram::successful_image_compilations();
         let refused = session.install_runtime_target_in(scope, targets, "result");
         assert!(matches!(
             refused,
@@ -8495,6 +8505,50 @@ mod checkpoint_scope_tests {
             session.prepared().is_none(),
             "refusal precedes machine allocation"
         );
+        assert_eq!(
+            CompiledProgram::successful_image_compilations(),
+            before_images,
+            "missing transaction refuses before native image preparation"
+        );
+
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        assert!(!Arc::ptr_eq(&targets.source, other.original_source()));
+        for target_scope in [ScopeId::ROOT, other.scope()] {
+            let before_visibility = session.public_visibility_snapshot_in(target_scope).unwrap();
+            let settled = session
+                .with_source_compiler_transaction(
+                    other.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.install_runtime_target_in(target_scope, targets, "result"),
+                )
+                .unwrap();
+            assert!(
+                matches!(
+                    settled.action(),
+                    Err(PreparedRuntimeError::SourceAdmission(
+                        super::super::SourceAdmissionError::DifferentOriginalSource
+                    ))
+                ),
+                "the output's actual source is required even when the target is ROOT"
+            );
+            assert!(matches!(
+                settled.close(),
+                crate::CompilerTransactionClose::NotStarted
+            ));
+            assert!(session.prepared().is_none());
+            assert_eq!(
+                session.public_visibility_snapshot_in(target_scope).unwrap(),
+                before_visibility
+            );
+            assert_eq!(
+                CompiledProgram::successful_image_compilations(),
+                before_images,
+                "a foreign source transaction cannot prepare images or install the output"
+            );
+        }
     }
 }
 
