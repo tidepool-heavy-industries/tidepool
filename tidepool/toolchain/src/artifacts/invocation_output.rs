@@ -668,11 +668,57 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
         operation: Arc::clone(bundle.operation()),
         files,
     };
+    #[cfg(test)]
+    capture_observation::observe(&output);
     Ok(CompletedNativeOutputBundle {
         bundle,
         receipt,
         output,
     })
+}
+
+#[cfg(test)]
+mod capture_observation {
+    use super::*;
+
+    thread_local! {
+        static ROOTS: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn observe(output: &FiniteNativeOutput) {
+        ROOTS.with(|slot| {
+            if let Some(roots) = slot.borrow_mut().as_mut() {
+                assert!(output.root.is_absolute());
+                assert!(output.root.join("certified-products.cbor").is_file());
+                let interfaces = output
+                    .files
+                    .keys()
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "hi"))
+                    .collect::<Vec<_>>();
+                assert!(
+                    !interfaces.is_empty(),
+                    "lifetime fixture must capture package interfaces"
+                );
+                assert!(interfaces
+                    .iter()
+                    .all(|path| output.root.join(path).is_file()));
+                roots.push(output.root.clone());
+            }
+        });
+    }
+
+    pub(super) fn record<T>(action: impl FnOnce() -> T) -> (T, Vec<PathBuf>) {
+        struct Restore(Option<Vec<PathBuf>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ROOTS.with(|slot| *slot.borrow_mut() = self.0.take());
+            }
+        }
+        let _restore = Restore(ROOTS.with(|slot| slot.replace(Some(Vec::new()))));
+        let result = action();
+        let roots = ROOTS.with(|slot| slot.borrow_mut().take().unwrap());
+        (result, roots)
+    }
 }
 
 #[cfg(test)]
@@ -1002,6 +1048,39 @@ mod tests {
             );
             if let Some(native) = output.native_output() {
                 assert!(native.products().is_some());
+                let captured = extract_turn(&output.run, &deployment, output.directory())
+                    .unwrap()
+                    .complete()
+                    .unwrap();
+                let owner = captured.native_output();
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                        Arc::clone(owner.operation()),
+                    );
+                let custody = certified_products::PackageInterfaceCustody::from_native_output(
+                    &owner,
+                    &captured.receipt,
+                    &mut validation,
+                )
+                .unwrap();
+                let mut missing_capture = captured.receipt.clone();
+                let (key, witness) = missing_capture
+                    .packages
+                    .iter_mut()
+                    .next()
+                    .expect("actual executable turn retains TYPE package support");
+                let ambient = output.directory().join("uncaptured-package-copy.hi");
+                std::fs::write(&ambient, custody.get(key).unwrap().bytes()).unwrap();
+                witness.selected_path = ambient.clone();
+                assert!(ambient.is_file());
+                assert!(
+                    matches!(certified_products::PackageInterfaceCustody::from_native_output(
+                    &owner, &missing_capture, &mut validation,
+                ), Err(certified_products::CertificationError::OriginalClosure(error))
+                    if matches!(*error, CompileError::MissingOutput(ref path) if *path == ambient)),
+                    "fresh output cannot substitute an ambient file for absent captured custody"
+                );
+                std::fs::remove_file(ambient).unwrap();
                 let operation = Arc::new(InventoryOperation::new(Default::default()));
                 assert!(
                     matches!(
@@ -1320,6 +1399,181 @@ mod tests {
 
     #[test]
     #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+    fn finite_original_package_interfaces_survive_independent_outputs_and_cold_recovery() {
+        use crate::recovery_artifacts::{PackageInterfaceValidation, RecoveryArtifactError};
+        for (module, source, package_code) in [
+            (
+                "NativePackageTargets",
+                include_str!("../../tests/fixtures/invocation-output/NativePackageTargets.hs"),
+                true,
+            ),
+            (
+                "NativeTargets",
+                include_str!("../../tests/fixtures/invocation-output/NativeTargets.hs"),
+                false,
+            ),
+        ] {
+            let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+            let mut originals = Vec::new();
+            let mut directories = Vec::new();
+            let mut identities = Vec::new();
+            let mut native_counts = Vec::new();
+            for root in &roots {
+                let includes = [root.path().to_owned()];
+                let (output, captured_roots) = capture_observation::record(|| {
+                    crate::artifacts::test_support::compile_invocation(
+                        &crate::artifacts::CompileInvocation {
+                            source,
+                            targets: &["first"],
+                            include: &includes,
+                            fallback_module_name: module,
+                        },
+                        |_, _, _| {},
+                    )
+                    .expect("actual independent native output")
+                });
+                let [directory] = captured_roots.as_slice() else {
+                    panic!("one actual completed output expected");
+                };
+                let product = output
+                    .recovery_products
+                    .iter()
+                    .find(|product| product.owner().module == module)
+                    .unwrap()
+                    .clone();
+                let canonical = product.module_interface().unwrap();
+                let native = product.original_native().unwrap();
+                native_counts.push(native.package_interfaces().iter().count());
+                let target = output.targets["first"].native_inputs.as_ref().unwrap();
+                assert_eq!(
+                    target
+                        .completed_selection()
+                        .unwrap()
+                        .completion()
+                        .package_bindings()
+                        .len()
+                        != 0,
+                    package_code
+                );
+                if !package_code {
+                    assert!(canonical.package_interfaces().iter().chain(native.package_interfaces().iter()).any(|(owner,_)| owner.1 == "GHC.Types"),
+                        "constructor-only Original must keep TYPE support without native package demand");
+                }
+                identities.push(
+                    crate::artifact_inventory::ArtifactEntry::original(
+                        canonical.producer_sha256(),
+                        product.clone(),
+                    )
+                    .unwrap()
+                    .descriptor
+                    .id,
+                );
+                directories.push(directory.clone());
+                originals.push(product);
+            }
+            assert_ne!(
+                directories[0], directories[1],
+                "actual compiler outputs must have independent storage"
+            );
+            for (owner, token) in originals[0]
+                .module_interface()
+                .unwrap()
+                .package_interfaces()
+                .iter()
+            {
+                let other = originals[1]
+                    .module_interface()
+                    .unwrap()
+                    .package_interfaces()
+                    .get(owner)
+                    .unwrap();
+                assert_eq!(token.sha256(), other.sha256());
+                assert_eq!(token.bytes(), other.bytes());
+            }
+            for directory in &directories {
+                if directory.exists() {
+                    assert!(directory.join(format!("{module}.hs")).is_file());
+                    assert!(directory.join("certified-products.cbor").is_file());
+                    std::fs::remove_dir_all(directory).unwrap();
+                }
+                assert!(!directory.exists());
+            }
+            let storage = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+            let mut references = Vec::new();
+            let mut producers = Vec::new();
+            for (index, (product, store)) in originals.iter().zip(&storage).enumerate() {
+                let producer = product.module_interface().unwrap().producer_sha256();
+                let before = crate::recovery_artifacts::package_interface_io();
+                let reference = crate::recovery_artifacts::materialize_certified_products(
+                    store.path(),
+                    producer,
+                    std::slice::from_ref(product),
+                )
+                .unwrap()
+                .remove(0);
+                assert_eq!(
+                    crate::recovery_artifacts::package_interface_io(),
+                    before,
+                    "Original materialization must not reopen vanished producer paths"
+                );
+                assert_eq!(reference.package_interfaces.len(), native_counts[index]);
+                references.push(reference);
+                producers.push(producer);
+            }
+            drop(originals);
+            for (index, (reference, store)) in references.iter().zip(&storage).enumerate() {
+                let artifact =
+                    crate::recovery_artifacts::verify_materialized_ref(store.path(), reference)
+                        .unwrap();
+                let recovered = certified_products::certify_recovery_products_with_validation(
+                    vec![artifact],
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap()
+                .remove(0)
+                .product;
+                assert_eq!(
+                    crate::artifact_inventory::ArtifactEntry::original(producers[index], recovered)
+                        .unwrap()
+                        .descriptor
+                        .id,
+                    identities[index],
+                    "custody restoration must preserve the issued Original identity"
+                );
+                let mut legacy = serde_json::to_value(reference).unwrap();
+                legacy.as_object_mut().unwrap().remove("package_interfaces");
+                assert!(
+                    serde_json::from_value::<crate::recovery_artifacts::RecoveryArtifactRef>(
+                        legacy
+                    )
+                    .is_err()
+                );
+                if !reference.package_interfaces.is_empty() {
+                    let mut missing = reference.clone();
+                    missing.package_interfaces.pop();
+                    assert!(matches!(
+                        crate::recovery_artifacts::verify_materialized_ref(store.path(), &missing),
+                        Err(RecoveryArtifactError::InvalidReference)
+                    ));
+                    let mut foreign = reference.clone();
+                    foreign.package_interfaces[0].unit.push_str("-foreign");
+                    assert!(matches!(
+                        crate::recovery_artifacts::verify_materialized_ref(store.path(), &foreign),
+                        Err(RecoveryArtifactError::InvalidReference)
+                    ));
+                    let mut changed = reference.clone();
+                    changed.package_interfaces[0].sha256[0] ^= 1;
+                    assert!(matches!(
+                        crate::recovery_artifacts::verify_materialized_ref(store.path(), &changed),
+                        Err(RecoveryArtifactError::InvalidReference)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
     fn finite_canonical_package_interfaces_survive_output_release_and_recovery() {
         use crate::recovery_artifacts::{
             MaterializationMode, PackageInterfaceValidation, RecoveryArtifactError,
@@ -1327,29 +1581,23 @@ mod tests {
 
         let source = tempfile::tempdir().unwrap();
         let includes = [source.path().to_owned()];
-        let output = crate::artifacts::test_support::compile_invocation(
-            &crate::artifacts::CompileInvocation {
-                source: include_str!(
-                    "../../tests/fixtures/invocation-output/NativePackageTargets.hs"
-                ),
-                targets: &["first"],
-                include: &includes,
-                fallback_module_name: "NativePackageTargets",
-            },
-            |_, _, _| {},
-        )
-        .expect("actual canonical package owner through the finite compiler front door");
-        let producer = output
-            .module_inventory
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|module| module.module == "NativePackageTargets" && !module.boot)
-            .expect("actual generated source observation")
-            .source
-            .parent()
-            .unwrap()
-            .to_owned();
+        let (output, captured_roots) = capture_observation::record(|| {
+            crate::artifacts::test_support::compile_invocation(
+                &crate::artifacts::CompileInvocation {
+                    source: include_str!(
+                        "../../tests/fixtures/invocation-output/NativePackageTargets.hs"
+                    ),
+                    targets: &["first"],
+                    include: &includes,
+                    fallback_module_name: "NativePackageTargets",
+                },
+                |_, _, _| {},
+            )
+            .expect("actual canonical package owner through the finite compiler front door")
+        });
+        let [producer] = captured_roots.as_slice() else {
+            panic!("one actual completed output expected");
+        };
         let canonical = output
             .recovery_products
             .iter()
