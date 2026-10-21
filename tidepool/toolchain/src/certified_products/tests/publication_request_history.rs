@@ -390,6 +390,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let mut demanded = BTreeSet::from([ORDINALS[initial]]);
         let mut context = original.as_ref().clone();
         let mut outputs = BTreeMap::new();
+        let mut output_producers = BTreeMap::new();
         let mut cached_outputs = BTreeSet::new();
         let request_scratch = tempfile::tempdir().unwrap();
         // Every history reaches the causal interaction, even after shrinking:
@@ -491,8 +492,14 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         crate::declaration_context::NativeTransportMode::Full);
                     prop_assert!(!completed.issued_artifacts().selected_native_groups().iter()
                         .any(|group| group.artifact == output.descriptor.id));
+                    let own = selection.produced_source_receipt(
+                        &output.descriptor.owner, completed.issued_artifacts(),
+                    ).unwrap().unwrap();
+                    let expected_bindings = own.own_offer().issued_group_carriers().unwrap()
+                        .into_keys().collect::<BTreeSet<_>>();
                     let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed).unwrap();
                     context = context.extend_issued_compiler_support(&support).unwrap();
+                    output_producers.insert(ordinal, (selection, completed, expected_bindings));
                     prop_assert_eq!(&output.requirements, &vec![root.descriptor.owner.clone()]);
                     let output_lexical = ExactLexicalNode {
                         owner: output.descriptor.owner.clone(),
@@ -649,34 +656,35 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             // Recorded source choices are independent of later executable demand.
             prop_assert_eq!(context.artifact_view().selected_native_groups(), initial_groups.clone());
             if !outputs.is_empty() {
-                // Continue the complete owner, then consume actual exported binders
-                // through the same observed-target selector used by compiled targets.
-                let exact_request = ExactCompileContext::new(Arc::new(context.clone()))
-                    .prepare_compilation(&request_scratch.path().join(format!("target-{step}")), PRODUCER).unwrap();
-                let request = exact_request.compiler_inputs();
-                let mut validation = PackageInterfaceValidation::default();
-                let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                    request, &validation.inventory,
-                ).unwrap();
-                let entries = outputs.values().map(|(entry, _, _)| entry.clone()).collect();
-                let sources = outputs.values().map(|(entry, _, _)| {
-                    let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
-                    (product, 0)
-                }).collect::<Vec<_>>();
-                let observations = source_target_observations(&sources);
-                let prepared = prepared_target_fixture(&observations);
-                let inventory = request.artifacts().inventory();
-                let fixed = inventory.bind_segment(request.artifacts(), entries, &selection, &mut validation).unwrap();
-                let observed = AuthenticatedTargetImports::issue(
-                    &prepared, &observations, &validation.inventory,
-                ).unwrap();
-                let target = inventory.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(), fixed.source_selection(),
-                    observed, None, Some(request.artifacts()), &[], &BTreeMap::new(), &mut validation,
-                ).unwrap();
-                let groups = target.resolve().unwrap().groups().clone();
-                let edges = target.artifacts().binding_dependencies();
+                // Each emission has its own physical producer. Recovery of the
+                // context preserves availability, not same-program Source identity.
+                let mut aggregate_targets = BTreeSet::new();
                 for (ordinal, (output, _, permitted_carriers)) in &outputs {
+                    let (selection, physical, expected_bindings) = &output_producers[ordinal];
+                    let ArtifactPayload::Original(product) = &output.payload else { unreachable!() };
+                    let mut observations = source_target_observations(&[(product, 0)]);
+                    if !cached_outputs.contains(ordinal) {
+                        let ReceiptImportOwner::Source { module_version, .. } = &mut observations[0].owner
+                            else { unreachable!() };
+                        *module_version = None;
+                    }
+                    let prepared = prepared_target_fixture(&observations);
+                    let inventory = physical.issued_artifacts().inventory();
+                    let baseline = physical.issued_artifacts().capture_graph_selection().native_groups
+                        .into_iter().collect::<BTreeSet<_>>();
+                    let before_target = inventory.metrics().issued_scope_nodes;
+                    let mut validation = PackageInterfaceValidation::default();
+                    let observed = AuthenticatedTargetImports::issue(
+                        &prepared, &observations, &validation.inventory,
+                    ).unwrap();
+                    let target = inventory.select_native_target(
+                        physical.physical_cohort().unwrap(), selection,
+                        observed, None, None, &[], &BTreeMap::new(), &mut validation,
+                    ).unwrap();
+                    let groups = target.resolve().unwrap().groups().clone();
+                    prop_assert_eq!(&groups, expected_bindings);
+                    prop_assert_eq!(inventory.metrics().issued_scope_nodes, before_target);
+                    let edges = target.artifacts().binding_dependencies();
                     prop_assert!(edges.iter().any(|(dependent, required, edge)| {
                         matches!((dependent, required), (
                             crate::artifact_inventory::ArtifactBindingNode::Group(dependent),
@@ -692,36 +700,47 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                                 dependent_ordinal: 0, required_ordinal,
                             } if required_ordinal == ordinal)
                     }), "target output requires the previously permitted Root group with its issuing carrier edge: expected={:?}, actual={:?}", permitted_carriers, edges);
+                    let expected_target = std::iter::once(NativeGroupKey {
+                        artifact: root.descriptor.id, original_ordinal: *ordinal,
+                    }).chain((*ordinal != 3).then_some(NativeGroupKey {
+                        artifact: helper.descriptor.id, original_ordinal: 7,
+                    })).chain(std::iter::once(NativeGroupKey {
+                        artifact: output.descriptor.id, original_ordinal: 0,
+                    })).collect::<BTreeSet<_>>();
+                    let expected_retained = baseline.union(expected_bindings)
+                        .copied().collect::<BTreeSet<_>>();
+                    prop_assert_eq!(target.artifacts().capture_graph_selection().native_groups
+                        .into_iter().collect::<BTreeSet<_>>(), expected_retained);
+                    let actual_target = groups.iter().map(|group| NativeGroupKey {
+                        artifact: group.binding.artifact(), original_ordinal: group.original_ordinal,
+                    }).collect::<BTreeSet<_>>();
+                    prop_assert_eq!(&actual_target, &expected_target);
+                    aggregate_targets.extend(actual_target);
+                    let issuer_originals = original.compiler_input_roles().iter()
+                        .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
+                    let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
+                        .all(|group| original.artifact_view().contains_issued_native_group(*group));
+                    let selected = context.published_source_original_selections_for_target(&groups, target.imports()).unwrap();
+                    prop_assert_eq!(selected.len(), usize::from(issued_groups),
+                        "target policy follows exact issuer-owned dependency groups: {:?}", groups);
                 }
-                let expected = demanded.iter().map(|ordinal| NativeGroupKey {
-                    artifact: root.descriptor.id, original_ordinal: *ordinal,
-                }).chain(demanded.iter().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
-                    artifact: helper.descriptor.id, original_ordinal: 7,
-                })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
-                    artifact: entry.descriptor.id, original_ordinal: 0,
-                })).collect::<BTreeSet<_>>();
-                let actual_retained = target.artifacts().selected_native_groups();
-                let expected_target = outputs.keys().map(|ordinal| NativeGroupKey {
+                let expected_targets = outputs.keys().map(|ordinal| NativeGroupKey {
                     artifact: root.descriptor.id, original_ordinal: *ordinal,
                 }).chain(outputs.keys().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
                     artifact: helper.descriptor.id, original_ordinal: 7,
                 })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
                     artifact: entry.descriptor.id, original_ordinal: 0,
                 })).collect::<BTreeSet<_>>();
-                let expected_retained = initial_groups.union(&expected_target)
-                    .copied().collect::<BTreeSet<_>>();
-                prop_assert_eq!(&expected_retained, &expected);
-                prop_assert_eq!(actual_retained, expected_retained);
-                prop_assert_eq!(groups.iter().map(|group| NativeGroupKey {
-                    artifact: group.binding.artifact(), original_ordinal: group.original_ordinal,
-                }).collect::<BTreeSet<_>>(), expected_target);
-                let issuer_originals = original.compiler_input_roles().iter()
-                    .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
-                let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
-                    .all(|group| original.artifact_view().contains_issued_native_group(*group));
-                let selected = context.published_source_original_selections_for_target(&groups, target.imports()).unwrap();
-                prop_assert_eq!(selected.len(), usize::from(issued_groups),
-                    "target policy follows exact issuer-owned dependency groups: {:?}", groups);
+                prop_assert_eq!(&aggregate_targets, &expected_targets);
+                let expected_history = demanded.iter().map(|ordinal| NativeGroupKey {
+                    artifact: root.descriptor.id, original_ordinal: *ordinal,
+                }).chain(demanded.iter().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
+                    artifact: helper.descriptor.id, original_ordinal: 7,
+                })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
+                    artifact: entry.descriptor.id, original_ordinal: 0,
+                })).collect::<BTreeSet<_>>();
+                prop_assert_eq!(initial_groups.union(&aggregate_targets).copied()
+                    .collect::<BTreeSet<_>>(), expected_history);
             }
             let exact_request = ExactCompileContext::new(Arc::new(context.clone()))
                 .prepare_compilation(&request_scratch.path().join(format!("published-wire-{step}")), PRODUCER).unwrap();
