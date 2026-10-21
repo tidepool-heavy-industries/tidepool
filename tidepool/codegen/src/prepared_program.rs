@@ -765,13 +765,14 @@ impl CompiledProgram {
     pub fn prepare_target_code(
         prepared: &PreparedProgram,
         owners: &[Option<LiteralOwner>],
+        packages: &BTreeMap<tidepool_repr::execution_schema::SymbolIdentity, PackageLiteral>,
         sources: &BTreeMap<SourceBinder, SourceLiteral>,
         registry: &ImageRegistry,
     ) -> Result<Arc<Self>, CompileError> {
         let literals = package_literals::GroupPackageLiterals::select_immutable(
             &prepared.definitions(),
             owners,
-            &BTreeMap::new(),
+            packages,
             sources,
         )?;
         Self::compile_target_literals(prepared, &literals, registry)
