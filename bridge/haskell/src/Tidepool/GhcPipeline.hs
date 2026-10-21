@@ -1433,7 +1433,9 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
                   local = qualifier == NoPkgQual || qualifier == ThisPkg (homeUnitId (hsc_home_unit environment))
               in local && moduleNameString name == snd key
                 && (boot == IsBoot || AuthoredSourceImport name raw `elem` intents)) (moduleImportRequests parsed))) $
-            throwIO (WorldInputsFailure WorldInputsUnavailable "current source import lacks captured source")
+            throwIO (WorldInputsFailure WorldInputsUnavailable
+              ("current source import lacks captured source; owner="
+                ++ boundedDiagnosticText 2048 (fst key ++ ":" ++ snd key)))
           pure Nothing
     pure (WorldImportBasis entries lexical sources)
   where
