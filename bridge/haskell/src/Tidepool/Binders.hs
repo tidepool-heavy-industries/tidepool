@@ -47,7 +47,7 @@ module Tidepool.Binders
   , analyzeOrderedCell, analyzeOrderedCellWithFlags
   , defaultParserDynFlags, templateParserFlags, sourceModuleFlags
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset
-  , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
+  , PreparedTypedSegmentSource(..), prepareTypedSegmentSource, prepareTypedSegmentSourceAvoiding
   , CellExpressionPlan(..), ExpressionLiftPlan(..)
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
@@ -63,6 +63,7 @@ module Tidepool.Binders
   ) where
 
 import GHC
+import qualified Data.Set as Set
 import Tidepool.ExactHydration (depanalSourceModules)
 import GHC.Driver.Session (xopt, xopt_set, parseDynamicFilePragma)
 import GHC.Utils.Outputable (showSDocOneLine, defaultSDocContext, ppr)
@@ -991,10 +992,16 @@ data PreparedTypedSegmentSource = PreparedTypedSegmentSource
 
 prepareTypedSegmentSource :: String -> CellSourcePlan -> String
   -> [(Int, Word64, Maybe String)] -> Either String PreparedTypedSegmentSource
-prepareTypedSegmentSource template sourcePlan reservation slots = do
+prepareTypedSegmentSource = prepareTypedSegmentSourceAvoiding Set.empty
+
+-- The held World service supplies its actual lexical collision scope. The
+-- same allocator protects every generated helper, including capture companions.
+prepareTypedSegmentSourceAvoiding :: Set.Set String -> String -> CellSourcePlan -> String
+  -> [(Int, Word64, Maybe String)] -> Either String PreparedTypedSegmentSource
+prepareTypedSegmentSourceAvoiding unavailable template sourcePlan reservation slots = do
   let items = cellPlanItems sourcePlan
       occupied = template ++ concatMap cellAnalysisSource items
-      fresh candidate | candidate `isInfixOf` occupied = fresh (candidate ++ "X")
+      fresh candidate | candidate `Set.member` unavailable || candidate `isInfixOf` occupied = fresh (candidate ++ "X")
                       | otherwise = candidate
       root = fresh "__tidepool_segment_check"
       reserve role ordinal = fresh ("__tidepool_segment_" ++ role ++ "_" ++ show ordinal)
@@ -1017,7 +1024,8 @@ prepareTypedSegmentSource template sourcePlan reservation slots = do
           (ActionItem (reserve "step" ordinal) (reserve "probe" ordinal) (reserve "match" ordinal) names))
         (KBind, Just RecursiveBinding, Nothing) -> Right (TypedItemPlan ordinal entry generation
           (ActionItem (reserve "step" ordinal) (reserve "probe" ordinal) (reserve "match" ordinal) names))
-        (KExpr, Nothing, Just name) | not (null name), not (name `isInfixOf` occupied) ->
+        (KExpr, Nothing, Just name) | not (null name), not (name `isInfixOf` occupied)
+          , name `Set.notMember` unavailable, (name ++ "_unit") `Set.notMember` unavailable ->
           Right (TypedItemPlan ordinal entry generation (ObservationItem (reserve "probe" ordinal) name))
         _ -> Left "typed segment reservation differs from its parser statement form"
     | (item, (ordinal, generation, observation)) <- zip items slots ]

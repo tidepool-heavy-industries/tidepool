@@ -1846,7 +1846,11 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
 
 worldCellAdmissionParse :: IO ()
 worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel _scopePath -> do
-    (packetPath,_primary) <- writeWorldCellAdmissionPacket handles work producer profile contextParcel
+    let collisionModule = BS8.unlines ["module WorldObservationNames where"
+          ,"observation1, observation3_unit, __tidepool_segment_probe_1 :: Int"
+          ,"observation1 = 1", "observation3_unit = 3", "__tidepool_segment_probe_1 = 9"]
+    (packetPath,_primary) <- writeWorldCellAdmissionPacketWithSources handles work producer profile contextParcel
+      [("WorldObservationNames.hs",collisionModule)]
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
@@ -1879,6 +1883,44 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
             planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
             planBytes <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \request ->
               runBoundWorldCellPlan request
+            -- These names are persisted observations, so UNUSED imported
+            -- exports and every current binder/companion belong to freshness.
+            let nameRecipe = recipe {worldCellSource=unlines
+                  ["import WorldObservationNames", "(1 :: Int)"
+                  ,"let observation3 = (2 :: Int)", "(3 :: Int)"]}
+                namesQuestion = planRequest {worldCellPlanRecipe=nameRecipe}
+                issueNames = do
+                  args <- decodeWorldArgs [WorldCellPlan namesQuestion]
+                  (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldCellPlan
+            namesBytes <- issueNames
+            repeatedNames <- issueNames
+            unless (namesBytes == repeatedNames) (fail "same held expression plan changed its issued names")
+            names <- case deserialiseFromBytes decodeTerm (BL.fromStrict namesBytes) of
+              Right (remaining,TList [TString "TPCELLPLAN6",_,_,_,_,_,_,_,_,TString actual,TList rows])
+                | BL.null remaining,actual == T.pack reference -> forM rows $ \row -> case row of
+                    TList [TInt ordinal,TString name] -> pure (ordinal,T.unpack name)
+                    _ -> fail "expression plan omitted its exact ordinal/name row"
+              _ -> fail "expression plan lost its held realization or required names"
+            unless (map fst names == [1,3] && lookup 1 names /= Just "observation1"
+                && lookup 3 names /= Just "observation3"
+                && lookup 3 names /= Just "observation3_unit"
+                && length (nub (concatMap (\(_,name) -> [name,name ++ "_unit"]) names)) == 4)
+              (fail "expression names shadow an unused import, current binder, or companion")
+            let nameSlots = [(0,PlannedPrologue 91),(1,PlannedExpression 92 (snd (head names)))
+                  ,(2,PlannedBind 93),(3,PlannedExpression 94 (snd (last names)))]
+                namesPrepare = WorldCellPrepareRequest identity reference nameRecipe Nothing namesBytes
+                  (BS.replicate 32 8) 17 nameSlots (work </> "expression-names") (work </> "expression-names.cbor")
+            grant <- either fail pure (compilerExecutionGrant 2)
+            (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
+              let wrong = namesPrepare {worldCellPrepareSlots=[(ordinal,case slot of
+                    PlannedExpression generation name -> PlannedExpression generation (name ++ "wrong")
+                    _ -> slot) | (ordinal,slot) <- nameSlots]}
+              invalid <- scopedValidateWorldCell compiler grant executor wrong
+              unless (either (== WorldCellCorrupt) (const False) invalid)
+                (fail "receiving World accepted an expression name absent from its held plan")
+              valid <- scopedValidateWorldCell compiler grant executor namesPrepare
+              unless (either (const False) (const True) valid)
+                (fail "failed expression-name validation poisoned a valid retry")
             slots <- scopedRunGhc compiler $ do
               environment <- getSession
               plan <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment)
