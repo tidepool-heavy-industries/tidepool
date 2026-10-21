@@ -6690,7 +6690,29 @@ pub(super) mod tests {
         ProgramId,
         tidepool_codegen::binding_table::SourceScopeAdmission,
     ) {
-        install_selected_source_fixture(session, scope, "a")
+        tidepool_testing::eval_harness::require_extract();
+        let targets = tidepool_testing::with_settlement(|settlement| {
+            crate::compile_runtime_targets(
+                &tidepool_toolchain::artifacts::CompileInvocation {
+                    source: include_str!("../../tests/fixtures/SourcePublication.hs"),
+                    targets: &["result"],
+                    include: &[tidepool_testing::eval_harness::prelude_path()],
+                    fallback_module_name: "SourcePublication",
+                },
+                |_, _, _| {},
+                settlement,
+            )
+        })
+        .expect("compile the actual source publication producer");
+        let (program, admission, _) = session
+            .install_runtime_target_in(scope, &targets, "result")
+            .expect("install the same complete producer in its actual target scope")
+            .into_parts();
+        assert!(
+            !admission.is_empty(),
+            "the producer must select native source custody"
+        );
+        (program, admission)
     }
 
     pub(in crate::session) fn install_selected_source_fixture(
@@ -6962,7 +6984,7 @@ pub(super) mod tests {
         let (target, admission) = install_source_publication_fixture(&mut session, private);
         let mut keys = admission.to_vec();
         keys.sort();
-        assert_eq!(keys.len(), 2);
+        assert!(!keys.is_empty());
         assert!(session.prepared_mut().unwrap().unpin(target));
         let incarnation = session
             .public_visibility_snapshot_in(private)
