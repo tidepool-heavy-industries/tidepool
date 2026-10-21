@@ -1428,14 +1428,18 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
               ModuleInterfaceEvidence proof | isSourceOriginal (canonicalOrigin proof) -> pure (Just key)
               evidence -> unsupported "current source qualification" key evidence
         _ -> do
-          unless (not (any (\(name,raw,boot) ->
-              let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
-                  local = qualifier == NoPkgQual || qualifier == ThisPkg (homeUnitId (hsc_home_unit environment))
-              in local && moduleNameString name == snd key
-                && (boot == IsBoot || AuthoredSourceImport name raw `elem` intents)) (moduleImportRequests parsed))) $
+          let requests = [(boot == IsBoot,AuthoredSourceImport name raw `elem` intents)
+                | (name,raw,boot) <- moduleImportRequests parsed
+                , let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
+                , qualifier == NoPkgQual || qualifier == ThisPkg (homeUnitId (hsc_home_unit environment))
+                , moduleNameString name == snd key]
+          unless (not (any (\(boot,authored) -> boot || authored) requests)) $
             throwIO (WorldInputsFailure WorldInputsUnavailable
               ("current source import lacks captured source; owner="
-                ++ boundedDiagnosticText 2048 (fst key ++ ":" ++ snd key)))
+                ++ boundedDiagnosticText 2048 (fst key ++ ":" ++ snd key)
+                ++ "; SOURCE=" ++ show (any fst requests)
+                ++ "; authored=" ++ show (any snd requests)
+                ++ "; selected-import-root=" ++ show (key `Set.member` roots)))
           pure Nothing
     pure (WorldImportBasis entries lexical sources)
   where
