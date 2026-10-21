@@ -3142,7 +3142,29 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
     use tidepool_toolchain::certified_products::SelectedNativeImport;
 
     tidepool_testing::eval_harness::require_extract();
-    let root = tempfile::tempdir().unwrap();
+    let diagnostic_root = PathBuf::from(
+        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .expect("cold producer-removal control requires the native runner's owned case root"),
+    );
+    let transactions = diagnostic_root.join("compiler-transactions");
+    let transaction_directories = || match std::fs::read_dir(&transactions) {
+        Ok(entries) => entries
+            .map(|entry| {
+                let entry = entry.unwrap();
+                assert!(entry.file_type().unwrap().is_dir());
+                entry.path()
+            })
+            .collect::<std::collections::BTreeSet<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => panic!("cannot inspect case compiler outputs: {error}"),
+    };
+    let before_outputs = transaction_directories();
+    let mut root = tempfile::Builder::new()
+        .prefix("historical-original-run-")
+        .tempdir_in(&diagnostic_root)
+        .unwrap();
+    root.disable_cleanup(true);
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
     std::fs::write(
         root.path().join("HistoricalOriginalG.hs"),
         include_str!("fixtures/historical-original-g.hs"),
@@ -3153,13 +3175,15 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
     std::fs::write(&source, original_source).unwrap();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
-    let lib = SessionLib::open(
+    let mut lib = SessionLib::open(
         SessionId(1018),
         root.path(),
         ModuleEnv::standalone_default(),
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
@@ -3258,13 +3282,38 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         .into_iter()
         .find(|product| product.owner() == &old_owner)
         .expect("the parent retains its exact original child's immutable bytes");
-    let old_interface_sha256 = sha2::Sha256::digest(old_product.interface_bytes());
-    assert!(context.compiler_input_roles().iter().any(|role| {
-        role.original().is_some()
-            && descriptors.iter().any(|descriptor| {
-                descriptor.id == role.interface() && descriptor.owner.module == reader_owner.module
-            })
-    }));
+    let old_interface_bytes = old_product.interface_bytes().to_vec();
+    let selected_originals = context
+        .compiler_input_roles()
+        .into_iter()
+        .filter_map(|role| role.original())
+        .map(|original| {
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == original)
+                .unwrap()
+                .owner
+                .module
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_originals,
+        [reader_owner.module.clone()],
+        "the capture must select only R as Original while retaining G/H as dependency custody"
+    );
+    let cold_owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/historical-original").unwrap(),
+        1,
+    )
+    .unwrap();
+    let captured = resident.mint_detached_scope(public).unwrap();
+    assert!(matches!(
+        resident
+            .initialize_durable_public_scope(cold_owner.clone(), captured)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
 
     let current_source = original_source.replace("h = 41", "h = 99");
     assert_ne!(current_source, original_source);
@@ -3301,8 +3350,8 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         .find(|product| product.owner() == current_owner)
         .unwrap();
     assert_eq!(
-        old_interface_sha256,
-        sha2::Sha256::digest(current_product.interface_bytes()),
+        old_interface_bytes.as_slice(),
+        current_product.interface_bytes(),
         "old and current implementation must actually share the complete interface bytes"
     );
     assert_eq!(
@@ -3337,6 +3386,69 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
             .to_json(),
         serde_json::json!(99)
     );
+    let current_impl_sha256 = current_impl_owner.product_sha256;
+    let observe_original_history = |program: &tidepool_toolchain::checked_cell::CellProgram| {
+        let mut selected_old = false;
+        let mut selected_old_child = false;
+        let mut selected_old_implementation = false;
+        let mut selected_current = false;
+        for item in program.items() {
+            let products = item.native_products().unwrap();
+            let selected = products.native_source_products().unwrap();
+            for row in selected.groups() {
+                if row.binding() == reader_binding {
+                    selected_old = true;
+                    assert!(row.imports().iter().any(|import| {
+                        matches!(import, SelectedNativeImport::Source { binding, .. }
+                            if *binding == old_binding)
+                    }));
+                }
+                if row.binding() == old_binding {
+                    selected_old_child = true;
+                    assert!(row.imports().iter().any(|import| {
+                        matches!(import, SelectedNativeImport::Source { binding, .. }
+                            if *binding == old_impl_binding)
+                    }));
+                }
+                if row.binding() == old_impl_binding {
+                    selected_old_implementation = true;
+                }
+                if row.group().owner().module == "HistoricalOriginalG"
+                    && row.binding() != old_binding
+                {
+                    let current_import = row.imports().iter().find_map(|import| {
+                        let SelectedNativeImport::Source { binding, .. } = import else {
+                            return None;
+                        };
+                        selected.groups().find(|child| {
+                            child.binding() == *binding
+                                && child.group().owner().module == "HistoricalOriginalH"
+                        })
+                    });
+                    if let Some(implementation) = current_import {
+                        assert_eq!(
+                            implementation.group().owner().product_sha256,
+                            current_impl_sha256,
+                        );
+                        assert_ne!(implementation.binding(), old_impl_binding);
+                        selected_current = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            selected_old,
+            "the actual World stage must select the original parent"
+        );
+        assert!(
+            selected_old_child && selected_old_implementation,
+            "the actual World stage must retain both exact historical dependency rows"
+        );
+        assert!(
+            selected_current,
+            "the actual World stage must select the current child independently"
+        );
+    };
     try_execute_cell_with_template_imports_expectation_observed(
         &mut resident,
         public,
@@ -3350,58 +3462,130 @@ fn historical_original_executes_old_child_beside_current_same_interface_source()
         AuthorityChecks::Configured,
         &imports,
         Some(41099),
-        |program| {
-            let mut selected_old = false;
-            let mut selected_current = false;
-            for item in program.items() {
-                let products = item.native_products().unwrap();
-                let selected = products.native_source_products().unwrap();
-                for row in selected.groups() {
-                    if row.binding() == reader_binding {
-                        selected_old = true;
-                        assert!(row.imports().iter().any(|import| {
-                            matches!(import, SelectedNativeImport::Source { binding, .. }
-                                if *binding == old_binding)
-                        }));
-                    }
-                    if row.binding() == old_binding {
-                        assert!(row.imports().iter().any(|import| {
-                            matches!(import, SelectedNativeImport::Source { binding, .. }
-                                if *binding == old_impl_binding)
-                        }));
-                    }
-                    if row.group().owner().module == "HistoricalOriginalG"
-                        && row.binding() != old_binding
-                    {
-                        let current_import = row.imports().iter().find_map(|import| {
-                            let SelectedNativeImport::Source { binding, .. } = import else {
-                                return None;
-                            };
-                            selected.groups().find(|child| {
-                                child.binding() == *binding
-                                    && child.group().owner().module == "HistoricalOriginalH"
-                            })
-                        });
-                        if let Some(implementation) = current_import {
-                            assert_eq!(
-                                implementation.group().owner().product_sha256,
-                                current_impl_owner.product_sha256,
-                            );
-                            assert_ne!(implementation.binding(), old_impl_binding);
-                            selected_current = true;
-                        }
-                    }
-                }
-            }
-            assert!(
-                selected_old,
-                "the actual World stage must select the original parent"
-            );
-            assert!(
-                selected_current,
-                "the actual World stage must select the current child independently"
-            );
-        },
+        &observe_original_history,
+    )
+    .unwrap();
+
+    let evidence = diagnostic_root.join("historical-original-producer-evidence");
+    std::fs::create_dir(&evidence).unwrap();
+    let mut disposable_outputs = Vec::new();
+    for output in transaction_directories().difference(&before_outputs) {
+        let transaction_path = output.join("transaction.json");
+        let transaction = match std::fs::read(&transaction_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("cannot inspect completed compiler transaction: {error}"),
+        };
+        let record: serde_json::Value = serde_json::from_slice(&transaction).unwrap();
+        assert_eq!(record["phase"], "compiler_completed");
+        assert_eq!(record["compiler_process_success"], true);
+        assert_eq!(
+            PathBuf::from(record["original_directory"].as_str().unwrap()),
+            *output
+        );
+        let retained = evidence.join(output.file_name().unwrap());
+        std::fs::create_dir(&retained).unwrap();
+        std::fs::write(retained.join("transaction.json"), transaction).unwrap();
+        let consumed = output.join("consumed-sources.json");
+        if consumed.try_exists().unwrap() {
+            std::fs::copy(&consumed, retained.join("consumed-sources.json")).unwrap();
+        }
+        disposable_outputs.push(output.clone());
+    }
+    assert!(
+        !disposable_outputs.is_empty(),
+        "the absence control must observe actual compiler outputs"
+    );
+    std::fs::write(
+        evidence.join("removed-output-inventory.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "original_directories": &disposable_outputs,
+            "retained_run": root.path(),
+            "reader_binding": reader_binding,
+            "old_g_binding": old_binding,
+            "old_h_binding": old_impl_binding,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    drop(current_products);
+    drop(current);
+    drop(old_product);
+    drop(view);
+    drop(old_interface_bytes);
+    drop(resident);
+    drop(images);
+    drop(recovery);
+
+    for output in &disposable_outputs {
+        if output.try_exists().unwrap() {
+            std::fs::remove_dir_all(output).unwrap();
+        }
+        assert!(!output.try_exists().unwrap());
+    }
+    assert!(root.path().join("artifacts").is_dir());
+    eprintln!(
+        "historical-original cold run={} removed_outputs={} retained_diagnostics={}",
+        root.path().display(),
+        disposable_outputs.len(),
+        evidence.display(),
+    );
+
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::reopen(
+        crate::session::recovery_test_fixture::run_owner(root.path()),
+    );
+    let mut lib = SessionLib::open(
+        SessionId(1019),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.recover_public_scope(&cold_owner).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let recovered_view = resident.compile_view_in(public).unwrap();
+    let recovered = recovered_view.exact_declaration_context().unwrap();
+    let descriptors = recovered.artifact_view().descriptors();
+    let selected_originals = recovered
+        .compiler_input_roles()
+        .into_iter()
+        .filter_map(|role| role.original())
+        .map(|original| {
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == original)
+                .unwrap()
+                .owner
+                .module
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_originals,
+        [reader_owner.module],
+        "cold acquisition must preserve the parent-only Original selection"
+    );
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "historical_original_cold_old_and_current_execution",
+        include_str!("fixtures/historical-original-observe.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &imports,
+        Some(41099),
+        &observe_original_history,
     )
     .unwrap();
 }
