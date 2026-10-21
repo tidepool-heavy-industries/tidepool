@@ -814,7 +814,13 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             assert_eq!(expected.len(), expected_keys.len());
             assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
             let inventory = inputs.artifacts().inventory();
-            assert!(inputs.physical_cohort().is_err());
+            assert!(
+                crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                    inputs.compiler_source_support(),
+                )
+                .physical_cohort()
+                .is_err()
+            );
             let physical = inventory
                 .bind_segment(inputs.artifacts(), vec![], &receipt, &mut validation)
                 .unwrap();
@@ -1557,7 +1563,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             .native_groups
                             .clone();
                         let expected_carriers = offer.issued_group_carriers().unwrap();
-                        let expected_canonical = issued
+                        let expected_canonical = private
                             .issued_artifacts()
                             .binding_dependencies()
                             .into_iter()
@@ -1574,7 +1580,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         );
                         let selected = physical_selection
                             .selected_authored_original_closure(
-                                issued.issued_artifacts(),
+                                private.issued_artifacts(),
                                 &owner(module).unit,
                                 &owner(module).module,
                             )

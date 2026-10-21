@@ -20302,7 +20302,13 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
-            assert!(request.compiler_inputs().physical_cohort().is_err());
+            assert!(
+                crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                    request.compiler_inputs().compiler_source_support(),
+                )
+                .physical_cohort()
+                .is_err()
+            );
             let physical = inventory
                 .bind_segment(
                     request.compiler_inputs().artifacts(),
@@ -20712,7 +20718,13 @@ pub(crate) mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-                assert!(next.compiler_inputs().physical_cohort().is_err());
+                assert!(
+                    crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                        next.compiler_inputs().compiler_source_support(),
+                    )
+                    .physical_cohort()
+                    .is_err()
+                );
                 let physical = next
                     .compiler_inputs()
                     .artifacts()
