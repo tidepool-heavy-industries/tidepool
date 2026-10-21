@@ -1581,6 +1581,7 @@ pub enum ArtifactIdentityStage {
     MissingModuleMapCanonical,
     MissingInterfacePayload,
     NominalOwnerDiffers,
+    BinderOwnerDiffers,
     NominalMembershipDiffers,
     ModuleInterfaceDiffers,
 }
@@ -5769,7 +5770,7 @@ impl AuthenticatedOriginalBindings {
                 continue;
             }
             operation.reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(1)?;
-            let member = authenticate_original_binding_membership(
+            let member = authenticate_presented_original(
                 &basis,
                 &crate::declaration_join::ExactModuleIdentity {
                     unit: unit.clone(),
@@ -6291,7 +6292,13 @@ fn require_original_permission(
 
 // Metadata authentication proves code membership only. It cannot issue an
 // executable choice, retained-value custody, or completed package readiness.
-fn authenticate_original_binding_membership(
+//
+// The corrected producer resolves re-exports to their defining site, so the
+// reference's nominal owner must be the binder's defining module. A facade
+// listing module cannot lend its implementation identity to a definition it
+// merely re-exports, so a mismatched owner/binder pair refuses here instead
+// of searching for another authority.
+fn authenticate_presented_original(
     source: &crate::artifact_inventory::CompilerSourceSupport,
     owner: &crate::declaration_join::ExactModuleIdentity,
     interface: crate::artifact_inventory::ArtifactBinding,
@@ -6303,116 +6310,19 @@ fn authenticate_original_binding_membership(
         owner: owner.clone(),
         reason,
     };
-    // GHC resolves a re-exported symbol to its defining site, so the nominal
-    // listing module's pair did not issue the symbol. Carry the defining
-    // module's own authenticated primary pair and prove membership against
-    // its witness groups; the listing provenance stays in the receipt.
     if binder.unit != owner.unit || binder.module != owner.module {
-        let defining = crate::declaration_join::ExactModuleIdentity {
-            unit: binder.unit.clone(),
-            module: binder.module.clone(),
-        };
-        let refuse_defining = |reason| CertificationError::InputDecision {
-            owner: defining.clone(),
-            reason,
-        };
-        // Prefer the defining module's own selected row. The defining module
-        // is usually retained as dependency custody rather than selected, so
-        // fall back to the exact retained Original payload whose owner is the
-        // binder's defining module. Membership is still proven against that
-        // product's authenticated witness groups; the scan only locates the
-        // owner-issued pair, it cannot manufacture one.
-        let selected = source
-            .compiler_primary_input(&defining)
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        let (interface_artifact, original_artifact, interface_entry, original_entry) =
-            if let Some(primary) = selected {
-                let Some(defining_original) = primary.original() else {
-                    return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
-                };
-                let interface_entry = source
-                    .artifacts()
-                    .observed_payload(&primary.interface().artifact)
-                    .ok_or_else(|| {
-                        refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
-                            ArtifactIdentityMismatch {
-                                stage: ArtifactIdentityStage::MissingInterfacePayload,
-                                expected_canonical: Some(primary.interface().artifact),
-                                expected_original: Some(defining_original.artifact),
-                                ..ArtifactIdentityMismatch::refused(
-                                    ArtifactIdentityStage::MissingInterfacePayload,
-                                )
-                            },
-                        ))
-                    })?;
-                (
-                    primary.interface().artifact,
-                    defining_original.artifact,
-                    Arc::clone(interface_entry),
-                    Arc::clone(primary.entry()),
-                )
-            } else {
-                let mut located = None;
-                for descriptor in source.artifacts().descriptors() {
-                    if descriptor.kind == crate::artifact_inventory::ArtifactKind::OriginalModule
-                        && descriptor.owner == defining
-                    {
-                        let entry = source
-                            .artifacts()
-                            .observed_payload(&descriptor.id)
-                            .ok_or_else(|| {
-                                refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
-                                    ArtifactIdentityMismatch::refused(
-                                        ArtifactIdentityStage::MissingSelectedRow,
-                                    ),
-                                ))
-                            })?;
-                        if located.replace((descriptor.id, Arc::clone(entry))).is_some() {
-                            return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
-                        }
-                    }
-                }
-                let (original_id, original_entry) = located
-                    .ok_or_else(|| refuse_defining(InputDecisionRefusal::RoleMismatch))?;
-                let crate::artifact_inventory::ArtifactPayload::Original(defining_product) =
-                    &original_entry.payload
-                else {
-                    return Err(refuse_defining(InputDecisionRefusal::NativeOwnerMismatch));
-                };
-                let canonical = defining_product
-                    .module_interface()
-                    .ok_or_else(|| {
-                        refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
-                            ArtifactIdentityMismatch::refused(
-                                ArtifactIdentityStage::ModuleInterfaceDiffers,
-                            ),
-                        ))
-                    })?;
-                let interface_id =
-                    crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical);
-                let interface_entry = source
-                    .artifacts()
-                    .observed_payload(&interface_id)
-                    .ok_or_else(|| {
-                        refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
-                            ArtifactIdentityMismatch::refused(
-                                ArtifactIdentityStage::MissingInterfacePayload,
-                            ),
-                        ))
-                    })?;
-                (interface_id, original_id, Arc::clone(interface_entry), original_entry)
-            };
-        return original_reference_payload_membership(
-            &defining.unit,
-            &defining.module,
-            interface_artifact,
-            original_artifact,
-            &interface_entry,
-            &original_entry,
-            binder,
-            Some(operation),
-        )
-        .map(|(owner, ordinal)| (owner.clone(), ordinal));
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
+            ArtifactIdentityMismatch {
+                stage: ArtifactIdentityStage::BinderOwnerDiffers,
+                expected_original: Some(original.artifact),
+                expected_canonical: Some(interface.artifact),
+                expected_unit: Some(owner.unit.clone()),
+                expected_module: Some(owner.module.clone()),
+                observed_binder_unit: Some(binder.unit.clone()),
+                observed_binder_module: Some(binder.module.clone()),
+                ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::BinderOwnerDiffers)
+            },
+        )));
     }
     let primary = source
         .compiler_primary_input(owner)
@@ -15850,6 +15760,10 @@ pub(crate) mod tests {
                 ..
             })
         ));
+        // The corrected producer resolves re-exports by defining name, so a
+        // nominal owner that differs from the binder's defining module is
+        // malformed. A facade listing module cannot stand in for the defining
+        // site: refuse instead of searching for another authority.
         let foreign_owner = crate::declaration_join::ExactModuleIdentity {
             unit: owner.unit.clone(),
             module: "Other".into(),
@@ -15864,9 +15778,9 @@ pub(crate) mod tests {
                 &operation
             ),
             Err(CertificationError::InputDecision {
-                reason: InputDecisionRefusal::RoleMismatch,
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch(refusal),
                 ..
-            })
+            }) if refusal.stage == ArtifactIdentityStage::BinderOwnerDiffers
         ));
         assert!(matches!(
             resolve(
