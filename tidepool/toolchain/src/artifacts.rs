@@ -3722,6 +3722,11 @@ impl CompiledArtifacts {
 }
 
 impl TargetArtifact {
+    /// Retain the prepared owner paired with this target's certification.
+    pub fn prepared_owner(&self) -> &Arc<tidepool_repr::execution_schema::PreparedProgram> {
+        self.prepared.prepared_shared()
+    }
+
     /// Borrow the completion issued for this exact physical target. It is
     /// separate from broader Original availability and retained byte custody.
     pub fn completed_native_selection(
