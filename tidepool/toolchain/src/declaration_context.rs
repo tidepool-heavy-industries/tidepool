@@ -548,12 +548,27 @@ impl IssuedOriginalOutput {
         originals
             .authored_artifacts()
             .map_err(compiler_evidence_failure)?;
+        Ok(Self::from_segment_physical(originals))
+    }
+
+    fn from_segment_physical(
+        originals: &crate::certified_products::CertifiedSegmentOriginals,
+    ) -> Self {
         let inputs = Arc::clone(originals.physical_inputs());
-        Ok(Self {
+        Self {
             selection: originals.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
             inputs,
-        })
+        }
+    }
+
+    fn produced_source(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<Option<Arc<CompletedNativeProductAvailability>>, CompileError> {
+        self.selection
+            .produced_source_receipt(owner, &self.artifacts)
+            .map_err(compiler_evidence_failure)
     }
 
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
@@ -7435,10 +7450,76 @@ impl ExactRequestInputs {
 #[derive(Clone)]
 struct ProgramSourceSupport {
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
-    imports: Arc<imbl::OrdMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>>,
+    imports: Arc<imbl::OrdMap<ExactModuleIdentity, ProgramSourceSupportRow>>,
+}
+
+#[derive(Clone, Debug)]
+struct ProgramSourceSupportRow {
+    imports: Vec<ExactModuleIdentity>,
+    produced: Option<Arc<CompletedNativeProductAvailability>>,
+}
+
+impl PartialEq for ProgramSourceSupportRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.imports == other.imports
+            && match (&self.produced, &other.produced) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for ProgramSourceSupportRow {}
+
+impl ProgramSourceSupportRow {
+    fn matches_entry(&self, entry: &Arc<ArtifactEntry>) -> bool {
+        let Some(receipt) = &self.produced else {
+            return false;
+        };
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return false;
+        };
+        receipt.row().original_artifact_id() == entry.descriptor.id
+            && receipt.row().original_owner() == product.owner()
+            && product
+                .module_interface()
+                .map(ArtifactEntry::canonical_artifact_id)
+                == Some(receipt.row().canonical)
+            && receipt
+                .row()
+                .target_original(product.owner())
+                .is_some_and(|actual| actual.as_ref() == entry.as_ref())
+    }
 }
 
 impl ProgramSourceSupport {
+    fn retain_imports(
+        retained: &mut imbl::OrdMap<ExactModuleIdentity, ProgramSourceSupportRow>,
+        owner: ExactModuleIdentity,
+        mut imports: Vec<ExactModuleIdentity>,
+        produced: Option<Arc<CompletedNativeProductAvailability>>,
+    ) -> Result<(), CompileError> {
+        imports.sort();
+        imports.dedup();
+        if let Some(previous) = retained.get(&owner) {
+            if previous.imports != imports {
+                return Err(failure("program support changed its original import graph"));
+            }
+            match (&previous.produced, &produced) {
+                (Some(previous), Some(incoming)) if !Arc::ptr_eq(previous, incoming) => {
+                    return Err(failure(
+                        "program support changed its completed source issuer",
+                    ));
+                }
+                (Some(_), _) | (_, None) => return Ok(()),
+                (None, Some(_)) => {}
+            }
+        }
+        retained.insert(owner, ProgramSourceSupportRow { imports, produced });
+        Ok(())
+    }
+
     fn source_original(
         &self,
         owner: &ExactModuleIdentity,
@@ -7453,6 +7534,7 @@ impl ProgramSourceSupport {
         previous: Option<&Self>,
         incoming: &crate::artifact_inventory::CompilerSourceSupport,
         imports: impl IntoIterator<Item = (ExactModuleIdentity, Vec<ExactModuleIdentity>)>,
+        physical: &IssuedOriginalOutput,
     ) -> Result<Self, CompileError> {
         let compiler_support = match previous {
             Some(previous) => {
@@ -7465,15 +7547,22 @@ impl ProgramSourceSupport {
         };
         let mut retained =
             previous.map_or_else(imbl::OrdMap::new, |value| value.imports.as_ref().clone());
-        for (owner, mut requirements) in imports {
-            requirements.sort();
-            requirements.dedup();
-            if retained
-                .insert(owner, requirements.clone())
-                .is_some_and(|old| old != requirements)
-            {
-                return Err(failure("program support changed its original import graph"));
+        for (owner, requirements) in imports {
+            let row = ProgramSourceSupportRow {
+                imports: requirements,
+                produced: physical.produced_source(&owner)?,
+            };
+            if row.produced.is_some() {
+                let entry = incoming.implementation_entry(&owner).ok_or_else(|| {
+                    failure("produced program source lacks its compiler support entry")
+                })?;
+                if !row.matches_entry(entry) {
+                    return Err(failure(
+                        "produced program source changed its physical entry",
+                    ));
+                }
             }
+            Self::retain_imports(&mut retained, owner, row.imports, row.produced)?;
         }
         Ok(Self {
             compiler_support,
@@ -7492,15 +7581,8 @@ impl ProgramSourceSupport {
         };
         let mut retained =
             previous.map_or_else(imbl::OrdMap::new, |value| value.imports.as_ref().clone());
-        for (owner, mut requirements) in imports {
-            requirements.sort();
-            requirements.dedup();
-            if retained
-                .insert(owner, requirements.clone())
-                .is_some_and(|old| old != requirements)
-            {
-                return Err(failure("program support changed its original import graph"));
-            }
+        for (owner, requirements) in imports {
+            Self::retain_imports(&mut retained, owner, requirements, None)?;
         }
         Ok(Self {
             compiler_support,
@@ -8312,6 +8394,7 @@ pub(crate) struct ProductCompilerInputs<'a> {
     native_selection: &'a NativeInputSelection,
     original_sources: &'a crate::certified_products::RetainedOriginalSources,
     original_bindings: Option<crate::certified_products::OriginalBindingSelection>,
+    program_support: Option<&'a ProgramSourceSupport>,
 }
 
 impl<'a> ProductCompilerInputs<'a> {
@@ -8322,7 +8405,42 @@ impl<'a> ProductCompilerInputs<'a> {
             native_selection: &inputs.native_selection,
             original_sources: &inputs.original_sources,
             original_bindings: None,
+            program_support: None,
         }
+    }
+
+    fn with_program_support(mut self, support: Option<&'a ProgramSourceSupport>) -> Self {
+        self.program_support = support;
+        self
+    }
+
+    pub(crate) fn produced_source(
+        &self,
+        entry: &Arc<ArtifactEntry>,
+    ) -> Result<
+        Option<&Arc<CompletedNativeProductAvailability>>,
+        crate::certified_products::CertificationError,
+    > {
+        let Some(support) = self.program_support else {
+            return Ok(None);
+        };
+        let Some(row) = support.imports.get(entry.descriptor.owner.as_ref()) else {
+            return Ok(None);
+        };
+        if row.produced.is_none() {
+            return Ok(None);
+        }
+        if support
+            .compiler_support
+            .implementation_entry(&entry.descriptor.owner)
+            .is_none_or(|actual| actual.as_ref() != entry.as_ref())
+            || !row.matches_entry(entry)
+        {
+            return Err(crate::certified_products::CertificationError::Mismatch(
+                "prior program Source has another physical issuer",
+            ));
+        }
+        Ok(row.produced.as_ref())
     }
 
     /// Carry the semantic support a demanded owner projected from its own
@@ -8341,6 +8459,7 @@ impl<'a> ProductCompilerInputs<'a> {
             native_selection: &inputs.native_selection,
             original_sources,
             original_bindings: Some(original_bindings),
+            program_support: None,
         }
     }
 
@@ -8461,7 +8580,8 @@ impl<'a> ProductInputFacts<'a> {
     ) -> Self {
         Self {
             context: inputs.context(),
-            compiler: ProductCompilerInputs::from_exact(inputs.compiler()),
+            compiler: ProductCompilerInputs::from_exact(inputs.compiler())
+                .with_program_support(program.program_support.as_ref()),
             groups,
             source_lexical: &program.program_source_lexical,
             program_support: program.program_support.as_ref(),
@@ -8473,31 +8593,21 @@ impl<'a> ProductInputFacts<'a> {
         }
     }
 
-    /// Collect the facts a demanded world owner supplies. `support` is the
-    /// projected semantic owner from `semantic_source_support`; the cold
-    /// continuation contributes only its immutable original-source custody.
-    pub(crate) fn from_demand(
+    /// Initial executable choices and previously produced Source proofs travel
+    /// through the same demanded World owner and remain separate authorities.
+    fn from_demand(
         context: &'a Arc<ExactDeclarationContext>,
-        demand: &'a DemandNativeInputs,
+        compiler: ProductCompilerInputs<'a>,
         groups: &'a DemandCertifiedGroups,
-        support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         checked_values: &'a crate::checked_cell::CheckedValueImportAuthority,
-        original_bindings: &crate::certified_products::OriginalBindingSelection,
     ) -> Self {
+        let program_support = compiler.program_support;
         Self {
             context,
-            compiler: ProductCompilerInputs::from_semantic_support(
-                demand,
-                support,
-                &demand.cold().original_sources,
-                original_bindings.clone(),
-            ),
+            compiler,
             groups: groups.groups(),
-            // A world cell has no program-level source continuation. Its
-            // checked imports also retain an unused operation input's interface;
-            // executable demand remains with the checked stage.
             source_lexical: &[],
-            program_support: None,
+            program_support,
             source_selected_support: imbl::OrdSet::new(),
             source_search_include: None,
             scaffold_imports: &[],
@@ -8518,6 +8628,7 @@ pub(crate) struct DemandedWorldCompilerInputs {
     binding: WorldCompilationIdentity,
     context: Arc<ExactDeclarationContext>,
     checked_values: crate::checked_cell::CheckedValueImportAuthority,
+    program_support: Option<ProgramSourceSupport>,
 }
 
 impl DemandedWorldCompilerInputs {
@@ -8555,18 +8666,15 @@ impl DemandedWorldCompilerInputs {
             &self.demand.cold().original_sources,
             self.original_bindings.clone(),
         )
+        .with_program_support(self.program_support.as_ref())
     }
 
-    /// Build the world product facts exactly once for certification. `groups`
-    /// and the projected support are the only executable input authority.
     fn facts(&self) -> ProductInputFacts<'_> {
         ProductInputFacts::from_demand(
             &self.context,
-            &self.demand,
+            self.compiler_inputs(),
             &self.groups,
-            Arc::clone(&self.support),
             &self.checked_values,
-            &self.original_bindings,
         )
     }
 
@@ -8576,7 +8684,6 @@ impl DemandedWorldCompilerInputs {
     ) -> ProductInputFacts<'a> {
         let mut facts = self.facts();
         facts.source_lexical = &program.program_source_lexical;
-        facts.program_support = program.program_support.as_ref();
         facts.source_selected_support = program.source_selected_support.clone();
         facts
     }
@@ -9131,11 +9238,11 @@ impl<'a> ExactProductAdmission<'a> {
                 }
                 // A missing row remains missing original evidence. Never
                 // replace its unknown home imports with an empty leaf.
-                if let Some(requirements) = support.imports.get(&owner) {
-                    pending.extend(requirements.iter().cloned());
+                if let Some(row) = support.imports.get(&owner) {
+                    pending.extend(row.imports.iter().cloned());
                     scaffold.push(ExactLexicalNode {
                         owner,
-                        imports: requirements.clone(),
+                        imports: row.imports.clone(),
                     });
                 }
             }
@@ -10595,6 +10702,7 @@ impl WorldProgramContinuation {
             binding: WorldCompilationIdentity::from_binding(&decoded.binding),
             context: Arc::clone(&self.context),
             checked_values,
+            program_support: self.program.program_support.clone(),
         })
     }
 
@@ -10860,6 +10968,7 @@ impl WorldProgramSegment {
         let advanced = continuation
             .inputs
             .advance_program_support(&projected, &fragment)?;
+        let physical = IssuedOriginalOutput::from_segment_physical(&self.originals);
         continuation.program.program_support = Some(ProgramSourceSupport::append_fragment(
             continuation.program.program_support.as_ref(),
             &fragment,
@@ -10871,6 +10980,7 @@ impl WorldProgramSegment {
                             .generated_source_owner()
                             .expect("validated generated owner")
             }),
+            &physical,
         )?);
         continuation.program.program_source_lexical = continuation
             .program
