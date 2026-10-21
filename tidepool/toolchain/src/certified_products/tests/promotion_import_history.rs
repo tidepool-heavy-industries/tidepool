@@ -809,11 +809,11 @@ fn check_retained_core_promotion_history(item_count: usize) {
         ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
         HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
     );
-    let empty_delta = receipt_bytes(&value_array([
-        value_text("TPCERT"),
-        Value::Integer(11.into()),
-        value_array([value_text("segment-item"), value_array([]), value_array([])]),
-    ]));
+    let empty_delta = receipt_bytes(&segment_item_receipt(&SegmentItemReceipt {
+        globals: vec![],
+        packages: BTreeMap::new(),
+        package_products: vec![],
+    }));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
     let prepared = testing::prepare(testing::wire_program()).unwrap();
     for item in 0..item_count {

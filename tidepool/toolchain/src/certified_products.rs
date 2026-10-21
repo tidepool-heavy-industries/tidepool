@@ -27938,16 +27938,11 @@ None,
         let payload = receipt_payload_mut(&mut originals);
         payload[0] = value_text("segment-originals");
         payload.remove(2);
-        let item = value_array([
-            value_text("TPCERT"),
-            Value::Integer(11.into()),
-            value_array([
-                value_text("segment-item"),
-                value_array([]),
-                value_array([]),
-                value_array([]),
-            ]),
-        ]);
+        let item = segment_item_receipt(&SegmentItemReceipt {
+            globals: vec![],
+            packages: BTreeMap::new(),
+            package_products: vec![],
+        });
         let decode_originals = |value: &Value| {
             decode_segment_originals_with_operation(
                 &receipt_bytes(value),
@@ -27975,6 +27970,13 @@ None,
             receipt_payload_mut(&mut changed)[0] = value_text(tag);
             assert!(decode_item(&changed).is_err());
         }
+        // The obsolete three-field packet omits the required package output table.
+        let mut missing_outputs = item.clone();
+        receipt_payload_mut(&mut missing_outputs).pop();
+        assert!(matches!(
+            decode_item(&missing_outputs),
+            Err(CertificationError::Receipt("segment item output arity"))
+        ));
         let mut extra = item.clone();
         receipt_payload_mut(&mut extra).push(Value::Null);
         assert!(decode_item(&extra).is_err());
@@ -28410,9 +28412,9 @@ None,
                     },
                 }
             }
-            let item = value_array([value_text("TPCERT"), Value::Integer(11.into()), value_array([
-                value_text("segment-item"), value_array([value_global(&left)]), value_array([]), value_array([]),
-            ])]);
+            let item = segment_item_receipt(&SegmentItemReceipt {
+                globals: vec![left.clone()], packages: BTreeMap::new(), package_products: vec![],
+            });
             let operation = InventoryOperation::new(Default::default());
             let decoded = decode_segment_item_with_operation(&receipt_bytes(&item), &operation).unwrap();
             proptest::prop_assert_eq!(&decoded.globals, &vec![left.clone()]);
@@ -28688,6 +28690,31 @@ None,
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(value, &mut bytes).unwrap();
         bytes
+    }
+
+    fn segment_item_receipt(receipt: &SegmentItemReceipt) -> Value {
+        value_array([
+            value_text("TPCERT"),
+            Value::Integer(11.into()),
+            value_array([
+                value_text("segment-item"),
+                value_array(receipt.globals.iter().map(value_global)),
+                value_array(receipt.packages.iter().map(|((unit, module), witness)| {
+                    value_array([
+                        value_text(unit),
+                        value_text(module),
+                        value_text(witness.selected_path.display().to_string()),
+                        value_text(hex(&witness.sha256)),
+                    ])
+                })),
+                value_array(receipt.package_products.iter().map(|output| {
+                    value_array([
+                        value_text(output.relative_path.display().to_string()),
+                        Value::Bytes(output.sha256.to_vec()),
+                    ])
+                })),
+            ]),
+        ])
     }
 
     fn fixture_envelope_value(envelope: &FinalizationEnvelope) -> Value {
