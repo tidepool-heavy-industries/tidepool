@@ -16,24 +16,48 @@ struct HeldPackageCaf {
     evaluated: bool,
 }
 
-fn observed_package_cafs(
-    resident: &mut TestSession,
+fn selected_package_roots(
+    resident: &TestSession,
     scope: ScopeId,
-) -> BTreeMap<CafKey, HeldPackageCaf> {
+) -> (
+    SourceInstanceDomain,
+    BTreeMap<NativeBindingKey, NativeInstanceLease>,
+) {
     let selection = resident
         .state
         .bindings()
         .native_domain_selection_in(resident.state.scope_tree(), scope)
         .expect("the actual source owner issues its selected native domain");
     let domain = selection.current();
-    let leases = selection
+    let mut roots = BTreeMap::<NativeBindingKey, NativeInstanceLease>::new();
+    for (key, lease) in selection
         .roots()
         .iter()
         .filter(|(key, _)| key.domain == domain)
-        .map(|(_, lease)| lease.clone())
-        .collect::<Vec<_>>();
+    {
+        if !matches!(lease, NativeInstanceLease::Package(_)) {
+            continue;
+        }
+        if let Some(previous) = roots.get(&key.binding) {
+            assert_eq!(
+                previous.instance(),
+                lease.instance(),
+                "one selected binding in this actual domain has one physical instance"
+            );
+        } else {
+            roots.insert(key.binding, lease.clone());
+        }
+    }
+    (domain, roots)
+}
+
+fn observed_package_cafs(
+    resident: &mut TestSession,
+    scope: ScopeId,
+) -> BTreeMap<CafKey, HeldPackageCaf> {
+    let (domain, roots) = selected_package_roots(resident, scope);
     let mut observations = BTreeMap::<CafKey, HeldPackageCaf>::new();
-    for lease in leases {
+    for lease in roots.into_values() {
         let NativeInstanceLease::Package(package) = &lease else {
             continue;
         };
@@ -331,7 +355,16 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     );
     let public_second = observed_package_cafs(&mut resident, public_b);
     assert!(assert_unchanged_public_caf(&public_second, forced_key, first_caf).evaluated);
+    let (_, before_expression) = selected_package_roots(&resident, public_b);
     public_package_expression(&mut resident, &recipe);
+    let (late_domain, late_roots) = selected_package_roots(&resident, public_b);
+    let newly_selected = late_roots
+        .keys()
+        .filter(|key| !before_expression.contains_key(*key))
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(!newly_selected.is_empty(),
+        "the zero-name expression must genuinely select new package bindings: before={before_expression:?}, after={late_roots:?}");
     let after_expression = observed_package_cafs(&mut resident, public_b);
     assert!(assert_unchanged_public_caf(&after_expression, forced_key, first_caf).evaluated);
 
@@ -377,9 +410,21 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         &mut resident,
         &recipe,
         "packageAfterCutoff",
-        "P.fst packageSecond + if PackageProbe.packageProbe 2 > 0 then 1 else 0",
+        "P.fst packageSecond + if PackageProbe.packageProbe 2 > 0 && PackageProbe.packageLater 37 == 23 then 1 else 0",
         44,
     );
+    let (restored_domain, restored_roots) = selected_package_roots(&resident, public_b);
+    assert_eq!(restored_domain, late_domain);
+    for key in &newly_selected {
+        let restored = restored_roots.get(key).expect(
+            "cold rebootstrap and new B use retain the expression's actual package binding",
+        );
+        assert_eq!(
+            restored.instance(),
+            late_roots[key].instance(),
+            "the later B cell reuses its own already-installed package instance"
+        );
+    }
     let public_after_cutoff = observed_package_cafs(&mut resident, public_b);
     assert!(assert_unchanged_public_caf(&public_after_cutoff, forced_key, first_caf).evaluated);
     eprintln!(
@@ -456,7 +501,7 @@ fn public_package_expression(resident: &mut TestSession, recipe: &InputRecipe) {
     let cell = check_fixture_cell(
         resident,
         recipe,
-        "pure (if PackageProbe.packageProbe 3 > 0 then (42 :: Int) else 0)",
+        "if PackageProbe.packageLater 37 == 23 then (42 :: Int) else 0",
         execution.clone(),
         0,
     );
@@ -473,16 +518,20 @@ fn public_package_expression(resident: &mut TestSession, recipe: &InputRecipe) {
         panic!("the owner issues one actual expression observation")
     };
     assert_eq!(reservation.observation_name(), Some(binder.name.as_str()));
-    let effectful = matches!(
-        reservation.item().expression_lift().unwrap(),
-        Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful)
+    let lift = reservation.item().expression_lift().unwrap();
+    assert!(
+        matches!(
+            lift,
+            Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Pure)
+        ),
+        "the actual pure-expression adapter must force its result before completion: {lift:?}"
     );
     let completed = source_action(resident, |resident, settlement| {
         resident.run_observation_with_sites(
             compiled.code(),
             binder,
             reservation.generation(),
-            effectful,
+            false,
             settlement,
         )
     })
