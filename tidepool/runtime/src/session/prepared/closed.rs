@@ -559,14 +559,13 @@ impl NativeInstantiationPlan {
                         interface_digest: owner.interface_sha256,
                     }));
                     if let Some(image) = literals.get(&import.program) {
-                        let storage = image.image().package_literals(|unit, module| {
-                            (unit == owner.unit && module == owner.module)
-                                .then_some(owner.interface_sha256)
-                        });
-                        if let Some(literal) = storage.get(&global.identity) {
+                        let NativeCompiledProduct::Package { image, .. } = image else {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        };
+                        if let Some(literal) = image.package_literal(import.value) {
                             if packages
                                 .insert(global.identity.clone(), literal.clone())
-                                .is_some_and(|old| old != *literal)
+                                .is_some_and(|old| old != literal)
                             {
                                 return Err(PreparedRuntimeError::CertifiedTargetOwners);
                             }

@@ -13264,8 +13264,57 @@ mod authored_publication_tests {
                 &source
             ));
         }
+        let captured_a = session
+            .retain_lexical_scope(prior_entry.installation_scope.scope())
+            .unwrap();
+        assert!(
+            !session
+                .state
+                .bindings()
+                .native_domain_selection_in(session.state.scope_tree(), captured_a.scope(),)
+                .unwrap()
+                .roots()
+                .is_empty(),
+            "the capture retains A's actual installed native instances"
+        );
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: captured_a.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
         let cutoff = prior.lease().source_admission().fence_if_idle().unwrap();
         assert!(prior.lease().admit_source().is_err());
+        let before_refusal = session.residency();
+        let before_images = CompiledProgram::successful_image_compilations();
+        let refused = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.prepare_startup_entry(prepared.compiled().code()),
+            )
+            .unwrap()
+            .into_outcome();
+        assert!(
+            matches!(refused.action,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Closed { scope, .. }
+            ))) if scope == prior.lease().scope()),
+            "an actual captured A environment cannot admit new work after A is fenced"
+        );
+        assert!(matches!(
+            refused.close,
+            crate::CompilerTransactionClose::NotStarted
+        ));
+        assert_eq!(session.residency(), before_refusal);
+        assert_eq!(
+            CompiledProgram::successful_image_compilations(),
+            before_images
+        );
+
         assert!(
             candidate.lease().admit_source().is_ok(),
             "B has no prior-A source edge"
