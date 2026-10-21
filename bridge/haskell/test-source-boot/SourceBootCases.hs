@@ -3125,25 +3125,42 @@ verifyOriginalOnlyPackageRefusal :: FilePath -> PreparedPipelineResult
   -> [(Module, Either ProjectionError [ProjectedGroup])] -> BS.ByteString -> IO ()
 verifyOriginalOnlyPackageRefusal work original outcomes certified = do
   facts <- certificateFacts certified
-  (unit,name,path) <- case codecCertificatePackages facts of
-    (unit,name,path,_):_ | null (codecCertificateTargets facts) -> pure (unit,name,path)
+  (unit,name,seal,binder) <- case codecCertificateOwners facts of
+    owners | null (codecCertificateTargets facts)
+      , first:_ <- [(unit,name,seal,binder)
+          | CodecPackageOwner unit name seal binder <- owners] -> pure first
     _ -> fail "original-only package requirement did not issue its own positive witness"
+  path <- case [path | (ownerUnit,ownerName,path,ownerSeal) <- codecCertificatePackages facts
+      , (ownerUnit,ownerName,ownerSeal) == (unit,name,seal)] of
+    [path] -> pure path
+    _ -> fail "original-only package global lost its exact defining interface witness"
   let env = prHscEnv (pprPipelineResult original)
       owner = mkModule (stringToUnit unit) (mkModuleName name)
       missing = work </> "missing-original-package.hi"
+      requireRefusal reason result = case result of
+        Left actual | (reason ++ ": " ++ unit ++ ":" ++ name ++ ".") `isPrefixOf` actual -> pure ()
+        Left actual -> fail ("original package fault reached another refusal: " ++ actual)
+        Right _ -> fail "original-only package demand sealed without its defining interface"
   (_,location) <- readExactInterface env owner >>= either (fail . show) pure
+  unless (ml_hi_file location == path)
+    (fail "original package fault does not target its actual defining interface")
+  (_,witness) <- resolvePackageGlobal env binder >>= either fail pure
+  unless (witness == PackageImportRoot unit name path seal)
+    (fail "original package global differs from its certified defining interface")
   finder <- initFinderCache
+  -- The table also carries TYPE-only and reexport sidecars. Fault the defining
+  -- owner of an actual native package global, not an arbitrary table member.
   addModuleToFinder finder (GWIB owner NotBoot) location {ml_hi_file=missing}
-  certifyProjectedProducts work "missing" original outcomes [] env {hsc_FC=finder} >>= \case
-    Left _ -> pure ()
-    Right _ -> fail "original-only package demand sealed without its defining interface"
+  certifyProjectedProducts work "missing" original outcomes [] env {hsc_FC=finder}
+    >>= requireRefusal "selected package interface is unavailable"
   wrong <- maybe (fail "original package fixture has no home interface for owner refusal") pure
     (Map.lookup (mkModuleName "PackageOriginalSupport") (pprProductInterfaces original))
   writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression missing wrong
-  certifyProjectedProducts work "wrong-owner" original outcomes [] env {hsc_FC=finder} >>= \case
-    Left _ -> pure ()
-    Right _ -> fail "original-only package demand sealed another actual interface owner"
-  BS.writeFile missing =<< BS.readFile path
+  certifyProjectedProducts work "wrong-owner" original outcomes [] env {hsc_FC=finder}
+    >>= requireRefusal "selected package interface is unavailable or changed"
+  -- Restore the sealed selection itself; equal bytes at the fault path would
+  -- not restore the canonical sidecar's independently authenticated origin.
+  addModuleToFinder finder (GWIB owner NotBoot) location
   restored <- certifyProjectedProducts work "restored" original outcomes [] env {hsc_FC=finder}
   either fail (const (pure ())) restored
 
