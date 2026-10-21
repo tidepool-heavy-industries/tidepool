@@ -3796,6 +3796,16 @@ struct NativeInputSelection {
 }
 
 impl NativeInputSelection {
+    fn retain_acquisitions(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            availability: self.availability.retain_acquisitions(support.artifacts())?,
+            advertised: self.advertised.clone(),
+        })
+    }
+
     fn receive(
         roles: &CompilerInputProjection,
         projection: &CompilerArtifactMetadata,
@@ -4245,13 +4255,16 @@ impl RequestCompilerInputs {
         let mut facts = primary.owner.facts.clone();
         facts.compiler_support = support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let metadata = CompilerArtifactMetadata {
+            entries: self.metadata.entries.clone(),
+            retained: Arc::clone(&self.metadata.retained),
+        }
+        .retain_acquisitions(support.artifacts())?;
+        let native_selection = self.native_selection.retain_acquisitions(&support)?;
         let inputs = Arc::new(Self {
             source_support: Arc::new(support),
-            metadata: CompilerArtifactMetadata {
-                entries: self.metadata.entries.clone(),
-                retained: Arc::clone(&self.metadata.retained),
-            },
-            native_selection: self.native_selection.clone(),
+            metadata,
+            native_selection,
             original_sources: Arc::clone(&self.original_sources),
             world_primary_context: Some(Arc::clone(&context)),
         });
@@ -4296,10 +4309,11 @@ impl RequestCompilerInputs {
         let mut facts = primary.owner.facts.clone();
         facts.compiler_support = support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let native_selection = self.native_selection.retain_acquisitions(&support)?;
         let inputs = Arc::new(Self {
             source_support: Arc::new(support),
             metadata,
-            native_selection: self.native_selection.clone(),
+            native_selection,
             original_sources: Arc::clone(&self.original_sources),
             world_primary_context: Some(Arc::clone(&context)),
         });
@@ -4436,10 +4450,11 @@ impl RequestCompilerInputs {
         facts.compiler_support = support.clone();
         facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let native_selection = self.native_selection.retain_acquisitions(&support)?;
         Ok(Arc::new(Self {
             source_support: Arc::new(support),
             metadata,
-            native_selection: self.native_selection.clone(),
+            native_selection,
             original_sources: Arc::clone(&self.original_sources),
             world_primary_context: Some(context),
         }))

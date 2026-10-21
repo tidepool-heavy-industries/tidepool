@@ -2441,11 +2441,14 @@ impl crate::declaration_context::RequestCompilerInputs {
 }
 
 impl CompilerArtifactMetadata {
-    fn retain_acquisitions(mut self, artifacts: &ArtifactView) -> Result<Self, CompileError> {
+    pub(crate) fn retain_acquisitions(
+        mut self,
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
         fn retain<K: Ord + Clone>(
             entries: &mut imbl::OrdMap<K, Arc<ArtifactEntry>>,
             artifacts: &ArtifactView,
-        ) -> Result<(), CompileError> {
+        ) -> Result<bool, CompileError> {
             let mut changed = Vec::new();
             for (key, entry) in entries.iter() {
                 crate::host_work::checkpoint()?;
@@ -2465,17 +2468,20 @@ impl CompilerArtifactMetadata {
                     changed.push((key.clone(), Arc::clone(retained)));
                 }
             }
+            let updated = !changed.is_empty();
             for (key, entry) in changed {
                 entries.insert(key, entry);
             }
-            Ok(())
+            Ok(updated)
         }
         retain(&mut self.entries, artifacts)?;
         let mut retained = self.retained.as_ref().clone();
-        retain(&mut retained.artifacts, artifacts)?;
-        retain(&mut retained.entries, artifacts)?;
-        retain(&mut retained.interface_representatives, artifacts)?;
-        self.retained = Arc::new(retained);
+        let mut changed = retain(&mut retained.artifacts, artifacts)?;
+        changed |= retain(&mut retained.entries, artifacts)?;
+        changed |= retain(&mut retained.interface_representatives, artifacts)?;
+        if changed {
+            self.retained = Arc::new(retained);
+        }
         Ok(self)
     }
 }
