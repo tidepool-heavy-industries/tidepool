@@ -75,8 +75,8 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
   , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
-  , PackageLinkIndex(..), PackageOccurrence(..)
-  , emptyPackageLinkIndex, linkForOccurrence )
+  , PackageLinkIndex(..), RawOccurrence(..), RawLink(..)
+  , emptyPackageLinkIndex, canonicalizeOccurrences )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -531,25 +531,29 @@ retainPreparedPackageTargets provenance targets captures context = do
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
           bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
       pure (name, group, bytes)
-    let targetOwners = Map.fromListWith Map.union
-          [ (T.pack name, Map.singleton binder (fromIntegral index))
+    let rawTargetOwners = Map.fromListWith Map.union
+          [ (T.pack name, Map.singleton binder index)
           | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
           , binder <- projectedBinders
               (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
-        occurrences =
-          [ PackageOccurrence
-              { packageOccurrenceEnvelopeSha256 = SHA256.hash bytes
-              , packageOccurrenceUnit = T.pack (unitString (moduleUnit (projectedPackageModule group)))
-              , packageOccurrenceModule = T.pack (moduleNameString (moduleName (projectedPackageModule group)))
-              , packageOccurrenceDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
-              , packageOccurrenceDefiningVersionSha256 = projectedPackageDefiningVersion group
-              , packageOccurrenceImports =
-                  [ linkForOccurrence (Map.findWithDefault Map.empty (T.pack name) targetOwners)
-                      (globalIdentity global)
+        rawOccurrences =
+          [ RawOccurrence
+              { rawEnvelopeSha256 = SHA256.hash bytes
+              , rawUnit = T.pack (unitString (moduleUnit (projectedPackageModule group)))
+              , rawModule = T.pack (moduleNameString (moduleName (projectedPackageModule group)))
+              , rawDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
+              , rawDefiningVersionSha256 = projectedPackageDefiningVersion group
+              , rawImports =
+                  [ case Map.lookup (globalIdentity global)
+                        (Map.findWithDefault Map.empty (T.pack name) rawTargetOwners) of
+                      Just child -> RawLinkLocal child
+                      Nothing -> RawLinkInherited
                   | global <- projectedGlobals (projectedBody
                       (projectedGroupEncodingInput (projectedPackageEncoding group))) ]
               }
           | (name, group, bytes) <- encodings ]
+        (occurrences, indexMap) = canonicalizeOccurrences rawOccurrences
+        targetOwners = Map.map (Map.map (indexMap Map.!)) rawTargetOwners
     let interfaces = Map.fromList
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
             ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
