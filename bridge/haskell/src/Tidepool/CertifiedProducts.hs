@@ -247,16 +247,23 @@ resolveHomeRoots
   -> Map.Map T.Text (Map.Map SymbolIdentity Int)
   -> Map.Map T.Text (Map.Map (T.Text,T.Text,Word) [SymbolIdentity])
   -> Either String (Map.Map (T.Text,T.Text,Word) [PackageLink])
-resolveHomeRoots indexMap targetOwners targetHomeImports =
-  foldM insertAgreeing Map.empty
-    [ (key, resolveLinks (Map.findWithDefault Map.empty target targetOwners) identities)
+resolveHomeRoots indexMap targetOwners targetHomeImports = do
+  rows <- forM
+    [ (key, Map.findWithDefault Map.empty target targetOwners, identities)
     | (target, imports) <- Map.toAscList targetHomeImports
     , (key, identities) <- Map.toAscList imports ]
+    $ \(key, owners, identities) -> do
+      links <- resolveLinks owners identities
+      pure (key, links)
+  foldM insertAgreeing Map.empty rows
   where
-    resolveLinks owners =
-      map (\identity -> case Map.lookup identity owners of
-        Just raw -> PackageLinkLocal (indexMap Map.! raw)
-        Nothing -> PackageLinkInherited)
+    resolveLinks owners = traverse $ \identity ->
+      case Map.lookup identity owners of
+        Nothing -> Right PackageLinkInherited
+        Just raw -> case Map.lookup raw indexMap of
+          Just canonical -> Right (PackageLinkLocal canonical)
+          Nothing -> Left
+            ("HOME package import lacks canonical occurrence " ++ show raw)
     insertAgreeing known (key, links) = case Map.lookup key known of
       Nothing -> Right (Map.insert key links known)
       Just prior | prior == links -> Right known

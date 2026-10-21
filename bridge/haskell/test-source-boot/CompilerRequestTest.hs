@@ -147,6 +147,13 @@ homeRootResolutionAgreement = do
   case resolveHomeRoots indexMap owners disagreeing of
     Left _ -> pure ()
     Right actual -> fail ("disagreeing HOME roots were silently merged: " ++ show actual)
+  let missingIndex = Map.singleton (Text.pack "t1")
+        (Map.singleton binderA 99)
+      onlyFirstTarget = Map.singleton (Text.pack "t1")
+        (Map.singleton home1 [binderA])
+  case resolveHomeRoots indexMap missingIndex onlyFirstTarget of
+    Left reason | "canonical occurrence" `isInfixOf` reason -> pure ()
+    other -> fail ("missing canonical occurrence was not refused: " ++ show other)
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do

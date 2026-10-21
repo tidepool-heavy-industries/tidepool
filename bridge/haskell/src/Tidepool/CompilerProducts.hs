@@ -553,10 +553,15 @@ retainPreparedPackageTargets provenance targets captures context = do
               }
           | (name, group, bytes) <- encodings ]
         (occurrences, indexMap) = canonicalizeOccurrences rawOccurrences
-        targetOwners = Map.map (Map.map (indexMap Map.!)) rawTargetOwners
         targetHomeImports = Map.fromList
           [ (T.pack name, packageTargetHomeImports paired)
           | (name, paired) <- targets ]
+    targetOwners <- Map.traverseWithKey (\target owners ->
+      Map.traverseWithKey (\identity raw -> case Map.lookup raw indexMap of
+        Just canonical -> pure canonical
+        Nothing -> fail ("target " ++ T.unpack target
+          ++ " package import lacks canonical occurrence " ++ show raw
+          ++ ": " ++ show identity)) owners) rawTargetOwners
     homeRoots <- either fail pure (resolveHomeRoots indexMap rawTargetOwners targetHomeImports)
     let interfaces = Map.fromList
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
