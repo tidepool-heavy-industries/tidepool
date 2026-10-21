@@ -3012,7 +3012,16 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
                 &mut validation,
             );
             if case == "exact" {
-                assert_eq!(result.unwrap().imports(), &[source_import(&native, 9001)]);
+                assert!(
+                    matches!(&result, Err(CompileError::ArtifactInventory(error))
+                        if matches!(&error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact, original_ordinal: 9001,
+                        } if *artifact == entry.descriptor.id)
+                        && matches!(&error.native_refusal,
+                            Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceMissing { owner })
+                                if owner == &entry.descriptor.owner)),
+                    "InterfaceOnly custody cannot issue a Source root choice: {result:?}"
+                );
             } else {
                 let expected = match case {
                     "unversioned" => "unversioned source lacks compiler selection",
@@ -3082,6 +3091,64 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .find(|group| group.original_ordinal() == 9001)
         .unwrap();
     let binder = group.binders()[0].clone();
+    // The later compiler explicitly acquires the exact held pair. Full private
+    // availability supplies code; this request's resolver issues the use choice.
+    let namespace = full.capture_graph_selection().namespace;
+    let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface().unwrap());
+    let pair = |binding: &crate::artifact_inventory::ArtifactBinding| {
+        Value::Array(vec![
+            Value::Bytes(binding.artifact.0.to_vec()),
+            Value::Bytes(binding.selection.0.to_vec()),
+        ])
+    };
+    let mut demand_bytes = Vec::new();
+    ciborium::ser::into_writer(
+        &Value::Array(vec![
+            text("TPNATIVEDEMAND1"),
+            Value::Array(vec![Value::Array(vec![
+                text(&owner.unit),
+                text(&owner.module),
+                pair(&namespace[&canonical]),
+                pair(&namespace[&entry.descriptor.id]),
+                Value::Array(vec![
+                    text(&binder.unit),
+                    text(&binder.module),
+                    text(&binder.namespace),
+                    text(&binder.occurrence),
+                    binder.record_parent.as_ref().map_or(Value::Null, text),
+                ]),
+            ])]),
+        ]),
+        &mut demand_bytes,
+    )
+    .unwrap();
+    let packet =
+        crate::certified_products::NativeDemandPacket::decode(&demand_bytes, &validation.inventory)
+            .unwrap();
+    let acquired = next
+        .inputs
+        .compiler
+        .resolve_native_demand(&packet, &mut validation)
+        .expect("explicit exact Original acquisition from Full private availability");
+    let bindings = crate::certified_products::OriginalBindingSelection::from_resolved(Arc::clone(
+        acquired.groups().resolved_original_bindings().unwrap(),
+    ));
+    let product_inputs = ProductCompilerInputs::from_exact(next_inputs)
+        .with_original_bindings(bindings, &validation.inventory)
+        .unwrap();
+    let mut acquired_selection =
+        crate::certified_products::CertifiedSourceSelection::from_product_compiler_inputs(
+            &product_inputs,
+            &validation.inventory,
+        )
+        .unwrap();
+    let acquired_physical = OriginalCompilerInputs::issue_segment_native_availability(
+        &mut acquired_selection,
+        next_inputs.artifacts(),
+        Vec::new(),
+        &mut validation,
+    )
+    .unwrap();
     let prepared = prepared_target_fixture(vec![GlobalDecl {
         identity: binder.clone(),
         rep: RuntimeRep::LiftedRef,
@@ -3094,13 +3161,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         rep: RuntimeRep::LiftedRef,
         entry_signature: None,
         required_evaluated: false,
-        owner: ReceiptImportOwner::Source {
-            unit: native.owner().unit.clone(),
-            module: native.owner().module.clone(),
-            module_version: Some(native.owner().module_version.clone()),
-            original_ordinal: 9001,
-            binder,
-        },
+        owner: packet.originals()[0].clone(),
     }];
     let observed =
         AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
@@ -3108,8 +3169,8 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         .artifacts()
         .inventory()
         .select_native_target(
-            physical.physical_cohort().unwrap(),
-            &selection,
+            acquired_physical.physical_cohort().unwrap(),
+            &acquired_selection,
             observed,
             None,
             None,
