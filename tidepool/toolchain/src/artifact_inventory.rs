@@ -3937,6 +3937,14 @@ impl ArtifactInventory {
         {
             return Err(failure("target belongs to another inventory"));
         }
+        if typed_entry
+            .as_ref()
+            .is_some_and(|entry| !entry.belongs_to_target(observed.target()))
+        {
+            return Err(failure(
+                "typed target entry belongs to another prepared target",
+            ));
+        }
         let operation_owner = Arc::clone(&validation.inventory);
         let operation = operation_owner.as_ref();
         let mut allowed = BTreeSet::new();

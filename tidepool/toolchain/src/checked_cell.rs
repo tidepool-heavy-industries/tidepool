@@ -3293,14 +3293,27 @@ impl SelectedNativeSites {
 }
 
 /// Read-only identity of a native entry sealed against its canonical original.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct CheckedTypedEntry {
+    target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     plan_digest: String,
     origin: tidepool_repr::execution_schema::SymbolIdentity,
     entry: tidepool_repr::execution_schema::SymbolIdentity,
     original_ordinal: u32,
     artifact: crate::artifact_inventory::ArtifactId,
 }
+
+impl PartialEq for CheckedTypedEntry {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.target, &other.target)
+            && self.plan_digest == other.plan_digest
+            && self.origin == other.origin
+            && self.entry == other.entry
+            && self.original_ordinal == other.original_ordinal
+            && self.artifact == other.artifact
+    }
+}
+impl Eq for CheckedTypedEntry {}
 
 fn validate_item_receipt(
     fields: &[Value],
@@ -3374,7 +3387,7 @@ impl CheckedTypedEntry {
         plans: &[CheckedTypedSegmentPlan],
         index: usize,
         source: &str,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         owner: &crate::declaration_join::ExactModuleIdentity,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         producer: [u8; 32],
@@ -3427,7 +3440,7 @@ impl CheckedTypedEntry {
     pub(crate) fn issue_world_item(
         program: &crate::compiler_world::CheckedWorldCellProgram,
         ordinal: usize,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         owner: &crate::declaration_join::ExactModuleIdentity,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
@@ -3473,7 +3486,7 @@ impl CheckedTypedEntry {
         origin: tidepool_repr::execution_schema::SymbolIdentity,
         entry: tidepool_repr::execution_schema::SymbolIdentity,
         original_ordinal: u32,
-        target: &tidepool_repr::execution_schema::PreparedProgram,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         owner: &crate::declaration_join::ExactModuleIdentity,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         producer: [u8; 32],
@@ -3507,6 +3520,7 @@ impl CheckedTypedEntry {
             return Err(typed_entry_failure());
         }
         Ok(Self {
+            target: Arc::clone(target),
             plan_digest,
             origin,
             entry,
@@ -3516,6 +3530,13 @@ impl CheckedTypedEntry {
                 originals[0],
             ),
         })
+    }
+
+    pub(crate) fn belongs_to_target(
+        &self,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    ) -> bool {
+        Arc::ptr_eq(&self.target, target)
     }
 
     pub fn plan_digest(&self) -> &str {
