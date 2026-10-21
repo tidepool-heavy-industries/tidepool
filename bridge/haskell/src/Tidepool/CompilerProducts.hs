@@ -34,7 +34,6 @@ import Codec.CBOR.Write (toStrictByteString)
 import Control.Applicative ((<|>))
 import Control.Exception (Exception, throwIO, evaluate)
 import Control.Concurrent.MVar (MVar)
-import Data.Array (listArray, (!))
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
@@ -76,8 +75,8 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
   , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
-  , PackageLink(..), PackageLinkIndex(..), PackageOccurrence(..)
-  , emptyPackageLinkIndex )
+  , PackageLinkIndex(..), PackageOccurrence(..)
+  , emptyPackageLinkIndex, linkForOccurrence )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -503,14 +502,6 @@ data PreparedPackageOutputs = PreparedPackageOutputs
 emptyPreparedPackageOutputs :: PreparedPackageOutputs
 emptyPreparedPackageOutputs = PreparedPackageOutputs [] Map.empty emptyPackageLinkIndex
 
-deduplicateOccurrenceKeys :: Ord a => [a] -> [a]
-deduplicateOccurrenceKeys = go Set.empty
-  where
-    go _ [] = []
-    go seen (x:xs)
-      | x `Set.member` seen = go seen xs
-      | otherwise = x : go (Set.insert x seen) xs
-
 -- The active stage supplies deployment provenance; the paired projection and
 -- its captured interfaces supply code and byte custody. The writer only copies
 -- these immutable inputs, never resolves another package path.
@@ -540,82 +531,25 @@ retainPreparedPackageTargets provenance targets captures context = do
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
           bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
       pure (name, group, bytes)
-    let n = length encodings
-        indexed = listArray (0, n - 1) (zip [0 :: Int ..] encodings)
-        ownerMaps = Map.fromListWith Map.union
+    let targetOwners = Map.fromListWith Map.union
           [ (T.pack name, Map.singleton binder (fromIntegral index))
           | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
           , binder <- projectedBinders
               (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
-        baseLabel i =
-          let (_, (_, group, bytes)) = indexed ! i
-          in ( SHA256.hash bytes
-             , T.pack (unitString (moduleUnit (projectedPackageModule group)))
-             , T.pack (moduleNameString (moduleName (projectedPackageModule group)))
-             , projectedPackageInterfaceSha256 group
-             , projectedPackageDefiningVersion group )
-        edges i =
-          let (_, (name, group, _)) = indexed ! i
-              owners = Map.findWithDefault Map.empty (T.pack name) ownerMaps
-          in [ case Map.lookup (globalIdentity global) owners of
-                 Nothing -> Left ()
-                 Just child -> Right (fromIntegral child)
-             | global <- projectedGlobals (projectedBody
-                 (projectedGroupEncodingInput (projectedPackageEncoding group))) ]
-        -- Finite partition refinement (bisimulation) over raw (target, group)
-        -- nodes. The initial partition is the exact envelope/owner/defining
-        -- label; each refinement splits nodes whose ordered child slots land
-        -- in different blocks. It terminates at a fixed point and therefore
-        -- accepts cyclic Local-link graphs, so no DAG assumption or recursive
-        -- child digest is introduced.
-        initialLabels = deduplicateOccurrenceKeys [ baseLabel i | i <- [0 .. n - 1] ]
-        initialLabelId = Map.fromList (zip initialLabels [0 :: Int ..])
-        initialBlocks = listArray (0, n - 1) [ initialLabelId Map.! baseLabel i | i <- [0 .. n - 1] ]
-        refine blockOf =
-          let signatures =
-                [ ( blockOf ! i
-                  , [ either (const (Left ())) (Right . (blockOf !)) child
-                    | child <- edges i ] )
-                | i <- [0 .. n - 1] ]
-              distinct = deduplicateOccurrenceKeys signatures
-              signatureId = Map.fromList (zip distinct [0 :: Int ..])
-              next = listArray (0, n - 1)
-                [ signatureId Map.! signature | signature <- signatures ]
-          in (next, length distinct)
-        settle blockOf blockCount =
-          let (next, nextCount) = refine blockOf
-          in if nextCount == blockCount
-               then (blockOf, blockCount)
-               else settle next nextCount
-        (finalBlocks, _) = settle initialBlocks (length initialLabels)
-        firstNode = Map.fromListWith min
-          [ (finalBlocks ! i, i) | i <- [0 .. n - 1] ]
-        blockOrder = Map.keys (Map.fromList
-          [ (i, block) | (block, i) <- Map.toList firstNode ])
-        blockId = Map.fromList (zip blockOrder [0 :: Word32 ..])
-        nodeId i = blockId Map.! (finalBlocks ! i)
-        occurrenceOf representative =
-          let (_, (name, group, bytes)) = indexed ! representative
-              owners = Map.findWithDefault Map.empty (T.pack name) ownerMaps
-              importLink global = case Map.lookup (globalIdentity global) owners of
-                Nothing -> PackageLinkInherited
-                Just child -> PackageLinkLocal (blockId Map.! (finalBlocks ! fromIntegral child))
-          in PackageOccurrence
-               { packageOccurrenceEnvelopeSha256 = SHA256.hash bytes
-               , packageOccurrenceUnit = T.pack (unitString (moduleUnit (projectedPackageModule group)))
-               , packageOccurrenceModule = T.pack (moduleNameString (moduleName (projectedPackageModule group)))
-               , packageOccurrenceDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
-               , packageOccurrenceDefiningVersionSha256 = projectedPackageDefiningVersion group
-               , packageOccurrenceImports =
-                   [ importLink global
-                   | global <- projectedGlobals (projectedBody
-                       (projectedGroupEncodingInput (projectedPackageEncoding group))) ] }
-        occurrences = [ occurrenceOf (firstNode Map.! block) | block <- blockOrder ]
-        targetOwners = Map.fromListWith Map.union
-          [ (T.pack name, Map.singleton binder (nodeId index))
-          | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
-          , binder <- projectedBinders
-              (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
+        occurrences =
+          [ PackageOccurrence
+              { packageOccurrenceEnvelopeSha256 = SHA256.hash bytes
+              , packageOccurrenceUnit = T.pack (unitString (moduleUnit (projectedPackageModule group)))
+              , packageOccurrenceModule = T.pack (moduleNameString (moduleName (projectedPackageModule group)))
+              , packageOccurrenceDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
+              , packageOccurrenceDefiningVersionSha256 = projectedPackageDefiningVersion group
+              , packageOccurrenceImports =
+                  [ linkForOccurrence (Map.findWithDefault Map.empty (T.pack name) targetOwners)
+                      (globalIdentity global)
+                  | global <- projectedGlobals (projectedBody
+                      (projectedGroupEncodingInput (projectedPackageEncoding group))) ]
+              }
+          | (name, group, bytes) <- encodings ]
     let interfaces = Map.fromList
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
             ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
