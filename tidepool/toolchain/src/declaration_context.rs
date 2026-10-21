@@ -11512,41 +11512,15 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 .unwrap();
         }
         if matches!(observation, Observation::Unchanged) {
-            let initial_inputs = segment.inputs.compiler_inputs();
             let support = segment
                 .continuation
                 .program
                 .program_support
                 .as_ref()
                 .unwrap();
-            let carried =
-                ProgramSourceSupport::extend(Some(support), support.compiler_support.clone(), [])
-                    .unwrap();
-            let mut produced_rows = 0;
-            for (owner, row) in support.imports.iter() {
-                let Some(receipt) = &row.produced else {
-                    continue;
-                };
-                produced_rows += 1;
-                let physical = output.produced_source(owner).unwrap().unwrap();
-                assert!(Arc::ptr_eq(receipt, &physical));
-                let entry = support
-                    .compiler_support
-                    .implementation_entry(owner)
-                    .unwrap();
-                assert!(row.matches_entry(entry));
-                assert!(
-                    initial_inputs.produced_source(entry).unwrap().is_none(),
-                    "initial input availability cannot claim same-program production"
-                );
-                assert!(
-                    Arc::ptr_eq(carried.imports[owner].produced.as_ref().unwrap(), receipt,),
-                    "ordinary support extension preserves the exact completed issuer"
-                );
-            }
             assert!(
-                produced_rows > 0,
-                "actual first stage owns produced Source proofs"
+                support.imports.values().all(|row| row.produced.is_none()),
+                "the executable first stage has no importable produced Source"
             );
         }
         let (continuation, first_source) = segment.finish();
@@ -11626,22 +11600,53 @@ pub(crate) fn assert_world_repeated_source_refusals(
         }
         next.source.evidence_bytes = serde_json::to_vec(&next.source.evidence).unwrap();
         let stage_produced = produced.for_segment(1..1).unwrap();
-        let result = next.issue_segment_originals(
-            None,
-            &stage_produced,
-            &mut validation,
-            continuation,
-        );
+        let result =
+            next.issue_segment_originals(None, &stage_produced, &mut validation, continuation);
         match (observation, result) {
-            (Observation::Unchanged, Ok(next)) => {
-                let inputs = next.inputs.compiler_inputs();
-                let support = next.inputs.program_support.as_ref().unwrap();
+            (Observation::Unchanged, Ok(mut next)) => {
+                let authored_ordinal = *next.stage.ordinals().first().unwrap();
+                let authored_produced = produced
+                    .for_segment(authored_ordinal..authored_ordinal)
+                    .unwrap();
+                let output = IssuedOriginalOutput::from_segment_originals(&next.originals)
+                    .expect("actual authored stage owns its source publication");
+                next.admit_program_support(program, &output, &authored_produced)
+                    .unwrap();
+                let produced_rows = {
+                    let initial_inputs = next.inputs.compiler_inputs();
+                    let support = next.continuation.program.program_support.as_ref().unwrap();
+                    let carried = ProgramSourceSupport::extend(
+                        Some(support), support.compiler_support.clone(), [],
+                    ).unwrap();
+                    let mut rows = Vec::new();
+                    for (owner, row) in support.imports.iter() {
+                        let Some(receipt) = &row.produced else { continue };
+                        let physical = output.produced_source(owner).unwrap().unwrap();
+                        assert!(Arc::ptr_eq(receipt, &physical));
+                        let entry = support.compiler_support.implementation_entry(owner).unwrap();
+                        assert!(row.matches_entry(entry));
+                        assert!(initial_inputs.produced_source(entry).unwrap().is_none(),
+                            "incoming stage inputs cannot claim its new Source production");
+                        assert!(Arc::ptr_eq(
+                            carried.imports[owner].produced.as_ref().unwrap(), receipt,
+                        ), "ordinary support extension preserves the exact completed issuer");
+                        rows.push((Arc::clone(receipt), Arc::clone(entry)));
+                    }
+                    rows
+                };
+                assert!(!produced_rows.is_empty(),
+                    "actual authored stage owns produced Source proofs");
+                let (continuation, _) = next.finish();
+                let following = &program.stages()[2];
+                let first = *following.ordinals().first().unwrap();
+                let end = following.ordinals().last().unwrap() + 1;
+                let following_produced = produced.for_segment(first..end).unwrap();
+                let following = decode_world_source_receipt(program, following.index()).unwrap()
+                    .issue_segment_originals(None, &following_produced, &mut validation, continuation)
+                    .expect("actual following stage receives authored Source production");
+                let inputs = following.inputs.compiler_inputs();
                 let mut consumed_rows = 0;
-                for (owner, row) in support.imports.iter() {
-                    let Some(receipt) = &row.produced else {
-                        continue;
-                    };
-                    let entry = support.compiler_support.implementation_entry(owner).unwrap();
+                for (receipt, entry) in &produced_rows {
                     if !inputs.projection().roles().iter().any(|role| {
                         role.original() == Some(entry.descriptor.id)
                     }) {
