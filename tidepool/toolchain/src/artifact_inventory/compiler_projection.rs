@@ -4107,6 +4107,7 @@ impl CompilerSourceSupport {
         source: &crate::declaration_context::ExactSourceAdmission,
         source_text: &str,
         output: &crate::declaration_context::IssuedOriginalOutput,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
     ) -> Result<Self, CompileError> {
         if !source.matches_world_stage(program, stage.index(), source_text)? {
             return Err(failure(
@@ -4121,13 +4122,74 @@ impl CompilerSourceSupport {
         );
         let inputs = output.compiler_inputs();
         let artifacts = inputs.issued_artifacts();
-        let mut projection = inputs.role_projection().clone();
+        let mut available = inputs.role_projection().clone();
         if executable {
             owners.remove(&generated);
-            projection =
-                projection.project_roles(|owner, role| (owner != &generated).then(|| role.clone()));
+            available =
+                available.project_roles(|owner, role| (owner != &generated).then(|| role.clone()));
         }
-        projection = projection.for_source_owners(&owners);
+        let operation = program.validation().inventory.as_ref();
+        let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
+        };
+        let push = |pending: &mut Vec<ExactModuleIdentity>, owner: &ExactModuleIdentity| {
+            charge(operation.reserve::<ExactModuleIdentity>(1))?;
+            charge(operation.charge(owner.unit.len().saturating_add(owner.module.len())))?;
+            pending.push(owner.clone());
+            Ok::<_, CompileError>(())
+        };
+        let mut pending = Vec::new();
+        for owner in &owners {
+            push(&mut pending, owner)?;
+        }
+        for output in produced.required() {
+            crate::host_work::checkpoint()?;
+            let interface = output.interface();
+            charge(operation.charge(interface.unit().len() + interface.module().len()))?;
+            let owner = ExactModuleIdentity {
+                unit: interface.unit().to_owned(),
+                module: interface.module().to_owned(),
+            };
+            if available.roles.get(&owner).is_none_or(|role| {
+                role.interface() != output.artifact_id() || role.original().is_some()
+            }) {
+                return Err(failure(
+                    "World source fragment lost its actual produced TYPE output",
+                ));
+            }
+            push(&mut pending, &owner)?;
+        }
+        // A source fragment carries its own roots and required TYPE closure.
+        // Unrelated checked values remain stage inputs, not new prefix roles.
+        let mut projection = CompilerInputProjection::default();
+        while let Some(owner) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(1))?;
+            if projection.roles.contains_key(&owner) {
+                continue;
+            }
+            let role = available
+                .roles
+                .get(&owner)
+                .ok_or_else(|| failure("World source fragment lacks a required compiler role"))?;
+            let role = if owners.contains(&owner) {
+                role.clone()
+            } else {
+                CompilerInputRole::InterfaceOnly {
+                    interface: role.interface(),
+                }
+            };
+            for id in std::iter::once(role.interface()).chain(role.original()) {
+                let entry =
+                    artifacts.lease.payloads.get(&id).ok_or_else(|| {
+                        failure("World source fragment lacks required TYPE custody")
+                    })?;
+                for required in &entry.requirements {
+                    push(&mut pending, required)?;
+                }
+            }
+            projection.admit_role(owner, role)?;
+        }
         let selected = projection.resolve_source_associations(artifacts)?;
         projection.validate_requirements(
             selected.values().flat_map(|row| {

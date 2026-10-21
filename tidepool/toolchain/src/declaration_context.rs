@@ -11198,6 +11198,7 @@ impl WorldProgramSegment {
             &self.source,
             &self.source_text,
             output,
+            produced,
         )?;
         let context = &continuation.context;
         let imports = self.source.home_imports()?;
