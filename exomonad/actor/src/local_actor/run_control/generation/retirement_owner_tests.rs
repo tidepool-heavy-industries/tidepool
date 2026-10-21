@@ -486,7 +486,7 @@ impl RunControlClient {
         }
     }
 
-    pub(crate) async fn assert_generation_publication_delivery_lost(
+    pub(crate) async fn assert_captured_source_refusal_delivery_lost(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,
         preparation: ActorGenerationRetirementPreparation,
@@ -538,10 +538,10 @@ impl RunControlClient {
             matches!(
                 terminal.get(),
                 Some(preparation::PublicationTerminalObservation::Completed {
-                    outcome: preparation::PublicationOutcomeObservation::Visible,
+                    outcome: preparation::PublicationOutcomeObservation::Failed,
                 })
             ),
-            "expected actual Visible body before delivery loss, observed {:?}",
+            "expected actual typed captured-A refusal before delivery loss, observed {:?}",
             terminal.get()
         );
         // This round trip drains the worker completion without supplying its lost body result.
@@ -553,7 +553,7 @@ impl RunControlClient {
         assert!(state.snapshot_for_call().is_err());
         assert_eq!(
             decision.phase(),
-            tidepool_runtime::session::PublicationPhase::Published
+            tidepool_runtime::session::PublicationPhase::Running
         );
         assert!(matches!(
             SourceDependency::Generation(expected.dependency().clone()).claim(),
@@ -631,7 +631,7 @@ impl RunControlClient {
                 })));
             assert_eq!(
                 decision.phase(),
-                tidepool_runtime::session::PublicationPhase::Published
+                tidepool_runtime::session::PublicationPhase::Running
             );
             assert!(matches!(SourceDependency::Generation(expected.dependency().clone()).claim(),
                 Err(crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {

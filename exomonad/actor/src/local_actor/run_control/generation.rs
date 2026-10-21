@@ -3012,7 +3012,10 @@ impl RunState {
             preparation::PublicationTransfer::channel(actor, observer.clone(), myself.clone());
         #[cfg(test)]
         let writer = if lose_delivery {
-            writer.lose_delivery_after_completion_for_test()
+            let expected = reserved
+                .expected_generation()
+                .ok_or(GenerationPublicationDispatchFailure::AttemptChanged)?;
+            writer.lose_delivery_after_completion_for_test(expected.scope().scope())
         } else {
             writer
         };
@@ -4431,7 +4434,7 @@ pub(crate) enum GenerationRetirementNativeControl {
     PublicationBodyRefusal,
     WorkerLiveRefusal,
     WorkerNativeLossAfterBody,
-    WorkerPublishedDeliveryLost,
+    WorkerCapturedSourceRefusalDeliveryLost,
     BeforeSend,
     QueuedBeforeReceive,
     KillAfterReserve,

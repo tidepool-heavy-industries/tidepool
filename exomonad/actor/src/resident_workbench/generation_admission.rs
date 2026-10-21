@@ -3433,8 +3433,8 @@ mod tests {
             directory
                 .assert_retirement_owner_loss_without_attempt(directory_task)
                 .await;
-        } else if control == crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerPublishedDeliveryLost {
-            directory.assert_generation_publication_delivery_lost(
+        } else if control == crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerCapturedSourceRefusalDeliveryLost {
+            directory.assert_captured_source_refusal_delivery_lost(
                 directory_task, preparation, state, expected, publication, target,
                 kernel.lifecycle().clone(),
             ).await;

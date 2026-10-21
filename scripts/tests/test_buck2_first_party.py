@@ -1125,7 +1125,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(retirement['binary'], group['binary'])
         self.assertEqual(retirement['exact_tests'], [
             'resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff',
-            'resident_workbench::request_tests::actual_retirement_lost_body_delivery_retains_unconfirmed_publication',
+            'resident_workbench::request_tests::captured_a_publication_refusal_survives_lost_body_delivery',
             'resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate',
             'resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic',
             'resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open',
@@ -1199,7 +1199,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                                   'tidepool_rust_test_cases')
         self.assertEqual(delivery_loss['binary'], retirement['binary'])
         self.assertEqual(delivery_loss['exact_tests'], [
-            'resident_workbench::request_tests::actual_retirement_lost_body_delivery_retains_unconfirmed_publication',
+            'resident_workbench::request_tests::captured_a_publication_refusal_survives_lost_body_delivery',
         ])
         self.assertEqual(delivery_loss['expected_count'], 1)
         self.assertTrue(delivery_loss['ignored'])

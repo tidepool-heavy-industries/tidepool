@@ -24299,12 +24299,12 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires the dedicated rooted generation retirement execution group"]
-    async fn actual_retirement_lost_body_delivery_retains_unconfirmed_publication() {
+    async fn captured_a_publication_refusal_survives_lost_body_delivery() {
         with_test_compiler_owner(|client| async move {
             quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
                 client, Some(crate::ActorPersistencePolicy::Ephemeral),
                 Some(PublicationFailureControl::RetirementNativeOwnerLoss(
-                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerPublishedDeliveryLost,
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::WorkerCapturedSourceRefusalDeliveryLost,
                 )),
             ).await;
         }).await;
