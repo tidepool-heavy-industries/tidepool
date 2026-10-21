@@ -1402,9 +1402,10 @@ pub(crate) struct CompilerSourceSupport {
 
 /// Assembly-only state for one compiler support. Incomplete assembly never
 /// escapes this module: every usable [`CompilerSourceSupport`] is produced by
-/// [`SupportDraft::close`], which folds completion custody, re-pairs selected
-/// rows against the final acquired entries and maintains the native fact
-/// owner. The prior fact owner is carried only as the maintenance input.
+/// [`SupportDraft::close`]. Every accumulated completion already names custody
+/// retained in the draft's `artifacts`; constructors merge completion custody
+/// before the draft exists and `close` never re-folds it. The prior fact owner
+/// is carried only as the maintenance input.
 struct SupportDraft {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -1415,16 +1416,13 @@ struct SupportDraft {
     native_availability: crate::declaration_context::RequestNativeAvailability,
     selected: Arc<AdmittedCompilerRoles>,
     input_decisions: IssuedInputNativeDecisions,
-    /// Whether `artifacts` may not yet retain every completion's custody.
-    /// Literals derived from an already closed support clear this; literals
-    /// built over a fresh or merged view keep it so `close` re-runs the
-    /// retention fold exactly once.
-    completion_custody_dirty: bool,
 }
 
 impl SupportDraft {
-    /// The only constructor of a usable compiler support. Performs every
-    /// custody merge once and maintains the mandatory native fact owner.
+    /// The only constructor of a usable compiler support. Re-pairs selected
+    /// rows against the final acquired entries and maintains the mandatory
+    /// native fact owner. Completion custody is already retained in
+    /// `artifacts` and is never re-merged here.
     fn close(self) -> Result<CompilerSourceSupport, CompileError> {
         let SupportDraft {
             projection,
@@ -1436,13 +1434,7 @@ impl SupportDraft {
             native_availability,
             mut selected,
             input_decisions,
-            completion_custody_dirty,
         } = self;
-        if completion_custody_dirty {
-            for completion in native_completions.iter() {
-                artifacts = artifacts.retain_custody(completion.artifacts())?;
-            }
-        }
         let mut repaired = None;
         for (owner, row) in selected.rows.iter() {
             crate::host_work::checkpoint()?;
@@ -2210,7 +2202,6 @@ impl SelectedCompilerInterfaces<'_> {
             native_completions: NativeSelectionCompletions::default(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: IssuedInputNativeDecisions::default(),
-            completion_custody_dirty: false,
         }
         .close()
     }
@@ -2612,7 +2603,6 @@ impl CompilerSourceSupport {
             native_availability: self.native_availability.clone(),
             selected: Arc::clone(&self.selected),
             input_decisions: self.input_decisions.clone(),
-            completion_custody_dirty: false,
         }
     }
 
@@ -2798,7 +2788,6 @@ impl CompilerSourceSupport {
                 native_offer_facts: facts.offers.clone(),
                 native_completions: self.native_completions.clone(),
                 native_fact_owner: Some(facts),
-                completion_custody_dirty: false,
                 // The home census belongs to the demanded rows, not to cold
                 // custody or units merely mentioned by another retained row.
                 selected: Arc::new(AdmittedCompilerRoles::from_admitted(
@@ -3102,7 +3091,6 @@ impl CompilerSourceSupport {
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions,
-            completion_custody_dirty: false,
         };
         Ok(support)
     }
@@ -3525,6 +3513,15 @@ impl CompilerSourceSupport {
             }),
             &new_offers,
         )?;
+        // The draft invariant owns completion custody in its artifacts before
+        // the draft exists; self's completions stay retained through the
+        // append, and incoming completions merge here exactly once.
+        let artifacts = incoming
+            .native_completions
+            .iter()
+            .try_fold(artifacts, |view, completion| {
+                view.retain_custody(completion.artifacts())
+            })?;
         for (owner, _) in incoming.selected.iter() {
             let row = selected.rows.get_mut(owner).expect("incoming admitted row");
             let interface = &artifacts.lease.payloads[&row.interface.0.artifact];
@@ -3569,7 +3566,6 @@ impl CompilerSourceSupport {
                 native_availability,
                 selected: Arc::new(selected),
                 input_decisions,
-                completion_custody_dirty: true,
             }
             .close()?,
             changed_owners: changed.into_iter().collect(),
@@ -4417,9 +4413,17 @@ impl CompilerSourceSupport {
                 offers.push(offer.clone());
             }
         }
+        // Completion custody joins the acquired artifacts before the draft
+        // exists; `close` never re-folds it.
+        let artifacts = inputs
+            .issued_native_completions()
+            .iter()
+            .try_fold(artifacts.clone(), |view, completion| {
+                view.retain_custody(completion.artifacts())
+            })?;
         SupportDraft {
             projection,
-            artifacts: artifacts.clone(),
+            artifacts,
             native_fact_owner: inputs.native_fact_base().cloned(),
             native_offers: offers.into(),
             native_offer_facts,
@@ -4427,7 +4431,6 @@ impl CompilerSourceSupport {
             native_availability,
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions,
-            completion_custody_dirty: true,
         }
         .close()
     }
@@ -4511,7 +4514,6 @@ impl CompilerSourceSupport {
                 home_units: Arc::clone(&self.selected.home_units),
             }),
             input_decisions: self.input_decisions.clone(),
-            completion_custody_dirty: false,
         }
         .close()
     }
@@ -4568,7 +4570,6 @@ impl CompilerSourceSupport {
                 home_units: Arc::clone(&self.selected.home_units),
             }),
             input_decisions: self.input_decisions.clone(),
-            completion_custody_dirty: false,
         }
         .close()
     }
@@ -4647,7 +4648,6 @@ impl CompilerSourceSupport {
                 home_units: Arc::clone(&self.selected.home_units),
             }),
             input_decisions,
-            completion_custody_dirty: false,
         }
         .close()
     }
@@ -4749,7 +4749,6 @@ impl CompilerSourceSupport {
                     native_completions: self.native_completions.clone(),
                     native_availability: self.native_availability.clone(),
                     input_decisions: self.input_decisions.clone(),
-                    completion_custody_dirty: true,
                 };
                 timing.finish(true);
                 return draft.close();
@@ -4869,7 +4868,6 @@ impl CompilerSourceSupport {
             native_availability: saved.availability.clone(),
             selected: Arc::clone(&saved.selected),
             input_decisions: saved.decisions.clone(),
-            completion_custody_dirty: false,
         }
         .close()?)
     }
@@ -5122,7 +5120,6 @@ impl CompilerSourceSupport {
             native_offers: offers.into(),
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: decisions,
-            completion_custody_dirty: false,
         }
         .close()
     }
