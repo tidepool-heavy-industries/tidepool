@@ -2829,7 +2829,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .unwrap();
     let offer = IssuedNativeOffer::issue(entry.descriptor.id, &full, Some(proof)).unwrap();
     assert!(offer.is_full());
-    let reusable_support = recover_fixture_compiler_support(
+    let reusable_support = fixture_support_with_issued_offers(
         CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
         full.clone(),
         [offer.clone()],
