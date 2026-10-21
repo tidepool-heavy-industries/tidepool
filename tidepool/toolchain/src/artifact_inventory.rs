@@ -9479,6 +9479,62 @@ impl ArtifactView {
         self.merge_validated_namespace(&selected, self.namespace().clone())
     }
 
+    /// Metadata membership retains its exact acquisition's pair as custody.
+    /// It cannot select a group or change the receiving compiler namespace.
+    pub(crate) fn retain_original_binding_metadata(
+        &self,
+        metadata: &crate::certified_products::OriginalBindingSelection,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        let references = metadata
+            .metadata_references(operation)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        if references.len() == 0 {
+            return Ok(self.clone());
+        }
+        let initial = metadata.acquisition().artifacts();
+        if !Arc::ptr_eq(&self.lease.inventory.0, &initial.lease.inventory.0) {
+            return Err(failure(
+                "Original metadata acquisition belongs to another inventory",
+            ));
+        }
+        operation
+            .reserve::<InventoryNodeKey>(references.len().saturating_mul(2))
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &initial.read_projection(&state).nodes;
+        let mut custody = BTreeSet::new();
+        for reference in references {
+            crate::host_work::checkpoint()?;
+            let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                interface,
+                original,
+                ..
+            } = reference
+            else {
+                return Err(failure("Original metadata contains another reference kind"));
+            };
+            for binding in [*interface, *original] {
+                let node = InventoryNodeKey::Artifact(binding);
+                if !owned.contains(&node) {
+                    return Err(failure(
+                        "Original metadata lost its authenticated exact binding",
+                    ));
+                }
+                custody.insert(node);
+            }
+        }
+        let custody = initial.native_payload_custody_nodes(owned, &custody);
+        drop(state);
+        let retained = initial.lease.inventory.retain(
+            Vec::new(),
+            custody.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        self.merge_validated_namespace(&retained, self.namespace())
+    }
+
     /// Both views and the exact namespace have already crossed their issuing
     /// owner. Historical edges remain in their immutable scopes, independently
     /// of the compiler namespace selected for this receiving view.

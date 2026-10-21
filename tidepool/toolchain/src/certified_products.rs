@@ -5219,6 +5219,18 @@ impl OriginalBindingSelection {
         self.authenticated.belongs_to(basis, operation)
     }
 
+    pub(crate) fn metadata_references<'a>(
+        &'a self,
+        operation: &InventoryOperation,
+    ) -> CertResult<impl ExactSizeIterator<Item = &'a ReceiptImportOwner>> {
+        if !std::ptr::eq(self.authenticated.operation.as_ref(), operation) {
+            return Err(CertificationError::Mismatch(
+                "Original metadata belongs to another inventory operation",
+            ));
+        }
+        Ok(self.authenticated.references())
+    }
+
     pub(crate) fn acquisition(&self) -> &Arc<crate::artifact_inventory::CompilerSourceSupport> {
         self.authenticated.acquisition()
     }
@@ -14486,6 +14498,63 @@ pub(crate) mod tests {
         assert_eq!(
             unchanged.metadata(&references[1]),
             extended.metadata(&references[1])
+        );
+        // Independent issuer scopes for equal payloads remain distinct metadata custody.
+        let receiving = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![entry.clone(), other_entry.clone()],
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: 7,
+                }]),
+            )
+            .unwrap();
+        let before = receiving.capture_graph_selection();
+        let receiving_binding = *before
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == entry.descriptor.id)
+            .unwrap();
+        assert_ne!(receiving_binding, original);
+        let retained = receiving
+            .retain_original_binding_metadata(&mixed, &operation)
+            .unwrap();
+        let retained_graph = retained.capture_graph_selection();
+        assert_eq!(retained_graph.namespace, before.namespace);
+        assert_eq!(
+            retained.selected_native_groups(),
+            receiving.selected_native_groups()
+        );
+        assert!(retained_graph.bindings.contains(&original));
+        assert!(retained_graph.bindings.contains(&receiving_binding));
+        assert!(
+            !retained.selected_native_groups().contains(&NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: 11
+            })
+        );
+        assert!(mixed
+            .executable(&references[1], &operation)
+            .unwrap()
+            .is_none());
+        let foreign_operation = InventoryOperation::new(Default::default());
+        assert!(receiving
+            .retain_original_binding_metadata(&mixed, &foreign_operation)
+            .is_err());
+        let cold = ArtifactInventory::default();
+        let recovered = cold
+            .recover_selection(
+                &cold.empty_view(),
+                retained.entries(),
+                &retained_graph,
+                &retained.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(recovered.capture_graph_selection(), retained_graph);
+        assert_eq!(
+            recovered.selected_native_groups(),
+            receiving.selected_native_groups()
         );
         let mut conflicting = references[0].clone();
         let ReceiptImportOwner::OriginalBinding {
