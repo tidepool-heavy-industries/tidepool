@@ -13962,6 +13962,82 @@ pub(crate) mod tests {
         .unwrap()
     }
 
+    fn source_target_observations(
+        sources: &[(&crate::recovery_artifacts::CertifiedRecoveryProduct, u32)],
+    ) -> Vec<AcceptedGlobal> {
+        sources
+            .iter()
+            .map(|(product, ordinal)| {
+                let definitions = original_native_group_definitions(product, *ordinal).unwrap();
+                let mut exports = definitions.export_contracts();
+                let contract = exports.next().unwrap().unwrap();
+                assert!(
+                    exports.next().is_none(),
+                    "source target fixture requires one exact export"
+                );
+                AcceptedGlobal {
+                    identity: contract.identity.clone(),
+                    rep: contract.rep,
+                    entry_signature: contract.entry_signature.cloned(),
+                    required_evaluated: contract.evaluated,
+                    owner: ReceiptImportOwner::Source {
+                        unit: product.owner().unit.clone(),
+                        module: product.owner().module.clone(),
+                        module_version: Some(product.owner().module_version.clone()),
+                        original_ordinal: *ordinal,
+                        binder: contract.identity.clone(),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    // This fixture constructs validated syntax, not target admission or grants.
+    fn prepared_target_fixture(observations: &[AcceptedGlobal]) -> Arc<PreparedProgram> {
+        let mut wire = testing::wire_program();
+        wire.globals = observations
+            .iter()
+            .map(|observation| {
+                let entry_signature = observation.entry_signature.as_ref().map(|signature| {
+                    let id = tidepool_repr::execution_schema::SignatureId(
+                        u32::try_from(wire.signatures.len()).unwrap(),
+                    );
+                    wire.signatures.push(signature.clone());
+                    id
+                });
+                GlobalDecl {
+                    identity: observation.identity.clone(),
+                    rep: observation.rep,
+                    entry_signature,
+                    required_evaluated: observation.required_evaluated,
+                    required_generation: match &observation.owner {
+                        ReceiptImportOwner::Retained { generation, .. } => Some(*generation),
+                        _ => None,
+                    },
+                }
+            })
+            .collect();
+        if !observations.is_empty() {
+            wire.signatures[0].results = tidepool_repr::execution_schema::ResultContract::Returns(
+                observations.iter().map(|row| row.rep).collect(),
+            );
+            wire.expressions.nodes[0] = tidepool_repr::execution_schema::ExprFrame::Return(
+                (0..observations.len())
+                    .map(|index| {
+                        tidepool_repr::execution_schema::Atom::Ref(
+                            tidepool_repr::execution_schema::ValueRef::Global(
+                                tidepool_repr::execution_schema::GlobalId(
+                                    u32::try_from(index).unwrap(),
+                                ),
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        Arc::new(testing::prepare(wire).unwrap())
+    }
+
     fn full_native_fixture(
         module: &str,
         groups: Vec<(u32, Vec<PendingImportOwner>)>,
@@ -21053,7 +21129,7 @@ pub(crate) mod tests {
             request_offer.issued_group_carriers().unwrap()
         );
         let inventory = inputs.artifacts().inventory();
-        let mut fixed = inventory
+        let fixed = inventory
             .bind_segment(
                 inputs.artifacts(),
                 entries,
@@ -21061,25 +21137,25 @@ pub(crate) mod tests {
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let source = |ordinal| {
-            let definitions = original_native_group_definitions(&product, ordinal).unwrap();
-            let binding = match &definitions.bindings()[0] {
-                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
-                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
-            };
-            PendingImportOwner::Source {
-                owner: product.owner().clone(),
-                original_ordinal: ordinal,
-                binder: binding.identity.clone(),
-            }
-        };
+        let mut target_validation = PackageInterfaceValidation::default();
+        let observations = source_target_observations(&[(&product, 0)]);
+        let prepared = prepared_target_fixture(&observations);
+        let observed = AuthenticatedTargetImports::issue(
+            &prepared,
+            &observations,
+            &target_validation.inventory,
+        )
+        .unwrap();
         let current = inventory
-            .admit_bound_target(
-                &mut fixed,
-                &inventory.empty_view(),
-                NativeArtifactDemand::CertifiedTargetImports(&[source(0)]),
-                vec![],
+            .select_native_target(
+                fixed.physical_inputs().issued_artifacts(),
                 &item,
+                observed,
+                None,
+                Some(&inventory.empty_view()),
+                &[],
+                &BTreeMap::new(),
+                &mut target_validation,
             )
             .unwrap()
             .artifacts()
@@ -21092,25 +21168,47 @@ pub(crate) mod tests {
             }])
         );
         assert!(!current.artifact_ids().contains(&future.descriptor.id));
+        let observations = source_target_observations(&[(&product, 17)]);
+        let prepared = prepared_target_fixture(&observations);
+        let observed = AuthenticatedTargetImports::issue(
+            &prepared,
+            &observations,
+            &target_validation.inventory,
+        )
+        .unwrap();
         assert!(
             inventory
-                .admit_bound_target(
-                    &mut fixed,
-                    &current,
-                    NativeArtifactDemand::CertifiedTargetImports(&[source(17)]),
-                    vec![],
+                .select_native_target(
+                    fixed.physical_inputs().issued_artifacts(),
                     &item,
+                    observed,
+                    None,
+                    Some(&current),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut target_validation,
                 )
                 .is_err(),
             "issued availability cannot authorize future item type demand"
         );
+        let observations = source_target_observations(&[(&product, 0), (&product, 17)]);
+        let prepared = prepared_target_fixture(&observations);
+        let observed = AuthenticatedTargetImports::issue(
+            &prepared,
+            &observations,
+            &target_validation.inventory,
+        )
+        .unwrap();
         let next = inventory
-            .admit_bound_target(
-                &mut fixed,
-                &current,
-                NativeArtifactDemand::CertifiedTargetImports(&[source(17)]),
-                vec![future.clone()],
+            .select_native_target(
+                fixed.physical_inputs().issued_artifacts(),
                 &physical,
+                observed,
+                None,
+                Some(&current),
+                &[future.clone()],
+                &BTreeMap::new(),
+                &mut target_validation,
             )
             .unwrap()
             .artifacts()
@@ -21867,22 +21965,21 @@ pub(crate) mod tests {
         assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_g)));
         assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_j)));
         let owner = finished_artifacts.inventory();
-        let mut bound = owner
-            .bind_segment(
-                finished_artifacts,
-                entries,
-                &current,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
-        let imports = [source(&g, 7), source(&j, 9)];
+        let observations = source_target_observations(&[(&g, 7), (&j, 9)]);
+        let prepared = prepared_target_fixture(&observations);
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                .unwrap();
         let admitted_target = owner
-            .admit_bound_target(
-                &mut bound,
-                &owner.empty_view(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
+            .select_native_target(
+                finished_artifacts,
                 &current,
+                observed,
+                None,
+                Some(&owner.empty_view()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
             )
             .unwrap();
         let target = admitted_target.artifacts().clone();
@@ -21917,17 +22014,51 @@ pub(crate) mod tests {
         ).unwrap();
         let issued_groups = Arc::new(issued_groups);
         let capture_identity = testing::identity("Values", "value");
-        let mixed_target = admitted_target.for_ordinary_target(vec![
-            source(&g, 7),
-            PendingImportOwner::Retained { identity: capture_identity.clone(), generation: 4 },
-        ]).unwrap().with_certified_groups(Arc::clone(&issued_groups)).unwrap();
+        let mut observations = source_target_observations(&[(&g, 7)]);
+        observations.push(AcceptedGlobal {
+            identity: capture_identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Retained {
+                identity: capture_identity.clone(),
+                generation: 4,
+            },
+        });
+        let prepared = prepared_target_fixture(&observations);
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                .unwrap();
+        let mixed_target = owner
+            .select_native_target(
+                finished_artifacts,
+                &current,
+                observed,
+                None,
+                Some(&owner.empty_view()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        let mixed_groups =
+            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+                mixed_target.artifacts(),
+                None,
+                &mut validation,
+            )
+            .unwrap();
+        let mixed_target = mixed_target
+            .with_certified_groups(Arc::new(mixed_groups))
+            .unwrap();
         let mixed = mixed_target.resolve_sources().unwrap();
         assert!(matches!(mixed.target_requirements(), [
             SelectedNativeTargetImport::Source { binding, .. },
             SelectedNativeTargetImport::RetainedCapture { identity, generation: 4 },
         ] if *binding == fresh_g && identity == &capture_identity));
-        let certified_target = admitted_target.bind_target(None, imports.to_vec())
-            .with_certified_groups(issued_groups).unwrap();
+        let certified_target = admitted_target
+            .with_certified_groups(issued_groups)
+            .unwrap();
         let linked_target = certified_target.resolve_sources().unwrap();
         assert!(matches!(linked_target.target_requirements(), [
             SelectedNativeTargetImport::Source { binding: first, .. },
@@ -22144,7 +22275,7 @@ pub(crate) mod tests {
                 binder: testing::identity("CohortParent", "entry_5"),
             }];
             let inventory = output.inventory();
-            let mut bound = inventory
+            let bound = inventory
                 .bind_segment(
                     &output,
                     vec![],
@@ -22160,13 +22291,21 @@ pub(crate) mod tests {
                     &selection,
                 )
                 .unwrap();
+            let observations = source_target_observations(&[(parent, 5)]);
+            let prepared = prepared_target_fixture(&observations);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                    .unwrap();
             let bound = inventory
-                .admit_bound_target(
-                    &mut bound,
-                    &output,
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![],
-                    &selection,
+                .select_native_target(
+                    bound.physical_inputs().issued_artifacts(),
+                    bound.source_selection(),
+                    observed,
+                    None,
+                    Some(&output),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
                 .unwrap()
                 .artifacts()
@@ -22487,7 +22626,7 @@ pub(crate) mod tests {
                     binder,
                 }];
                 let inventory = output.inventory();
-                let mut bound = inventory
+                let bound = inventory
                     .bind_segment(
                         &output,
                         vec![],
@@ -22503,13 +22642,24 @@ pub(crate) mod tests {
                         &selection,
                     )
                     .unwrap();
+                let observations = source_target_observations(&[(current, 5)]);
+                let prepared = prepared_target_fixture(&observations);
+                let observed = AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &observations,
+                    &validation.inventory,
+                )
+                .unwrap();
                 let bound = inventory
-                    .admit_bound_target(
-                        &mut bound,
-                        &output,
-                        NativeArtifactDemand::CertifiedTargetImports(&imports),
-                        vec![],
-                        &selection,
+                    .select_native_target(
+                        bound.physical_inputs().issued_artifacts(),
+                        bound.source_selection(),
+                        observed,
+                        None,
+                        Some(&output),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
                     )
                     .unwrap()
                     .artifacts()
@@ -22648,7 +22798,7 @@ pub(crate) mod tests {
                         .is_none(),
                     "private Input availability is not current physical production"
                 );
-                let mut bound = inventory
+                let bound = inventory
                     .bind_segment(
                         input_view,
                         vec![],
@@ -22658,20 +22808,25 @@ pub(crate) mod tests {
                     .unwrap();
                 let before = bound.observed_binding_state();
                 let before_view = input_view.capture_graph_selection();
-                let mut binder = testing::identity("AvailableDependency", "entry_9001");
-                binder.unit = dependency.owner().unit.clone();
-                let imports = [PendingImportOwner::Source {
-                    owner: dependency.owner().clone(),
-                    original_ordinal: key.original_ordinal,
-                    binder,
-                }];
+                let observations =
+                    source_target_observations(&[(dependency, key.original_ordinal)]);
+                let prepared = prepared_target_fixture(&observations);
+                let observed = AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &observations,
+                    &validation.inventory,
+                )
+                .unwrap();
                 let error = inventory
-                    .admit_bound_target(
-                        &mut bound,
-                        input_view,
-                        NativeArtifactDemand::CertifiedTargetImports(&imports),
-                        vec![],
+                    .select_native_target(
+                        bound.physical_inputs().issued_artifacts(),
                         &input_selection,
+                        observed,
+                        None,
+                        Some(input_view),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
                     )
                     .err()
                     .expect("private Full without a root choice cannot become a current root");
@@ -23261,13 +23416,10 @@ pub(crate) mod tests {
             &[original.clone(), other.clone()],
         )
         .unwrap();
-        let import = |group: &AuthenticatedOriginalGroup| PendingImportOwner::Source {
-            owner: group.owner().clone(),
-            original_ordinal: group.group().original_ordinal(),
-            binder: group.group().binders().first().unwrap().clone(),
-        };
-        let own_imports = vec![import(&issued[0])];
-        let both_imports = vec![import(&issued[0]), import(&issued[2])];
+        let own_observations = source_target_observations(&[(&original, 8)]);
+        let both_observations = source_target_observations(&[(&original, 8), (&other, 12)]);
+        let own_prepared = prepared_target_fixture(&own_observations);
+        let both_prepared = prepared_target_fixture(&both_observations);
         let inventory = ArtifactInventory::default();
         let mut validation = PackageInterfaceValidation::default();
         let entries = [&original, &other]
@@ -23290,19 +23442,34 @@ pub(crate) mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let admit = |imports: &[PendingImportOwner]| {
-            inventory
-                .admit_product_artifacts(
-                    &available,
-                    entries.clone(),
-                    NativeArtifactDemand::CertifiedTargetImports(imports),
-                    None,
-                )
-                .unwrap()
-                .into_target()
-                .unwrap()
-        };
-        let admitted = admit(&own_imports);
+        let selection = CertifiedSourceSelection::from_projected_originals(
+            &[original.clone(), other.clone()],
+            &validation.inventory,
+        )
+        .unwrap();
+        let physical = inventory
+            .bind_segment(&available, entries, &selection, &mut validation)
+            .unwrap();
+        let before = inventory.metrics().issued_scope_nodes;
+        let observed = AuthenticatedTargetImports::issue(
+            &own_prepared,
+            &own_observations,
+            &validation.inventory,
+        )
+        .unwrap();
+        let admitted = inventory
+            .select_native_target(
+                physical.physical_inputs().issued_artifacts(),
+                physical.source_selection(),
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        let admitted_view = admitted.artifacts().clone();
         let owner = Arc::new(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 admitted.artifacts(),
@@ -23321,27 +23488,34 @@ pub(crate) mod tests {
             owner.get(binding).unwrap(),
             &owner.groups()[0]
         ));
-        assert!(owner.matches_view(&admitted.artifacts().clone()));
-
-        let first = admitted
-            .for_ordinary_target(own_imports.clone())
-            .unwrap()
-            .with_certified_groups(Arc::clone(&owner))
-            .unwrap();
-        let second = admitted
-            .for_ordinary_target(own_imports.clone())
-            .unwrap()
-            .with_certified_groups(Arc::clone(&owner))
-            .unwrap();
-        let first_rows = first.resolve_sources().unwrap();
-        let second_rows = second.resolve_sources().unwrap();
+        assert!(owner.matches_view(&admitted_view));
+        let target = admitted.with_certified_groups(Arc::clone(&owner)).unwrap();
+        let first_rows = target.resolve_sources().unwrap();
+        let second_rows = target.resolve_sources().unwrap();
         assert!(std::ptr::eq(
             first_rows.group(binding).unwrap(),
-            second_rows.group(binding).unwrap()
+            second_rows.group(binding).unwrap(),
         ));
 
         // Equal selected bindings do not establish the same acquisition owner.
-        let foreign = admit(&own_imports);
+        let observed = AuthenticatedTargetImports::issue(
+            &own_prepared,
+            &own_observations,
+            &validation.inventory,
+        )
+        .unwrap();
+        let foreign = inventory
+            .select_native_target(
+                physical.physical_inputs().issued_artifacts(),
+                physical.source_selection(),
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
         let foreign_owner = Arc::new(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 foreign.artifacts(),
@@ -23355,15 +23529,28 @@ pub(crate) mod tests {
             foreign.artifacts().selected_native_binding_rows().1,
             selected
         );
-        assert!(!foreign_owner.matches_view(admitted.artifacts()));
-        assert!(admitted
-            .for_ordinary_target(own_imports.clone())
-            .unwrap()
-            .with_certified_groups(foreign_owner)
-            .is_err());
+        assert!(!foreign_owner.matches_view(&admitted_view));
+        assert!(foreign.with_certified_groups(Arc::clone(&owner)).is_err());
 
-        // A separate real demand issues a different scope for the same payload.
-        let independent = admit(&both_imports);
+        // A different target selects existing occurrences without issuing scopes.
+        let observed = AuthenticatedTargetImports::issue(
+            &both_prepared,
+            &both_observations,
+            &validation.inventory,
+        )
+        .unwrap();
+        let independent = inventory
+            .select_native_target(
+                physical.physical_inputs().issued_artifacts(),
+                physical.source_selection(),
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
         let (_, independent_bindings) = independent.artifacts().selected_native_binding_rows();
         let independent_binding = *independent_bindings
             .iter()
@@ -23372,8 +23559,7 @@ pub(crate) mod tests {
                     && group.original_ordinal == binding.original_ordinal
             })
             .unwrap();
-        assert_ne!(independent_binding, binding);
-        assert!(owner.get(independent_binding).is_none());
+        assert_eq!(independent_binding, binding);
         let independent_owner = Arc::new(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 independent.artifacts(),
@@ -23383,22 +23569,49 @@ pub(crate) mod tests {
             )
             .unwrap(),
         );
+        assert!(std::ptr::eq(
+            owner.get(binding).unwrap().group(),
+            independent_owner.get(binding).unwrap().group(),
+        ));
         let other_binding = *independent_bindings
             .iter()
             .find(|group| group.binding.artifact() != binding.binding.artifact())
             .unwrap();
         assert!(independent_owner.get(other_binding).is_some());
-        let narrowed = independent
-            .for_ordinary_target(own_imports.clone())
-            .unwrap()
-            .with_certified_groups(independent_owner)
+        let observed = AuthenticatedTargetImports::issue(
+            &own_prepared,
+            &own_observations,
+            &validation.inventory,
+        )
+        .unwrap();
+        let narrowed = inventory
+            .select_native_target(
+                physical.physical_inputs().issued_artifacts(),
+                physical.source_selection(),
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        let narrowed_owner =
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                narrowed.artifacts(),
+                &issued,
+                None,
+                &mut validation,
+            )
+            .unwrap();
+        let narrowed = narrowed
+            .with_certified_groups(Arc::new(narrowed_owner))
             .unwrap();
         let narrowed_rows = narrowed.resolve_sources().unwrap();
         assert!(narrowed_rows.group(independent_binding).is_ok());
         assert!(narrowed_rows.group(other_binding).is_err());
 
-        let joined = admitted
-            .artifacts()
+        let joined = admitted_view
             .merge_fixture_selections(independent.artifacts())
             .unwrap();
         let joined_owner =
@@ -23409,14 +23622,8 @@ pub(crate) mod tests {
                 &mut validation,
             )
             .unwrap();
-        assert!(
-            std::ptr::eq(
-                joined_owner.get(binding).unwrap(),
-                joined_owner.get(independent_binding).unwrap(),
-            ),
-            "independent exact edges share one certified physical row"
-        );
         assert_eq!(joined_owner.groups().len(), 2);
+        assert_eq!(inventory.metrics().issued_scope_nodes, before);
     }
 
     #[test]

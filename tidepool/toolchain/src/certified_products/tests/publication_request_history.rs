@@ -647,23 +647,30 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             prop_assert_eq!(context.artifact_view().selected_native_groups(), initial_groups.clone());
             if !outputs.is_empty() {
                 // Continue the complete owner, then consume actual exported binders
-                // through the same bound-target solver used by compiled targets.
+                // through the same observed-target selector used by compiled targets.
                 let exact_request = ExactCompileContext::new(Arc::new(context.clone()))
                     .prepare_compilation(&request_scratch.path().join(format!("target-{step}")), PRODUCER).unwrap();
                 let request = exact_request.compiler_inputs();
-                let validation = PackageInterfaceValidation::default();
+                let mut validation = PackageInterfaceValidation::default();
                 let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     request, &validation.inventory,
                 ).unwrap();
                 let entries = outputs.values().map(|(entry, _, _)| entry.clone()).collect();
-                let imports = outputs.values().map(|(_, import, _)| import.clone()).collect::<Vec<_>>();
+                let sources = outputs.values().map(|(entry, _, _)| {
+                    let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
+                    (product, 0)
+                }).collect::<Vec<_>>();
+                let observations = source_target_observations(&sources);
+                let prepared = prepared_target_fixture(&observations);
                 let inventory = request.artifacts().inventory();
-                let mut fixed = inventory.bind_segment(request.artifacts(), entries, &selection, &mut crate::recovery_artifacts::PackageInterfaceValidation::default()).unwrap();
-                let target = inventory.admit_bound_target(
-                    &mut fixed, request.artifacts(),
-                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    vec![], &selection,
-                ).unwrap().bind_target(None, imports.clone());
+                let fixed = inventory.bind_segment(request.artifacts(), entries, &selection, &mut validation).unwrap();
+                let observed = AuthenticatedTargetImports::issue(
+                    &prepared, &observations, &validation.inventory,
+                ).unwrap();
+                let target = inventory.select_native_target(
+                    fixed.physical_inputs().issued_artifacts(), fixed.source_selection(),
+                    observed, None, Some(request.artifacts()), &[], &BTreeMap::new(), &mut validation,
+                ).unwrap();
                 let groups = target.resolve().unwrap().groups().clone();
                 let edges = target.artifacts().binding_dependencies();
                 for (ordinal, (output, _, permitted_carriers)) in &outputs {
@@ -690,7 +697,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
                     artifact: entry.descriptor.id, original_ordinal: 0,
                 })).collect::<BTreeSet<_>>();
-                prop_assert_eq!(target.artifacts().selected_native_groups(), expected);
+                let actual_target = target.artifacts().selected_native_groups();
+                let carried_and_target = context.artifact_view().selected_native_groups()
+                    .union(&actual_target).copied().collect::<BTreeSet<_>>();
+                prop_assert_eq!(carried_and_target, expected);
                 let expected_target = outputs.keys().map(|ordinal| NativeGroupKey {
                     artifact: root.descriptor.id, original_ordinal: *ordinal,
                 }).chain(outputs.keys().any(|ordinal| *ordinal != 3).then_some(NativeGroupKey {
@@ -698,6 +708,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 })).chain(outputs.values().map(|(entry, _, _)| NativeGroupKey {
                     artifact: entry.descriptor.id, original_ordinal: 0,
                 })).collect::<BTreeSet<_>>();
+                prop_assert_eq!(actual_target, expected_target.clone());
                 prop_assert_eq!(groups.iter().map(|group| NativeGroupKey {
                     artifact: group.binding.artifact(), original_ordinal: group.original_ordinal,
                 }).collect::<BTreeSet<_>>(), expected_target);
