@@ -102,22 +102,25 @@ data PackageOccurrence = PackageOccurrence
   } deriving (Eq, Show)
 
 -- The complete frozen linkage manifest. `target_roots` keys match the
--- CertifiedReceipt.targets keys; `home_roots` keys name fresh HOME groups.
+-- CertifiedReceipt.targets keys; `home_roots` keys name fresh HOME groups by
+-- `(unit, module, original ordinal)`, matching Rust's NativeGroupBinding.
 data PackageLinks = PackageLinks
   { packageLinksOccurrences :: [PackageOccurrence]
   , packageLinksTargetRoots :: Map.Map T.Text [PackageLink]
-  , packageLinksHomeRoots :: Map.Map (T.Text,T.Text) [PackageLink]
+  , packageLinksHomeRoots :: Map.Map (T.Text,T.Text,Word) [PackageLink]
   } deriving (Eq, Show)
 
 emptyPackageLinks :: PackageLinks
 emptyPackageLinks = PackageLinks [] Map.empty Map.empty
 
 -- The producer-boundary value carried from CompilerProducts into
--- certification: occurrence rows plus the exact binder-to-occurrence
--- resolution used to fill target and fresh-HOME root slots.
+-- certification: occurrence rows plus one binder-to-occurrence map per target.
+-- A request-wide binder map would be a global symbol index with last-write-wins
+-- across targets, so the same SymbolIdentity may name distinct occurrence ids
+-- in different targets without colliding here.
 data PackageLinkIndex = PackageLinkIndex
   { packageLinkIndexOccurrences :: [PackageOccurrence]
-  , packageLinkIndexExportOwner :: Map.Map SymbolIdentity Word32
+  , packageLinkIndexTargetOwners :: Map.Map T.Text (Map.Map SymbolIdentity Word32)
   } deriving (Eq, Show)
 
 emptyPackageLinkIndex :: PackageLinkIndex
@@ -158,8 +161,8 @@ encodePackageLinks links = array
       ]
     encodeTargetRoots (target, roots) = array
       [encodeString target, list encodeLink roots]
-    encodeHomeRoots ((unit, name), roots) = array
-      [array [encodeString unit, encodeString name], list encodeLink roots]
+    encodeHomeRoots ((unit, name, ordinal), roots) = array
+      [array [encodeString unit, encodeString name, encodeWord ordinal], list encodeLink roots]
 
 data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
@@ -610,15 +613,22 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
-              owners = packageLinkIndexExportOwner packageLinks
+              targetOwners = packageLinkIndexTargetOwners packageLinks
+              -- Fresh HOME products are projected with the first target's
+              -- context, so their package imports resolve through that
+              -- target's own occurrence map, never a request-wide symbol map.
+              firstTargetOwners = case targets of
+                [] -> Map.empty
+                (target, _) : _ -> Map.findWithDefault Map.empty (T.pack target) targetOwners
               targetRoots = Map.fromList
-                [ (T.pack target, packageRootLinks owners witnesses)
+                [ (T.pack target,
+                    packageRootLinks (Map.findWithDefault Map.empty (T.pack target) targetOwners) witnesses)
                 | (target, witnesses) <- targetRowsReady ]
-              homeRoots = Map.fromListWith (flip (++))
-                [ ((productUnit product, productModule product), roots)
-                | (product, _, witnesses) <- moduleRows
+              homeRoots = Map.fromList
+                [ ((productUnit product, productModule product, candidateGroupOrdinal group), roots)
+                | (product, group, witnesses) <- moduleRows
                 , productOrigin product == FreshProduct
-                , let roots = packageRootLinks owners witnesses
+                , let roots = packageRootLinks firstTargetOwners witnesses
                 , not (null roots) ]
               encodedPackageLinks = encodePackageLinks
                 (PackageLinks (packageLinkIndexOccurrences packageLinks) targetRoots homeRoots)
