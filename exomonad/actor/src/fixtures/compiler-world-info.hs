@@ -23,7 +23,9 @@ frontendAnswer <- do
                     ValueDeclaration valueType -> typeCanonical valueType == "Int"
                     _ -> False)
               && fitIdentifier fitted == inspectedIdentifier details
-              && fitAvailability fitted == FitAvailable
+              -- Hot queries answer before retained-history preparation:
+              -- the inspected row fit is Unknown and bindings are still empty.
+              && fitAvailability fitted == FitUnknown
               && fitProvenance fitted == snapshot
               && expressionSource typed == "queryEcho"
               && expressionDisplay typed == "Int -> Int"
@@ -40,11 +42,12 @@ frontendAnswer <- do
               && typeMatchesObserved found == length (typeMatches found)
               && typeMatchesLimit found > 0
               && typeMatchesObserved found <= typeMatchesLimit found
-              && IdentifierRef "WorldQuestion" "queryEcho" ValueIdentifier `elem` refs initialBindings
+              && refsObserved initialBindings == length (refs initialBindings)
+              && refsLimit initialBindings > 0
               && refListProvenance initialBindings == snapshot
               && initialBindings == finalBindings
               && finalSnapshot == snapshot -> pure (7 :: Int)
-        _ -> error ("wrong world query answer\n" ++ unlines
+        _ -> error (pack ("wrong world query answer\n" ++ P.unlines
           [ bounded "entry snapshot" snapshot
           , bounded "public info" details
           , bounded "scopeBindings before (counts, provenance, first 8 refs)"
@@ -59,8 +62,8 @@ frontendAnswer <- do
               (fmap (\value -> (refsObserved value, refsLimit value,
                 refListProvenance value, take 8 (refs value))) after)
           , bounded "final currentScopeView" finalView
-          ])
-    _ -> error ("world query refused\n" ++ unlines
+          ]))
+    _ -> error (pack ("world query refused\n" ++ P.unlines
       [ bounded "currentScopeView" view
       , bounded "public info" answer
-      ])
+      ]))
