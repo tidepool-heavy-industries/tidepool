@@ -6623,23 +6623,29 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn authored_source_selection_preserves_late_group_support_after_binding_publication() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        use super::super::prepared::tests::{
+            authored_domain_fixture, authored_domain_owner, install_runtime_fixture_in,
+        };
+        let targets = authored_domain_fixture();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 822);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let authored = session.mint_detached_scope(public).unwrap();
         let unrelated = session.mint_detached_scope(public).unwrap();
-        let (target_a, keys_a) = install_selected_source_fixture(&mut session, authored, "a");
-        let (target_b, keys_b) = install_selected_source_fixture(&mut session, unrelated, "a");
+        let (target_a, keys_a, _placement_a) =
+            install_runtime_fixture_in(&mut session, authored, targets, "dFirst");
+        let (target_b, keys_b, _placement_b) =
+            install_runtime_fixture_in(&mut session, unrelated, targets, "dFirst");
         assert!(session.retain_scope_dependencies(unrelated, authored));
         let authored_custody = session
             .public_visibility_snapshot_in(authored)
             .unwrap()
             .source_instances;
-        assert_eq!(authored_custody.len(), 4);
-        assert_eq!(selected_sources(&session, authored).len(), 2);
-        let owner = selected_sources(&session, authored)[0].owner().clone();
+        assert!(!keys_a.is_empty());
+        assert_eq!(authored_custody.len(), keys_a.len() + keys_b.len());
+        assert_eq!(selected_sources(&session, authored).len(), keys_a.len());
+        let owner = authored_domain_owner("SourceDomainD");
         mint_fixture_origin(&mut session, authored, owner.clone());
         let authored_promotion = session
             .bindings
@@ -6665,11 +6671,12 @@ mod checkpoint_scope_tests {
                 .bindings
                 .source_instances_in(&session.scopes, public)
                 .len(),
-            4
+            keys_a.len() + keys_b.len()
         );
-        assert_eq!(selected_sources(&session, public).len(), 2);
+        assert_eq!(selected_sources(&session, public).len(), keys_a.len());
         let later = session.mint_detached_scope(public).unwrap();
-        let (late_target, late_keys) = install_selected_source_fixture(&mut session, later, "late");
+        let (late_target, late_keys, _placement_late) =
+            install_runtime_fixture_in(&mut session, later, targets, "dLater");
         assert_eq!(late_keys.len(), 1);
         assert_eq!(
             session
@@ -6678,7 +6685,7 @@ mod checkpoint_scope_tests {
                 .unwrap()
                 .export()
                 .occurrence,
-            "late"
+            "d2"
         );
         for original in &keys_a {
             assert!(selected_sources(&session, later)
