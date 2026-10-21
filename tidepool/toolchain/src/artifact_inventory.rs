@@ -8160,7 +8160,7 @@ impl ArtifactView {
             );
             if !owned.contains(root) {
                 let artifact = match root {
-                    InventoryNodeKey::Artifact(binding) => binding.artifact(),
+                    InventoryNodeKey::Artifact(binding) => binding.artifact,
                     InventoryNodeKey::Group(group) => group.binding.artifact(),
                 };
                 let caller = std::panic::Location::caller();
