@@ -4611,6 +4611,115 @@ observationFacts (HydratedObservation _ _ admitted) = pure
         , let (identity, required) = candidateOriginalGlobalDemand global
         , required ] }
 
+-- | One request-local aggregation of immutable finalized-owner facts.
+--
+-- The finalized-owner trace event reports counts and short path lists per
+-- owner. These were previously recomputed by scanning the full module graphs,
+-- observations, dependency evidence and prepared modules for each finalized
+-- owner. Build the per-owner facts once under the enabled-trace branch so a
+-- large finalized set does not rescan every immutable collection per owner.
+-- Counts preserve list multiplicity, and the rendered path lists keep their
+-- original order and truncation. There is no cross-request cache.
+data FinalizedOwnerTrace = FinalizedOwnerTrace
+  { finalizedOwnerFreshGraphCount :: !Int
+  , finalizedOwnerSourceCaptureCount :: !Int
+  , finalizedOwnerFreshPaths :: [FilePath]
+  , finalizedOwnerSelectedWorldSource :: !Bool
+  , finalizedOwnerObservations :: [String]
+  , finalizedOwnerNativePrepared :: !Bool
+  , finalizedOwnerDependencyNodes :: !Int
+  , finalizedOwnerDependencyPaths :: [FilePath]
+  , finalizedOwnerConsumedSources :: !Int
+  }
+
+emptyFinalizedOwnerTrace :: FinalizedOwnerTrace
+emptyFinalizedOwnerTrace = FinalizedOwnerTrace 0 0 [] False [] False 0 [] 0
+
+finalizedOwnerTraces
+  :: ModuleGraph
+  -> ModuleGraph
+  -> [ModuleObservation]
+  -> DependencyEvidence
+  -> Maybe WorldSourceSelection
+  -> [PreparedModule]
+  -> Map.Map (String,String) FinalizedOwnerTrace
+finalizedOwnerTraces freshGraph sourceCaptureGraph observations dependencies worldSources preparedModules =
+  Map.fromSet assemble allKeys
+  where
+    ownerKey owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
+
+    graphFacts graph = foldl' step Map.empty (mgModSummaries' graph)
+      where
+        step acc (ModuleNode _ summary) =
+          Map.insertWith combine k (1, files) acc
+          where
+            k = ownerKey (ms_mod summary)
+            files = [take 256 source | Just source <- [ml_hs_file (ms_location summary)]]
+            combine (countNew, filesNew) (countOld, filesOld) =
+              (countNew + countOld, take 2 (filesOld ++ filesNew))
+        step acc _ = acc
+
+    freshFacts = graphFacts freshGraph
+    sourceCaptureFacts = graphFacts sourceCaptureGraph
+    freshCounts = fmap fst freshFacts
+    freshPaths = fmap snd freshFacts
+    sourceCaptureCounts = fmap fst sourceCaptureFacts
+
+    selectedKeys = Set.fromList
+      [ owner | WorldSourceSelection selected _ _ _ _ <- maybe [] pure worldSources
+      , selection <- maybe [] pure selected
+      , (owner, _, _, _) <- selectedOriginalRows selection ]
+
+    preparedKeys = Set.fromList [ownerKey (pmModule module') | module' <- preparedModules]
+
+    observationLabels = foldl' step Map.empty observations
+      where
+        step acc observation =
+          Map.insertWith (flip (++)) (ownerKey (ms_mod (observationSummary observation)))
+            [label observation] acc
+        label observation = case observation of
+          CachedObservation _ entry -> "memo:" ++ show (gmeCycle entry)
+          LoadedObservation {} -> "loaded"
+          CanonicalObservation {} -> "canonical-input"
+          HydratedObservation {} -> "admitted-candidate"
+
+    dependencyFacts = foldl' step Map.empty (dependencyModules dependencies)
+      where
+        step acc node =
+          Map.insertWith combine k (1, [source], Set.singleton source) acc
+          where
+            k = (dependencyModuleUnit node, dependencyModuleName node)
+            source = dependencyModuleSource node
+            combine (countNew, pathsNew, setNew) (countOld, pathsOld, setOld) =
+              (countNew + countOld, pathsOld ++ pathsNew, setNew `Set.union` setOld)
+
+    dependencySourceCounts = foldl' step Map.empty (dependencySources dependencies)
+      where
+        step acc source = Map.insertWith (+) (dependencySourcePath source) 1 acc
+
+    allKeys = Set.unions
+      [ Map.keysSet freshFacts
+      , Map.keysSet sourceCaptureFacts
+      , selectedKeys
+      , preparedKeys
+      , Map.keysSet observationLabels
+      , Map.keysSet dependencyFacts ]
+
+    assemble k = FinalizedOwnerTrace
+      (Map.findWithDefault 0 k freshCounts)
+      (Map.findWithDefault 0 k sourceCaptureCounts)
+      (Map.findWithDefault [] k freshPaths)
+      (Set.member k selectedKeys)
+      (Map.findWithDefault [] k observationLabels)
+      (Set.member k preparedKeys)
+      dependencyNodes dependencyPaths consumedSources
+      where
+        (dependencyNodes, dependencyPathsAll, dependencyPathSet) =
+          Map.findWithDefault (0, [], Set.empty) k dependencyFacts
+        dependencyPaths = map (take 256) (take 2 dependencyPathsAll)
+        consumedSources = sum [Map.findWithDefault 0 path dependencySourceCounts
+          | path <- Set.toList dependencyPathSet]
+
 -- Checked HPT metadata alone has no admitted native outline. Executable
 -- observations add their already authenticated candidate demand above.
 hydratedModuleFacts :: PackageImportEvidence -> ModuleFacts
@@ -6699,42 +6808,28 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           finalizedModules <- liftIO (readIORef finalizedModulesRef)
           logger <- liftIO (readLogger "tidepool.compiler.finalized")
-          when (loggerEnabled logger LogTrace) $ forM_ (Map.elems finalizedModules) $ \finalized -> liftIO $ do
-            let owner = mi_module (hm_iface (finalizedHomeModInfo finalized))
-            let key owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
-                summaries graph owner = [summary | ModuleNode _ summary <- mgModSummaries' graph
-                  , ms_mod summary == owner]
-                selectedSources = [owner | WorldSourceSelection selected _ _ _ _ <- maybe [] pure worldSources
-                  , selection <- maybe [] pure selected,(owner,_,_,_) <- selectedOriginalRows selection]
-                observed owner = [case observation of
-                    CachedObservation _ entry -> "memo:" ++ show (gmeCycle entry)
-                    LoadedObservation {} -> "loaded"
-                    CanonicalObservation {} -> "canonical-input"
-                    HydratedObservation {} -> "admitted-candidate"
-                  | observation <- observations,ms_mod (observationSummary observation) == owner]
-                sourcePaths graph owner = take 2
-                  [take 256 source | summary <- summaries graph owner
-                    , source <- maybe [] pure (ml_hs_file (ms_location summary))]
-                (unit,name) = key owner
-                nodes = [node | node <- dependencyModules dependencies
-                  , dependencyModuleUnit node == unit,dependencyModuleName node == name]
-                paths = map dependencyModuleSource nodes
-                consumed = [source | source <- dependencySources dependencies
-                  , dependencySourcePath source `elem` paths]
-            logTrace logger "finalized.owner"
-              [ ("owner", LogText (unit ++ ":" ++ name))
-              , ("fresh_graph", LogInteger (fromIntegral (length (summaries freshGraph owner))))
-              , ("source_capture_graph", LogInteger (fromIntegral (length (summaries sourceCaptureGraph owner))))
-              , ("fresh_paths", LogText (show (sourcePaths freshGraph owner)))
-              , ("selected_world_source", LogBool (key owner `elem` selectedSources))
-              , ("canonical_admission", LogBool (Map.member (key owner) selectedCanonicalInterfaces))
-              , ("validated_memo", LogBool (Map.member owner validatedMemo))
-              , ("observations", LogText (show (take 2 (observed owner))))
-              , ("native_prepared", LogBool (any ((== owner) . pmModule) preparedModules))
-              , ("dependency_nodes", LogInteger (fromIntegral (length nodes)))
-              , ("dependency_paths", LogText (show (map (take 256) (take 2 paths))))
-              , ("consumed_sources", LogInteger (fromIntegral (length consumed)))
-              ]
+          when (loggerEnabled logger LogTrace) $ do
+            let ownerTraces = finalizedOwnerTraces freshGraph sourceCaptureGraph observations
+                  dependencies worldSources preparedModules
+            forM_ (Map.elems finalizedModules) $ \finalized -> liftIO $ do
+              let owner = mi_module (hm_iface (finalizedHomeModInfo finalized))
+                  key = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
+                  (unit, name) = key
+                  facts = Map.findWithDefault emptyFinalizedOwnerTrace key ownerTraces
+              logTrace logger "finalized.owner"
+                [ ("owner", LogText (unit ++ ":" ++ name))
+                , ("fresh_graph", LogInteger (fromIntegral (finalizedOwnerFreshGraphCount facts)))
+                , ("source_capture_graph", LogInteger (fromIntegral (finalizedOwnerSourceCaptureCount facts)))
+                , ("fresh_paths", LogText (show (finalizedOwnerFreshPaths facts)))
+                , ("selected_world_source", LogBool (finalizedOwnerSelectedWorldSource facts))
+                , ("canonical_admission", LogBool (Map.member key selectedCanonicalInterfaces))
+                , ("validated_memo", LogBool (Map.member owner validatedMemo))
+                , ("observations", LogText (show (take 2 (finalizedOwnerObservations facts))))
+                , ("native_prepared", LogBool (finalizedOwnerNativePrepared facts))
+                , ("dependency_nodes", LogInteger (fromIntegral (finalizedOwnerDependencyNodes facts)))
+                , ("dependency_paths", LogText (show (finalizedOwnerDependencyPaths facts)))
+                , ("consumed_sources", LogInteger (fromIntegral (finalizedOwnerConsumedSources facts)))
+                ]
           let packageRoots = Map.union
                 (Map.fromList [(ms_mod_name (observationSummary observation), moduleFactPackageImports facts)
                   | (observation, facts) <- zip observations moduleFacts])
