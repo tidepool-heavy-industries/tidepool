@@ -57,8 +57,10 @@ producer outcome and independent compiler-settlement evidence.
 Native build actions bind only to the authenticated compiler service owned by
 their action; portable prepared fixtures keep their direct worker. The native
 module-package CLI preserves that service's endpoint coordinates while clearing
-ambient cache and catalog selections, and retains failed producer scratch with
-its invocation evidence.
+ambient cache and catalog selections. Build failures retain disposable-output
+diagnostics in private producer scratch. EntryPreparation preserves original
+entry output in its reserved stage, and inspection keeps its own raw output;
+those owners report their existing paths without diagnostic copies.
 
 The worker emits versioned `dependencies.json` with consumed SHA-256 source
 evidence, selected home modules and absent higher-priority import candidates.

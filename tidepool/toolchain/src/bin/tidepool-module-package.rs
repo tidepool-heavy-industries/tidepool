@@ -72,7 +72,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output_root.display()
         );
     }
-    prepare_environment(scratch.path())?;
+    prepare_environment(mode, scratch.path())?;
     std::env::set_current_dir(scratch.path())?;
     let targets = args.targets.iter().map(String::as_str).collect::<Vec<_>>();
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -112,7 +112,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && matches!(mode, Mode::Build) {
         scratch.disable_cleanup(true);
         eprintln!(
             "native producer retains failed scratch {} and output {}",
@@ -123,7 +123,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn prepare_environment(scratch: &std::path::Path) -> Result<(), String> {
+fn prepare_environment(mode: Mode, scratch: &std::path::Path) -> Result<(), String> {
     // The native producer retains its declared compiler and the endpoint issued
     // by its owning frontend. Binding authenticates the endpoint before use.
     let compiler = [
@@ -158,8 +158,10 @@ fn prepare_environment(scratch: &std::path::Path) -> Result<(), String> {
         std::env::set_var("GHC_ENVIRONMENT", "-");
         std::env::set_var("TMPDIR", scratch);
         std::env::set_var("XDG_CACHE_HOME", scratch.join("cache"));
-        std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
-        std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", scratch);
+        if matches!(mode, Mode::Build) {
+            std::env::set_var("TIDEPOOL_KEEP_TEST_LOGS", "1");
+            std::env::set_var("TIDEPOOL_TEST_ARTIFACT_ROOT", scratch);
+        }
     }
     Ok(())
 }
@@ -187,7 +189,13 @@ mod tests {
         reason = "isolated subprocess exercises the native CLI environment owner"
     )]
     fn owned_endpoint_survives_sanitization_and_requires_both_coordinates() {
-        for missing in [None, Some(SELECTED[4].0), Some(SELECTED[5].0)] {
+        for (mode, missing) in [
+            ("build", None),
+            ("entry", None),
+            ("inspect", None),
+            ("build", Some(SELECTED[4].0)),
+            ("build", Some(SELECTED[5].0)),
+        ] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -203,6 +211,7 @@ mod tests {
                 .env("TIDEPOOL_TEST_ARTIFACT_ROOT", "/ambient/artifacts")
                 .env("GHC_PACKAGE_PATH", "/ambient/packages")
                 .env("GHCRTS", "-N8")
+                .env("MODULE_COMPILER_INPUT_MODE", mode)
                 .env_remove("MODULE_COMPILER_INPUT_MISSING");
             if let Some(name) = missing {
                 command
@@ -223,13 +232,15 @@ mod tests {
     #[ignore = "private subprocess entry for process-global environment mutation"]
     fn compiler_environment_child() {
         let scratch = tempfile::tempdir().unwrap();
+        let mode =
+            super::Mode::parse(std::env::var_os("MODULE_COMPILER_INPUT_MODE").as_deref()).unwrap();
         if let Ok(name) = std::env::var("MODULE_COMPILER_INPUT_MISSING") {
-            assert!(super::prepare_environment(scratch.path())
+            assert!(super::prepare_environment(mode, scratch.path())
                 .unwrap_err()
                 .contains(&name));
             return;
         }
-        super::prepare_environment(scratch.path()).unwrap();
+        super::prepare_environment(mode, scratch.path()).unwrap();
         for (name, value) in SELECTED {
             assert_eq!(std::env::var(name).unwrap(), value);
         }
@@ -243,11 +254,16 @@ mod tests {
             assert!(std::env::var_os(name).is_none(), "ambient {name} survived");
         }
         assert_eq!(std::env::var("GHC_ENVIRONMENT").unwrap(), "-");
-        assert_eq!(std::env::var("TIDEPOOL_KEEP_TEST_LOGS").unwrap(), "1");
-        assert_eq!(
-            std::path::PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap()),
-            scratch.path()
-        );
+        if matches!(mode, super::Mode::Build) {
+            assert_eq!(std::env::var("TIDEPOOL_KEEP_TEST_LOGS").unwrap(), "1");
+            assert_eq!(
+                std::path::PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap()),
+                scratch.path()
+            );
+        } else {
+            assert!(std::env::var_os("TIDEPOOL_KEEP_TEST_LOGS").is_none());
+            assert!(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").is_none());
+        }
         assert_eq!(
             std::path::PathBuf::from(std::env::var_os("TMPDIR").unwrap()),
             scratch.path()
