@@ -785,7 +785,7 @@ impl OriginalCompilerInputs {
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
                 native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-            native_completions: source.native_completions().clone(),
+                native_completions: source.native_completions().clone(),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -881,7 +881,9 @@ impl OriginalCompilerInputs {
         }
     }
 
-    pub(crate) fn issued_native_completions(&self) -> &crate::artifact_inventory::NativeSelectionCompletions {
+    pub(crate) fn issued_native_completions(
+        &self,
+    ) -> &crate::artifact_inventory::NativeSelectionCompletions {
         &self.native_completions
     }
 
@@ -10640,8 +10642,8 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             .package_products
             .iter()
             .map(|output| {
-                crate::certified_products::CertifiedPackageCodeProduct::from_world_output(
-                    program,
+                crate::certified_products::CertifiedPackageCodeProduct::from_native_output(
+                    &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(program),
                     relative_prefix,
                     output,
                     &receipt,
@@ -11470,7 +11472,9 @@ impl ExactDeclarationContext {
         self,
         completed: &crate::artifact_inventory::CompletedNativeSelection,
     ) -> Result<Self, CompileError> {
-        let support = self.compiler_source_support().with_native_selection_completion(completed)?;
+        let support = self
+            .compiler_source_support()
+            .with_native_selection_completion(completed)?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
 

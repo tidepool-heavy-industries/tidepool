@@ -317,6 +317,41 @@ impl<'a> CapturedNativeOutput<'a> {
         }
     }
 
+    pub(crate) fn validate_interfaces(
+        &self,
+        receipt: &certified_products::CertifiedReceipt,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        if !Arc::ptr_eq(self.operation(), &validation.inventory) {
+            return Err(CompileError::ExtractFailed(
+                "native output has another inventory owner".into(),
+            ));
+        }
+        for witness in receipt.packages.values() {
+            let relative = witness
+                .selected_path
+                .strip_prefix(self.directory())
+                .map_err(|_| {
+                    CompileError::ExtractFailed(
+                        "package interface is outside completed output".into(),
+                    )
+                })?;
+            validation
+                .verify_captured(
+                    &witness.selected_path,
+                    &self.physical_directory().join(relative),
+                    &witness.sha256,
+                    self.bytes(relative)?,
+                )
+                .map_err(|error| {
+                    compiler_evidence_failure(
+                        certified_products::CertificationError::CapturedModulePayload(error),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn bytes(&self, relative: &Path) -> Result<&Arc<[u8]>, CompileError> {
         if relative.as_os_str().is_empty()
             || relative
@@ -355,7 +390,11 @@ impl<P> CompletedNativeOutputBundle<P> {
         for (relative, bytes) in &self.output.files {
             validation
                 .record_captured_bytes(&self.output.root.join(relative), bytes)
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                .map_err(|error| {
+                    compiler_evidence_failure(
+                        certified_products::CertificationError::CapturedModulePayload(error),
+                    )
+                })?;
         }
         Ok(())
     }

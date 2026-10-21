@@ -1025,6 +1025,11 @@ pub fn prepare_world_cell_program(
                     *program.producer_sha256(),
                     &target,
                     &certified,
+                    segment.package_products(),
+                    segment
+                        .product_admission()
+                        .compiler_inputs()
+                        .compiler_source_support(),
                     &globals,
                     &segment_package_availability(&segment.originals, &packages),
                     Some(&segment.originals),
@@ -1510,7 +1515,8 @@ fn immutable_candidates_in_context_with_catalog(
                 crate::artifact_inventory::ArtifactPayload::Original(product) => {
                     product.module_interface()?
                 }
-                crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return None,
+                crate::artifact_inventory::ArtifactPayload::Interface(_, _)
+                | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return None,
             };
             Some((
                 (canonical.unit().to_owned(), canonical.module().to_owned()),
@@ -3512,8 +3518,14 @@ impl SealedOriginalEvidence {
         target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
     ) -> Result<Self, CompileError> {
         let context = admission.original_execution_context(output.compiler_inputs())?;
-        let execution =
-            Arc::new(Arc::unwrap_or_clone(context).retain_native_target_custody(target)?);
+        let completed = target.completed_selection().ok_or_else(|| {
+            CompileError::ExtractFailed("exact native target lacks its issued completion".into())
+        })?;
+        let execution = Arc::new(
+            Arc::unwrap_or_clone(context)
+                .retain_native_target_custody(target)?
+                .retain_completed_native_selection(completed)?,
+        );
         target
             .resolve()?
             .ensure_original_execution_custody(&execution)?;
@@ -4106,6 +4118,10 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    let package_products = native_output
+        .map(|(output, receipt)| certify_native_package_products(output, receipt, validation))
+        .transpose()?
+        .unwrap_or_default();
     let valid =
         evidence.filter(|evidence| source_segment.is_some() || evidence.revalidate(source).is_ok());
     let Some(valid) = valid else {
@@ -4232,11 +4248,19 @@ fn seal_turn_outputs_with_validation(
         }
         None => None,
     };
+    let inherited_inputs = request_admission.map(|request| request.compiler_inputs());
+    let no_inherited_inputs = crate::artifact_inventory::CompilerSourceSupport::empty();
+    let inherited_support = inherited_inputs
+        .as_ref()
+        .map(|inputs| inputs.compiler_source_support())
+        .unwrap_or(&no_inherited_inputs);
     let admitted = admit_native_target_products(
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
             .sha256(),
         prepared,
         &certified,
+        &package_products,
+        inherited_support,
         accepted,
         &package_catalog,
         segment_originals,
@@ -4313,17 +4337,29 @@ fn seal_turn_outputs_with_validation(
             })?;
             SealedOriginalEvidence::issue_exact(admission, output, &target_native)?
         }
-        None => original_compile_input
-            .as_ref()
-            .map(|proof| SealedOriginalEvidence::Ordinary {
-                execution: proof.issued_original_execution(),
+        None => match original_compile_input.as_ref() {
+            Some(proof) => {
+                let completed = target_native.completed_selection().ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "ordinary native target lacks its issued completion".into(),
+                    )
+                })?;
+                let execution = Arc::new(
+                    Arc::unwrap_or_clone(proof.issued_original_execution())
+                        .retain_native_target_custody(&target_native)?
+                        .retain_completed_native_selection(completed)?,
+                );
+                SealedOriginalEvidence::Ordinary {
+                    execution,
+                    artifacts: artifact_view.clone(),
+                    selection: certified.source_selection.clone(),
+                }
+            }
+            None => SealedOriginalEvidence::Absent {
                 artifacts: artifact_view.clone(),
                 selection: certified.source_selection.clone(),
-            })
-            .unwrap_or_else(|| SealedOriginalEvidence::Absent {
-                artifacts: artifact_view.clone(),
-                selection: certified.source_selection.clone(),
-            }),
+            },
+        },
     };
     drop(original_execution_span);
     let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
@@ -4397,6 +4433,34 @@ fn seal_turn_outputs_with_validation(
     }))
 }
 
+fn certify_native_package_products(
+    output: &invocation_output::CapturedNativeOutput<'_>,
+    receipt: &certified_products::CertifiedReceipt,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<Vec<Arc<certified_products::CertifiedPackageCodeProduct>>, CompileError> {
+    output.validate_interfaces(receipt, validation)?;
+    validation
+        .inventory
+        .reserve::<Arc<certified_products::CertifiedPackageCodeProduct>>(
+            receipt.package_products.len(),
+        )
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    receipt
+        .package_products
+        .iter()
+        .map(|product| {
+            certified_products::CertifiedPackageCodeProduct::from_native_output(
+                output,
+                Path::new(""),
+                product,
+                receipt,
+                validation,
+            )
+            .map_err(compiler_evidence_failure)
+        })
+        .collect()
+}
+
 struct AdmittedNativeTargetProducts {
     target: crate::artifact_inventory::CertifiedTargetNativeInputs,
     certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
@@ -4410,6 +4474,8 @@ fn admit_native_target_products(
     producer: [u8; 32],
     prepared: &Arc<PreparedProgram>,
     certified: &certified_products::CertifiedProducts,
+    packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
+    inherited: &crate::artifact_inventory::CompilerSourceSupport,
     accepted: &[certified_products::AcceptedGlobal],
     package_catalog: &PackageInterfaceCatalog<'_>,
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
@@ -4528,7 +4594,8 @@ fn admit_native_target_products(
     Ok(AdmittedNativeTargetProducts {
         target: admitted_target
             .bind_target(typed_entry, pending_imports)
-            .with_certified_groups(Arc::clone(&selected_groups))?,
+            .with_certified_groups(Arc::clone(&selected_groups))?
+            .complete_native_selection(prepared, packages, inherited, &validation.inventory)?,
         certified_groups: Arc::clone(selected_groups.groups()),
         package_interfaces,
     })
@@ -6086,6 +6153,8 @@ fn compile_invocation_inner(
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
         let receipt = &native.receipt;
+        let package_products =
+            certify_native_package_products(&native_output, receipt, &mut validation)?;
         invocation_timing.advance("product_decode_and_freshness");
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
@@ -6289,7 +6358,18 @@ fn compile_invocation_inner(
                 target.native_inputs = Some(
                     admitted_targets
                         .for_ordinary_target(target.pending_imports.clone())?
-                        .with_certified_groups(Arc::clone(&selected_groups))?,
+                        .with_certified_groups(Arc::clone(&selected_groups))?
+                        .complete_native_selection(
+                            target.prepared.prepared(),
+                            &package_products,
+                            compiler_inputs
+                                .as_ref()
+                                .map(|inputs| inputs.compiler_source_support())
+                                .unwrap_or(
+                                    &crate::artifact_inventory::CompilerSourceSupport::empty(),
+                                ),
+                            &validation.inventory,
+                        )?,
                 );
             }
         }
