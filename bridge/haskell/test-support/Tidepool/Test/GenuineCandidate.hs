@@ -7,7 +7,7 @@ module Tidepool.Test.GenuineCandidate
   , writeGenuineCandidateManifestFor, writeGenuineMetadataScope
   , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope
   , writeGenuineCandidateLexicalScope
-  , writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext
+  , writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuineMetadataScopeWithContext
   , writeGenuinePublishedScopeWithContext
   , writeGenuineAuthoredDeclarationScope ) where
 
@@ -129,6 +129,16 @@ writeGenuineExecutionScopeWithContext nativeOwners lexicalRoots work capture = d
   case output of
     ScopeContextOutput path bytes -> pure (path,bytes)
     _ -> fail "fixture delivery omitted its requested scope and context parcel"
+
+-- The same compiled fixture can expose canonical source metadata without
+-- selecting any native Original. Native custody never supplies that role.
+writeGenuineMetadataScopeWithContext :: [String] -> [String] -> FilePath -> CapturedCompilerFixture -> IO (FilePath,BS.ByteString)
+writeGenuineMetadataScopeWithContext interfaces lexicalRoots work capture = do
+  output <- deliverCapturedFixture capture
+    (FixtureSelection [] interfaces [] lexicalRoots) (WorldContextDelivery work)
+  case output of
+    ScopeContextOutput path bytes -> pure (path,bytes)
+    _ -> fail "metadata fixture delivery omitted its scope and context parcel"
 
 -- Explicit publication intent is consumed by the Rust completed-source issuer.
 -- Ordinary fixture selection never silently endorses a source original.

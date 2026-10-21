@@ -8,7 +8,7 @@ module Tidepool.ExecutionEncode
   , ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory
   , ProjectedGroupEncoding, prepareProjectedGroupEncoding, prepareModuleProductEncodingFromGroups
-  , projectedGroupEncodingInput, projectedGroupEncodingBytes
+  , projectedGroupEncodingInput, projectedGroupEncodingBytes, encodePackageGroup
   ) where
 
 import Codec.CBOR.Encoding
@@ -49,6 +49,22 @@ encodeWireProgram program = toStrictByteString $ array
  where
   envelope = programEnvelope program
   ((_, frames), bindings) = mapAccumL encodeTopGroup (0, Seq.empty) (programBindings program)
+
+-- The package envelope reuses the neutral group arena. Its identity is
+-- independent of the target and of unrelated selected package siblings.
+encodePackageGroup :: PackageCodeOwner -> ProjectedGroupEncoding -> ByteString
+encodePackageGroup owner group = toStrictByteString $ array
+  [ encodeString "TPPACKAGEGROUP1"
+  , array
+      [ encodeString (packageCodeUnit owner)
+      , encodeString (packageCodeModule owner)
+      , encodeBytes (packageCodeCompilerSha256 owner)
+      , encodeBytes (packageCodeProfileSha256 owner)
+      , encodeBytes (packageCodeInterfaceSha256 owner)
+      , encodeBytes (packageCodeDefiningVersionSha256 owner)
+      ]
+  , encodeBytes (projectedGroupEncodingBytes group)
+  ]
 
 -- | Entry-free, independently decodable definition arena for one original
 -- STG group. The body uses the same table grammar as a prepared program, but

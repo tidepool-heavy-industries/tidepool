@@ -684,7 +684,7 @@ workerRequestFlag = "--worker-request-v" ++ show workerRequestVersion
 
 -- The launcher flag and byte framing describe the same grammar version.
 workerRequestVersion :: Int
-workerRequestVersion = 28
+workerRequestVersion = 29
 
 workerRequestMagic :: BS.ByteString
 workerRequestMagic = TE.encodeUtf8 (T.pack ("TPREQ" ++ replicate (3 - length version) '0' ++ version))

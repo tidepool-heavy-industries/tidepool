@@ -35,13 +35,25 @@ Retained facts may outlive that allowance; they do not authorize later effects.
 Package cells keep their existing GHC owner, and changed projection inputs still
 use the original worklist's validation and fallback.
 
-World native preparation uses the same worklist with an optional completed-product
-handoff. The private issuer certifies its guarded completion and pairs the result
-with the actual pending dependency owner; a later stage must have borrowed that
-exact predecessor. Source captures retain the original local finalization and
-canonical proof without declaring native readiness. Newly reached source bodies
-are prepared from that completed owner without frontend replay. Each operation
-keeps its own source-resolution evidence.
+Every NativeOriginals output, including finite installers and catalogs, receives
+its producer and package-profile provenance from the admitted CompilerScope before
+compilation. Its final projection pairs HOME targets with actual immutable package
+products and captured interface bytes. Observation-only configuration cannot
+supply that provenance; an explicit PortableExecutable remains a separate closed
+output intent.
+
+World native preparation uses the same worklist. A stage-input view binds one
+guarded CompiledWorldStage and its actual immediate predecessor once. The private
+writer certifies products before advancing that stage and seals selective late
+canonical recovery additions through the same pending dependency owner. Source
+captures retain the original local finalization and canonical proof without
+claiming native readiness. Each operation keeps its own source-resolution evidence.
+
+Selected Original references carry actual compiler Names and their exact selected
+interface/original association. Only reached uses enter the active handler's native
+demand exchange. A reply associates complete package obligations with each exact
+use; stage-wide acquisition must not widen another target's projection. Final
+package issuance checks the reply seals against the same captured interface bytes.
 
 Staged certification retains exact GHC Name-to-symbol associations together with
 its native certification context. Same-Name conflicts refuse; native projection
@@ -130,7 +142,7 @@ qualification.
 
 ## Exact-scope transport
 
-Worker requests use `TPREQ028`. Field 57 acquires one world without source
+Worker requests use `TPREQ029`. Field 57 acquires one world without source
 request fields; field 58 queries public module metadata through the same
 `CompilerRequest` executor admission. Fields 59 and 60 carry the held-world
 cell plan and preparation recipes. Runtime owns reservation/adoption authority;

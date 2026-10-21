@@ -48,7 +48,8 @@ module Tidepool.ExactScope
   , WorldCellOperandInputs, WorldCellOperandExposure(..), readWorldCellOperandWithOwner
   , worldCellOperandExposure, worldCellOperandBinding, worldCellOperandInterface
   , worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
-  , worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsProducer, worldInputsProfile, worldInputsSources
+  , worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
+  , WorldOriginalReference, worldOriginalReferenceFor, worldOriginalReferenceOwner, worldOriginalReferenceBindings
   , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
   , WorldObservationProfile(..), WorldObservationScaffold, worldLexicalObservation
@@ -2289,7 +2290,7 @@ decodeInterfaceRow = do
 data WorldInputFacts = WorldInputFacts
   { worldInputsIdentity :: !(String)
   , worldInputsIdentityBytes :: !(BS.ByteString)
-  , worldInputsCompilerIdentity :: !(String)
+  , worldInputsCompilerIdentityBytes :: !(BS.ByteString)
   , worldInputsProducer :: !(BS.ByteString)
   , worldInputsProfile :: !(BS.ByteString)
   , worldInputsSources :: !(CapturedWorldSources)
@@ -2310,6 +2311,9 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsPrimary :: !(WorldPrimaryFacts)
   , ownedWorldInputsLexicalSurface :: !(WorldLexicalSurface)
   }
+
+worldInputsCompilerIdentity :: WorldInputFacts -> String
+worldInputsCompilerIdentity = hexBytes . worldInputsCompilerIdentityBytes
 
 -- This result contains reconstruction facts, never a lineage or execution
 -- grant. Request admission selects the exact held predecessor; Rust's checked
@@ -3026,11 +3030,11 @@ encodeWorldRestoration primary domain producer profile scope associations bindin
 -- A semantic compiler identity deliberately excludes the opaque full runtime
 -- commitment. Every request, reservation and END still uses worldInputsIdentity.
 worldCompilerIdentity :: BS.ByteString -> BS.ByteString -> BS.ByteString -> Word64
-  -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
+  -> BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
 worldCompilerIdentity domain producer profile scope primary bindings lexical =
-  hexBytes (SHA.hash (toStrictByteString (E.encodeListLen 8 <> E.encodeString "TPCWINPUT1"
+  SHA.hash (toStrictByteString (E.encodeListLen 8 <> E.encodeString "TPCWINPUT1"
     <> E.encodeBytes domain <> E.encodeBytes producer <> E.encodeBytes profile
-    <> E.encodeWord64 scope <> E.encodeBytes primary <> E.encodeBytes bindings <> E.encodeBytes lexical)))
+    <> E.encodeWord64 scope <> E.encodeBytes primary <> E.encodeBytes bindings <> E.encodeBytes lexical))
 
 data OfferedWorldSuccessor = OfferedWorldSuccessor BS.ByteString [(BS.ByteString,BS.ByteString)]
   [(InterfaceOwner,Maybe OfferedWorldRow)] [(InterfaceOwner,Maybe OfferedWorldRow)] InputAcquisition
@@ -3477,6 +3481,26 @@ type WorldArtifactBinding = (BS.ByteString,BS.ByteString)
 data WorldPrimaryBinding
   = WorldInterfaceOnly WorldArtifactBinding
   | WorldOriginal WorldArtifactBinding WorldArtifactBinding
+
+-- A selected association is provenance for an external symbol witness. It
+-- grants no executable group permission; the held Rust input owner resolves it.
+data WorldOriginalReference = WorldOriginalReference !T.Text !T.Text
+  !WorldArtifactBinding !WorldArtifactBinding deriving (Eq,Ord,Show)
+
+worldOriginalReferenceFor :: WorldInputFacts -> Module -> Maybe WorldOriginalReference
+worldOriginalReferenceFor facts owner = do
+  let unit = unitString (moduleUnit owner)
+      name = moduleNameString (moduleName owner)
+  association <- Map.lookup (unit,name) (worldPrimarySelected (worldInputsPrimary facts))
+  case worldPrimaryBinding association of
+    WorldOriginal interface original -> Just (WorldOriginalReference (T.pack unit) (T.pack name) interface original)
+    WorldInterfaceOnly _ -> Nothing
+
+worldOriginalReferenceOwner :: WorldOriginalReference -> (T.Text,T.Text)
+worldOriginalReferenceOwner (WorldOriginalReference unit name _ _) = (unit,name)
+
+worldOriginalReferenceBindings :: WorldOriginalReference -> (WorldArtifactBinding,WorldArtifactBinding)
+worldOriginalReferenceBindings (WorldOriginalReference _ _ interface original) = (interface,original)
 
 data WorldPrimaryAssociation = WorldPrimaryAssociation
   { worldPrimaryBinding :: WorldPrimaryBinding

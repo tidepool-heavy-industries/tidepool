@@ -990,7 +990,7 @@ checkingSourceRequestRoundTrip = do
       resident = ExactInputsRequest world (ResidentExactInputs realization)
       exactFields = [EnsureExactInputs resident]
   [exactFlag, exactPayload] <- pure (workerArgv exactFields)
-  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v28" exactFlag
+  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v29" exactFlag
   assertEqual "source-free request matches independent Rust fixture"
     "5450524551303238000100000001000000010000003940000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610042000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e37" exactPayload
   forM_ [resident

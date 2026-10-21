@@ -131,7 +131,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs, publishStagedOriginalProducts, stagedOriginalPackageDemand
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs, publishStagedOriginalProducts, stagedOriginalExternalDemand
   , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
@@ -211,7 +211,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithPrior, reconcileOriginalProducts, unrecoveredExactProducts)
+import Tidepool.OriginalProductRoots (requiredOriginalExternalGlobalsWithPrior, reconcileOriginalProducts, unrecoveredExactProducts)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports
   , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
   , packageImportRootWithin, validatePackageImportRootWithin)
@@ -3475,10 +3475,10 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
   nativeBytes <- BS.readFile descriptorPath
   nativeTerm <- decode nativeBytes
   case nativeTerm of
-    TList [TString "TPHOMEOWNERS",TInt 5,_,_,_,_,_,_,_] -> pure ()
-    _ -> fail "native census control lacks an actual HOME v5 certificate"
+    TList [TString "TPHOMEOWNERS",TInt 6,_,_,_,_,_,_,_] -> pure ()
+    _ -> fail "native census control lacks an actual HOME v6 certificate"
   unless (digest nativeBytes == descriptorSha && encode nativeTerm == nativeBytes) $
-    fail "actual HOME v5 bytes did not retain their canonical roundtrip and SHA"
+    fail "actual HOME v6 bytes did not retain their canonical roundtrip and SHA"
   indexed <- readOriginalNativeCensus descriptorPath descriptorSha
   let groups = nativeCensusExactGroups indexed
       ordinals = map originalOrdinal groups
@@ -3532,7 +3532,7 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
             Just (_,rest) -> T.cons '0' rest
             Nothing -> T.replicate 64 "0"
       in pure (TList [magic,version,nativeOwner,groups,sources,packages,execution,requirements,TString changed])
-    _ -> fail "actual HOME v5 certificate lacks its bound canonical owner"
+    _ -> fail "actual HOME v6 certificate lacks its bound canonical owner"
   rejectCertificate "canonical-owner" changedCanonical
   (BS.writeFile descriptorPath (BS.snoc nativeBytes 0) >> readExactScope (scopeManifestPath scope) >>= \case
       Left _ -> pure ()
@@ -3742,11 +3742,11 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "native package publication changed original package codec bytes"
   let segmentDirectory = captureDirectory </> "segment-originals"
   sharedCertificate <- writeCertifiedSegmentProducts [work] currentInterfaces segmentDirectory paired issuedContext
-  let priorPackages = stagedOriginalPackageDemand (Just sharedCertificate)
+  let priorPackages = stagedOriginalExternalDemand (Just sharedCertificate)
   packages <- either fail (maybe (fail "actual native binder was not in its issued context") pure)
     (priorPackages known)
   let direct = [global | global <- currentGlobals,globalIdentity global == known]
-  unless (not (null direct) && requiredOriginalPackageGlobalsWithPrior [] [] [] Set.empty priorPackages direct
+  unless (not (null direct) && requiredOriginalExternalGlobalsWithPrior [] [] [] Set.empty priorPackages direct
       == Right (Set.toAscList packages)) $
     fail "direct prior native root lost its certified package closure"
   case priorPackages (known {symbolOccurrence="unissuedPriorNativeBinder"}) of
@@ -3755,7 +3755,7 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (priorPackages (known {symbolUnit="unrelated-unit"}) == Right Nothing) $
     fail "unrelated owner was classified as a certified native binder"
   let retained = map (\global -> global {globalRequiredGeneration=Just 99}) direct
-  unless (requiredOriginalPackageGlobalsWithPrior [] [] [] Set.empty
+  unless (requiredOriginalExternalGlobalsWithPrior [] [] [] Set.empty
       (const (Left "retained value crossed its runtime boundary")) retained == Right []) $
     fail "retained value package demand recovered an implementation"
   sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")

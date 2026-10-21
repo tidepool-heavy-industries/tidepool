@@ -41,7 +41,8 @@ import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..))
 import GHC.Iface.Binary (writeBinIface, TraceBinIFace(..), CompressionIFace(..))
 import GHC.Iface.Load (readIface)
-import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.ExtractUtil (getLibdir, shaHex)
+import Tidepool.ArtifactBytes (artifactBytes, artifactSha256, artifactDigestBytes)
 import Tidepool.Metadata (DCMeta(..), metadataForConstructors)
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
@@ -71,18 +72,21 @@ import Tidepool.ExecutionProjection qualified as Projection
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
   , prepareProjection, prepareProjectionWithReachability, prepareComponentProjectionWithReachability, projectSelected
+  , projectPreparedPackageTarget, packageTargetProgram, packageTargetGroups
+  , projectPreparedPackageGroups, projectedPackageEncoding, projectedPackageDefiningVersion, projectedPackageInterfaceSha256
   , projectPreparedTarget, projectPreparedModuleProducts, preparedModuleProductConstructors, preparedModuleReachFacts, preparedSeedUniques
   , admitReachFacts, emptyPreparedReachability, reachedUniques, admittedTops
   , PreparedReachUpdate(..), updatePreparedReachability
   , preparedTargetReferences, preparedRootIdentity, resolveTextPackageUnit )
+import Tidepool.ExecutionEncode (projectedGroupEncodingInput, projectedGroupEncodingBytes)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), ConstructorIdentity(..), TypeIdentity(..), TypeVersion(..), TargetDescriptor(..)
-  , TopBinding(..), WireProgram(..) )
+  , TopBinding(..), WireProgram(..), ProjectedGroup(..) )
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
   , FatIfaceComponentLookup(..), fatSelectionComponents
-  , readExactInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..)
+  , readExactInterface, readCapturedDefiningInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..)
   , OwnerInterfaceContext, copyOwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface
   , selectOwnerInterfaceCaches, evictOwnerInterfaceMatching, sameOwnerInterfaceContext )
 import Tidepool.PreparedRecovery
@@ -97,7 +101,7 @@ import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmIdentityResolver, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
   , newPreparedBodyCache, prepareModule, acquirePreparedModule, runPreparedModuleTask
   , prepareRecoveredBodies, newPreparedComponentUnitsPreparer, runPreparedComponentTask, preparedComponentModules
-  , preparedExpectedEntry )
+  , preparedExpectedEntry, capturePreparedPackageInterfaces )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.Timing (timeSection)
 
@@ -1065,6 +1069,21 @@ scenario = do
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assertProjectionEquivalent context closure
+    liftIO $ do
+      paired <- either (fail . show) pure (projectPreparedPackageTarget [] context
+        (closureHomeModules closure) (closureComponentSelections closure) (closureReachability closure))
+      let exports = Set.fromList [identity | product <- packageTargetGroups paired
+            , identity <- projectedBinders (projectedGroupEncodingInput (projectedPackageEncoding product))]
+          target = packageTargetProgram paired
+          targetDefinitions = Set.fromList [identity | group <- programBindings target
+            , TopBinding identity _ <- case group of NonRecursive top -> [top]; Recursive tops -> tops]
+          imported = Set.fromList (map globalIdentity (programGlobals target))
+      assert (not (Set.null exports) && not (Set.null (Set.intersection exports imported)))
+        "real package target did not import any of its coissued package exports"
+      assert (Set.null (Set.intersection exports targetDefinitions))
+        "separated target still embeds its package export bodies"
+      assert (projectionEntry context `Set.member` targetDefinitions)
+        "separating package code lost the actual target entry"
     liftIO $ verifyRecoveryPublication hsc context modules closure
     liftIO $ assertReachExpansion context closure
     liftIO $ assertRejectionBoundary context closure
@@ -1139,16 +1158,16 @@ scenario = do
               FatIfaceComponents selected -> pure selected
               _ -> fail "real FTCQueue component selection failed"
             task <- acquire Nothing selection >>= either (fail . show) pure
-            prepared <- preparedComponentModules <$> (runPreparedComponentTask task >>= either (fail . show) pure)
-            pure (selection, prepared)
+            completed <- runPreparedComponentTask task >>= either (fail . show) pure
+            pure (selection, completed, preparedComponentModules completed)
           bindings prepared = fmap Map.fromList $ fmap concat $ forM (concatMap pmBindings prepared) $ \(binding, _) -> do
             physical <- evaluate binding >>= makeStableName
             pure [(varName binder, physical) | binder <- topBinders binding]
           workerNames prepared = [varName binder | (binding, _) <- concatMap pmBindings prepared
             , binder <- topBinders binding, isJust (isDataConWorkId_maybe binder)]
-      (_, first) <- prepare (take 1 identifiers)
+      (_, firstComponents, first) <- prepare (take 1 identifiers)
       firstBindings <- bindings first
-      (selection, grown) <- prepare identifiers
+      (selection, grownComponents, grown) <- prepare identifiers
       assert (length (fatSelectionComponents selection) > 1)
         "queue regression did not select independent components sharing a datatype"
       let names = map varName (concatMap topBindersOfModule grown)
@@ -1159,12 +1178,37 @@ scenario = do
       grownBindings <- bindings grown
       assert (all (\(name, physical) -> Map.lookup name grownBindings == Just physical)
         (Map.toList firstBindings)) "queue growth re-lowered completed component or constructor workers"
-      (_, repeated) <- prepare (reverse identifiers ++ identifiers)
+      (_, repeatedComponents, repeated) <- prepare (reverse identifiers ++ identifiers)
       repeatedBindings <- bindings repeated
       assert (grownBindings == repeatedBindings) "queue root permutation re-lowered completed units"
       projected <- either (fail . show) pure (projectPreparedTarget packageContext grown)
       repeatedProgram <- either (fail . show) pure (projectPreparedTarget packageContext repeated)
       assert (projected == repeatedProgram) "queue root permutation changed executable identities"
+      let packageProducts selectedContext completed prepared = do
+            let seeds = nonDetEltsUniqSet (preparedSeedUniques selectedContext prepared)
+                reach = admitReachFacts seeds (map (preparedModuleReachFacts selectedContext) prepared)
+                  emptyPreparedReachability
+            products <- either (fail . show) pure
+              (projectPreparedPackageGroups selectedContext [completed] reach)
+            let rows = [(projectedBinders (projectedGroupEncodingInput (projectedPackageEncoding product)),
+                         (projectedPackageDefiningVersion product, projectedPackageInterfaceSha256 product,
+                          projectedGroupEncodingBytes (projectedPackageEncoding product)))
+                       | product <- products]
+            assert (not (null rows) && length rows == Map.size (Map.fromList rows))
+              "actual package producer emitted no groups or duplicate binder groups"
+            assert (all ((== 0) . projectedOriginalOrdinal . projectedGroupEncodingInput
+                . projectedPackageEncoding) products)
+              "package product identity retained subset-relative ordinals"
+            pure (Map.fromList rows)
+      firstProducts <- packageProducts
+        (packageContext { projectionAuxiliaryRoots = [] }) firstComponents first
+      grownProducts <- packageProducts packageContext grownComponents grown
+      repeatedProducts <- packageProducts packageContext repeatedComponents repeated
+      assert (all (\(binders, bytes) -> Map.lookup binders grownProducts == Just bytes)
+        (Map.toList firstProducts)) "package demand growth changed an existing group product"
+      assert (grownProducts == repeatedProducts)
+        "package demand permutation changed independently reusable group products"
+
       let defined = Set.fromList [identity | group <- programBindings projected
             , TopBinding identity _ <- case group of NonRecursive top -> [top]; Recursive tops -> tops]
       assert (viewRoot `Set.member` defined && workerRoot `Set.member` defined)
@@ -1681,6 +1725,7 @@ verifyRecoveryPublication env context modules original = do
   owner <- maybe (fail "genuine fst input has no defining owner") pure
     (nameModule_maybe (varName root))
   (_,location) <- readExactInterface env owner >>= either (fail . show) pure
+  originalBytes <- BS.readFile (ml_hi_file location)
   bracket (openTempFile "/tmp" "tidepool-recovery-broken-interface")
     (\(path,handle) -> hClose handle >> removeFile path) $ \(path,handle) -> do
       hPutStr handle "not-a-ghc-interface"
@@ -1690,6 +1735,29 @@ verifyRecoveryPublication env context modules original = do
       addModuleToFinder finder (GWIB owner NotBoot)
         location {ml_hi_file=path,ml_dyn_hi_file=path}
       let broken = env {hsc_FC=finder}
+      -- A custom mutable finder location is captured, not forbidden or reread
+      -- by the decoder. Its source path remains provenance, never the temp copy.
+      BS.writeFile path originalBytes
+      (_, capturedLocation, capturedBody) <- readCapturedDefiningInterface broken owner
+        >>= either (fail . show) pure
+      assert (ml_hi_file capturedLocation == path && artifactSha256 capturedBody == shaHex originalBytes)
+        "captured package interface did not preserve its actual bytes and defining location"
+      capturedOwners <- newOwnerInterfaceCache
+      held <- capturePreparedPackageInterfaces broken capturedOwners
+        [(owner, Just (artifactDigestBytes capturedBody))] >>= either (fail . show) pure
+      BS.writeFile path "not-a-ghc-interface"
+      repeated <- capturePreparedPackageInterfaces broken capturedOwners
+        [(owner, Just (artifactDigestBytes capturedBody))] >>= either (fail . show) pure
+      assert (Map.lookup owner held == Map.lookup owner repeated)
+        "retained package context reread its changed defining path"
+      crossed <- capturePreparedPackageInterfaces broken capturedOwners [(owner, Just BS.empty)]
+      assert (either (const True) (const False) crossed)
+        "retained package context accepted a conflicting expected interface seal"
+      changed <- readCapturedDefiningInterface broken owner
+      assert (either (const True) (const False) changed)
+        "captured package acquisition reused a changed custom source without its owner"
+      assert (artifactBytes capturedBody == originalBytes && artifactSha256 capturedBody == shaHex originalBytes)
+        "later source mutation changed the retained defining byte witness"
       forM_ [False,True] $ \preparedInterface -> do
         cache <- newFatIfaceCache
         when preparedInterface $ do

@@ -15,8 +15,8 @@ module Tidepool.FatIface
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , FatIfaceComponentLookup(..), lookupFatIfaceComponents, privateOriginalDependencies
-  , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
+  , ExactInterfaceFailure(..), readExactInterface, readCapturedDefiningInterface
+  , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceBytes, ownerInterfaceTyCons, ownerInterfaceEntries
   , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
@@ -25,7 +25,7 @@ module Tidepool.FatIface
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.TyCon (TyCon)
-import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
+import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags, hsc_FC, hsc_HUG, hsc_units, hsc_home_unit_maybe)
 import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
 import GHC.Types.Var (Id, isId, isLocalId)
 import GHC.Types.Id (isFCallId, isPrimOpId_maybe)
@@ -34,10 +34,15 @@ import GHC.Types.Var (varName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Var.Env (emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
-import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls, mi_iface_hash, mi_final_exts)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_iface_hash, mi_final_exts)
 import GHC.Utils.Fingerprint (Fingerprint)
 import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
 
+import GHC.Driver.Config.Finder (initFinderOpts)
+import GHC.Unit.Finder (findExactModule, InstalledFindResult(..))
+import GHC.Unit.Env (HomeUnitEnv(..))
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes)
+import qualified Data.ByteString as BS
 import GHC.Iface.Load (findAndReadIface, readIface)
 import GHC.Iface.Errors.Types
   ( MissingInterfaceError(..), ReadInterfaceError(..) )
@@ -267,6 +272,30 @@ readExactInterface env owner = do
         (renderMissingInterfaceError failure)
       _ -> ExactInterfaceFinderFailure (renderMissingInterfaceError failure)
 
+-- Resolve once and decode exactly the captured bytes. The temporary decoder
+-- path never replaces the defining location used by CorePrep and provenance.
+readCapturedDefiningInterface :: HscEnv -> Module
+  -> IO (Either ExactInterfaceFailure (ModIface, ModLocation, ArtifactBytes))
+readCapturedDefiningInterface env owner = do
+  attempted <- trySynchronous $ do
+    found <- findExactModule (hsc_FC env) (initFinderOpts (hsc_dflags env))
+      (fmap (initFinderOpts . homeUnitEnv_dflags) (hsc_HUG env))
+      (hsc_units env) (hsc_home_unit_maybe env) (toUnitId <$> owner)
+    case found of
+      InstalledFound location _ -> do
+        captured <- captureArtifactBytes <$> BS.readFile (ml_hi_file location)
+        decoded <- Shared.withCapturedIface False (showSDocUnsafe (ppr owner))
+          (artifactBytes captured) $ readIface (hsc_dflags env) (hsc_NC env) owner
+        pure $ case decoded of
+          Succeeded iface | mi_module iface == owner ->
+            Right (iface, location, captured)
+          Succeeded _ -> Left (ExactInterfaceReadFailure "captured defining interface owner differs")
+          Failed failure -> Left (ExactInterfaceReadFailure (renderReadInterfaceError failure))
+      _ -> pure (Left (ExactInterfaceFinderFailure "defining package interface does not resolve"))
+  pure $ case attempted of
+    Left failure -> Left (ExactInterfaceReadFailure (displayException failure))
+    Right result -> result
+
 loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDeclsUnsafe hscEnv modl = do
   ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
@@ -433,8 +462,11 @@ sameOwnerInterfaceContext first second =
     && ownerInterfaceVersion first == ownerInterfaceVersion second
 
 ownerInterfaceMatchesOriginal :: OwnerInterfaceContext -> FatOriginalVersion -> Bool
-ownerInterfaceMatchesOriginal context (FatOriginalVersion owner interface _) =
+ownerInterfaceMatchesOriginal context (FatOriginalVersion owner interface core) =
   ownerInterfaceVersion context == (owner,interface)
+    && case ownerInterfaceBytes context of
+      Nothing -> True
+      Just _ -> ownerInterfaceCapturedCore context == Just core
 
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
 -- defining context: the 'ModLocation' 'readExactInterface' resolved it at,
