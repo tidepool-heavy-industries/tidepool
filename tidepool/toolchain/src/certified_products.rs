@@ -6316,39 +6316,94 @@ fn authenticate_original_binding_membership(
             owner: defining.clone(),
             reason,
         };
-        let primary = source
+        // Prefer the defining module's own selected row. The defining module
+        // is usually retained as dependency custody rather than selected, so
+        // fall back to the exact retained Original payload whose owner is the
+        // binder's defining module. Membership is still proven against that
+        // product's authenticated witness groups; the scan only locates the
+        // owner-issued pair, it cannot manufacture one.
+        let selected = source
             .compiler_primary_input(&defining)
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
-            .ok_or_else(|| refuse_defining(InputDecisionRefusal::RoleMismatch))?;
-        let Some(defining_original) = primary.original() else {
-            return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
-        };
-        let interface_entry = source
-            .artifacts()
-            .observed_payload(&primary.interface().artifact)
-            .ok_or_else(|| {
-                refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
-                    ArtifactIdentityMismatch {
-                        stage: ArtifactIdentityStage::MissingInterfacePayload,
-                        expected_canonical: Some(primary.interface().artifact),
-                        expected_original: Some(defining_original.artifact),
-                        ..ArtifactIdentityMismatch::refused(
-                            ArtifactIdentityStage::MissingInterfacePayload,
-                        )
-                    },
-                ))
-            })?;
-        let reference = ReceiptImportOwner::OriginalBinding {
-            unit: defining.unit.clone(),
-            module: defining.module.clone(),
-            interface: primary.interface(),
-            original: defining_original,
-            binder: binder.clone(),
-        };
-        return original_reference_payload_member(
-            &reference,
-            interface_entry,
-            primary.entry(),
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        let (interface_artifact, original_artifact, interface_entry, original_entry) =
+            if let Some(primary) = selected {
+                let Some(defining_original) = primary.original() else {
+                    return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
+                };
+                let interface_entry = source
+                    .artifacts()
+                    .observed_payload(&primary.interface().artifact)
+                    .ok_or_else(|| {
+                        refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
+                            ArtifactIdentityMismatch {
+                                stage: ArtifactIdentityStage::MissingInterfacePayload,
+                                expected_canonical: Some(primary.interface().artifact),
+                                expected_original: Some(defining_original.artifact),
+                                ..ArtifactIdentityMismatch::refused(
+                                    ArtifactIdentityStage::MissingInterfacePayload,
+                                )
+                            },
+                        ))
+                    })?;
+                (
+                    primary.interface().artifact,
+                    defining_original.artifact,
+                    Arc::clone(interface_entry),
+                    Arc::clone(primary.entry()),
+                )
+            } else {
+                let mut located = None;
+                for descriptor in source.artifacts().descriptors() {
+                    if descriptor.kind == crate::artifact_inventory::ArtifactKind::OriginalModule
+                        && descriptor.owner == defining
+                    {
+                        let entry = source
+                            .artifacts()
+                            .observed_payload(&descriptor.id)
+                            .expect("retained descriptor has its payload");
+                        if located.replace((descriptor.id, Arc::clone(entry))).is_some() {
+                            return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
+                        }
+                    }
+                }
+                let (original_id, original_entry) = located
+                    .ok_or_else(|| refuse_defining(InputDecisionRefusal::RoleMismatch))?;
+                let crate::artifact_inventory::ArtifactPayload::Original(defining_product) =
+                    &original_entry.payload
+                else {
+                    return Err(refuse_defining(InputDecisionRefusal::NativeOwnerMismatch));
+                };
+                let canonical = defining_product
+                    .module_interface()
+                    .ok_or_else(|| {
+                        refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
+                            ArtifactIdentityMismatch::refused(
+                                ArtifactIdentityStage::ModuleInterfaceDiffers,
+                            ),
+                        ))
+                    })?;
+                let interface_id =
+                    crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical);
+                let interface_entry = source
+                    .artifacts()
+                    .observed_payload(&interface_id)
+                    .ok_or_else(|| {
+                        refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
+                            ArtifactIdentityMismatch::refused(
+                                ArtifactIdentityStage::MissingInterfacePayload,
+                            ),
+                        ))
+                    })?;
+                (interface_id, original_id, Arc::clone(interface_entry), original_entry)
+            };
+        return original_reference_payload_membership(
+            &defining.unit,
+            &defining.module,
+            interface_artifact,
+            original_artifact,
+            &interface_entry,
+            &original_entry,
+            binder,
             Some(operation),
         )
         .map(|(owner, ordinal)| (owner.clone(), ordinal));
@@ -6426,9 +6481,33 @@ pub(crate) fn original_reference_payload_member<'a>(
             "nominal Original reference kind",
         ));
     };
+    original_reference_payload_membership(
+        unit,
+        module,
+        interface.artifact,
+        original.artifact,
+        interface_entry,
+        original_entry,
+        binder,
+        operation,
+    )
+}
+
+/// Membership core over held exact payloads. The unit/module here is the
+/// nominal reference identity; artifact IDs are its exact issued pair.
+fn original_reference_payload_membership<'a>(
+    unit: &str,
+    module: &str,
+    interface_artifact: crate::artifact_inventory::ArtifactId,
+    original_artifact: crate::artifact_inventory::ArtifactId,
+    interface_entry: &crate::artifact_inventory::ArtifactEntry,
+    original_entry: &'a crate::artifact_inventory::ArtifactEntry,
+    binder: &SymbolIdentity,
+    operation: Option<&InventoryOperation>,
+) -> CertResult<(&'a CachedHomeOwner, u32)> {
     let owner = crate::declaration_join::ExactModuleIdentity {
-        unit: unit.clone(),
-        module: module.clone(),
+        unit: unit.to_owned(),
+        module: module.to_owned(),
     };
     let refuse = |reason| CertificationError::InputDecision {
         owner: owner.clone(),
@@ -6445,8 +6524,8 @@ pub(crate) fn original_reference_payload_member<'a>(
     // the product's issued witness groups.
     let mismatch = if product.owner().unit != *unit || product.owner().module != *module {
         Some(ArtifactIdentityStage::NominalOwnerDiffers)
-    } else if original_entry.descriptor.id != original.artifact
-        || interface_entry.descriptor.id != interface.artifact
+    } else if original_entry.descriptor.id != original_artifact
+        || interface_entry.descriptor.id != interface_artifact
     {
         Some(ArtifactIdentityStage::NominalMembershipDiffers)
     } else {
@@ -6456,13 +6535,13 @@ pub(crate) fn original_reference_payload_member<'a>(
         return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
             ArtifactIdentityMismatch {
                 stage,
-                expected_original: Some(original.artifact),
-                expected_canonical: Some(interface.artifact),
+                expected_original: Some(original_artifact),
+                expected_canonical: Some(interface_artifact),
                 observed_original: Some(original_entry.descriptor.id),
                 observed_canonical: Some(interface_entry.descriptor.id),
                 observed_kind: Some(original_entry.payload.artifact_kind()),
-                expected_unit: Some(unit.clone()),
-                expected_module: Some(module.clone()),
+                expected_unit: Some(unit.to_owned()),
+                expected_module: Some(module.to_owned()),
                 observed_owner_unit: Some(product.owner().unit.clone()),
                 observed_owner_module: Some(product.owner().module.clone()),
                 observed_binder_unit: Some(binder.unit.clone()),
@@ -6478,7 +6557,7 @@ pub(crate) fn original_reference_payload_member<'a>(
         return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch(
             ArtifactIdentityMismatch {
                 stage: ArtifactIdentityStage::ModuleInterfaceDiffers,
-                expected_original: Some(original.artifact),
+                expected_original: Some(original_artifact),
                 expected_canonical: product
                     .module_interface()
                     .map(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id),
@@ -6510,8 +6589,8 @@ pub(crate) fn original_reference_payload_member<'a>(
     // re-expressed at this nominal reference's own identity. A demand for an
     // occurrence the witness never issued still refuses.
     let reexported = tidepool_repr::execution_schema::SymbolIdentity {
-        unit: unit.clone(),
-        module: module.clone(),
+        unit: unit.to_owned(),
+        module: module.to_owned(),
         ..binder.clone()
     };
     let mut ordinal = None;
@@ -6534,21 +6613,6 @@ pub(crate) fn original_reference_payload_member<'a>(
         }
     }
     let ordinal = ordinal.ok_or_else(|| {
-        eprintln!(
-            "DEBUG membership miss owner={:?} requested={binder:?} reexported={reexported:?} groups={:?}",
-            product.owner(),
-            witness
-                .groups
-                .iter()
-                .flat_map(|group| group.group.binders().iter())
-                .filter(|binder| {
-                    binder.occurrence.contains("id")
-                        || binder.module.contains("GHC")
-                        || binder.unit.contains("ghc")
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
         CertificationError::OriginalMembership(Box::new(OriginalMembershipFailure::MissingSymbol {
             owner: product.owner().clone(),
             symbol: binder.clone(),
