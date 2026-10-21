@@ -1569,6 +1569,14 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("compiler product certificate disagrees with source outside compiler selection")]
+    SourceOutsideCompilerSelection {
+        owner: crate::declaration_join::ExactModuleIdentity,
+        requested_version: ModuleVersion,
+        original_ordinal: Option<u32>,
+    },
+    #[error("compiler product certificate disagrees with retained core replaces native owner")]
+    RetainedCoreReplacesNativeOwner { owner: CachedHomeOwner },
     #[error("selected original {artifact:?} is outside retained custody")]
     MissingRetainedCustody {
         artifact: crate::artifact_inventory::ArtifactId,
@@ -4878,9 +4886,14 @@ impl CertifiedSourceSelection {
             .private_advertised
             .receipt_original(&self.private_native, unit, module, version)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
-            .ok_or(CertificationError::Mismatch(
-                "source outside compiler selection",
-            ))?;
+            .ok_or_else(|| CertificationError::SourceOutsideCompilerSelection {
+                owner: crate::declaration_join::ExactModuleIdentity {
+                    unit: unit.to_owned(),
+                    module: module.to_owned(),
+                },
+                requested_version: version.clone(),
+                original_ordinal: ordinal,
+            })?;
         if ordinal.is_some_and(|ordinal| !original.permits(ordinal)) {
             return Err(CertificationError::OriginalAvailability(Box::new(
                 OriginalAvailabilityRefusal {
@@ -11597,13 +11610,12 @@ pub(crate) fn certify_products_with_validation(
                 exact.ok_or(CertificationError::Mismatch(
                     "retained core requires exact request",
                 ))?;
-                if projected_originals
-                    .iter()
-                    .any(|product| product.owner().unit == key.0 && product.owner().module == key.1)
-                {
-                    return Err(CertificationError::Mismatch(
-                        "retained core replaces native owner",
-                    ));
+                if let Some(original) = projected_originals.iter().find(|product| {
+                    product.owner().unit == key.0 && product.owner().module == key.1
+                }) {
+                    return Err(CertificationError::RetainedCoreReplacesNativeOwner {
+                        owner: original.owner().clone(),
+                    });
                 }
                 let canonical = inherited_module_interfaces
                     .iter()

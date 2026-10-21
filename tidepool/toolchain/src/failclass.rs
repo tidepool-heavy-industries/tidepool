@@ -464,6 +464,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         // malformed extractor artifact or impossible internal request shape.
         CompileError::SessionValueSelection(_)
         | CompileError::ExtractFailed(_)
+        | CompileError::ExactImportWitness(_)
         | CompileError::ArtifactInventory(_)
         | CompileError::CompileInput(_)
         | CompileError::ModulePackage(_) => {
@@ -573,9 +574,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::CompilerActionRetired(_) | CompileError::CompilerPreparationRetired(_) => {
             CompileFailureCause::CompilerActionRetired
         }
-        CompileError::SessionValueSelection(_) | CompileError::ExtractFailed(_) => {
-            CompileFailureCause::ExtractorContract
-        }
+        CompileError::SessionValueSelection(_)
+        | CompileError::ExtractFailed(_)
+        | CompileError::ExactImportWitness(_) => CompileFailureCause::ExtractorContract,
         CompileError::CompilerEvidence(error) => CompileFailureCause::CompilerEvidence {
             failure: error.as_ref().into(),
         },

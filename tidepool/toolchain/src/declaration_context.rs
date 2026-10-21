@@ -31,6 +31,43 @@ mod published_source;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExactImportWitnessRefusal {
+    BootImport,
+    OutsideSelectedGraph,
+    QualifierMismatch,
+    DuplicateImport,
+}
+
+/// The observed import and retained lexical selection at the refusal site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactImportWitnessFailure {
+    pub source: ExactModuleIdentity,
+    pub import: ExactModuleIdentity,
+    pub qualifier: crate::cache::ImportQualifier,
+    pub boot: bool,
+    pub selected: Option<ExactModuleIdentity>,
+    pub reason: ExactImportWitnessRefusal,
+}
+
+impl std::fmt::Display for ExactImportWitnessFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "exact declaration context: exact import witness leaves selected lexical graph: source {}:{}, import {}:{}, qualifier {}, boot {}, selected {}",
+            self.source.unit,
+            self.source.module,
+            self.import.unit,
+            self.import.module,
+            String::from(self.qualifier.clone()),
+            self.boot,
+            self.selected.is_some(),
+        )
+    }
+}
+
+impl std::error::Error for ExactImportWitnessFailure {}
+
 // Full-profile diagnostics have an independent output budget. An omitted row
 // or binding makes this observation incomplete, never proof of absence.
 const NATIVE_TRACE_ROWS: usize = 256;
@@ -10612,18 +10649,49 @@ impl ProductInputFacts<'_> {
                         scaffold_import = true;
                     }
                 }
-                if boot
-                    || !(is_selected(unit, name)
-                        || scaffold_import
-                        || selected_originals.contains_key(&identity(unit, name)))
-                    || (qualifier != "none" && qualifier != format!("this:{unit}"))
-                    || !imported.insert((qualifier.clone(), name.to_owned(), boot, unit.to_owned()))
+                let refusal = if boot {
+                    Some(ExactImportWitnessRefusal::BootImport)
+                } else if !(is_selected(unit, name)
+                    || scaffold_import
+                    || selected_originals.contains_key(&identity(unit, name)))
                 {
-                    return Err(failure(format!(
-                        "exact import witness leaves selected lexical graph: source {}:{}, import {unit}:{name}, qualifier {qualifier}, boot {boot}, selected {}",
-                        owner.0,
-                        owner.1,
-                        is_selected(unit, name),
+                    Some(ExactImportWitnessRefusal::OutsideSelectedGraph)
+                } else if !matches!(&edge.qualifier, crate::cache::ImportQualifier::Unqualified)
+                    && !matches!(
+                        &edge.qualifier,
+                        crate::cache::ImportQualifier::ThisUnit(selected_unit) if selected_unit == unit
+                    )
+                {
+                    Some(ExactImportWitnessRefusal::QualifierMismatch)
+                } else if !imported.insert((
+                    qualifier.clone(),
+                    name.to_owned(),
+                    boot,
+                    unit.to_owned(),
+                )) {
+                    Some(ExactImportWitnessRefusal::DuplicateImport)
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    let selected = selected
+                        .get(&(unit, name))
+                        .map(|(unit, module)| identity(unit, module))
+                        .or_else(|| {
+                            world
+                                .then(|| context.source_lexical_node(&identity(unit, name)))
+                                .flatten()
+                                .map(|node| node.owner.clone())
+                        });
+                    return Err(CompileError::ExactImportWitness(Box::new(
+                        ExactImportWitnessFailure {
+                            source: module.owner.clone(),
+                            import: identity(unit, name),
+                            qualifier: edge.qualifier.clone(),
+                            boot,
+                            selected,
+                            reason,
+                        },
                     )));
                 }
                 resolved.insert(identity(unit, name));
