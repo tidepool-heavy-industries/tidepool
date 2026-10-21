@@ -9554,7 +9554,7 @@ impl ExactCompilationRequest {
             .collect::<BTreeSet<_>>();
         let graph_paths = materialization.selected_graph_path_refs(&selected_graphs);
         crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::InputFdDistinctGraph,
+            crate::host_work::HostWorkCounter::InputFdSelectedGraphTransport,
             graph_paths.len() as u64,
         );
         for owned in graph_paths.values() {
@@ -9562,7 +9562,7 @@ impl ExactCompilationRequest {
             files.insert(Arc::as_ptr(&file) as usize, file);
         }
         tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_input_transport_files",
-            selected_row_visits, slice_visits, graph_path_visits = graph_paths.len(),
+            selected_row_visits, slice_visits, selected_graph_transports = graph_paths.len(),
             metadata_entry_visits = metadata.entries.len(), exported_files = files.len(),
             "enumerated exact immutable input file leases");
         crate::host_work::record_host_work(

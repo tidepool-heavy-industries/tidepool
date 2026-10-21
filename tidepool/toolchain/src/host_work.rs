@@ -54,7 +54,7 @@ pub enum HostWorkCounter {
     MaterializationGraphVisit,
     /// Distinct selected graph transports found during FD enumeration.
     /// Unrelated retained graphs are not included.
-    InputFdDistinctGraph,
+    InputFdSelectedGraphTransport,
     InputFdMetadataVisit,
     InputFdExport,
     ColdSourceFile,
@@ -107,7 +107,7 @@ impl HostWorkCounter {
         Self::InputFdSelectedRowVisit,
         Self::InputFdSliceVisit,
         Self::MaterializationGraphVisit,
-        Self::InputFdDistinctGraph,
+        Self::InputFdSelectedGraphTransport,
         Self::InputFdMetadataVisit,
         Self::InputFdExport,
         Self::ColdSourceFile,

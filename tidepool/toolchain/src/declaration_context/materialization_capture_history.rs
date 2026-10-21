@@ -507,6 +507,12 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
         observation.snapshot().get(HostWorkCounter::InputFdExport),
         files.len() as u64
     );
+    assert_eq!(
+        observation
+            .snapshot()
+            .get(HostWorkCounter::InputFdSelectedGraphTransport),
+        0
+    );
     assert!(!files.is_empty());
     let weak_files = files.iter().map(Arc::downgrade).collect::<Vec<_>>();
     drop(expected);
