@@ -453,6 +453,7 @@ enum OriginalInputDemand {
 #[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
     native_fact_base: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
+    native_completions: crate::artifact_inventory::NativeSelectionCompletions,
     demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -473,6 +474,7 @@ impl PartialEq for OriginalCompilerInputs {
         }) && self.projection == other.projection
             && self.artifacts == other.artifacts
             && self.native_offers == other.native_offers
+            && self.native_completions == other.native_completions
             && self.native_availability == other.native_availability
     }
 }
@@ -783,6 +785,7 @@ impl OriginalCompilerInputs {
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
                 native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+            native_completions: source.native_completions().clone(),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -809,6 +812,7 @@ impl OriginalCompilerInputs {
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+            native_completions: source.native_completions().clone(),
             native_availability: source.native_availability().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -868,12 +872,17 @@ impl OriginalCompilerInputs {
     ) -> Self {
         Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+            native_completions: source.native_completions().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().clone(),
             artifacts: source.artifacts().clone(),
             native_offers: source.native_offers().to_vec(),
             native_availability: source.native_availability().clone(),
         }
+    }
+
+    pub(crate) fn issued_native_completions(&self) -> &crate::artifact_inventory::NativeSelectionCompletions {
+        &self.native_completions
     }
 
     pub(crate) fn from_selection(
@@ -971,6 +980,7 @@ impl OriginalCompilerInputs {
         timing.finish(true);
         Ok(NormalizedOriginalCompilerInputs { inputs: Self {
             native_fact_base: selection.native_fact_base().cloned(),
+            native_completions: selection.native_completions(),
             native_availability,
             demand: OriginalInputDemand::Issued(
                 crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
@@ -1120,6 +1130,7 @@ impl OriginalCompilerInputs {
         };
         Ok(Self {
             native_fact_base: self.native_fact_base.clone(),
+            native_completions: self.native_completions.clone(),
             native_availability: self
                 .native_availability
                 .for_compiler_roles(&projection, &artifacts)?,
@@ -1143,6 +1154,7 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
+            native_completions: self.native_completions.append(&other.native_completions)?,
             native_fact_base: self
                 .native_fact_base
                 .clone()
@@ -3528,6 +3540,52 @@ fn compiler_execution_scope(
 }
 
 impl RequestCompilerInputs {
+    /// Advance only immutable completion custody from an actually issued context.
+    /// The receiver keeps its public compiler namespace and lexical policy.
+    pub(crate) fn with_native_completion_from(
+        self: &Arc<Self>,
+        issued: &Arc<ExactDeclarationContext>,
+    ) -> Result<WorldPrimaryProgramSupport, CompileError> {
+        let primary = self
+            .world_primary_context
+            .as_ref()
+            .ok_or_else(|| failure("native completion requires the actual World primary owner"))?;
+        if primary.owner.facts.producer == [0; 32]
+            || primary.owner.facts.producer != issued.owner.facts.producer
+        {
+            return Err(failure(
+                "native completion differs from the primary compiler producer",
+            ));
+        }
+        let support = self
+            .source_support
+            .with_native_completions_from(issued.compiler_source_support())?;
+        if support.native_completions() == self.source_support.native_completions() {
+            return Ok(WorldPrimaryProgramSupport {
+                inputs: Arc::clone(self),
+                context: Arc::clone(primary),
+                changed_owners: Vec::new(),
+                promotion_qualifier_invocations: 0,
+            });
+        }
+        let mut facts = primary.owner.facts.clone();
+        facts.compiler_support = support.clone();
+        let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let inputs = Arc::new(Self {
+            source_support: Arc::new(support),
+            metadata: self.metadata.clone(),
+            native_selection: self.native_selection.clone(),
+            original_sources: Arc::clone(&self.original_sources),
+            world_primary_context: Some(Arc::clone(&context)),
+        });
+        Ok(WorldPrimaryProgramSupport {
+            inputs,
+            context,
+            changed_owners: Vec::new(),
+            promotion_qualifier_invocations: 0,
+        })
+    }
+
     pub(crate) fn with_type_interfaces(
         self: &Arc<Self>,
         contexts: &[Arc<ExactDeclarationContext>],
