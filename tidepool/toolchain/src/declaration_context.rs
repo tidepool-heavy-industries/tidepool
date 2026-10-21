@@ -10652,7 +10652,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 None,
                 Some(&stage_produced),
                 &mut validation,
-                WorldProgramContinuation::begin(program).unwrap(),
+                WorldProgramContinuation::begin(program),
             )
             .expect("actual first stage admission");
         let output = IssuedOriginalOutput::from_segment_originals(&segment.originals).unwrap();

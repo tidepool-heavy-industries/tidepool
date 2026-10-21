@@ -318,7 +318,7 @@ fn assert_physical_selection(
         None,
         Some(&physical),
         &mut validation,
-        crate::declaration_context::WorldProgramContinuation::begin(checked)?,
+        crate::declaration_context::WorldProgramContinuation::begin(checked),
     )?;
     let input = operand.checked_row().certified_interface().artifact_id();
     assert!(
