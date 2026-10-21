@@ -6871,6 +6871,7 @@ pub(crate) fn recover_module_interface(
     interface: Vec<u8>,
     packages: Vec<u8>,
     core: Option<Vec<u8>>,
+    package_interfaces: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedModuleInterface> {
     finalized_module::recover_interface(
@@ -6879,6 +6880,7 @@ pub(crate) fn recover_module_interface(
         interface,
         packages,
         core,
+        package_interfaces,
         validation,
     )
 }

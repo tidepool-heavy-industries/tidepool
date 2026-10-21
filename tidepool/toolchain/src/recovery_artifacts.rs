@@ -48,6 +48,7 @@ pub struct RecoveryModuleInterfaceRef {
     pub certificate_path: PathBuf,
     pub certificate_sha256: [u8; 32],
     pub core: Option<RecoveryCoreRef>,
+    pub package_interfaces: Vec<crate::certified_products::RecoveryPackageInterfaceRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -2272,6 +2273,7 @@ fn admit_certified_interface<'a>(
             if interface.producer_sha256() != producer {
                 return Err(RecoveryArtifactError::InvalidReference);
             }
+            interface.validate_package_interfaces(validation)?;
             (
                 interface.unit(),
                 interface.module(),
@@ -2521,6 +2523,7 @@ impl<'a> ValidatedModuleInterface<'a> {
         interface: &'a crate::certified_products::CertifiedModuleInterface,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<Self, RecoveryArtifactError> {
+        interface.validate_package_interfaces(validation)?;
         let bytes = ValidatedInterfaceBytes::admit(
             interface.producer_sha256(),
             interface.unit(),
@@ -2588,6 +2591,12 @@ impl<'a> ValidatedModuleInterface<'a> {
             certificate_path,
             certificate_sha256,
             core,
+            package_interfaces: interface
+                .package_interfaces()
+                .materialize(root, mode, validation)
+                .map_err(|error| {
+                    recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+                })?,
         })
     }
 }
@@ -2671,7 +2680,7 @@ pub(crate) fn recover_module_interface(
         PACKAGE_IMPORTS_LIMIT,
         validation,
     )?;
-    validate_package_imports_with_validation(
+    let obligations = decode_package_import_obligations(
         &package_imports_bytes,
         &anchor.unit,
         &anchor.module,
@@ -2679,6 +2688,16 @@ pub(crate) fn recover_module_interface(
         &root.join(&anchor.package_imports_path),
         validation,
     )?;
+    let package_interfaces = crate::certified_products::PackageInterfaceCustody::restore(
+        root,
+        &reference.package_interfaces,
+        &obligations.interface_seals(validation)?,
+        validation,
+    )
+    .map_err(|error| {
+        recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+    })?;
+    validate_package_imports_with_custody(obligations, &package_interfaces, validation)?;
     let certificate = capture_module_payload(
         root,
         &reference.certificate_path,
@@ -2707,6 +2726,7 @@ pub(crate) fn recover_module_interface(
         interface_bytes,
         package_imports_bytes,
         core,
+        &package_interfaces,
         validation,
     )
     .map_err(|error| {

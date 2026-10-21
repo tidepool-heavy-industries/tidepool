@@ -552,6 +552,7 @@ pub(crate) struct CanonicalFacts {
     certificate: Arc<[u8]>,
     core: Option<Arc<[u8]>>,
     origin: CanonicalOrigin,
+    package_interfaces: PackageInterfaceCustody,
 }
 
 impl PartialEq for CanonicalFacts {
@@ -704,6 +705,28 @@ impl CertifiedModuleInterface {
     pub(crate) fn package_imports_bytes(&self) -> &[u8] {
         &self.package_imports
     }
+    pub(crate) fn package_interfaces(&self) -> &PackageInterfaceCustody {
+        &self.package_interfaces
+    }
+    pub(crate) fn validate_package_interfaces(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), crate::recovery_artifacts::RecoveryArtifactError> {
+        let obligations = crate::recovery_artifacts::decode_package_import_obligations(
+            self.package_imports_bytes(),
+            self.unit(),
+            self.module(),
+            &self.interface_sha256(),
+            Path::new("owned-module.hi.packages"),
+            validation,
+        )?;
+        crate::recovery_artifacts::validate_package_imports_with_custody(
+            obligations,
+            self.package_interfaces(),
+            validation,
+        )?;
+        Ok(())
+    }
     pub(crate) fn certificate_bytes(&self) -> &[u8] {
         &self.certificate
     }
@@ -737,6 +760,7 @@ impl CertifiedModuleInterface {
             && interface.package_imports_sha256 == self.receipt.package_imports.sha256
             && reference.certificate_sha256 == sha(&self.certificate)
             && core_matches
+            && self.package_interfaces.matches_references(&reference.package_interfaces)
     }
 
     /// Materialization can retain Core without making it available through an
@@ -1024,6 +1048,7 @@ pub(super) fn issue_interfaces(
         crate::declaration_join::ExactModuleIdentity,
         Vec<CanonicalSourceImport>,
     >,
+    package_interfaces: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedModuleInterface>> {
     envelope.validate_structure()?;
@@ -1082,12 +1107,24 @@ pub(super) fn issue_interfaces(
             COMPILER_RECEIPT_BYTES_LIMIT as u64,
             validation,
         )?;
-        crate::recovery_artifacts::validate_package_imports_with_validation(
+        let obligations = crate::recovery_artifacts::decode_package_import_obligations(
             &package_imports,
             &module.unit,
             &module.module,
             &module.interface.sha256,
             Path::new("finalized-module.hi.packages"),
+            validation,
+        )
+        .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
+        let selected_packages = package_interfaces.select(
+            &obligations
+                .interface_seals(validation)
+                .map_err(|_| CertificationError::Mismatch("finalized package imports"))?,
+            validation,
+        )?;
+        crate::recovery_artifacts::validate_package_imports_with_custody(
+            obligations,
+            &selected_packages,
             validation,
         )
         .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
@@ -1165,6 +1202,7 @@ pub(super) fn issue_interfaces(
                 certificate: certificate.into(),
                 core: core.map(Into::into),
                 origin,
+                package_interfaces: selected_packages,
             }),
             input_custody: None,
         });
@@ -1180,6 +1218,7 @@ pub(super) fn recover_interface(
     interface: Vec<u8>,
     package_imports: Vec<u8>,
     core: Option<Vec<u8>>,
+    package_interfaces: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<CertifiedModuleInterface> {
     if certificate.len() > CANONICAL_CERTIFICATE_LIMIT {
@@ -1249,12 +1288,24 @@ pub(super) fn recover_interface(
             "finalized certificate payload",
         ));
     }
-    crate::recovery_artifacts::validate_package_imports_with_validation(
+    let obligations = crate::recovery_artifacts::decode_package_import_obligations(
         &package_imports,
         &receipt.unit,
         &receipt.module,
         &receipt.interface.sha256,
         Path::new("finalized-module.hi.packages"),
+        validation,
+    )
+    .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
+    let selected_packages = package_interfaces.select(
+        &obligations
+            .interface_seals(validation)
+            .map_err(|_| CertificationError::Mismatch("finalized package imports"))?,
+        validation,
+    )?;
+    crate::recovery_artifacts::validate_package_imports_with_custody(
+        obligations,
+        &selected_packages,
         validation,
     )
     .map_err(|_| CertificationError::Mismatch("finalized package imports"))?;
@@ -1289,6 +1340,7 @@ pub(super) fn recover_interface(
             certificate: certificate.into(),
             core: core.map(Into::into),
             origin,
+            package_interfaces: selected_packages,
         }),
         input_custody: None,
     })
