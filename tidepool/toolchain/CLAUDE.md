@@ -47,8 +47,11 @@ evidence. Strict join protocol 4 attests those interfaces; the retained Rust con
 owns native implementations and exact bindings independently. A raw advisory
 observation cannot issue an accepted join. Input directory custody follows uncertain
 close evidence. Keep `CompilerCloseUnconfirmed` and its completed
-action typed, and never replay it. Declared build actions use their file-only
-isolated invocation and do not acquire owned request transport.
+action typed, and never replay it. Declared portable fixture actions use their isolated direct invocation. Native
+build actions require the declared action-owned compiler service and its actual
+package-source association; endpoint binding must refuse an absent or different
+service instead of falling back to direct compilation. The action owner retains
+producer outcome and independent compiler-settlement evidence.
 
 The worker emits versioned `dependencies.json` with consumed SHA-256 source
 evidence, selected home modules and absent higher-priority import candidates.

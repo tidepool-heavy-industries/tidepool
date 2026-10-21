@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-This map describes source at `f3b350e29adc9ddb839474d7fe9af3c21f32e204`
+This map describes source at `23c4850feb`
 (2026-10-20), on `integration/compiler-query-warm-final`. It separates the
 implemented path from accepted G2 work still being received. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -105,10 +105,10 @@ remaining boundary, rather than treating every part of G2 as absent from source.
 
 | Boundary | Accepted remaining contract |
 |---|---|
-| World prefix and source closure | Finish the atomic composition of initial `ResolvedNativeDemand` with actual issued prefix additions and captured source closure. Preserve nominal metadata separately from executable choices; receipt membership must not widen demand. The common native output and version-7 completion storage are already present. |
+| World prefix and source closure | Finish the atomic composition of initial `ResolvedNativeDemand` with actual issued prefix additions and captured source closure. Coupled Original metadata and executable selection now retain one acquisition; finish latent HOME/recovery propagation and stage composition without widening demand from receipt membership. The common native output and version-7 completion storage are already present. |
 | Closed source and ordinary installation | Replace repeated resolution with a closed installation recipe; retain shared immutable program data through `TurnCode`. Preserve exact logical binding plus `SourceInstanceDomain` through the existing BindingTable, rollback, capture and retirement. Delete `code_exports`/RetainedPackage fallbacks and finish the ordinary-path cutover. |
-| Package selection | Complete selected TYPE interface capture and package-only graph issuance through the existing compiler/inventory owners. `complete_native_selection` currently requires `ResolvedNativeSourceProducts`; the package-only producer is a separate remaining boundary, not absence of all package graph support. |
-| Native build authority | [AdmittedCompilerDeployment](../tidepool/toolchain/src/toolchain.rs) still represents both observation-only and rooted service modes; native extraction dynamically requires its optional package association. [Package qualification](../build/package/qualification.py) emits a compiler-service deployment from the frozen build contract. The receiving required native-build authority/service and its package consumer are not integrated at this revision. |
+| Package selection | Selected TYPE interfaces now travel inside the actual output, and package graphs retain their reached payloads without parent HOME selection. Reconcile immutable selected-origin paths with owned capture locations through the existing validation owner; raw path equality still rejects legitimate relocation. Real package-only lifetime and joined World controls remain acceptance obligations. |
+| Native build authority | Native build actions now require `bind_owned` and the declared compiler-service deployment through [package qualification](../build/package/qualification.py); portable actions remain direct. Actual catalog production is still unqualified. The frontend still needs to retain an observed child outcome before later cleanup failures; packaging already keeps invocation results separate from owner-issued cleanup evidence. |
 | Joined ordinary workflow | Follow real finite source → installer → public World → repeated package-using cells; retire A and execute a new B cell while retaining genuine captured-A refusal. Qualify discovery, private inputs, default reload and caller loss, then selected Persona startup and real DeepSeek smoke on one frozen bundle. |
 
 G2 includes ordinary-workflow correctness. The G2 contract assigns the full
