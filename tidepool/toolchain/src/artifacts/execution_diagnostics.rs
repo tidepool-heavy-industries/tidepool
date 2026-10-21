@@ -197,6 +197,10 @@ impl InputArtifactDiagnostics {
     ) -> io::Result<serde_json::Value> {
         use crate::artifact_inventory::ArtifactPayload;
         match payload {
+            ArtifactPayload::PackageCode(product) => Ok(serde_json::json!({
+                "package_code": self.bytes("package-code.cbor", product.bytes())?,
+                "defining_interface": self.bytes("hi", product.defining_interface().bytes())?,
+            })),
             ArtifactPayload::Canonical(interface) => self.canonical(interface),
             ArtifactPayload::Original(product) => Ok(serde_json::json!({
                 "interface": self.bytes("hi", product.interface_bytes())?,

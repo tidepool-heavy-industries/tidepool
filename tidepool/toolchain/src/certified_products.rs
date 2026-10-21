@@ -17,7 +17,7 @@ use tidepool_repr::execution_schema::{
 };
 
 mod package_code;
-pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct};
+pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageCodeInterfaceRef};
 pub(crate) mod native_demand;
 pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
@@ -9522,7 +9522,7 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::ArtifactPayload::Original(product) => {
                             product.module_interface().cloned()
                         }
-                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) => None,
+                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => None,
                     })
                     .collect()
             });

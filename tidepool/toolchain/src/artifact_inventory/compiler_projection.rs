@@ -3885,7 +3885,8 @@ impl CompilerInputProjection {
                     ),
                     Some(entry.descriptor.id),
                 ),
-                _ => (entry.descriptor.id, None),
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => (entry.descriptor.id, None),
+                ArtifactPayload::PackageCode(_) => continue,
             };
             let role = match original_reuse {
                 Some(original) => CompilerInputRole::ReusableOriginal {
@@ -4316,7 +4317,10 @@ impl CompilerInputProjection {
         interface: &'a Arc<ArtifactEntry>,
         original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
     ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
-        if &interface.descriptor.owner != owner || interface.is_native() {
+        if &interface.descriptor.owner != owner
+            || interface.is_native()
+            || matches!(interface.payload, ArtifactPayload::PackageCode(_))
+        {
             return Err(failure("compiler interface role has another owner or kind"));
         }
         match role.original() {

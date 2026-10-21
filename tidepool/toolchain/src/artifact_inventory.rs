@@ -30,6 +30,8 @@ pub(crate) use native_availability::{
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
+pub use package_code::PackageCodeBinding;
+pub(crate) use package_code::IssuedPackageCodeGraph;
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
@@ -749,6 +751,8 @@ pub(crate) struct ResolvedNativeTarget<'a> {
 }
 
 impl ResolvedNativeTarget<'_> {
+    pub(crate) fn artifacts(&self) -> &ArtifactView { self.owner.artifacts() }
+
     pub(crate) fn has_only_current_source(&self, group: NativeGroupBinding) -> bool {
         self.sources
             .0
@@ -1536,12 +1540,14 @@ pub enum ArtifactKind {
     CanonicalModuleInterface,
     ValueInterface,
     LexicalJoin,
+    PackageCode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactDependency {
     Interface,
+    PackageCodeImport { global_index: u32 },
     NativeGroup {
         dependent_ordinal: u32,
         required_ordinal: u32,
@@ -1985,6 +1991,27 @@ pub struct ArtifactDescriptor {
 }
 
 impl ArtifactDescriptor {
+    pub fn from_recovery_package_code(
+        reference: &crate::certified_products::RecoveryPackageCodeRef,
+    ) -> Self {
+        let seals = reference
+            .import_interfaces
+            .iter()
+            .flat_map(|interface| interface.sha256)
+            .collect::<Vec<_>>();
+        descriptor(
+            ArtifactKind::PackageCode,
+            ExactModuleIdentity {
+                unit: reference.unit.clone(),
+                module: reference.module.clone(),
+            },
+            reference.producer_sha256,
+            reference.defining_interface.sha256,
+            Some(reference.product_sha256),
+            digest(&seals),
+            None,
+        )
+    }
     /// Describes persisted evidence; constructing a descriptor does not admit it.
     pub fn from_recovery_product(
         reference: &crate::recovery_artifacts::RecoveryArtifactRef,
@@ -2068,6 +2095,7 @@ pub(crate) enum ArtifactPayload {
     Original(CertifiedRecoveryProduct),
     Canonical(crate::certified_products::CertifiedModuleInterface),
     Interface(CertifiedJoinedInterface, JoinedInterfaceRole),
+    PackageCode(Arc<crate::certified_products::CertifiedPackageCodeProduct>),
 }
 
 impl PartialEq for ArtifactPayload {
@@ -2078,6 +2106,7 @@ impl PartialEq for ArtifactPayload {
             (Self::Interface(left, left_role), Self::Interface(right, right_role)) => {
                 left_role == right_role && left == right
             }
+            (Self::PackageCode(left), Self::PackageCode(right)) => left == right,
             _ => false,
         }
     }
@@ -2090,6 +2119,7 @@ impl ArtifactPayload {
             Self::Original(_) => ArtifactKind::OriginalModule,
             Self::Canonical(_) => ArtifactKind::CanonicalModuleInterface,
             Self::Interface(_, role) => role.artifact_kind(),
+            Self::PackageCode(_) => ArtifactKind::PackageCode,
         }
     }
 }
@@ -2100,6 +2130,7 @@ pub(crate) enum ArtifactFactsHandle {
     Original(Arc<crate::recovery_artifacts::OriginalFacts>),
     Canonical(Arc<crate::certified_products::CanonicalFacts>),
     Joined(Arc<JoinedFacts>),
+    PackageCode(Arc<crate::certified_products::CertifiedPackageCodeProduct>),
 }
 
 impl PartialEq for ArtifactFactsHandle {
@@ -2109,6 +2140,7 @@ impl PartialEq for ArtifactFactsHandle {
                 (Self::Original(a), Self::Original(b)) => a == b,
                 (Self::Canonical(a), Self::Canonical(b)) => a == b,
                 (Self::Joined(a), Self::Joined(b)) => a == b,
+                (Self::PackageCode(a), Self::PackageCode(b)) => a == b,
                 _ => false,
             }
     }
@@ -2127,6 +2159,7 @@ impl ArtifactFactsHandle {
             (Self::Original(a), Self::Original(b)) => Arc::ptr_eq(a, b),
             (Self::Canonical(a), Self::Canonical(b)) => Arc::ptr_eq(a, b),
             (Self::Joined(a), Self::Joined(b)) => Arc::ptr_eq(a, b),
+            (Self::PackageCode(a), Self::PackageCode(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -2238,6 +2271,9 @@ impl ArtifactEntry {
             (ArtifactPayload::Interface(_, _), ArtifactFactsHandle::Joined(owner)) => {
                 ArtifactPayload::Interface(owner.interface.clone(), owner.role)
             }
+            (ArtifactPayload::PackageCode(_), ArtifactFactsHandle::PackageCode(owner)) => {
+                ArtifactPayload::PackageCode(Arc::clone(owner))
+            }
             _ => unreachable!("canonical facts variant"),
         };
         let mut adopted = self.clone();
@@ -2257,7 +2293,7 @@ impl ArtifactEntry {
             ArtifactPayload::Original(product) => product
                 .module_interface()
                 .and_then(|interface| interface.catalog_input_custody()),
-            ArtifactPayload::Interface(_, _) => None,
+            ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         }
     }
 
@@ -2455,8 +2491,37 @@ impl ArtifactEntry {
         }
     }
 
+    /// Package products retain executable bytes without acquiring compiler roles.
+    pub(crate) fn package_code(
+        product: Arc<crate::certified_products::CertifiedPackageCodeProduct>,
+    ) -> Self {
+        let owner = product.code().owner();
+        let imports = digest(&product.import_interfaces().concat());
+        let descriptor = descriptor(
+            ArtifactKind::PackageCode,
+            ExactModuleIdentity { unit: owner.unit.clone(), module: owner.module.clone() },
+            owner.compiler_sha256,
+            owner.interface_sha256,
+            Some(*product.product_sha256()),
+            imports,
+            None,
+        );
+        Self {
+            descriptor,
+            facts: ArtifactFactsHandle::PackageCode(Arc::clone(&product)),
+            payload: ArtifactPayload::PackageCode(product),
+            requirements: Vec::new(),
+            interface_seals: BTreeMap::new(),
+            native: None,
+        }
+    }
+
     fn is_native(&self) -> bool {
         matches!(self.payload, ArtifactPayload::Original(_))
+    }
+
+    pub(crate) fn is_compiler_interface(&self) -> bool {
+        matches!(self.payload, ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _))
     }
 
     pub(crate) fn interface(
@@ -2760,6 +2825,9 @@ impl InventoryState {
                     && owner.requirements == entry.requirements
                     && owner.interface == *interface
             }
+            (ArtifactFactsHandle::PackageCode(owner), ArtifactPayload::PackageCode(product)) => {
+                Arc::ptr_eq(owner, product)
+            }
             _ => false,
         };
         if !consistent {
@@ -2807,6 +2875,7 @@ impl InventoryState {
         }
         self.canonical_comparisons.fetch_add(1, Ordering::Relaxed);
         let offered = match &entry.payload {
+            ArtifactPayload::PackageCode(product) => product.bytes().len(),
             ArtifactPayload::Original(product) => product
                 .original_byte_anchors()
                 .iter()
@@ -3108,6 +3177,8 @@ impl SelectedOwners {
                 selected
                     .native
                     .insert(NativeOwnerKey::from_owner(product.owner()), *id)
+            } else if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                continue;
             } else {
                 selected
                     .interfaces
@@ -3315,7 +3386,7 @@ impl SelectedOwners {
                     .module_interface()
                     .ok_or_else(|| failure("native canonical carrier missing"))?,
             ),
-            ArtifactPayload::Interface(_, _) => None,
+            ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         };
         if let Some(canonical) = canonical {
             let sealed = canonical
@@ -4854,7 +4925,7 @@ impl ArtifactInventory {
         }
         let materialization_parents = Vec::new();
         let retained_roots: Option<Vec<InventoryNodeKey>> = None;
-        let custody_roots = Vec::<ArtifactBindingNode>::new();
+        let mut custody_roots = Vec::<ArtifactBindingNode>::new();
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -5144,6 +5215,9 @@ impl ArtifactInventory {
         let planning_entries = selected
             .iter()
             .filter(|(id, entry)| {
+                if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                    return supplied.contains_key(id) && !parent_ids.contains(id);
+                }
                 namespace_ids.as_ref().is_none_or(|ids| {
                     ids.contains(id)
                         || current_artifacts.contains(id)
@@ -5390,6 +5464,7 @@ impl ArtifactInventory {
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let namespace = selected
             .keys()
+            .filter(|id| !matches!(selected[*id].payload, ArtifactPayload::PackageCode(_)))
             .filter(|id| namespace_ids.as_ref().is_none_or(|ids| ids.contains(id)))
             .map(|id| {
                 let InventoryNodeKey::Artifact(binding) =
@@ -5400,6 +5475,11 @@ impl ArtifactInventory {
                 Ok((*id, binding))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        for (id, entry) in &planning_entries {
+            if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                custody_roots.push(resolve_row(LogicalNodeKey::Artifact(*id))?);
+            }
+        }
         for (key, (binding, cause)) in issued_causes {
             if resolve_target(requested_target(key)?, selection)?
                 == InventoryNodeKey::Group(binding)
@@ -5457,6 +5537,7 @@ impl ArtifactInventory {
             None => {
                 let mut roots = supplied
                     .keys()
+                    .filter(|id| !matches!(selected[*id].payload, ArtifactPayload::PackageCode(_)))
                     .filter(|id| planning_entries.contains_key(id))
                     .map(|id| resolve_row(LogicalNodeKey::Artifact(*id)))
                     .collect::<Result<BTreeSet<_>, _>>()?;
@@ -5627,6 +5708,7 @@ impl ArtifactInventory {
             || namespace
                 .values()
                 .any(|binding| !bindings.contains(binding))
+            || namespace.keys().any(|id| matches!(entries[id].payload, ArtifactPayload::PackageCode(_)))
         {
             return Err(failure("invalid bound recovery namespace"));
         }
@@ -6947,6 +7029,12 @@ impl CompilerArtifactMetadata {
                     .values()
                     .map(|entry| entry.descriptor.id)
                     .collect::<Vec<_>>(),
+                self.retained
+                    .artifacts
+                    .values()
+                    .filter(|entry| matches!(entry.payload, ArtifactPayload::PackageCode(_)))
+                    .map(|entry| entry.descriptor.id)
+                    .collect::<Vec<_>>(),
                 &self.retained.selected_native_groups,
             ))
             .expect("compiler projection materialization key"),
@@ -6980,7 +7068,7 @@ impl ArtifactView {
             .filter_map(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) => product.module_interface(),
                 ArtifactPayload::Canonical(interface) => Some(interface),
-                ArtifactPayload::Interface(_, _) => None,
+                ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
             })
             .filter_map(|interface| interface.original_input_origins().cloned())
             .collect()
@@ -7312,7 +7400,7 @@ impl ArtifactView {
                 let owner = entry.descriptor.owner.clone();
                 if entry.is_native() {
                     natives.entry(owner).or_default().push(id);
-                } else {
+                } else if !matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
                     entries.insert(owner, id);
                 }
                 artifacts.insert(id, Arc::clone(entry));
@@ -7377,7 +7465,8 @@ impl ArtifactView {
     ) -> BTreeMap<ExactModuleIdentity, ArtifactKind> {
         self.descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.kind != ArtifactKind::CanonicalModuleInterface)
+            .filter(|descriptor| matches!(descriptor.kind,
+                ArtifactKind::OriginalModule | ArtifactKind::ValueInterface | ArtifactKind::LexicalJoin))
             .map(|descriptor| (descriptor.owner, descriptor.kind))
             .collect()
     }
@@ -9583,7 +9672,7 @@ impl ArtifactView {
                     .entry(entry.descriptor.owner.clone())
                     .or_default()
                     .push(id);
-            } else {
+            } else if entry.is_compiler_interface() {
                 interfaces.insert(entry.descriptor.owner.clone(), id);
             }
         }
@@ -9614,7 +9703,7 @@ impl ArtifactView {
         self.read_projection(&state)
             .entries
             .iter()
-            .filter(|entry| !entry.is_native())
+            .filter(|entry| entry.is_compiler_interface())
             .map(|entry| ExactInterfaceOwner {
                 owner: entry.descriptor.owner.clone(),
                 requirements: entry.requirements.clone(),
@@ -21619,4 +21708,77 @@ mod tests {
         );
         assert_eq!(inventory.metrics().nodes, 7);
     }
+}
+
+mod package_code {
+//! Exact package code custody, independent of compiler namespace and HOME roles.
+use super::*;
+use crate::certified_products::CertifiedPackageCodeProduct;
+use tidepool_repr::execution_schema::{SymbolIdentity, ValueId};
+
+/// A package occurrence borrowed from its actual immutable graph issuer.
+/// The scalar binding alone does not grant this acquired owner.
+#[derive(Clone)]
+pub struct PackageCodeBinding {
+    graph: Arc<IssuedPackageCodeGraph>,
+    binding: ArtifactBinding,
+}
+
+impl PartialEq for PackageCodeBinding {
+    fn eq(&self, other: &Self) -> bool { self.binding == other.binding }
+}
+impl Eq for PackageCodeBinding {}
+
+impl std::fmt::Debug for PackageCodeBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PackageCodeBinding").field(&self.binding).finish()
+    }
+}
+
+impl PackageCodeBinding {
+    pub fn binding(&self) -> ArtifactBinding { self.binding }
+    pub fn product(&self) -> &Arc<CertifiedPackageCodeProduct> {
+        &self.graph.rows[&self.binding].product
+    }
+    pub fn imports(&self) -> impl ExactSizeIterator<Item = Self> + '_ {
+        self.graph.rows[&self.binding].imports.iter().map(|binding| Self {
+            graph: Arc::clone(&self.graph), binding: *binding,
+        })
+    }
+    pub fn exported_value(&self, symbol: &SymbolIdentity) -> Option<ValueId> {
+        self.product().code().exported_values()
+            .find_map(|(identity, value)| (identity == symbol).then_some(value))
+    }
+}
+
+#[derive(Debug)]
+struct PackageCodeRow {
+    product: Arc<CertifiedPackageCodeProduct>,
+    imports: Arc<[ArtifactBinding]>,
+}
+
+/// One admitted package graph. Rows retain ordered slots; the inventory view
+/// retains the same exact scope proofs and immutable payload acquisitions.
+#[derive(Debug)]
+pub(crate) struct IssuedPackageCodeGraph {
+    artifacts: ArtifactView,
+    roots: Arc<[ArtifactBinding]>,
+    rows: BTreeMap<ArtifactBinding, Arc<PackageCodeRow>>,
+}
+
+impl IssuedPackageCodeGraph {
+    pub(crate) fn artifacts(&self) -> &ArtifactView { &self.artifacts }
+    pub(crate) fn roots(&self) -> &[ArtifactBinding] { &self.roots }
+    pub(crate) fn get(self: &Arc<Self>, binding: ArtifactBinding) -> Option<PackageCodeBinding> {
+        self.rows.contains_key(&binding).then(|| PackageCodeBinding {
+            graph: Arc::clone(self), binding,
+        })
+    }
+    pub(crate) fn bindings(self: &Arc<Self>) -> impl ExactSizeIterator<Item = PackageCodeBinding> + '_ {
+        self.rows.keys().map(|binding| PackageCodeBinding {
+            graph: Arc::clone(self), binding: *binding,
+        })
+    }
+}
+
 }
