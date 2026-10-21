@@ -4073,7 +4073,7 @@ impl ArtifactInventory {
             }
         }
         let entry = typed_entry
-            .map(|entry| {
+            .map(|entry| -> Result<_, CompileError> {
                 let selected = native_availability::select_target_entry(
                     &mut state,
                     physical,

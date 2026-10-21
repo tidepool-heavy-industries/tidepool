@@ -1038,7 +1038,6 @@ pub fn prepare_world_cell_program(
                     groups: segment.group_baseline(),
                 };
                 let admitted = admit_native_target_products(
-                    *program.producer_sha256(),
                     &target,
                     &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
@@ -4355,8 +4354,6 @@ fn seal_turn_outputs_with_validation(
         .map(|inputs| inputs.compiler_source_support())
         .unwrap_or(&no_inherited_inputs);
     let admitted = admit_native_target_products(
-        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
-            .sha256(),
         prepared,
         physical_native_output,
         &certified,
@@ -4573,7 +4570,6 @@ struct AdmittedNativeTargetProducts {
 /// Its inputs have already passed their owning source and product admission.
 #[allow(clippy::too_many_arguments)]
 fn admit_native_target_products(
-    producer: [u8; 32],
     prepared: &Arc<PreparedProgram>,
     output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
