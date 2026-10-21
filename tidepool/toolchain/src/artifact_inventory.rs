@@ -11312,6 +11312,37 @@ mod tests {
         Arc<tidepool_repr::execution_schema::PreparedProgram>,
         Vec<crate::certified_products::AcceptedGlobal>,
     ) {
+        let symbols = exports
+            .iter()
+            .map(|(entry, ordinal)| {
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    panic!("actual native fixture")
+                };
+                let definitions =
+                    crate::certified_products::original_native_group_definitions(product, *ordinal)
+                        .unwrap();
+                let mut contracts = definitions.export_contracts();
+                let contract = contracts.next().unwrap().unwrap();
+                assert!(
+                    contracts.next().is_none(),
+                    "single-export fixture requires an explicit symbol for a multi-export group"
+                );
+                (*entry, *ordinal, contract.identity.clone())
+            })
+            .collect::<Vec<_>>();
+        source_target_data_for_symbols(&symbols)
+    }
+
+    fn source_target_data_for_symbols(
+        exports: &[(
+            &ArtifactEntry,
+            u32,
+            tidepool_repr::execution_schema::SymbolIdentity,
+        )],
+    ) -> (
+        Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        Vec<crate::certified_products::AcceptedGlobal>,
+    ) {
         use crate::certified_products::{AcceptedGlobal, ReceiptImportOwner};
         use tidepool_repr::execution_schema::{
             testing, Atom, ExprFrame, GlobalDecl, GlobalId, ResultContract, SignatureId, ValueRef,
@@ -11320,14 +11351,18 @@ mod tests {
         let mut accepted = Vec::new();
         let mut returned = Vec::new();
         let mut result_reps = Vec::new();
-        for (entry, ordinal) in exports {
+        for (entry, ordinal, symbol) in exports {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 panic!("actual native fixture")
             };
             let definitions =
                 crate::certified_products::original_native_group_definitions(product, *ordinal)
                     .unwrap();
-            let contract = definitions.export_contracts().next().unwrap().unwrap();
+            let contract = definitions
+                .export_contracts()
+                .map(Result::unwrap)
+                .find(|contract| contract.identity == symbol)
+                .expect("actual exported fixture symbol");
             let signature = contract.entry_signature.cloned();
             let entry_signature = signature.as_ref().map(|signature| {
                 let id = SignatureId(wire.signatures.len() as u32);
@@ -11379,7 +11414,6 @@ mod tests {
             &[],
             &BTreeMap::new(),
         ));
-        let imports = [issued_source(&native, 7)];
         let physical = inventory
             .admit_shared_with_demand(
                 &inventory.empty_view(),
@@ -11413,7 +11447,21 @@ mod tests {
         let resolved = target.resolve().unwrap();
         let selected = resolved.groups();
         let _sites = resolved.native_sites().unwrap();
-        assert_eq!(resolved.imports(), imports.as_slice());
+        assert_eq!(resolved.imports().len(), 1);
+        let crate::certified_products::PendingImportOwner::Source {
+            owner,
+            original_ordinal,
+            binder,
+        } = &resolved.imports()[0]
+        else {
+            unreachable!()
+        };
+        let ArtifactPayload::Original(product) = &native.payload else {
+            unreachable!()
+        };
+        assert_eq!(owner, product.owner());
+        assert_eq!(*original_ordinal, 7);
+        assert_eq!(binder, &prepared.globals()[0].identity);
         let after = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
         assert_eq!(
             (after.0 - before.0, after.1 - before.1),
@@ -11483,6 +11531,134 @@ mod tests {
         ));
         let after = NATIVE_TARGET_RESOLUTION_WORK.with(std::cell::Cell::get);
         assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
+    }
+
+    #[test]
+    fn target_order_preserves_distinct_symbols_from_one_actual_group() {
+        use crate::certified_products::{PendingCertifiedGroup, ProductOrigin};
+        use tidepool_repr::execution_schema::{
+            testing, Group, HeapRhs, ModuleVersion, RawModuleProduct, ValueId,
+        };
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(mut first) = wire.bindings.remove(0) else {
+            unreachable!()
+        };
+        first.identity = testing::identity("OrderedExports", "first");
+        first.binding.rhs = HeapRhs::Bytes(vec![1]);
+        let mut second = first.clone();
+        second.identity.occurrence = "second".into();
+        second.binding.id = ValueId(1);
+        second.binding.rhs = HeapRhs::Bytes(vec![2]);
+        wire.bindings = vec![Group::Recursive(vec![first, second])];
+        wire.expressions.nodes.clear();
+        let group = testing::projected_group(wire, 7).unwrap();
+        let symbols = group.binders().to_vec();
+        let interface = vec![0x42];
+        let bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: "fixture".into(),
+                module: "OrderedExports".into(),
+                interface: interface.clone(),
+                groups: vec![group.clone()],
+            }]);
+        let owner = tidepool_repr::execution_schema::CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "OrderedExports".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: digest(&interface),
+            product_sha256: digest(&bytes),
+        };
+        let pending = PendingCertifiedGroup {
+            owner: owner.clone(),
+            origin: ProductOrigin::Fresh,
+            group: Arc::new(group),
+            imports: Arc::from([]),
+        };
+        let seal = crate::certified_products::encode_home_certification(
+            &owner,
+            &[pending],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            "fixture",
+            "OrderedExports",
+            &interface,
+            vec![],
+        );
+        let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            bytes,
+            package_bytes,
+            seal,
+        );
+        let product = crate::certified_products::fixture_finalized_product(product, [2; 32]);
+        let native = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![native.clone()],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let selection = bound_selection_for_entries(&physical, &[native.clone()]);
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let before = inventory.metrics().issued_scope_nodes;
+        let mut selected_values = Vec::new();
+        for order in [[0, 1], [1, 0]] {
+            let (prepared, accepted) = source_target_data_for_symbols(&[
+                (&native, 7, symbols[order[0]].clone()),
+                (&native, 7, symbols[order[1]].clone()),
+            ]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
+            let target = inventory
+                .select_native_target(
+                    &physical,
+                    &selection,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .unwrap();
+            assert_eq!(target.resolve().unwrap().groups().len(), 1);
+            let values = target
+                .slots
+                .links
+                .iter()
+                .map(|link| {
+                    let crate::certified_products::SelectedNativeTargetImport::Source {
+                        binding,
+                        value,
+                    } = link
+                    else {
+                        panic!("actual Source slot")
+                    };
+                    (*binding, *value)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(values[0].0, values[1].0);
+            assert_ne!(values[0].1, values[1].1);
+            selected_values.push(values);
+            assert_eq!(
+                inventory.metrics().issued_scope_nodes,
+                before,
+                "target borrows completed occurrences"
+            );
+        }
+        assert_eq!(
+            selected_values[0].iter().rev().copied().collect::<Vec<_>>(),
+            selected_values[1]
+        );
     }
 
     #[test]
