@@ -1576,6 +1576,7 @@ pub enum PackageCodeRefusal {
     ExportUnavailable,
     ImportContract,
     ConflictingPlan,
+    AmbiguousInheritance { candidates: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -21974,6 +21975,7 @@ mod package_code {
             parent: &ArtifactView,
             fresh: Vec<PackageCodePlan>,
             roots: Vec<PackageCodeTarget>,
+            inherited: &[Arc<Self>],
             operation: &tidepool_repr::execution_schema::InventoryOperation,
         ) -> Result<Arc<Self>, CompileError> {
             let account = |error| {
@@ -22053,6 +22055,97 @@ mod package_code {
                     validate_import(*id, &plans[id].product, index, target.as_ref())?;
                 }
             }
+            // Only actual prior package owners supply reuse candidates. Matching
+            // immutable code is insufficient: every ordered child must remain
+            // an eligible exact binding in this same planned environment.
+            let mut candidates =
+                BTreeMap::<ArtifactId, BTreeMap<ArtifactBinding, PackageCodeBinding>>::new();
+            for graph in inherited {
+                for (binding, row) in &graph.rows {
+                    crate::host_work::checkpoint()?;
+                    operation.charge(1).map_err(account)?;
+                    if required.contains(&binding.artifact)
+                        && row.product == plans[&binding.artifact].product
+                    {
+                        operation
+                            .reserve::<PackageCodeBinding>(1)
+                            .map_err(account)?;
+                        candidates.entry(binding.artifact).or_default().insert(
+                            *binding,
+                            PackageCodeBinding {
+                                graph: Arc::clone(graph),
+                                binding: *binding,
+                            },
+                        );
+                    }
+                }
+            }
+            loop {
+                let mut rejected = Vec::new();
+                for (id, options) in &candidates {
+                    for (binding, held) in options {
+                        crate::host_work::checkpoint()?;
+                        operation.charge(1).map_err(account)?;
+                        let children = &held.graph.rows[binding].imports;
+                        let matches = children.len() == plans[id].imports.len()
+                            && children
+                                .iter()
+                                .zip(&plans[id].imports)
+                                .all(|(child, target)| match target {
+                                    PackageCodeTarget::Held(exact) => *child == exact.binding,
+                                    PackageCodeTarget::Fresh(id) => candidates
+                                        .get(id)
+                                        .is_some_and(|options| options.contains_key(child)),
+                                });
+                        if !matches {
+                            operation
+                                .reserve::<(ArtifactId, ArtifactBinding)>(1)
+                                .map_err(account)?;
+                            rejected.push((*id, *binding));
+                        }
+                    }
+                }
+                if rejected.is_empty() {
+                    break;
+                }
+                for (id, binding) in rejected {
+                    candidates
+                        .get_mut(&id)
+                        .expect("existing candidate set")
+                        .remove(&binding);
+                }
+            }
+            let mut reused = BTreeMap::new();
+            for (id, options) in candidates {
+                if options.len() > 1 {
+                    return Err(refusal(
+                        id,
+                        PackageCodeRefusal::AmbiguousInheritance {
+                            candidates: options.len(),
+                        },
+                    ));
+                }
+                if let Some((_, held)) = options.into_iter().next() {
+                    required.remove(&id);
+                    pending.push(PackageCodeTarget::Held(held.clone()));
+                    reused.insert(id, held);
+                }
+            }
+            while let Some(target) = pending.pop() {
+                crate::host_work::checkpoint()?;
+                operation.charge(1).map_err(account)?;
+                let PackageCodeTarget::Held(held) = target else {
+                    unreachable!("inherited exact closure");
+                };
+                if rows.contains_key(&held.binding) {
+                    continue;
+                }
+                pending.extend(held.imports().map(PackageCodeTarget::Held));
+                acquisitions
+                    .entry(Arc::as_ptr(&held.graph) as usize)
+                    .or_insert_with(|| held.graph.artifacts.clone());
+                rows.insert(held.binding, Arc::clone(&held.graph.rows[&held.binding]));
+            }
             let mut acquired = parent.clone();
             for incoming in acquisitions.values() {
                 acquired = acquired.retain_custody(incoming)?;
@@ -22062,10 +22155,13 @@ mod package_code {
             let provisional = ArtifactSelectionId([0; 32]);
             let node = |target: &PackageCodeTarget, scope| match target {
                 PackageCodeTarget::Held(held) => InventoryNodeKey::Artifact(held.binding),
-                PackageCodeTarget::Fresh(id) => InventoryNodeKey::Artifact(ArtifactBinding {
-                    artifact: *id,
-                    selection: scope,
-                }),
+                PackageCodeTarget::Fresh(id) => InventoryNodeKey::Artifact(reused.get(id).map_or(
+                    ArtifactBinding {
+                        artifact: *id,
+                        selection: scope,
+                    },
+                    |held| held.binding,
+                )),
             };
             let planned = required
                 .iter()
@@ -22095,11 +22191,14 @@ mod package_code {
             let resolve = |target: &PackageCodeTarget| -> Result<ArtifactBinding, CompileError> {
                 match target {
                     PackageCodeTarget::Held(held) => Ok(held.binding),
-                    PackageCodeTarget::Fresh(id) => Ok(ArtifactBinding {
-                        artifact: *id,
-                        selection: scope
-                            .ok_or_else(|| refusal(*id, PackageCodeRefusal::MissingProduct))?,
-                    }),
+                    PackageCodeTarget::Fresh(id) => match reused.get(id) {
+                        Some(held) => Ok(held.binding),
+                        None => Ok(ArtifactBinding {
+                            artifact: *id,
+                            selection: scope
+                                .ok_or_else(|| refusal(*id, PackageCodeRefusal::MissingProduct))?,
+                        }),
+                    },
                 }
             };
             let mut payloads = BTreeMap::new();
