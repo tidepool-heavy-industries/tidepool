@@ -515,12 +515,12 @@ retainPreparedPackageTargets provenance targets captures context = do
   do
     let producer = nativeProductProducer provenance
         profile = nativeProductProfile provenance
-        groups = [ group
-                 | (_, target) <- targets
-                 , group <- packageTargetGroups target ]
+        targetGroups = [ (name, group)
+                       | (name, target) <- targets
+                       , group <- packageTargetGroups target ]
     unless (BS.length producer == 32 && BS.length profile == 32)
       (fail "package product deployment commitments are malformed")
-    encodings <- forM groups $ \group -> do
+    encodings <- forM targetGroups $ \(name, group) -> do
       let owner = projectedPackageModule group
       body <- maybe (fail "package product lacks its captured defining interface") pure
         (Map.lookup owner captures)
@@ -530,10 +530,10 @@ retainPreparedPackageTargets provenance targets captures context = do
             (T.pack (unitString (moduleUnit owner))) (T.pack (moduleNameString (moduleName owner)))
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
           bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
-      pure (group, bytes)
-    let exportOwner = Map.fromList
-          [ (binder, fromIntegral index)
-          | (index, (group, _)) <- zip [0 :: Int ..] encodings
+      pure (name, group, bytes)
+    let targetOwners = Map.fromListWith Map.union
+          [ (T.pack name, Map.singleton binder (fromIntegral index))
+          | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
           , binder <- projectedBinders
               (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
         occurrences =
@@ -544,19 +544,20 @@ retainPreparedPackageTargets provenance targets captures context = do
               , packageOccurrenceDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
               , packageOccurrenceDefiningVersionSha256 = projectedPackageDefiningVersion group
               , packageOccurrenceImports =
-                  [ linkForOccurrence exportOwner (globalIdentity global)
+                  [ linkForOccurrence (Map.findWithDefault Map.empty (T.pack name) targetOwners)
+                      (globalIdentity global)
                   | global <- projectedGlobals (projectedBody
                       (projectedGroupEncodingInput (projectedPackageEncoding group))) ]
               }
-          | (group, bytes) <- encodings ]
+          | (name, group, bytes) <- encodings ]
     let interfaces = Map.fromList
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
             ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
           | (owner,body) <- Map.toAscList captures]
         writes = Map.toAscList (Map.fromList
           [("package-products" </> shaHex bytes ++ ".cbor",bytes)
-          | (_,bytes) <- encodings])
-        links = PackageLinkIndex occurrences exportOwner
+          | (_,_,bytes) <- encodings])
+        links = PackageLinkIndex occurrences targetOwners
     pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
 
 withWorldStageInputs :: Maybe WorldStageInputs -> PreparedProductContext -> PreparedProductContext
