@@ -6000,7 +6000,7 @@ impl OriginalBindingSelection {
                 self.available_group(reference, operation)?
             }
             OriginalBindingExecution::MetadataOnly => {
-                self.metadata_references(operation)
+                let _ = self.metadata_references(operation)
                     .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
                 None
             }

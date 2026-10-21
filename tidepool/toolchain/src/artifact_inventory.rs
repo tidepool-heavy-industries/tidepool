@@ -419,7 +419,7 @@ impl NativeSourceReceiptView<'_> {
     }
 }
 
-/// Exact executable roots remain private to their solver-issued view.
+/// Exact executable roots remain private to their issued target selection.
 #[derive(Clone, Debug)]
 struct IssuedTargetNativeSelection {
     sources: NativeSourceReceipts,

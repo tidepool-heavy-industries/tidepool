@@ -15251,42 +15251,6 @@ pub(crate) fn bind_certified_segment_artifacts_with_validation(
         .map_err(compiler_evidence_failure)
 }
 
-/// Each item adds only ordinal-visible values to its admitted prefix, then
-/// resolves executable demand against the fixed physical selection.
-pub(crate) fn certified_segment_artifact_view_with_validation(
-    producer: [u8; 32],
-    originals: &crate::certified_products::CertifiedSegmentOriginals,
-    bound: &mut crate::artifact_inventory::BoundArtifactSelection,
-    values: &[CertifiedValueInterface],
-    cursor: &ArtifactView,
-    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
-    validation: &mut PackageInterfaceValidation,
-    selection: &crate::certified_products::CertifiedSourceSelection,
-) -> Result<crate::artifact_inventory::AdmittedTargetArtifacts, CompileError> {
-    if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
-        return Err(failure("segment artifacts have another accounting owner"));
-    }
-    if values
-        .iter()
-        .any(|value| value.interface().toolchain_identity_sha256() != producer)
-    {
-        return Err(failure("captured value has another compiler producer"));
-    }
-    validation
-        .inventory
-        .reserve::<Arc<ArtifactEntry>>(values.len())
-        .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let admitted = cursor.artifact_ids().into_iter().collect::<BTreeSet<_>>();
-    let visible = originals
-        .selected_value_entries(values)
-        .filter(|entry| !admitted.contains(&entry.descriptor.id))
-        .cloned()
-        .collect();
-    cursor
-        .inventory()
-        .admit_bound_target(bound, cursor, demand, visible, selection)
-}
-
 /// Check the inventory's selected dependency closure without issuing group rows.
 pub(crate) fn validate_artifact_view_groups_with_validation(
     view: &ArtifactView,
