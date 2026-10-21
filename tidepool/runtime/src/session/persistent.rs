@@ -6788,15 +6788,15 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn conflicting_authored_source_selection_refuses_before_machine_changes() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        use super::super::prepared::tests::install_source_publication_fixture;
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 823);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let a = session.mint_detached_scope(public).unwrap();
         let b = session.mint_detached_scope(public).unwrap();
-        let (target_a, keys_a) = install_selected_source_fixture(&mut session, a, "a");
-        let (target_b, keys_b) = install_selected_source_fixture(&mut session, b, "a");
+        let (target_a, keys_a, _placement_a) = install_source_publication_fixture(&mut session, a);
+        let (target_b, keys_b, _placement_b) = install_source_publication_fixture(&mut session, b);
         let owner = selected_sources(&session, a)[0].owner().clone();
         for scope in [a, b] {
             mint_fixture_origin(&mut session, scope, owner.clone());
@@ -6845,7 +6845,7 @@ mod checkpoint_scope_tests {
     #[test]
     fn authored_publication_keeps_exact_hidden_binding_custody_without_visible_aliases() {
         use super::super::prepared::tests::{
-            install_selected_source_fixture, rooted_publication_fixture,
+            install_source_publication_fixture, rooted_publication_fixture,
         };
         use tidepool_toolchain::artifact_inventory::{ArtifactId, NativeBindingRequirement};
         let root = tempfile::tempdir().unwrap();
@@ -6854,7 +6854,7 @@ mod checkpoint_scope_tests {
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
         let sibling = session.mint_detached_scope(public).unwrap();
-        let (target, keys) = install_selected_source_fixture(&mut session, private, "a");
+        let (target, keys, _placement) = install_source_publication_fixture(&mut session, private);
         let owner = selected_sources(&session, private)[0].owner().clone();
         let old = rooted_publication_fixture(&mut session, "captured", 826);
         let (old_id, old_handle) = (old.id, old.value.handle);
