@@ -47,6 +47,24 @@ site evidence. NativeReply's exact package obligations and seals constrain the
 captured interface bytes consumed by final product issuance. Cross-image
 contracts compare structural facts, not coincidentally equal local indices.
 
+Package interface custody includes the union of actual canonical sidecar and
+native receipt obligations, including direct facade imports and TYPE-only
+dependencies without executable package products. Capture those selected bytes
+once; canonical interfaces and Originals retain their respective obligation
+subsets through the same immutable interface-token owner. Do not retain the
+whole compiler output or infer executable demand from those subsets.
+
+Keep the sealed selection origin, the captured storage path and the owned bytes
+distinct. An authenticated selected interface may move without changing its
+Original ID, certificate or selected-origin facts. Fresh and recovered owners
+establish that relation; a path alias or equal digest alone is not authority.
+Materialization must preserve package interface bytes before producer custody
+ends, and recovery must acquire and verify them before validating their users.
+Use required package-interface references in Original and canonical recovery
+records, with the existing enclosing format cutover. Older missing-field records
+refuse; there is no ambient-file fallback. Share byte tokens and existing
+content-addressed writes rather than duplicating payloads for each Original.
+
 ## 2. Compose issued stages; do not re-resolve initial evidence
 
 The initial external native selection remains bound to its original
@@ -157,7 +175,7 @@ Preserve user source and memory; rebuild compiler products with real producers.
 | E / engine_completion | H demand callback/writer and selected package-interface custody | TYPE-only witnesses; finite/item writer parity; strict cutover |
 | common_native_output | Native physical output owner, finite/Turn layouts and required-owned build endpoint | Actual producer controls; primary-error retention; no raw sealing fallback |
 | N / native_offer_scope_repair | Completion transforms and required v7 snapshot restoration | Zero-name cells; cold reacquisition; stable inherited bindings |
-| Q / audit_native_selection | Package graph/binding issuer; ordered edges; kinds/storage/recovery | Namespace separation; real positive round trip; forbidden alternate issuers |
+| Q / audit_native_selection | Package graph/binding issuer; canonical interface custody/storage/recovery | Interface-only and TYPE-only round trips; namespace separation; forbidden alternate issuers |
 | W / review_world_lifetime_architecture | Common codegen custody, exact domain keys, leases, attachments, BindingTable | Rollback/retirement; structural export contracts; stale cache APIs |
 | L / audit_reload_ownership | Closed recipe, runtime link/adoption, sealed-output consumers, fallback deletion | Atomic tips; captured-A refusal; caller-loss visibility |
 | T / audit_warm_lifecycle | Production histories, fixture repair and G2 qualification | Independent oracles; source/public scope distinction; counted execution |
