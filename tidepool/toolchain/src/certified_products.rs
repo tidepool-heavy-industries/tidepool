@@ -1038,56 +1038,57 @@ impl AuthenticatedOriginalGroup {
         witness: &OriginalNativeWitness,
     ) -> CertResult<PendingImportOwner> {
         match reference {
-                ReceiptImportOwner::Source {
-                    unit,
-                    module,
-                    module_version,
-                    original_ordinal,
-                    binder,
-                } => {
-                    let owner = std::iter::once(&witness.owner)
-                        .chain(&witness.sources)
-                        .find(|owner| {
-                            &owner.unit == unit
-                                && &owner.module == module
-                                && module_version.as_ref() == Some(&owner.module_version)
-                        })
-                        .ok_or(CertificationError::Mismatch(
-                            "nominal source lacks its sealed owner",
-                        ))?;
-                    Ok(PendingImportOwner::Source {
-                        owner: owner.clone(),
-                        original_ordinal: *original_ordinal,
-                        binder: binder.clone(),
+            ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                original_ordinal,
+                binder,
+            } => {
+                let owner = std::iter::once(&witness.owner)
+                    .chain(&witness.sources)
+                    .find(|owner| {
+                        &owner.unit == unit
+                            && &owner.module == module
+                            && module_version.as_ref() == Some(&owner.module_version)
                     })
-                }
-                ReceiptImportOwner::OriginalBinding { unit, module, .. } => {
-                    Err(CertificationError::InputDecision {
-                        owner: crate::declaration_join::ExactModuleIdentity {
-                            unit: unit.clone(),
-                            module: module.clone(),
-                        },
-                        reason: InputDecisionRefusal::MissingContinuationOwner,
-                    })
-                }
-                ReceiptImportOwner::Retained {
-                    identity,
-                    generation,
-                } => Ok(PendingImportOwner::Retained {
-                    identity: identity.clone(),
-                    generation: *generation,
-                }),
-                ReceiptImportOwner::Package {
-                    unit,
-                    module,
-                    binder,
-                    interface_digest,
-                } => Ok(PendingImportOwner::Package {
-                    unit: unit.clone(),
-                    module: module.clone(),
+                    .ok_or(CertificationError::Mismatch(
+                        "nominal source lacks its sealed owner",
+                    ))?;
+                Ok(PendingImportOwner::Source {
+                    owner: owner.clone(),
+                    original_ordinal: *original_ordinal,
                     binder: binder.clone(),
                 })
             }
+            ReceiptImportOwner::OriginalBinding { unit, module, .. } => {
+                Err(CertificationError::InputDecision {
+                    owner: crate::declaration_join::ExactModuleIdentity {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                    },
+                    reason: InputDecisionRefusal::MissingContinuationOwner,
+                })
+            }
+            ReceiptImportOwner::Retained {
+                identity,
+                generation,
+            } => Ok(PendingImportOwner::Retained {
+                identity: identity.clone(),
+                generation: *generation,
+            }),
+            ReceiptImportOwner::Package {
+                unit,
+                module,
+                binder,
+                interface_digest,
+            } => Ok(PendingImportOwner::Package {
+                unit: unit.clone(),
+                module: module.clone(),
+                binder: binder.clone(),
+                interface_digest: *interface_digest,
+            }),
+        }
     }
 }
 

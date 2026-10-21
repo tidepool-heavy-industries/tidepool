@@ -1613,7 +1613,6 @@ fn run_history_observed(
                             step
                         );
                         prop_assert_eq!(result.bindings, catalog.bindings_for(&requested));
-                        prop_assert!(result.packages.is_empty());
                         coverage.custody_only_reads +=
                             usize::from(!requested.is_subset(&view.demand));
                         coverage.reads += 1;
@@ -2452,7 +2451,7 @@ fn retained_body_enters_demand_only_after_explicit_selection() {
             original_ordinal: body.original_ordinal,
         }])
         .unwrap();
-    assert!(available.bindings.is_empty() && available.packages.is_empty());
+    assert!(available.bindings.is_empty());
     assert_eq!(
         projected.selected_native_groups(),
         catalog.selection(&expected),

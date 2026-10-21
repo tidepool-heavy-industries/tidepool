@@ -1482,7 +1482,6 @@ proptest! {
             actual.bindings.iter().cloned().collect::<BTreeSet<_>>(),
             expected_bindings
         );
-        prop_assert!(actual.packages.is_empty());
         prop_assert!(!expected_groups.is_empty());
         prop_assert!(!expected_groups.contains(&(0, 11)), "the unselected later group on the root became a demand");
 

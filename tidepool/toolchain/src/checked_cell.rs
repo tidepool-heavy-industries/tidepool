@@ -3654,7 +3654,7 @@ impl ExactCompiledItem {
             self.settled_values.validate(actual)
         }
     }
-    /// Borrow the exact current value and package imports demanded by this
+    /// Borrow the exact captured value imports demanded by this
     /// issued native entry. Observing demand does not grant runtime leases.
     pub fn required_native_imports(
         &self,
@@ -3665,13 +3665,6 @@ impl ExactCompiledItem {
                 .bindings
                 .iter()
                 .map(|requirement| (&requirement.identity, requirement.generation))
-                .chain(
-                    proof
-                        .native_requirements
-                        .packages
-                        .iter()
-                        .map(|requirement| (&requirement.identity, requirement.generation)),
-                )
         })
     }
     /// Validate the selected original group against the admitted baseline and

@@ -22164,7 +22164,6 @@ mod tests {
                 identity: capture_identity,
                 generation: 4,
             }],
-            packages: vec![],
         };
         let admitted = inventory
             .admit(&inventory.empty_view(), vec![root, child, values])
