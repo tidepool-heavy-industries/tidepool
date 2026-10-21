@@ -331,6 +331,36 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     );
     let public_second = observed_package_cafs(&mut resident, public_b);
     assert!(assert_unchanged_public_caf(&public_second, forced_key, first_caf).evaluated);
+    public_package_expression(&mut resident, &recipe);
+    let after_expression = observed_package_cafs(&mut resident, public_b);
+    assert!(assert_unchanged_public_caf(&after_expression, forced_key, first_caf).evaluated);
+
+    // The optional warm association owns no replacement for the cold Tip
+    // context. Rebuild through that actual context before demanding code again.
+    let context = resident
+        .state
+        .lib()
+        .current_exact_context_in(public_b)
+        .expect("successful B items retain their completion-bearing context");
+    let association = resident
+        .state
+        .lib_mut()
+        .tips
+        .get_mut(&public_b)
+        .unwrap()
+        .inspection_world
+        .take()
+        .expect("the last successful item installed its actual successor");
+    drop(association);
+    assert!(Arc::ptr_eq(
+        &context,
+        &resident
+            .state
+            .lib()
+            .current_exact_context_in(public_b)
+            .unwrap()
+    ));
+    resident.bootstrap_world_in(&recipe, &source_b);
     let cutoff = source_a.source_admission().fence_if_idle().unwrap();
     assert!(cutoff
         .retire(
@@ -409,6 +439,63 @@ fn public_package_cell(
     resident.set_run_context(public).unwrap();
     drop(compiled);
     drop(reservation);
+    drop(execution);
+    resident.retire_scope(private);
+}
+
+fn public_package_expression(resident: &mut TestSession, recipe: &InputRecipe) {
+    let public = resident.public_context();
+    let execution = begin_fixture_execution(resident);
+    let private = execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: private,
+            ..public
+        })
+        .unwrap();
+    let cell = check_fixture_cell(
+        resident,
+        recipe,
+        "pure (if PackageProbe.packageProbe 3 > 0 then (42 :: Int) else 0)",
+        execution.clone(),
+        0,
+    );
+    let (bound, compiled, reservation) = cell.compile_binding(resident, 0);
+    assert_eq!(
+        reservation.item().kind(),
+        tidepool_toolchain::checked_cell::CheckedItemKind::Expression
+    );
+    assert!(
+        reservation.item().binders().is_empty(),
+        "this successful item has zero authored names"
+    );
+    let [binder] = bound.as_slice() else {
+        panic!("the owner issues one actual expression observation")
+    };
+    assert_eq!(reservation.observation_name(), Some(binder.name.as_str()));
+    let effectful = matches!(
+        reservation.item().expression_lift().unwrap(),
+        Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful)
+    );
+    let completed = source_action(resident, |resident, settlement| {
+        resident.run_observation_with_sites(
+            compiled.code(),
+            binder,
+            reservation.generation(),
+            effectful,
+            settlement,
+        )
+    })
+    .unwrap();
+    assert!(
+        matches!(completed, ResidentOutcome::Completed { .. }),
+        "the zero-name item executes before completion is published"
+    );
+    publish_checked_fixture(resident, &execution, 1);
+    resident.set_run_context(public).unwrap();
+    drop(compiled);
+    drop(reservation);
+    drop(cell);
     drop(execution);
     resident.retire_scope(private);
 }
