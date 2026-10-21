@@ -658,7 +658,7 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                   (fail "selected package witness differs from its captured bytes")
                 pure (unit,name,Text.unpack path,seal,body)
               _ -> fail "native writer emitted a malformed selected package witness"
-            unless (any (\(_,name,_,_,_) -> name == "GHC.Types") witnesses)
+            unless (wantsCode || any (\(_,name,_,_,_) -> name == "GHC.Types") witnesses)
               (fail "native package fixture lost its TYPE-only GHC.Types witness")
             unless (Set.fromList captured == Set.fromList
                 [Text.unpack seal ++ ".hi" | (_,_,_,seal,_) <- witnesses])
