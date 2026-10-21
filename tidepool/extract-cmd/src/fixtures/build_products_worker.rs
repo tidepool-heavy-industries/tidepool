@@ -1,6 +1,8 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+const REQUEST_FLAG: &str = "@WORKER_REQUEST_FLAG@";
+
 fn u32(r: &mut impl Read) -> usize {
     let mut b = [0; 4];
     r.read_exact(&mut b).unwrap();
@@ -67,10 +69,10 @@ fn main() {
         std::process::exit(args[4].parse().unwrap());
     }
     if args.get(1).map(String::as_str) == Some("--print-worker-request-flag") {
-        println!("--worker-request-v27");
+        println!("{REQUEST_FLAG}");
         return;
     }
-    if args.get(1).map(String::as_str) == Some("--worker-request-v27") {
+    if args.get(1).map(String::as_str) == Some(REQUEST_FLAG) {
         std::io::stdout()
             .write_all(&request(args[2].as_bytes()))
             .unwrap();

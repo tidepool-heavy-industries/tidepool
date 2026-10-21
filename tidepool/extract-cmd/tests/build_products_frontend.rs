@@ -9,6 +9,14 @@ use std::path::Path;
 use std::process::Command;
 use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
 
+fn worker_fixture_source() -> String {
+    let request =
+        ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("unused-fixture-worker"));
+    let argv = request.worker_argv();
+    include_str!("../src/fixtures/build_products_worker.rs")
+        .replace("@WORKER_REQUEST_FLAG@", argv[0].to_str().unwrap())
+}
+
 struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl Drop for RestoreEnv {
     fn drop(&mut self) {
@@ -30,11 +38,7 @@ impl Drop for RestoreEnv {
 fn direct_frontends_report_placement_and_reclaim_scratch_before_reply() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("worker.rs");
-    fs::write(
-        &source,
-        include_str!("../src/fixtures/build_products_worker.rs"),
-    )
-    .unwrap();
+    fs::write(&source, worker_fixture_source()).unwrap();
     let worker = dir.path().join("worker");
     assert!(Command::new("rustc")
         .arg("--edition=2021")
@@ -114,11 +118,7 @@ fn direct_frontends_report_placement_and_reclaim_scratch_before_reply() {
 fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coordinates() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("worker.rs");
-    fs::write(
-        &source,
-        include_str!("../src/fixtures/build_products_worker.rs"),
-    )
-    .unwrap();
+    fs::write(&source, worker_fixture_source()).unwrap();
     let worker = dir.path().join("worker");
     assert!(Command::new("rustc")
         .args(["--edition=2021"])
