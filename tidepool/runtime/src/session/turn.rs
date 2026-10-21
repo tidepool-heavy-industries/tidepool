@@ -1717,40 +1717,31 @@ impl<'a> CurrentNativeSources<'a> {
 
     pub(super) fn group(
         &self,
-        pending: &PendingCertifiedGroup,
+        selected: &tidepool_toolchain::artifact_inventory::CompletedNativeSourceRow,
     ) -> super::resident::NativeSourceCustody {
-        let mut sources = super::resident::NativeSourceCustody::default();
-        let mut found = false;
-        for row in self
-            .products
-            .groups()
-            .filter(|row| row.matches_group(pending))
-        {
-            found = true;
-            let contribution = match row.physical_current() {
-                Some(current) => self.source.for_current_group(current),
-                None => super::resident::NativeSourceCustody::unknown(
-                    pending
-                        .group()
-                        .definitions()
-                        .sites()
-                        .iter()
-                        .map(|site| site.site),
-                ),
-            };
-            sources.merge(&contribution);
-        }
-        if !found {
-            sources = super::resident::NativeSourceCustody::unknown(
+        let pending = selected.product();
+        let unknown = || {
+            super::resident::NativeSourceCustody::unknown(
                 pending
                     .group()
                     .definitions()
                     .sites()
                     .iter()
                     .map(|site| site.site),
-            );
+            )
+        };
+        let mut matching = self
+            .products
+            .groups()
+            .filter(|row| row.binding() == selected.binding() && row.matches_group(pending));
+        let row = matching.next();
+        if matching.next().is_some() {
+            return unknown();
         }
-        sources
+        match row.and_then(|row| row.physical_current()) {
+            Some(current) => self.source.for_current_group(current),
+            None => unknown(),
+        }
     }
 }
 

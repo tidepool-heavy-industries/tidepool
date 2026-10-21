@@ -673,7 +673,7 @@ impl NativeInstallationSources {
                                     .map(|site| site.site),
                             )
                         },
-                        |current| current.group(row.product()),
+                        |current| current.group(row),
                     ),
                     NativeCompiledProduct::Package { binding, .. } => current.map_or_else(
                         || {
