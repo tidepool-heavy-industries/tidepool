@@ -840,7 +840,7 @@ where
         "codegen_functions": functions, "codegen_bytes": code_bytes,
         "programs": residency.programs, "block_words": residency.block_words,
         "persistent_roots": residency.persistent_roots, "handles": residency.handles,
-        "code_exports": residency.code_exports, "parked": residency.parked,
+        "parked": residency.parked,
         "static_regions": residency.static_regions,
         "descriptor_rows": residency.descriptor_rows,
         "callable_rows": residency.callable_rows, "enter_rows": residency.enter_rows,

@@ -2229,11 +2229,19 @@ impl BindingTable {
         let entries = self.source_domain_entries_in(tree, scope, view)?;
         crate::prepared_program::NativeDomainSelection::new(
             view.current,
-            |domain| view.domains.contains_key(domain),
             view.domains
-                .values()
-                .flat_map(|record| record.authored.values())
-                .map(|origin| origin.domain),
+                .iter()
+                .map(|(domain, record)| {
+                    (
+                        *domain,
+                        record
+                            .authored
+                            .iter()
+                            .map(|(owner, origin)| (owner.clone(), origin.domain))
+                            .collect(),
+                    )
+                })
+                .collect(),
             entries,
         )
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)

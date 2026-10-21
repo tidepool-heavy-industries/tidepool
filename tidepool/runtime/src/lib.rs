@@ -438,37 +438,11 @@ fn install_compiled_target(
     target: &str,
     scope: tidepool_codegen::scope::ScopeId,
 ) -> Result<tidepool_codegen::prepared_program::ProgramId, RuntimeError> {
-    use session::prepared::ScopedTargetImage;
-    let artifacts = &targets.artifacts;
-
-    if artifacts.warnings.has_io {
+    if targets.artifacts.warnings.has_io {
         return Err(CompileError::IOTypeDetected.into());
     }
-    let name = target;
-    let target = artifacts.targets.get(name).ok_or_else(|| {
-        CompileError::ExtractFailed(format!("compiled artifact has no target {target:?}"))
-    })?;
-    artifacts
-        .table
-        .validate_program(target.prepared.prepared())
-        .map_err(tidepool_repr::serial::ReadError::ConstructorMetadata)
-        .map_err(CompileError::from)?;
-    let resolved = state.resolve_runtime_target_in(scope, targets, name)?;
-    let registry = state.certified_image_registry();
-    let target = ScopedTargetImage::compile_scoped(
-        target.prepared.prepared().clone(),
-        &resolved,
-        &registry,
-    )?;
     let (program, _, _) = state
-        .install_certified_turn_in(
-            scope,
-            &artifacts.table,
-            target,
-            &resolved.source_evidence,
-            &resolved.inherited_needed,
-            &|_| None,
-        )?
+        .install_runtime_target_in(scope, targets, target)?
         .into_parts();
     Ok(program)
 }

@@ -110,6 +110,18 @@ def tidepool_rust_test_cases(
     args = ["$(location " + binary + ")", "--timeout", str(timeout)]
     runtime_env = dict(env)
     resource_env = dict(resource_env)
+    if "owned-resident" in case_compiler_modes.values():
+        for key in [
+            "TIDEPOOL_EXTRACT",
+            "TIDEPOOL_EXTRACT_WORKER",
+            "TIDEPOOL_COMPILER_DEPLOYMENT",
+            "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
+        ]:
+            if key not in resource_env:
+                fail("owned-resident requires declared service resource: " + key)
+        for key in ["LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES"]:
+            if key in runtime_env or key in resource_env:
+                fail("owned-resident refuses generic loader resource: " + key)
     # The counted runner owns delegated admission and cleanup. These tools are
     # execution resources even when the shared libtest binary needs no host CLI.
     for key, executable in {
@@ -136,6 +148,8 @@ def tidepool_rust_test_cases(
     for test, mode in sorted(case_compiler_modes.items()):
         if mode not in ["direct", "owned-resident"]:
             fail("unsupported declared compiler mode: " + mode)
+        if exact_tests and test not in exact_tests:
+            fail("case compiler mode must belong to exact_tests: " + test)
         args.extend(["--case-compiler-mode", test + "=" + mode])
     if delegated_service:
         args.append("--delegated-service")

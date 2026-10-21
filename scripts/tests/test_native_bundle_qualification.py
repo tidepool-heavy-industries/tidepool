@@ -3,6 +3,7 @@ import importlib.util
 import contextlib
 import io
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1222,11 +1223,13 @@ class NativeQualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             resources = {}
-            for name in ('TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY',
+            for name in (*runner.OWNED_COMPILER_RESOURCES, 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY',
                          'TIDEPOOL_PREPARED_BUILTIN_ENTRIES', 'TIDEPOOL_TEST_FIXTURE_ROOT'):
                 resource = root / name
-                resource.mkdir()
+                resource.write_text('declared runtime resource')
                 resources[name] = str(resource)
+            config = Path(resources['TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'])
+            config.with_suffix('.sha256').write_text(hashlib.sha256(config.read_bytes()).hexdigest() + '\n')
             descriptor_path = root / 'qualification.json'
             descriptor_path.write_text('sealed descriptor')
             descriptor = {
@@ -1243,6 +1246,7 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(set(declared), set(resources))
                 with patch.dict(os.environ, kwargs['env'], clear=True):
                     runner.resolve_resource_environment(declared)
+                    runner.validate_owned_compiler_resources(declared)
                     delegated, _ = runner.delegated_command(
                         ['/frozen/libtest'], 1800, 'app.slice', {},
                         environment=os.environ, declared_resources=declared)
@@ -4164,14 +4168,17 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
             with policy.open('a') as output:
                 output.write("\ndef verify(path):\n    return json.loads(Path(path).read_text())\n")
             paths = {}
-            for name in ('TIDEPOOL_COMPILER_MODULES', *optional):
+            required = ('TIDEPOOL_COMPILER_MODULES', *runner.OWNED_COMPILER_RESOURCES)
+            for name in (*required, *optional):
                 path = root / name
                 path.write_text('immutable resource fixture')
                 paths[name] = str(path)
+            config = Path(paths['TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'])
+            config.with_suffix('.sha256').write_text(hashlib.sha256(config.read_bytes()).hexdigest() + '\n')
             for subset in range(1 << len(optional)):
                 for reverse in (False, True):
                     with self.subTest(subset=subset, reverse=reverse):
-                        selected = {'TIDEPOOL_COMPILER_MODULES': paths['TIDEPOOL_COMPILER_MODULES']}
+                        selected = {name: paths[name] for name in required}
                         selected.update({name: paths[name] for index, name in enumerate(optional)
                                          if subset & (1 << index)})
                         environment = dict(reversed(list(selected.items()))) if reverse else dict(selected)
@@ -4195,8 +4202,23 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                             self.assertEqual(supplied['EXOMONAD_NIX_OFFLINE'], '1')
                             self.assertEqual(set(supplied), set(selected) | {
                                 'EXOMONAD_NIX_OFFLINE', 'HOME', 'TMPDIR', 'XDG_CACHE_HOME',
-                                'TIDEPOOL_EXTRACT_NO_DAEMON', 'TIDEPOOL_COMPILE_CACHE_DIR',
+                                'TIDEPOOL_COMPILE_CACHE_DIR',
                                 'TIDEPOOL_BUILD_PRODUCTS_DIR'})
+                            self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
+                            self.assertEqual(command[command.index('--compiler-workers') + 1], '1')
+                            self.assertEqual(command[command.index('--output-dir') + 1], str(root / 'evidence/tests'))
+                            self.assertIn('--retain-artifacts', command)
+                            mounts = [(command[index + 1], command[index + 2])
+                                      for index, value in enumerate(command) if value in ('--bind', '--ro-bind')]
+                            socket = '/nix/var/nix/daemon-socket/socket'
+                            self.assertEqual(mounts, [('/nix/store', '/nix/store'), (str(root), str(root)),
+                                (str(root / 'evidence'), str(root / 'evidence')), (socket, socket)])
+                            descriptor_index = command.index('--ro-bind-data')
+                            config_fd = int(command[descriptor_index + 1])
+                            self.assertEqual(command[descriptor_index + 2], '/etc/nix/nix.conf')
+                            self.assertEqual(kwargs['pass_fds'], (config_fd,))
+                            self.assertEqual(os.pread(config_fd, 64, 0), b'store = daemon\n')
+                            self.assertIn('--unshare-all', command)
                             for name in ('POISON_AMBIENT_SENTINEL', 'POISON_AMBIENT_SECRET', 'HTTP_PROXY'):
                                 self.assertNotIn(name, supplied)
                             self.assertIn('--clearenv', command)
@@ -4207,6 +4229,7 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                                 supplied['TIDEPOOL_RECIPE_WORKSPACE'] = str(paths['TIDEPOOL_RECIPE_WORKSPACE'])
                             with patch.dict(os.environ, supplied, clear=True):
                                 runner.resolve_resource_environment(declared)
+                                runner.validate_owned_compiler_resources(declared)
                                 for name, value in selected.items():
                                     self.assertEqual(os.environ[name], value)
                                 for name in set(optional) - set(selected):

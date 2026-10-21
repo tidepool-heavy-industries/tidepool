@@ -5044,7 +5044,6 @@ pub struct ResidentMachineMeasurement {
     pub block_words: Option<usize>,
     pub persistent_roots: Option<usize>,
     pub handles: Option<usize>,
-    pub code_exports: Option<usize>,
     pub parked: Option<usize>,
     pub static_regions: Option<usize>,
     pub descriptor_rows: Option<usize>,
@@ -5070,7 +5069,6 @@ impl ResidentMachineMeasurement {
             block_words: residency.map(|counts| counts.block_words),
             persistent_roots: residency.map(|counts| counts.persistent_roots),
             handles: residency.map(|counts| counts.handles),
-            code_exports: residency.map(|counts| counts.code_exports),
             parked: residency.map(|counts| counts.parked),
             static_regions: residency.map(|counts| counts.static_regions),
             descriptor_rows: residency.map(|counts| counts.descriptor_rows),
@@ -28247,7 +28245,7 @@ pub(crate) mod request_tests {
     }
 
     #[test]
-    fn joined_source_hook_refusal_precedes_binding_and_native_exports() {
+    fn joined_source_hook_refusal_precedes_binding_and_native_installation() {
         let (mut session, _root) = bare_session_at(tidepool_repr::SessionId(878));
         let scope = session.mint_notebook_scope_with_lease(None).unwrap();
         session
@@ -28264,7 +28262,7 @@ pub(crate) mod request_tests {
             .unwrap();
         let (compiled, binder, generation) = lazy_binding_install();
         let before = (
-            session.code_export_count(),
+            session.residency(),
             session.scope_binding_count(scope.scope()),
         );
         let services = crate::capabilities::WorkbenchServices::new();
@@ -28295,7 +28293,7 @@ pub(crate) mod request_tests {
         assert!(result.unwrap().is_err());
         assert_eq!(
             (
-                session.code_export_count(),
+                session.residency(),
                 session.scope_binding_count(scope.scope())
             ),
             before

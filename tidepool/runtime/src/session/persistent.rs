@@ -18,26 +18,32 @@ use tidepool_codegen::binding_table::{
     BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
-#[cfg(test)]
-use tidepool_codegen::prepared_program::SourceInstanceLease;
 use tidepool_codegen::prepared_program::{
-    ImageRegistry, InheritedSourceDemand, NativeInstanceLease, PendingGroupInventory, ProgramId,
-    ResidencyCounts, SourceBinder, SourceGroupOutline,
+    ImageRegistry, InheritedSourceDemand, NativeInstanceLease, ProgramId, ResidencyCounts,
+    SourceBinder,
+};
+#[cfg(test)]
+use tidepool_codegen::prepared_program::{
+    PendingGroupInventory, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+#[cfg(test)]
+use tidepool_repr::execution_schema::{CertifiedGroup, GlobalDecl};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, CertifiedGroup, GlobalDecl, ImportOwner, PreparedProgram, SymbolIdentity,
+    CachedHomeOwner, ImportOwner, PreparedProgram, SymbolIdentity,
 };
+#[cfg(test)]
 use tidepool_toolchain::certified_products::PendingImportOwner;
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::prepared::{PreparedEngine, PreparedRuntimeError, ScopedTargetImage};
+use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::resident::NativeSourceCustody;
+#[cfg(test)]
 use super::turn::TurnCertification;
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, PublicManifestBase,
@@ -54,63 +60,6 @@ use super::{
 /// import specs its render pulls in, and the live-value environment (var id,
 /// module name) a later adopt must still match.
 type DeclarationStagingContext = (SourceImports, Vec<String>, Vec<(SessionVarId, String)>);
-
-/// Exact compiler owners after retained names have been resolved through one
-/// live lexical scope or the same machine's immutable export ledger. Native
-/// installation rechecks the handles under the final checkout; this record
-/// carries no permission to publish a binding.
-pub(crate) struct ResolvedCertifiedTurn {
-    pub groups: Vec<ResolvedSourceGroup>,
-    pub target_sources: NativeSourceCustody,
-    pub target_owners: Vec<ImportOwner>,
-    pub package_interfaces:
-        tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
-    pub source_evidence: BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-    pub inherited_needed: Vec<InheritedSourceDemand>,
-    pub source_plan: ResolvedSourceDomainPlan,
-}
-
-/// A selected source plan and its own physical runtime source contribution.
-#[derive(Clone)]
-pub(crate) struct ResolvedSourceGroup {
-    group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
-    sources: NativeSourceCustody,
-    proof: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
-}
-
-impl ResolvedSourceGroup {
-    #[cfg(test)]
-    pub(crate) fn unqualified(
-        group: tidepool_codegen::prepared_program::ScopedCertifiedGroup,
-    ) -> Self {
-        let sources = NativeSourceCustody::unknown(
-            group
-                .original()
-                .definitions()
-                .sites()
-                .iter()
-                .map(|site| site.site),
-        );
-        Self {
-            group,
-            sources,
-            proof: None,
-        }
-    }
-    pub(crate) fn group(&self) -> &tidepool_codegen::prepared_program::ScopedCertifiedGroup {
-        &self.group
-    }
-
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        tidepool_codegen::prepared_program::ScopedCertifiedGroup,
-        NativeSourceCustody,
-        Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
-    ) {
-        (self.group, self.sources, self.proof)
-    }
-}
 
 /// One successful native installation and its exact source contribution.
 pub(crate) struct InstalledCertifiedTurn {
@@ -149,26 +98,20 @@ impl ValidatedRetainedSourceRef<'_> {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ResolvedSourceDomainPlan {
-    pub(super) target:
-        BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
-    selection: tidepool_codegen::prepared_program::SourceDomainSelection,
+pub(crate) struct ResolvedNativeTurn {
+    instantiation: super::prepared::NativeInstantiation,
+    sources: super::prepared::NativeInstallationSources,
+    captures: BTreeMap<(SymbolIdentity, u64), super::prepared::ResolvedNativeCapture>,
     snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
 }
 
-impl ResolvedSourceDomainPlan {
-    #[cfg(test)]
-    pub(super) fn fixture(
-        target: BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
-        selection: tidepool_codegen::prepared_program::SourceDomainSelection,
-        snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
-    ) -> Self {
-        Self {
-            target,
-            selection,
-            snapshot,
-        }
+impl ResolvedNativeTurn {
+    pub(super) fn shares_plan(&self, plan: &Arc<super::prepared::NativeInstantiationPlan>) -> bool {
+        self.instantiation.shares_plan(plan)
+    }
+
+    pub(super) fn retained_ids(&self) -> impl Iterator<Item = SessionVarId> + '_ {
+        self.captures.values().map(|capture| capture.id)
     }
 }
 
@@ -340,8 +283,6 @@ pub struct PersistentSession {
     compiler_input_revision: u64,
     #[cfg(test)]
     compile_view_bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
-    #[cfg(test)]
-    certified_resolution_work: [std::sync::atomic::AtomicUsize; 2],
     /// Incremental indexes over `bindings`' live set (prepared-import
     /// resolution, retained-import pairs, live module names, root-slot
     /// aliasing refcounts), kept in sync at every bind/evict site below so
@@ -596,8 +537,6 @@ impl PersistentSession {
             compiler_input_revision: 1,
             #[cfg(test)]
             compile_view_bytes_hashed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            #[cfg(test)]
-            certified_resolution_work: [const { std::sync::atomic::AtomicUsize::new(0) }; 2],
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
@@ -863,395 +802,92 @@ impl PersistentSession {
         Ok(ids)
     }
 
-    /// Resolve the worker's retained imports against the exact inherited
-    /// lexical view or owning engine's immutable export ledger, before native
-    /// compilation. The worker never supplies a `SessionVarId` or native root
-    /// id; spelling or the globally newest binding cannot choose a mutable
-    /// value owned by another scope.
-    pub(crate) fn resolve_certification_in(
+    pub(super) fn resolve_native_turn_in(
         &self,
         scope: ScopeId,
-        prepared: &PreparedProgram,
-        certification: &TurnCertification,
-    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
-        let current = certification
-            .current_native_sources(prepared)
-            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        self.resolve_certification_with_sources(
-            scope,
-            prepared,
-            certification,
-            current.map_or(
-                NativeInstallationSource::Unwitnessed,
-                NativeInstallationSource::Checked,
-            ),
-        )
-    }
-
-    pub(crate) fn resolve_runtime_target_in(
-        &self,
-        scope: ScopeId,
-        targets: &crate::RuntimePreparedTargets,
-        name: &str,
-    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
-        let target = targets
-            .artifacts
-            .targets
-            .get(name)
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let certification = TurnCertification::from_artifacts(&targets.artifacts, target)
-            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        let current = super::turn::CurrentNativeSources::from_targets(targets, name)
-            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        self.resolve_certification_with_sources(
-            scope,
-            target.prepared.prepared(),
-            &certification,
-            current.map_or(
-                NativeInstallationSource::Unwitnessed,
-                NativeInstallationSource::Checked,
-            ),
-        )
-    }
-
-    fn resolve_certification_with_sources(
-        &self,
-        scope: ScopeId,
-        prepared: &PreparedProgram,
-        certification: &TurnCertification,
-        origin: NativeInstallationSource<'_>,
-    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
-        if !self.scopes.is_live(scope) {
+        code: &super::turn::TurnCode<'_>,
+        plan: Arc<super::prepared::NativeInstantiationPlan>,
+        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+    ) -> Result<ResolvedNativeTurn, PreparedRuntimeError> {
+        if !self.scopes.is_live(scope) || !plan.matches_code(code) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
-        #[cfg(test)]
-        self.certified_resolution_work[0].fetch_add(1, Ordering::Relaxed);
-        let retained = std::cell::OnceCell::new();
-        let mut source_evidence = BTreeMap::new();
-        let mut resolve = |globals: &[GlobalDecl], pending: &[PendingImportOwner]| {
-            if globals.len() != pending.len() {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
-            }
-            globals
-                .iter()
-                .zip(pending)
-                .map(|(global, owner)| {
-                    if let PendingImportOwner::Source {
-                        owner,
-                        original_ordinal,
-                        binder,
-                    } = owner
-                    {
-                        if binder != &global.identity {
-                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                        }
-                        let source = SourceBinder {
-                            version: owner.module_version.clone(),
-                            binder: binder.clone(),
-                        };
-                        let exact = (owner.clone(), *original_ordinal);
-                        if source_evidence
-                            .insert(source.clone(), exact.clone())
-                            .is_some_and(|prior| prior != exact)
-                        {
-                            return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(source));
-                        }
-                        return Ok(ImportOwner::Source {
-                            version: owner.module_version.clone(),
-                            binder: binder.clone(),
-                        });
-                    }
-                    if let PendingImportOwner::Retained {
-                        identity,
-                        generation,
-                    } = owner
-                    {
-                        if identity != &global.identity
-                            || global.required_generation != Some(*generation)
-                        {
-                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                        }
-                        if let Some(entry) = retained
-                            .get_or_init(|| self.scoped_prepared_bindings_in(scope))
-                            .get(&(identity, SessionModule::val(Generation(*generation))))
-                        {
-                            return Ok(ImportOwner::Retained {
-                                id: entry.id,
-                                generation: *generation,
-                            });
-                        }
-                        return Err(PreparedRuntimeError::MissingRetainedCertifiedOwner {
-                            identity: identity.clone(),
-                            generation: *generation,
-                        });
-                    }
-                    if let PendingImportOwner::RetainedPackage {
-                        unit,
-                        module,
-                        binder,
-                        generation,
-                        interface_digest,
-                    } = owner
-                    {
-                        if binder != &global.identity
-                            || &binder.unit != unit
-                            || &binder.module != module
-                            || global.required_generation != Some(*generation)
-                        {
-                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                        }
-                        return self
-                            .machine
-                            .as_ref()
-                            .and_then(|engine| {
-                                engine.retained_package_code_export_owner(
-                                    binder,
-                                    *generation,
-                                    interface_digest,
-                                )
-                            })
-                            .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
-                                identity: binder.clone(),
-                                generation: *generation,
-                            });
-                    }
-                    let PendingImportOwner::Package {
-                        unit,
-                        module,
-                        binder,
-                        interface_digest,
-                    } = owner
-                    else {
-                        unreachable!("all pending owner variants handled")
-                    };
-                    if binder != &global.identity {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                    }
-                    Ok(ImportOwner::Package {
-                        unit: unit.clone(),
-                        module: module.clone(),
-                        binder: binder.clone(),
-                        interface_digest: *interface_digest,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        };
-        let target_owners = resolve(prepared.globals(), &certification.target_owners)?;
-        let outlines = certification
-            .groups
-            .iter()
-            .map(|pending| {
-                #[cfg(test)]
-                self.certified_resolution_work[1].fetch_add(1, Ordering::Relaxed);
-                if pending.group().globals().len() != pending.imports().len() {
-                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                }
-                let source_imports = pending
-                    .group()
-                    .globals()
-                    .iter()
-                    .zip(pending.imports())
-                    .filter_map(|(global, owner)| match owner {
-                        PendingImportOwner::Source { owner, binder, .. } => {
-                            Some(if binder == &global.identity {
-                                Ok(SourceBinder {
-                                    version: owner.module_version.clone(),
-                                    binder: binder.clone(),
-                                })
-                            } else {
-                                Err(PreparedRuntimeError::CertifiedTargetOwners)
-                            })
-                        }
-                        PendingImportOwner::Retained { .. }
-                        | PendingImportOwner::RetainedPackage { .. }
-                        | PendingImportOwner::Package { .. } => None,
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(SourceGroupOutline::from_projected(
-                    pending.owner().clone(),
-                    pending.group(),
-                    source_imports,
-                )?)
-            })
-            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+        let certification = code
+            .certification()
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        let current = certification
+            .current_native_sources(code.prepared())
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
+        let sources = super::prepared::NativeInstallationSources::current(&plan, current.as_ref());
         let selection = self
             .bindings
-            .source_domain_selection_in(&self.scopes, scope)
+            .native_domain_selection_in(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
         let snapshot = self
             .bindings
             .scope_snapshot(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-        let roots = target_owners.iter().filter_map(|owner| match owner {
-            ImportOwner::Source { version, binder } => Some(SourceBinder {
-                version: version.clone(),
-                binder: binder.clone(),
-            }),
-            ImportOwner::Retained { .. }
-            | ImportOwner::CodeExport { .. }
-            | ImportOwner::Package { .. } => None,
-        });
-        let selected = PendingGroupInventory::new(outlines)?.seal_in_domains(roots, &selection)?;
-        let (plans, inherited_needed, target) = selected.into_parts();
-        let inherited_needed = inherited_needed
-            .into_iter()
-            .map(|scoped| scoped.into_demand())
-            .collect();
-        let mut groups = Vec::with_capacity(plans.len());
-        let products = certification
-            .original_output
-            .as_ref()
-            .map(|output| output.native_source_products())
-            .transpose()
-            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        for plan in plans {
-            let pending = &certification.groups[plan.index()];
-            let imports = resolve(pending.group().globals(), pending.imports())?;
-            groups.push(ResolvedSourceGroup {
-                proof: match (&products, &origin) {
-                    (Some(products), _) => super::turn::selected_group_proof(products, pending),
-                    (None, NativeInstallationSource::Checked(current)) => {
-                        current.group_proof(pending)
-                    }
-                    (None, _) => {
-                        let mut proofs = certification
-                            .native_group_proofs
-                            .iter()
-                            .filter(|proof| proof.matches_group(pending));
-                        let proof = proofs.next();
-                        if proofs.next().is_some() {
-                            Err(crate::CompileError::ExtractFailed(
-                                "native group requires an exact selected binding occurrence".into(),
-                            ))
-                        } else {
-                            Ok(proof.cloned())
-                        }
-                    }
-                }
-                .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?,
-                sources: match &origin {
-                    NativeInstallationSource::Checked(current) => current.group(pending),
-                    NativeInstallationSource::Unwitnessed => NativeSourceCustody::unknown(
-                        pending
-                            .group()
-                            .definitions()
-                            .sites()
-                            .iter()
-                            .map(|site| site.site),
-                    ),
+        let instantiation = plan.instantiate(selection)?;
+        let scoped = self.scoped_prepared_bindings_in(scope);
+        let mut captures = BTreeMap::new();
+        for requirement in instantiation.retained_requirements() {
+            let key = (requirement.identity().clone(), requirement.generation());
+            if captures.contains_key(&key) {
+                continue;
+            }
+            let entry = scoped
+                .get(&(
+                    requirement.identity(),
+                    SessionModule::val(Generation(requirement.generation())),
+                ))
+                .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
+                    identity: requirement.identity().clone(),
+                    generation: requirement.generation(),
+                })?;
+            let sources = retained_sources(ValidatedRetainedSourceRef { entry })
+                .ok_or(PreparedRuntimeError::MissingRetainedSource { id: entry.id })?;
+            captures.insert(
+                key,
+                super::prepared::ResolvedNativeCapture {
+                    id: entry.id,
+                    identity: entry.value.identity.clone(),
+                    generation: entry.module.gen.0,
+                    handle: entry.value.handle,
+                    sources,
                 },
-                group: tidepool_codegen::prepared_program::ScopedCertifiedGroup::admit(
-                    CertifiedGroup::admit(
-                        pending.owner().clone(),
-                        pending.group().clone(),
-                        imports,
-                    )?,
-                    plan,
-                )?,
-            });
+            );
         }
-        Ok(ResolvedCertifiedTurn {
-            groups,
-            target_sources: match &origin {
-                NativeInstallationSource::Checked(current) => current.target(),
-                NativeInstallationSource::Unwitnessed => {
-                    NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
-                }
-            },
-            target_owners,
-            package_interfaces: certification.package_interfaces.clone(),
-            source_evidence,
-            inherited_needed,
-            source_plan: ResolvedSourceDomainPlan {
-                target,
-                selection,
-                snapshot,
-            },
+        Ok(ResolvedNativeTurn {
+            instantiation,
+            sources,
+            captures,
+            snapshot,
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn certified_resolution_work(&self) -> (usize, usize) {
-        (
-            self.certified_resolution_work[0].load(Ordering::Relaxed),
-            self.certified_resolution_work[1].load(Ordering::Relaxed),
-        )
-    }
-
-    /// Install a certified target against this exact lexical view and place
-    /// every newly materialized source root under its scope before returning
-    /// the executable target. The machine batch is unpublished until the
-    /// registrar accepts all roots; rejection releases its handles and pins.
-    pub(crate) fn install_certified_turn_in(
+    pub(super) fn install_native_turn_in(
         &mut self,
         scope: ScopeId,
         metadata: &DataConTable,
-        target: ScopedTargetImage,
-        source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        inherited_needed: &[InheritedSourceDemand],
-        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
+        resolved: ResolvedNativeTurn,
     ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
-        let plan = target.source_plan();
-        let demanded = target.demanded();
-        self.admit_source_work_in(scope)?;
-
-        if !self.scopes.is_live(scope) {
-            return Err(PreparedRuntimeError::SourceScopeAdmission);
-        }
-        let admitted_metadata = self.stage_install_metadata(
-            Some(metadata),
-            target.constructor_declarations(),
-            demanded
-                .iter()
-                .flat_map(|selected| selected.image().constructor_declarations()),
-        )?;
-        let inherited = {
-            let current = self
+        self.admit_source_work_in(scope)
+            .map_err(PreparedRuntimeError::SourceAdmission)?;
+        if !self.scopes.is_live(scope)
+            || self
                 .bindings
                 .scope_snapshot(&self.scopes, scope)
-                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-            if current != plan.snapshot {
-                return Err(PreparedRuntimeError::SourceScopeAdmission);
-            }
-            // The exact scoped snapshot binds the privately issued selection.
-            plan.selection.inherited().clone()
-        };
-        let mut exact_external = HashMap::new();
-        let mut exact_sources = HashMap::new();
-        let retained = std::cell::OnceCell::new();
-        for (globals, owners) in std::iter::once((target.globals(), target.owners())).chain(
-            demanded.iter().map(|selected| {
-                (
-                    selected.group().definitions().globals(),
-                    selected.group().imports(),
-                )
-            }),
-        ) {
-            if globals.len() != owners.len() {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
-            }
-            for (global, owner) in globals.iter().zip(owners) {
-                let ImportOwner::Retained { id, generation } = owner else {
-                    continue;
-                };
-                let entry = retained
-                    .get_or_init(|| self.scoped_prepared_bindings_in(scope))
-                    .get(&(
-                        &global.identity,
-                        SessionModule::val(Generation(*generation)),
-                    ))
-                    .filter(|entry| entry.id == *id)
-                    .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
-                if !exact_external.contains_key(owner) {
-                    let witness = ValidatedRetainedSourceRef { entry };
-                    let sources = retained_sources(witness)
-                        .ok_or(PreparedRuntimeError::MissingRetainedSource { id: *id })?;
-                    exact_sources.insert(owner.clone(), sources);
-                    exact_external.insert(owner.clone(), entry.value.handle);
-                }
-            }
+                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?
+                != resolved.snapshot
+        {
+            return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
-        drop(retained);
+        let plan = resolved.instantiation.plan();
+        let admitted_metadata = self.stage_install_metadata(
+            Some(metadata),
+            plan.target_constructors(),
+            plan.dependency_constructors(),
+        )?;
         let mut bootstrap = if self.machine.is_none() {
             Some(PreparedEngine::empty_certified(
                 self.nursery_size,
@@ -1263,18 +899,39 @@ impl PersistentSession {
         let engine = bootstrap
             .as_mut()
             .or(self.machine.as_mut())
-            .expect("certified machine exists or was constructed");
+            .expect("native machine exists or was constructed");
         engine.set_invocation_cancel(self.invocation_cancel.clone());
-        let staged = engine.install_certified_turn(
-            target,
-            source_evidence,
-            inherited_needed,
-            &inherited,
-            &exact_external,
+        let staged = engine.install_native_turn(
+            &resolved.instantiation,
+            &resolved.sources,
             &self.bindings,
-            &exact_sources,
+            &resolved.captures,
         )?;
         self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
+    }
+
+    pub(crate) fn install_runtime_target_in(
+        &mut self,
+        scope: ScopeId,
+        targets: &crate::RuntimePreparedTargets,
+        name: &str,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
+        let source = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let target = (scope != ScopeId::ROOT)
+            .then(|| self.source_lease_in(scope))
+            .transpose()?;
+        source.admit_original(&targets.source, target)?;
+        let compiled = super::turn::CompiledTurn::from_runtime_target(targets, name)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
+        let plan = super::prepared::ClosedInstantiationPlan::prepare(
+            &compiled,
+            &self.certified_image_registry(),
+        )?;
+        let origin = super::resident::CapturedSourceOrigin::from_runtime_targets(targets);
+        self.install_closed_turn_in(scope, compiled.table(), &plan, &origin)
     }
 
     pub(super) fn install_closed_turn_in(
@@ -1813,13 +1470,6 @@ impl PersistentSession {
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
         self.binding_index.prepared_retained()
-    }
-
-    /// How many package tops this session's machine can hand a later turn
-    /// instead of recompiling; `None` before the prepared machine is installed.
-    #[must_use]
-    pub fn code_export_count(&self) -> Option<usize> {
-        self.machine.as_ref().map(PreparedEngine::code_export_count)
     }
 
     /// Move the resident machine out onto a [`MachineLease`] (to run a turn on
@@ -4921,20 +4571,11 @@ impl PersistentSession {
     /// could not enter the persistent binding store. Dropping their copied
     /// handle identities does not release the machine's retained values.
     fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
-        let mut owned = self
+        let owned = self
             .bindings
             .iter_live()
             .map(|entry| entry.value.handle.raw().0)
             .collect::<std::collections::HashSet<_>>();
-        if let Some(engine) = self.machine.as_ref() {
-            for (identity, generation) in engine.code_export_retentions() {
-                if let Some(ImportOwner::CodeExport { root_id, .. }) =
-                    engine.retained_code_export_owner(&identity, generation)
-                {
-                    owned.insert(root_id);
-                }
-            }
-        }
         let mut released = std::collections::HashSet::new();
         if let Some(engine) = self.machine.as_mut() {
             // A prepared entry's root is its adopted handle.
@@ -6676,13 +6317,13 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn durable_bootstrap_publishes_native_visibility_before_private_admission() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        use super::super::prepared::tests::install_source_publication_fixture;
         let root = tempfile::tempdir().unwrap();
         let (mut session, public, owner) = bootstrap_session(root.path(), 930);
         let seal = session
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
-        let (target, added) = install_selected_source_fixture(&mut session, public, "a");
+        let (target, added, _placement) = install_source_publication_fixture(&mut session, public);
         assert!(!added.is_empty());
         session.advance_public_visibility(public);
         assert!(matches!(
@@ -6847,40 +6488,48 @@ mod checkpoint_scope_tests {
         session.bindings.commit_declaration_binding_changes(changes);
     }
 
-    fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
-        use tidepool_repr::execution_schema::testing;
-        let mut wire = testing::wire_program();
-        let tidepool_repr::execution_schema::Group::NonRecursive(entry) = &mut wire.bindings[0]
-        else {
-            unreachable!()
-        };
-        entry.identity.unit = "main".into();
-        let prepared = testing::prepare(wire).unwrap();
-        let resolved = session
-            .resolve_certification_in(scope, &prepared, &TurnCertification::default())
-            .unwrap();
-        assert!(resolved.groups.is_empty());
-        let target =
-            ScopedTargetImage::compile_scoped(prepared, &resolved, &ImageRegistry::new()).unwrap();
-        assert!(target.demanded().is_empty());
-        let (program, keys, _) = session
-            .install_certified_turn_in(
-                scope,
-                &target.fixture_constructor_metadata(),
-                target,
-                &BTreeMap::new(),
-                &[],
-                &|_| None,
-            )
-            .unwrap()
-            .into_parts();
-        assert!(keys.is_empty());
+    fn assert_unrelated_certified_turn_admitted(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+    ) -> Option<std::sync::Arc<super::super::RuntimeLexicalScopeLease>> {
+        use std::collections::BTreeSet;
+        let before = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .into_iter()
+            .map(|lease| (lease.instance(), lease.value()))
+            .collect::<BTreeSet<_>>();
+        let targets = super::super::prepared::tests::compile_source_publication_fixture();
+        let (program, added, placement) = super::super::prepared::tests::install_runtime_fixture_in(
+            session, scope, targets, "result",
+        );
+        assert!(
+            !added.is_empty(),
+            "unselected custody must not silently select a prior instance"
+        );
+        assert!(added
+            .iter()
+            .all(|key| !before.contains(&(key.instance, key.value))));
+        assert!(session.retire_failed_turn_source_instances(scope, &added));
         assert!(session.prepared_mut().unwrap().unpin(program));
+        let after = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .into_iter()
+            .map(|lease| (lease.instance(), lease.value()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(after, before);
+        placement
     }
 
     #[test]
     fn binding_publication_retains_independent_source_instances_without_selecting_them() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        let targets = super::super::prepared::tests::compile_source_publication_fixture();
+        let install = |session: &mut PersistentSession, scope| {
+            super::super::prepared::tests::install_runtime_fixture_in(
+                session, scope, targets, "result",
+            )
+        };
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 821);
@@ -6891,10 +6540,11 @@ mod checkpoint_scope_tests {
         session
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
-        let (target_a, keys_a) = install_selected_source_fixture(&mut session, a, "a");
-        let (target_b, keys_b) = install_selected_source_fixture(&mut session, b, "a");
-        assert_eq!(keys_a.len(), 2);
-        assert_eq!(keys_b.len(), 2);
+        let (target_a, keys_a, _placement_a) = install(&mut session, a);
+        let (target_b, keys_b, _placement_b) = install(&mut session, b);
+        assert!(!keys_a.is_empty());
+        assert_eq!(keys_b.len(), keys_a.len());
+        let combined = keys_a.len() + keys_b.len();
         assert_ne!(keys_a[0].instance, keys_b[0].instance);
         let external = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         assert!(session.retain_scope_dependencies(a, external));
@@ -6904,10 +6554,10 @@ mod checkpoint_scope_tests {
                 .bindings
                 .source_instances_in(&session.scopes, external)
                 .len(),
-            4
+            combined
         );
         assert!(selected_sources(&session, external).is_empty());
-        assert_unrelated_certified_turn_admitted(&mut session, external);
+        let _external_placement = assert_unrelated_certified_turn_admitted(&mut session, external);
         assert_eq!(session.retire_scope(external).roots_released, 0);
         let capture_a = session.mint_detached_scope(a).unwrap();
         let capture_b = session.mint_detached_scope(b).unwrap();
@@ -6930,16 +6580,18 @@ mod checkpoint_scope_tests {
                 .bindings
                 .source_instances_in(&session.scopes, public)
                 .len(),
-            4
+            combined
         );
         assert!(selected_sources(&session, public).is_empty());
-        assert_unrelated_certified_turn_admitted(&mut session, public);
+        let _public_placement = assert_unrelated_certified_turn_admitted(&mut session, public);
         assert!(session.prepared_mut().unwrap().unpin(target_a));
         assert!(session.prepared_mut().unwrap().unpin(target_b));
         assert_eq!(session.retire_scope(a).roots_released, 0);
         assert_eq!(session.retire_scope(b).roots_released, 0);
+        let mut capture_placements = Vec::new();
         for (capture, original) in [(capture_a, &keys_a), (capture_b, &keys_b)] {
-            let (reused, added) = install_selected_source_fixture(&mut session, capture, "a");
+            let (reused, added, placement) = install(&mut session, capture);
+            capture_placements.push(placement);
             assert!(added.is_empty());
             assert!(selected_sources(&session, capture)
                 .iter()
@@ -6949,8 +6601,8 @@ mod checkpoint_scope_tests {
             assert!(session.prepared_mut().unwrap().unpin(reused));
         }
         let fresh = session.mint_detached_scope(public).unwrap();
-        let (fresh_target, fresh_keys) = install_selected_source_fixture(&mut session, fresh, "a");
-        assert_eq!(fresh_keys.len(), 2);
+        let (fresh_target, fresh_keys, _placement_fresh) = install(&mut session, fresh);
+        assert_eq!(fresh_keys.len(), keys_a.len());
         assert!(fresh_keys.iter().all(|key| !keys_a
             .iter()
             .chain(&keys_b)
@@ -6959,7 +6611,7 @@ mod checkpoint_scope_tests {
         assert_eq!(session.retire_scope(fresh).roots_released, fresh_keys.len());
         assert_eq!(session.retire_scope(capture_a).roots_released, 0);
         assert_eq!(session.retire_scope(capture_b).roots_released, 0);
-        assert_eq!(session.retire_scope(public).roots_released, 4);
+        assert_eq!(session.retire_scope(public).roots_released, combined);
         session
             .prepared_mut()
             .unwrap()
@@ -6971,23 +6623,29 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn authored_source_selection_preserves_late_group_support_after_binding_publication() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        use super::super::prepared::tests::{
+            authored_domain_fixture, authored_domain_owner, install_runtime_fixture_in,
+        };
+        let targets = authored_domain_fixture();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 822);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let authored = session.mint_detached_scope(public).unwrap();
         let unrelated = session.mint_detached_scope(public).unwrap();
-        let (target_a, keys_a) = install_selected_source_fixture(&mut session, authored, "a");
-        let (target_b, keys_b) = install_selected_source_fixture(&mut session, unrelated, "a");
+        let (target_a, keys_a, _placement_a) =
+            install_runtime_fixture_in(&mut session, authored, targets, "dFirst");
+        let (target_b, keys_b, _placement_b) =
+            install_runtime_fixture_in(&mut session, unrelated, targets, "dFirst");
         assert!(session.retain_scope_dependencies(unrelated, authored));
         let authored_custody = session
             .public_visibility_snapshot_in(authored)
             .unwrap()
             .source_instances;
-        assert_eq!(authored_custody.len(), 4);
-        assert_eq!(selected_sources(&session, authored).len(), 2);
-        let owner = selected_sources(&session, authored)[0].owner().clone();
+        assert!(!keys_a.is_empty());
+        assert_eq!(authored_custody.len(), keys_a.len() + keys_b.len());
+        assert_eq!(selected_sources(&session, authored).len(), keys_a.len());
+        let owner = authored_domain_owner("SourceDomainD");
         mint_fixture_origin(&mut session, authored, owner.clone());
         let authored_promotion = session
             .bindings
@@ -7013,11 +6671,12 @@ mod checkpoint_scope_tests {
                 .bindings
                 .source_instances_in(&session.scopes, public)
                 .len(),
-            4
+            keys_a.len() + keys_b.len()
         );
-        assert_eq!(selected_sources(&session, public).len(), 2);
+        assert_eq!(selected_sources(&session, public).len(), keys_a.len());
         let later = session.mint_detached_scope(public).unwrap();
-        let (late_target, late_keys) = install_selected_source_fixture(&mut session, later, "late");
+        let (late_target, late_keys, _placement_late) =
+            install_runtime_fixture_in(&mut session, later, targets, "dLater");
         assert_eq!(late_keys.len(), 1);
         assert_eq!(
             session
@@ -7026,7 +6685,7 @@ mod checkpoint_scope_tests {
                 .unwrap()
                 .export()
                 .occurrence,
-            "late"
+            "d2"
         );
         for original in &keys_a {
             assert!(selected_sources(&session, later)
@@ -7050,15 +6709,15 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn conflicting_authored_source_selection_refuses_before_machine_changes() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        use super::super::prepared::tests::install_source_publication_fixture;
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 823);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let a = session.mint_detached_scope(public).unwrap();
         let b = session.mint_detached_scope(public).unwrap();
-        let (target_a, keys_a) = install_selected_source_fixture(&mut session, a, "a");
-        let (target_b, keys_b) = install_selected_source_fixture(&mut session, b, "a");
+        let (target_a, keys_a, _placement_a) = install_source_publication_fixture(&mut session, a);
+        let (target_b, keys_b, _placement_b) = install_source_publication_fixture(&mut session, b);
         let owner = selected_sources(&session, a)[0].owner().clone();
         for scope in [a, b] {
             mint_fixture_origin(&mut session, scope, owner.clone());
@@ -7107,7 +6766,7 @@ mod checkpoint_scope_tests {
     #[test]
     fn authored_publication_keeps_exact_hidden_binding_custody_without_visible_aliases() {
         use super::super::prepared::tests::{
-            install_selected_source_fixture, rooted_publication_fixture,
+            install_source_publication_fixture, rooted_publication_fixture,
         };
         use tidepool_toolchain::artifact_inventory::{ArtifactId, NativeBindingRequirement};
         let root = tempfile::tempdir().unwrap();
@@ -7116,7 +6775,7 @@ mod checkpoint_scope_tests {
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
         let sibling = session.mint_detached_scope(public).unwrap();
-        let (target, keys) = install_selected_source_fixture(&mut session, private, "a");
+        let (target, keys, _placement) = install_source_publication_fixture(&mut session, private);
         let owner = selected_sources(&session, private)[0].owner().clone();
         let old = rooted_publication_fixture(&mut session, "captured", 826);
         let (old_id, old_handle) = (old.id, old.value.handle);
@@ -7250,38 +6909,44 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn independent_authored_domains_keep_late_group_original_support() {
-        use super::super::prepared::tests::{
-            certified_source_group_modules, install_selected_groups_fixture,
-        };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        use super::super::prepared::tests::{authored_domain_fixture, authored_domain_owner};
+        let targets = authored_domain_fixture();
+        let d_owner = authored_domain_owner("SourceDomainD");
+        let e_owner = authored_domain_owner("SourceDomainE");
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 824);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let d = session.mint_detached_scope(public).unwrap();
         let e = session.mint_detached_scope(public).unwrap();
-        let groups = [
-            certified_source_group_modules("D", "d1", 1, "Support", "support"),
-            certified_source_group_modules("D", "d2", 2, "Support", "support"),
-            certified_source_group_modules("E", "e1", 1, "Support", "support"),
-            certified_source_group_modules("Support", "support", 5, "Support", "support"),
-        ];
-        let source = |module, name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity(module, name),
+        let (target_d, keys_d, _placement_d) =
+            super::super::prepared::tests::install_runtime_fixture_in(
+                &mut session,
+                d,
+                targets,
+                "dFirst",
+            );
+        let (target_e, keys_e, _placement_e) =
+            super::super::prepared::tests::install_runtime_fixture_in(
+                &mut session,
+                e,
+                targets,
+                "eFirst",
+            );
+        let support = |session: &PersistentSession, scope| {
+            selected_sources(session, scope)
+                .into_iter()
+                .find(|lease| {
+                    lease.binder().binder.module == "SourceDomainSupport"
+                        && lease.binder().binder.occurrence == "support"
+                })
+                .expect("the real producer must retain its exact support export")
         };
-        let (target_d, keys_d) =
-            install_selected_groups_fixture(&mut session, d, &groups, source("D", "d1"));
-        let (target_e, keys_e) =
-            install_selected_groups_fixture(&mut session, e, &groups, source("E", "e1"));
-        let original_support = selected_sources(&session, d)
-            .into_iter()
-            .find(|lease| lease.binder().binder.module == "Support")
-            .unwrap();
-        for (scope, keys, owner) in [
-            (d, &keys_d, groups[0].owner().clone()),
-            (e, &keys_e, groups[2].owner().clone()),
-        ] {
+        let original_support = support(&session, d);
+        let independent_support = support(&session, e);
+        assert_ne!(original_support.instance(), independent_support.instance());
+        assert_eq!(original_support.binding(), independent_support.binding());
+        for (scope, keys, owner) in [(d, &keys_d, d_owner), (e, &keys_e, e_owner)] {
             mint_fixture_origin(&mut session, scope, owner.clone());
             let publication = session
                 .bindings
@@ -7296,30 +6961,41 @@ mod checkpoint_scope_tests {
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
-        // d2 must inherit D's original support instance despite E's independently
-        // retained support. A single ambient map cannot express both domains.
         let later = session.mint_detached_scope(public).unwrap();
-        let (target_late, _) =
-            install_selected_groups_fixture(&mut session, later, &groups, source("D", "d2"));
-        assert!(selected_sources(&session, later)
-            .iter()
-            .any(|lease| lease.instance() == original_support.instance()
-                && lease.handle() == original_support.handle()));
+        let (target_late, _, _placement_late) =
+            super::super::prepared::tests::install_runtime_fixture_in(
+                &mut session,
+                later,
+                targets,
+                "dLater",
+            );
+        let later_support = support(&session, later);
+        assert_eq!(later_support.instance(), original_support.instance());
+        assert_eq!(later_support.handle(), original_support.handle());
+        assert_ne!(later_support.instance(), independent_support.instance());
         for target in [target_d, target_e, target_late] {
-            session.prepared_mut().unwrap().unpin(target);
+            assert!(session.prepared_mut().unwrap().unpin(target));
         }
         for scope in [d, e, later, public] {
             session.retire_scope(scope);
         }
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.persistent_roots_count(), 0);
+        assert_eq!(session.residency().unwrap().programs, 0);
     }
 
     #[test]
     fn nested_authored_domains_keep_unmaterialized_capture_after_origin_retirement() {
         use super::super::prepared::tests::{
-            certified_source_group_modules, install_selected_groups_fixture,
-            prepare_selected_groups_fixture,
+            authored_domain_fixture, authored_domain_owner, install_runtime_fixture_in,
         };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let targets = authored_domain_fixture();
+        let d_owner = authored_domain_owner("SourceDomainD");
+        let e_owner = authored_domain_owner("SourceDomainE");
         for reversed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let recovery =
@@ -7327,41 +7003,30 @@ mod checkpoint_scope_tests {
             let mut session = publication_session(&recovery, root.path(), 825);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             let d = session.mint_detached_scope(public).unwrap();
-            let groups = [
-                certified_source_group_modules("D", "d1", 1, "Support", "support"),
-                certified_source_group_modules("D", "d2", 2, "Support", "support"),
-                certified_source_group_modules("E", "e1", 1, "D", "d1"),
-                certified_source_group_modules("E", "e2", 2, "D", "d2"),
-                certified_source_group_modules("Support", "support", 5, "Support", "support"),
-            ];
-            let source = |module, name| SourceBinder {
-                version: ModuleVersion([1; 32]),
-                binder: testing::identity(module, name),
-            };
-            mint_fixture_origin(&mut session, d, groups[0].owner().clone());
+            mint_fixture_origin(&mut session, d, d_owner.clone());
             let e = session.mint_detached_scope(d).unwrap();
             assert!(
                 selected_sources(&session, e).is_empty(),
                 "D is unmaterialized at capture"
             );
-            mint_fixture_origin(&mut session, e, groups[2].owner().clone());
-            let (td, kd) =
-                install_selected_groups_fixture(&mut session, d, &groups, source("D", "d1"));
-            let (te, ke) =
-                install_selected_groups_fixture(&mut session, e, &groups, source("E", "e1"));
+            mint_fixture_origin(&mut session, e, e_owner.clone());
+            let (td, kd, _placement_d) =
+                install_runtime_fixture_in(&mut session, d, targets, "dFirst");
+            let (te, ke, _placement_e) =
+                install_runtime_fixture_in(&mut session, e, targets, "eFirst");
             let support_a = selected_sources(&session, d)
                 .into_iter()
-                .find(|lease| lease.owner().module == "Support")
+                .find(|lease| lease.owner().module == "SourceDomainSupport")
                 .unwrap();
             let support_b = selected_sources(&session, e)
                 .into_iter()
-                .find(|lease| lease.owner().module == "Support")
+                .find(|lease| lease.owner().module == "SourceDomainSupport")
                 .unwrap();
             assert_ne!(support_a.instance(), support_b.instance());
             let publications = if reversed {
-                vec![(e, &ke, groups[2].owner()), (d, &kd, groups[0].owner())]
+                vec![(e, &ke, &e_owner), (d, &kd, &d_owner)]
             } else {
-                vec![(d, &kd, groups[0].owner()), (e, &ke, groups[2].owner())]
+                vec![(d, &kd, &d_owner), (e, &ke, &e_owner)]
             };
             for (scope, keys, owner) in publications {
                 let prepared = session
@@ -7383,61 +7048,45 @@ mod checkpoint_scope_tests {
             session.retire_scope(d);
             session.retire_scope(e);
             let later = session.mint_detached_scope(public).unwrap();
-            let (target, evidence, inherited) = prepare_selected_groups_fixture(
-                &session,
-                later,
-                &groups,
-                &[source("D", "d2"), source("E", "e2")],
-            );
-            let root_domain = target.source_plan().target[&source("D", "d2")].domain;
-            let e_domain = target.source_plan().target[&source("E", "e2")].domain;
-            assert_ne!(root_domain, e_domain);
-            let d2: Vec<_> = target
-                .demanded()
-                .iter()
-                .filter(|image| image.group().owner().module == "D")
-                .collect();
-            assert_eq!(d2.len(), 2);
-            assert!(
-                Arc::ptr_eq(d2[0].image(), d2[1].image()),
-                "immutable D2 image is shared"
-            );
-            let selection = session
+            let (late_d, _, _placement_late_d) =
+                install_runtime_fixture_in(&mut session, later, targets, "dLater");
+            let (late_e, _, _placement_late_e) =
+                install_runtime_fixture_in(&mut session, later, targets, "eLater");
+            let selected = session
                 .bindings
-                .source_domain_selection_in(&session.scopes, later)
+                .native_domain_selection_in(&session.scopes, later)
                 .unwrap();
-            for image in d2 {
-                let key = image
-                    .qualified_source(&source("Support", "support"))
-                    .unwrap();
-                let selected = &selection.inherited()[&key];
-                assert_eq!(
-                    selected.handle(),
-                    if image.domain() == root_domain {
-                        support_a.handle()
-                    } else {
-                        support_b.handle()
-                    }
-                );
+            let d_domain = selected
+                .domain_for_owner(selected.current(), &d_owner)
+                .unwrap();
+            let e_domain = selected
+                .domain_for_owner(selected.current(), &e_owner)
+                .unwrap();
+            assert_ne!(d_domain, e_domain);
+            for (domain, expected) in [(d_domain, &support_a), (e_domain, &support_b)] {
+                assert!(selected
+                    .roots()
+                    .iter()
+                    .any(|(key, lease)| key.domain == domain
+                        && lease.handle() == expected.handle()
+                        && lease.instance() == expected.instance()));
             }
-            let (mixed, _, _) = session
-                .install_certified_turn_in(
-                    later,
-                    &target.fixture_constructor_metadata(),
-                    target,
-                    &evidence,
-                    &inherited,
-                    &|_| None,
-                )
-                .unwrap()
-                .into_parts();
             let d2_leases: Vec<_> = selected_sources(&session, later)
                 .into_iter()
-                .filter(|lease| lease.owner().module == "D" && lease.original_ordinal() == 2)
+                .filter(|lease| {
+                    lease.owner().module == "SourceDomainD"
+                        && lease.binder().binder.occurrence == "d2"
+                })
                 .collect();
             assert_eq!(d2_leases.len(), 2);
             assert_ne!(d2_leases[0].instance(), d2_leases[1].instance());
-            assert!(session.prepared_mut().unwrap().unpin(mixed));
+            assert_eq!(
+                d2_leases[0].binding(),
+                d2_leases[1].binding(),
+                "same issued D2 product through distinct actual domains"
+            );
+            assert!(session.prepared_mut().unwrap().unpin(late_d));
+            assert!(session.prepared_mut().unwrap().unpin(late_e));
             session.retire_scope(later);
             session.retire_scope(public);
             session
@@ -7452,136 +7101,176 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn certified_source_plan_ignores_unrelated_sibling_observation_changes() {
-        use super::super::prepared::tests::{
-            certified_source_group_modules, prepare_selected_groups_fixture,
-        };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        use super::super::prepared::tests::compile_source_publication_fixture;
+        let targets = compile_source_publication_fixture();
+        let compiled =
+            super::super::turn::CompiledTurn::from_runtime_target(targets, "result").unwrap();
+        let code = compiled.code();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 828);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let observation = super::super::prepared::tests::evaluated_publication_fixture(
-            &mut session,
-            "observation",
-            922,
-        );
-        let id = observation.id;
-        session.bind_in(scope, observation).unwrap();
-        session.save_observation(id, &[]);
-        let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
-        let source = SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("D", "d1"),
-        };
-        let (target, evidence, inherited) =
-            prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
-        let admitted = session.public_visibility_snapshot_in(scope).unwrap();
-        let cache = session
-            .bindings()
-            .scope_witness(session.scope_tree(), scope)
-            .unwrap();
-        let sibling = session.mint_isolated_scope();
-        let sibling_observation = super::super::prepared::tests::evaluated_publication_fixture(
-            &mut session,
-            "sibling",
-            923,
-        );
-        let sibling_id = sibling_observation.id;
-        session.bind_in(sibling, sibling_observation).unwrap();
-        session.save_observation(sibling_id, &[]);
-        assert_ne!(
-            session
-                .bindings()
-                .scope_witness(session.scope_tree(), scope)
-                .unwrap(),
-            cache
-        );
-        assert_eq!(
-            session.public_visibility_snapshot_in(scope).unwrap(),
-            admitted
-        );
-        let (program, _, _) = session
-            .install_certified_turn_in(
-                scope,
-                &target.fixture_constructor_metadata(),
-                target,
-                &evidence,
-                &inherited,
-                &|_| None,
+        let plan = Arc::new(
+            super::super::prepared::NativeInstantiationPlan::prepare_code(
+                &code,
+                &session.certified_image_registry(),
             )
-            .unwrap()
-            .into_parts();
-        assert!(session.prepared_mut().unwrap().unpin(program));
+            .unwrap(),
+        );
+        let _placement = session.prepared_lexical_scope_lease(scope).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                targets.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |mut session, _| {
+                    let observation = super::super::prepared::tests::evaluated_publication_fixture(
+                        &mut session,
+                        "observation",
+                        922,
+                    );
+                    let id = observation.id;
+                    session.bind_in(scope, observation).unwrap();
+                    session.save_observation(id, &[]);
+                    let resolved = session
+                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
+                        .unwrap();
+                    let admitted = session.public_visibility_snapshot_in(scope).unwrap();
+                    let cache = session
+                        .bindings()
+                        .scope_witness(session.scope_tree(), scope)
+                        .unwrap();
+                    let sibling = session.mint_isolated_scope();
+                    let _sibling_placement = session.prepared_lexical_scope_lease(sibling).unwrap();
+                    let sibling_observation =
+                        super::super::prepared::tests::evaluated_publication_fixture(
+                            &mut session,
+                            "sibling",
+                            923,
+                        );
+                    let sibling_id = sibling_observation.id;
+                    session.bind_in(sibling, sibling_observation).unwrap();
+                    session.save_observation(sibling_id, &[]);
+                    assert_ne!(
+                        session
+                            .bindings()
+                            .scope_witness(session.scope_tree(), scope)
+                            .unwrap(),
+                        cache
+                    );
+                    assert_eq!(
+                        session.public_visibility_snapshot_in(scope).unwrap(),
+                        admitted
+                    );
+                    let (program, _, _) = session
+                        .install_native_turn_in(scope, &targets.artifacts.table, resolved)
+                        .unwrap()
+                        .into_parts();
+                    assert!(session.prepared_mut().unwrap().unpin(program));
+                },
+            )
+            .unwrap();
+        let outcome = settled.into_outcome();
+        assert!(matches!(
+            outcome.close,
+            crate::CompilerTransactionClose::NotStarted | crate::CompilerTransactionClose::Clean
+        ));
     }
 
     #[test]
     fn source_domain_metadata_change_refuses_prepared_install_atomically() {
-        use super::super::prepared::tests::{
-            certified_source_group_modules, prepare_selected_groups_fixture,
-        };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        use super::super::prepared::tests::compile_source_publication_fixture;
+        let targets = compile_source_publication_fixture();
+        let compiled =
+            super::super::turn::CompiledTurn::from_runtime_target(targets, "result").unwrap();
+        let code = compiled.code();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 826);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
-        let source = SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("D", "d1"),
-        };
-        let (target, evidence, inherited) =
-            prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
-        let mut metadata = target.fixture_constructor_metadata();
-        let staged_only = super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
-        metadata.insert_checked(staged_only.clone()).unwrap();
-        let before = session.public_visibility_snapshot_in(scope).unwrap();
-        mint_fixture_origin(&mut session, scope, groups[0].owner().clone());
-        let after = session.public_visibility_snapshot_in(scope).unwrap();
-        assert_eq!(before.source_instances, after.source_instances);
-        assert_eq!(before.bindings, after.bindings);
-        assert_ne!(before.source_selection, after.source_selection);
+        let plan = Arc::new(
+            super::super::prepared::NativeInstantiationPlan::prepare_code(
+                &code,
+                &session.certified_image_registry(),
+            )
+            .unwrap(),
+        );
+        let _placement = session.prepared_lexical_scope_lease(scope).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                targets.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |mut session, _| {
+                    let resolved = session
+                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
+                        .unwrap();
+                    let mut metadata = targets.artifacts.table.clone();
+                    let staged_only =
+                        super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
+                    metadata.insert_checked(staged_only.clone()).unwrap();
+                    let before = session.public_visibility_snapshot_in(scope).unwrap();
+                    let owner = code
+                        .certification()
+                        .unwrap()
+                        .native_selection
+                        .as_ref()
+                        .unwrap()
+                        .completion()
+                        .rows()
+                        .next()
+                        .expect("actual producer selects a HOME group")
+                        .product()
+                        .owner()
+                        .clone();
+                    mint_fixture_origin(&mut session, scope, owner);
+                    let after = session.public_visibility_snapshot_in(scope).unwrap();
+                    assert_eq!(before.source_instances, after.source_instances);
+                    assert_eq!(before.bindings, after.bindings);
+                    assert_ne!(before.source_selection, after.source_selection);
+                    assert!(matches!(
+                        session.install_native_turn_in(scope, &metadata, resolved),
+                        Err(PreparedRuntimeError::SourceScopeAdmission)
+                    ));
+                    assert!(session.residency().is_none());
+                    assert!(session.session_table().get(staged_only.id).is_none());
+                    assert_eq!(session.public_visibility_snapshot_in(scope).unwrap(), after);
+                },
+            )
+            .unwrap();
+        let outcome = settled.into_outcome();
         assert!(matches!(
-            session.install_certified_turn_in(
-                scope,
-                &metadata,
-                target,
-                &evidence,
-                &inherited,
-                &|_| None,
-            ),
-            Err(PreparedRuntimeError::SourceScopeAdmission)
+            outcome.close,
+            crate::CompilerTransactionClose::NotStarted | crate::CompilerTransactionClose::Clean
         ));
-        assert!(session.residency().is_none());
-        assert!(session.session_table().get(staged_only.id).is_none());
-        assert_eq!(session.public_visibility_snapshot_in(scope).unwrap(), after);
     }
 
     #[test]
     fn failed_late_sibling_attachment_restores_capture_custody_and_selection() {
         use super::super::prepared::tests::{
-            certified_sibling_fixture, install_selected_groups_fixture,
+            compile_source_publication_fixture, install_runtime_fixture_in,
         };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let targets = compile_source_publication_fixture();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 827);
         let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let groups = [certified_sibling_fixture()];
-        let source = |name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", name),
-        };
-        let (ta, _) = install_selected_groups_fixture(&mut session, a, &groups, source("a"));
+        let (ta, _, _placement_a) = install_runtime_fixture_in(&mut session, a, targets, "first");
         let b = session.mint_detached_scope(a).unwrap();
-        let (tb, _) = install_selected_groups_fixture(&mut session, a, &groups, source("b"));
+        let (tb, _, _placement_a_second) =
+            install_runtime_fixture_in(&mut session, a, targets, "second");
         let original_b = selected_sources(&session, a)
             .into_iter()
-            .find(|lease| lease.binder().binder.occurrence == "b")
+            .find(|lease| lease.binder().binder.occurrence == "second")
             .unwrap();
         let before_custody = session.bindings.source_instance_keys_in(&session.scopes, b);
         let before_selection = selected_sources(&session, b);
-        let (failed, delta) =
-            install_selected_groups_fixture(&mut session, b, &groups, source("b"));
+        let (failed, delta, _placement_b) =
+            install_runtime_fixture_in(&mut session, b, targets, "second");
         assert_eq!(delta.len(), 1);
         assert!(selected_sources(&session, b)
             .iter()
@@ -7608,7 +7297,7 @@ mod checkpoint_scope_tests {
             !session.prepared_mut().unwrap().release(original_b.handle()),
             "failed B admission does not retain A's b root"
         );
-        assert_eq!(selected_sources(&session, b).len(), 1);
+        assert_eq!(selected_sources(&session, b).len(), before_selection.len());
         session.retire_scope(b);
         session
             .prepared_mut()
@@ -7621,67 +7310,83 @@ mod checkpoint_scope_tests {
     #[test]
     fn stale_sibling_descriptor_cannot_restore_released_root_with_live_anchor() {
         use super::super::prepared::tests::{
-            certified_sibling_fixture, install_selected_groups_fixture,
-            prepare_selected_groups_fixture,
+            compile_source_publication_fixture, install_runtime_fixture_in,
         };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
-        let root = tempfile::tempdir().unwrap();
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        let mut session = publication_session(&recovery, root.path(), 828);
-        let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let groups = [certified_sibling_fixture()];
-        let source = |name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", name),
-        };
-        let (ta, _) = install_selected_groups_fixture(&mut session, a, &groups, source("a"));
+        let targets = compile_source_publication_fixture();
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let a = source.scope();
+        let (first, _, _first_placement) =
+            install_runtime_fixture_in(&mut session, a, targets, "first");
         let b = session.mint_detached_scope(a).unwrap();
-        let (old_target, old_delta) =
-            install_selected_groups_fixture(&mut session, a, &groups, source("b"));
-        let stale = selected_sources(&session, a)
-            .into_iter()
-            .find(|lease| lease.binder().binder.occurrence == "b")
+        let _b_placement = session.prepared_lexical_scope_lease(b).unwrap();
+        let before = session.bindings.source_instance_keys_in(&session.scopes, b);
+        let (second, delta, _second_placement) =
+            install_runtime_fixture_in(&mut session, a, targets, "second");
+        let selected = session
+            .bindings
+            .native_domain_selection_in(&session.scopes, b)
             .unwrap();
-        assert!(session.prepared_mut().unwrap().unpin(old_target));
-        assert!(session.retire_failed_turn_source_instances(a, &old_delta));
-        assert!(!session.prepared_mut().unwrap().release(stale.handle()));
-        let (target, evidence, inherited) =
-            prepare_selected_groups_fixture(&session, b, &groups, &[source("b")]);
-        assert_eq!(inherited.len(), 1);
-        assert!(
-            session
-                .bindings
-                .retained_source_sibling_attachment(&inherited[0])
-                .is_none(),
-            "live anchor cannot issue a stale sibling descriptor"
-        );
-        let (fresh, _, _) = session
-            .install_certified_turn_in(
-                b,
-                &target.fixture_constructor_metadata(),
-                target,
-                &evidence,
-                &inherited,
-                &|_| None,
-            )
-            .unwrap()
-            .into_parts();
-        let live = selected_sources(&session, b)
+        let (anchor_key, anchor) = selected
+            .roots()
+            .iter()
+            .find(|(_, lease)| lease.export().occurrence == "first")
+            .expect("real recursive first export is held by capture");
+        let stale = session
+            .bindings
+            .source_instances_in(&session.scopes, a)
             .into_iter()
-            .find(|lease| lease.binder().binder.occurrence == "b")
+            .find(|lease| lease.export().occurrence == "second")
+            .expect("real sibling was installed");
+        assert_eq!(
+            stale.binding_key(),
+            anchor.binding_key(),
+            "actual recursive group premise"
+        );
+        assert_eq!(stale.instance(), anchor.instance());
+        let held = session
+            .bindings
+            .retained_native_sibling_attachment(anchor_key.domain, anchor, stale.value())
+            .unwrap();
+        assert!(session.prepared_mut().unwrap().unpin(second));
+        assert!(session.retire_failed_turn_source_instances(a, &delta));
+        assert!(!session.prepared_mut().unwrap().release(stale.handle()));
+        let revision = session.bindings.mutation_revision();
+        assert!(session
+            .machine
+            .as_ref()
+            .unwrap()
+            .admit_source_instances(&mut session.bindings, &session.scopes, b, vec![held])
+            .is_err());
+        assert_eq!(session.bindings.mutation_revision(), revision);
+        assert_eq!(
+            session.bindings.source_instance_keys_in(&session.scopes, b),
+            before
+        );
+        assert!(session
+            .bindings
+            .retained_native_sibling_attachment(anchor_key.domain, anchor, stale.value())
+            .is_none());
+        let (fresh, _, _fresh_placement) =
+            install_runtime_fixture_in(&mut session, b, targets, "second");
+        let live = session
+            .bindings
+            .source_instances_in(&session.scopes, b)
+            .into_iter()
+            .find(|lease| lease.export().occurrence == "second")
             .unwrap();
         assert_eq!(
             live.instance(),
             stale.instance(),
-            "exact group CAF is shared"
+            "exact existing group instance remains anchored"
         );
         assert_ne!(
             live.handle(),
             stale.handle(),
-            "only a new machine-issued root is admitted"
+            "only a newly issued physical root is admitted"
         );
-        for target in [ta, fresh] {
-            session.prepared_mut().unwrap().unpin(target);
+        for target in [first, fresh] {
+            assert!(session.prepared_mut().unwrap().unpin(target));
         }
         session.retire_scope(a);
         session.retire_scope(b);
@@ -7691,98 +7396,7 @@ mod checkpoint_scope_tests {
             .quiesce_and_collect_now()
             .unwrap();
         assert_eq!(session.persistent_roots_count(), 0);
-    }
-
-    #[test]
-    fn retained_package_certification_resolves_exact_export_and_refuses_plain_retained() {
-        use tidepool_repr::execution_schema::{
-            testing, Atom, ExprFrame, GlobalId, Group, RuntimeRep, SignatureId, ValueRef,
-        };
-        let binder = testing::identity("Fixture", "entry");
-        let (legacy, _) =
-            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
-        let mut legacy_session = PersistentSession::new(None, 64 * 1024);
-        legacy_session.machine = Some(legacy);
-        assert!(legacy_session.prepared_retained().is_empty());
-        let (engine, _) = super::super::prepared::tests::certified_package_export_fixture([9; 32]);
-        let expected = engine
-            .retained_package_code_export_owner(&binder, 0, &[9; 32])
-            .unwrap();
-        let mut session = PersistentSession::new(None, 64 * 1024);
-        session.machine = Some(engine);
-        assert!(session.prepared_retained().contains(&(binder.clone(), 0)));
-        let mut wire = testing::wire_program();
-        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
-            unreachable!()
-        };
-        top.identity.unit = "main".into();
-        wire.expressions.nodes[0] = ExprFrame::Call {
-            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
-            signature: SignatureId(0),
-            arguments: vec![],
-        };
-        wire.globals.push(GlobalDecl {
-            identity: binder.clone(),
-            rep: RuntimeRep::LiftedRef,
-            entry_signature: Some(SignatureId(0)),
-            required_evaluated: true,
-            required_generation: Some(0),
-        });
-        let prepared = testing::prepare(wire).unwrap();
-        let mut certification = TurnCertification::default();
-        certification.target_owners = vec![PendingImportOwner::Retained {
-            identity: binder.clone(),
-            generation: 0,
-        }];
-        assert!(
-            matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
-            Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
-        );
-        for digest in [[0; 32], [8; 32]] {
-            certification.target_owners[0] = PendingImportOwner::RetainedPackage {
-                unit: binder.unit.clone(),
-                module: binder.module.clone(),
-                binder: binder.clone(),
-                generation: 0,
-                interface_digest: digest,
-            };
-            assert!(
-                matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
-                Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
-            );
-        }
-        certification.target_owners[0] = PendingImportOwner::RetainedPackage {
-            unit: binder.unit.clone(),
-            module: binder.module.clone(),
-            binder: binder.clone(),
-            generation: 0,
-            interface_digest: [9; 32],
-        };
-        let resolved = session
-            .resolve_certification_in(ScopeId::ROOT, &prepared, &certification)
-            .unwrap();
-        assert_eq!(resolved.target_owners, vec![expected]);
-        let registry = ImageRegistry::new();
-        let target =
-            ScopedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
-        let (program, keys, _) = session
-            .install_certified_turn_in(
-                ScopeId::ROOT,
-                &target.fixture_constructor_metadata(),
-                target,
-                &resolved.source_evidence,
-                &resolved.inherited_needed,
-                &|_| None,
-            )
-            .unwrap()
-            .into_parts();
-        assert!(keys.is_empty());
-        assert!(session.machine.as_mut().unwrap().unpin(program));
-        session.machine = None;
-        assert!(
-            matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
-            Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
-        );
+        assert_eq!(session.residency().unwrap().programs, 0);
     }
 
     #[test]
@@ -8838,77 +8452,67 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn certified_install_refuses_plan_less_target_before_source_work() {
-        use tidepool_repr::execution_schema::testing;
-        // A plan-less image target has no install entry point: the signature
-        // below admits only a `ScopedTargetImage`, which is issued together
-        // with the resolved plan. This function-item check is the type-level
-        // replacement for the former runtime refusal.
-        let _install: fn(
-            &mut PersistentSession,
-            ScopeId,
-            &DataConTable,
-            ScopedTargetImage,
-            &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-            &[InheritedSourceDemand],
-            &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
-        ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> =
-            PersistentSession::install_certified_turn_in;
-        let image = super::super::prepared::ImageTarget::compile(
-            testing::prepare(testing::wire_program()).unwrap(),
-            &ImageRegistry::new(),
-        )
-        .unwrap();
-        assert!(image.globals().is_empty());
-    }
-
-    #[test]
     fn certified_install_with_plan_reaches_the_source_transaction_seam() {
-        use tidepool_repr::execution_schema::testing;
-        let registry = ImageRegistry::new();
+        use tidepool_codegen::prepared_program::CompiledProgram;
+        let targets = super::super::prepared::tests::compile_source_publication_fixture();
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let scope = session.mint_isolated_scope();
-        let plan = ResolvedSourceDomainPlan::fixture(
-            BTreeMap::new(),
-            session
-                .bindings()
-                .source_domain_selection_in(session.scope_tree(), scope)
-                .unwrap(),
-            session
-                .bindings()
-                .scope_snapshot(session.scope_tree(), scope)
-                .unwrap(),
-        );
-        let resolved = ResolvedCertifiedTurn {
-            target_sources: NativeSourceCustody::default(),
-            groups: Vec::new(),
-            target_owners: Vec::new(),
-            package_interfaces: Default::default(),
-            source_evidence: BTreeMap::new(),
-            inherited_needed: Vec::new(),
-            source_plan: plan,
-        };
-        let target = ScopedTargetImage::compile_scoped(
-            testing::prepare(testing::wire_program()).unwrap(),
-            &resolved,
-            &registry,
-        )
-        .unwrap();
-        assert!(target.demanded().is_empty());
-        let refused = session.install_certified_turn_in(
-            scope,
-            &target.fixture_constructor_metadata(),
-            target,
-            &BTreeMap::new(),
-            &[],
-            &|_| None,
-        );
+        let before_images = CompiledProgram::successful_image_compilations();
+        let refused = session.install_runtime_target_in(scope, targets, "result");
         assert!(matches!(
             refused,
             Err(PreparedRuntimeError::SourceAdmission(
                 super::super::SourceAdmissionError::MissingTransaction
             ))
         ));
+        assert!(
+            session.prepared().is_none(),
+            "refusal precedes machine allocation"
+        );
+        assert_eq!(
+            CompiledProgram::successful_image_compilations(),
+            before_images,
+            "missing transaction refuses before native image preparation"
+        );
+
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        assert!(!Arc::ptr_eq(&targets.source, other.original_source()));
+        for target_scope in [ScopeId::ROOT, other.scope()] {
+            let before_visibility = session.public_visibility_snapshot_in(target_scope);
+            let settled = session
+                .with_source_compiler_transaction(
+                    other.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.install_runtime_target_in(target_scope, targets, "result"),
+                )
+                .unwrap();
+            assert!(
+                matches!(
+                    settled.action(),
+                    Err(PreparedRuntimeError::SourceAdmission(
+                        super::super::SourceAdmissionError::DifferentOriginalSource
+                    ))
+                ),
+                "the output's actual source is required even when the target is ROOT"
+            );
+            assert!(matches!(
+                settled.close(),
+                crate::CompilerTransactionClose::NotStarted
+            ));
+            assert!(session.prepared().is_none());
+            assert_eq!(
+                session.public_visibility_snapshot_in(target_scope),
+                before_visibility
+            );
+            assert_eq!(
+                CompiledProgram::successful_image_compilations(),
+                before_images,
+                "a foreign source transaction cannot prepare images or install the output"
+            );
+        }
     }
 }
 

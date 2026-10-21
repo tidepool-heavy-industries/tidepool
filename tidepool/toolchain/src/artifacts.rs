@@ -3587,41 +3587,6 @@ pub struct ResolvedNativeSourceProduct<'a> {
     binding: crate::artifact_inventory::NativeGroupBinding,
     physical_current: bool,
     imports: &'a Arc<[certified_products::SelectedNativeImport]>,
-    artifacts: &'a crate::artifact_inventory::ArtifactView,
-}
-
-/// Owned custody of one selected row and its exact ordered links. The acquired
-/// inventory remains held when the output that lent this row is released.
-#[derive(Clone)]
-pub struct OwnedNativeSourceProduct {
-    group: certified_products::PendingCertifiedGroup,
-    binding: crate::artifact_inventory::NativeGroupBinding,
-    imports: Arc<[certified_products::SelectedNativeImport]>,
-    _artifacts: crate::artifact_inventory::ArtifactView,
-}
-
-impl OwnedNativeSourceProduct {
-    pub fn matches_group(&self, group: &certified_products::PendingCertifiedGroup) -> bool {
-        self.group.same_issuance(group)
-    }
-    pub fn group(&self) -> &certified_products::PendingCertifiedGroup {
-        &self.group
-    }
-    pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
-        self.binding
-    }
-    pub fn imports(&self) -> &[certified_products::SelectedNativeImport] {
-        &self.imports
-    }
-}
-
-impl std::fmt::Debug for OwnedNativeSourceProduct {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OwnedNativeSourceProduct")
-            .field("binding", &self.binding)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
@@ -3634,15 +3599,6 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
     }
     pub fn imports(&self) -> &'a [certified_products::SelectedNativeImport] {
         self.imports
-    }
-
-    pub fn to_owned(&self) -> OwnedNativeSourceProduct {
-        OwnedNativeSourceProduct {
-            group: self.group.clone(),
-            binding: self.binding,
-            imports: Arc::clone(self.imports),
-            _artifacts: self.artifacts.clone(),
-        }
     }
 
     pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
@@ -3680,6 +3636,21 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
+    /// Borrow physical membership only for this exact selected row and issuance.
+    pub fn physical_current_for(
+        &self,
+        selected: &crate::artifact_inventory::CompletedNativeSourceRow,
+    ) -> Option<PhysicalCurrentNativeGroup<'a>> {
+        let mut matching = self.rows.iter().filter(|row| {
+            row.binding() == selected.binding() && row.matches_group(selected.product())
+        });
+        let row = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        row.physical_current()
+    }
+
     pub(crate) fn issue(
         resolved: crate::artifact_inventory::ResolvedNativeSourceTarget<'a>,
         prepared: &'a PreparedProgram,
@@ -3694,7 +3665,6 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
                 binding,
                 physical_current,
                 imports,
-                artifacts: resolved.artifacts(),
             });
         }
         Ok(Self {
@@ -10066,12 +10036,13 @@ mod module_product_tests {
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
         let products = crate::paths::build_products_dir(&endpoint.identity().producer_hex());
         assert!(products.starts_with(&compile_cache));
-        for directory in [&compile_cache, &products] {
-            match std::fs::read_dir(directory) {
-                Ok(entries) => assert_eq!(entries.count(), 0),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => panic!("isolated cache inspection {}: {error}", directory.display()),
-            }
+        match std::fs::read_dir(&products) {
+            Ok(entries) => assert_eq!(entries.count(), 0, "no prior module products"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "isolated product inspection {}: {error}",
+                products.display()
+            ),
         }
         let source = include_str!("../tests/fixtures/deployment-module-package/Consumer.hs");
         let original = crate::artifacts::test_support::compile_targets(
