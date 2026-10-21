@@ -112,7 +112,7 @@ import Tidepool.GhcPipeline
   , worldCellExactImports, pprOriginalBindings, pprOriginalReferences
   , heldWorldCellStagePath, heldWorldCellStageTypedSource
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
-  , WorldCellRefusal(..), emitWorldAcquisitionRejection
+  , WorldCellRefusal(..), CompilerTransactionFailure(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts, prTargetTcGblEnv
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
@@ -2369,7 +2369,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
             acquire compiler
             interrupted <- try (withDiagnosticCountFault "world.cell.name_scope_ready" fired
               (throwIO ThreadKilled) (issueCancellation compiler)) :: IO (Either AsyncException BS.ByteString)
-            poisoned <- try (scopedRunGhc compiler (pure ())) :: IO (Either InputRejection ())
+            poisoned <- try (scopedRunGhc compiler (pure ())) :: IO (Either CompilerTransactionFailure ())
             pure (interrupted,poisoned)
           hPutStrLn stderr cancelledLog
           reached <- readIORef fired
