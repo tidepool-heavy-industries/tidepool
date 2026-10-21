@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization, homeRootResolutionAgreement) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -22,6 +22,7 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
+import Data.Word (Word)
 import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName, getSessionDynFlags)
 import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Driver.Session (backend, gopt, GeneralFlag(Opt_ByteCode), parseDynamicFilePragma)
@@ -49,7 +50,7 @@ import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
   , PackageLink(..), PackageOccurrence(..), RawOccurrence(..), RawLink(..)
-  , canonicalizeOccurrences )
+  , canonicalizeOccurrences, resolveHomeRoots )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 
 -- The Rust receipt consumer expects null/text, independently of the execution
@@ -108,6 +109,51 @@ packageOccurrenceCanonicalization = do
       (cycleRows, _) = canonicalizeOccurrences cycleRaws
   unless (cycleRows == expectedCycleRows)
     (fail ("package occurrence cyclic canonicalization changed rows: " ++ show cycleRows))
+
+-- HOME root links resolve through each target's own occurrence map; a
+-- T2-only binder and reversed target order must not change the agreed links,
+-- and disagreeing targets must refuse rather than merge.
+homeRootResolutionAgreement :: IO ()
+homeRootResolutionAgreement = do
+  let unit = Text.pack "unit"
+      moduleNameText = Text.pack "Module"
+      binderA = SymbolIdentity (Text.pack "u") (Text.pack "A") (Text.pack "v") (Text.pack "a") Nothing
+      binderB = SymbolIdentity (Text.pack "u") (Text.pack "B") (Text.pack "v") (Text.pack "b") Nothing
+      binderC = SymbolIdentity (Text.pack "u") (Text.pack "C") (Text.pack "v") (Text.pack "c") Nothing
+      indexMap = Map.fromList [(0, 0), (1, 1), (2, 0), (3, 1)]
+      owners = Map.fromList
+        [ (Text.pack "t1", Map.fromList [(binderA, 0), (binderB, 1)])
+        , (Text.pack "t2", Map.fromList [(binderA, 2), (binderC, 3)]) ]
+      home1 = (unit, moduleNameText, 0 :: Word)
+      home2 = (unit, moduleNameText, 1 :: Word)
+      importsForward = Map.fromList
+        [ (Text.pack "t1", Map.fromList [(home1, [binderA])])
+        , (Text.pack "t2", Map.fromList [(home1, [binderA]), (home2, [binderC])]) ]
+      importsReversed = Map.fromList
+        [ (Text.pack "t2", Map.fromList [(home1, [binderA]), (home2, [binderC])])
+        , (Text.pack "t1", Map.fromList [(home1, [binderA])]) ]
+      disagreeing = Map.fromList
+        [ (Text.pack "t1", Map.fromList [(home1, [binderA])])
+        , (Text.pack "t2", Map.fromList [(home1, [binderB])]) ]
+      expected = Map.fromList
+        [ (home1, [PackageLinkLocal 0])
+        , (home2, [PackageLinkLocal 1]) ]
+  case resolveHomeRoots indexMap owners importsForward of
+    Right actual | actual == expected -> pure ()
+    other -> fail ("HOME root resolution changed: " ++ show other)
+  case resolveHomeRoots indexMap owners importsReversed of
+    Right actual | actual == expected -> pure ()
+    other -> fail ("reversed HOME root resolution changed: " ++ show other)
+  case resolveHomeRoots indexMap owners disagreeing of
+    Left _ -> pure ()
+    Right actual -> fail ("disagreeing HOME roots were silently merged: " ++ show actual)
+  let missingIndex = Map.singleton (Text.pack "t1")
+        (Map.singleton binderA 99)
+      onlyFirstTarget = Map.singleton (Text.pack "t1")
+        (Map.singleton home1 [binderA])
+  case resolveHomeRoots indexMap missingIndex onlyFirstTarget of
+    Left reason | "canonical occurrence" `isInfixOf` reason -> pure ()
+    other -> fail ("missing canonical occurrence was not refused: " ++ show other)
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do

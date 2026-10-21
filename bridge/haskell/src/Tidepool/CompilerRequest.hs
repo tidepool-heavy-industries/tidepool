@@ -840,7 +840,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                       (moduleUnit (fatOriginalOwner (preparedComponentVersion component)))
                     homeComponents = filter isHome (closureComponentSelections recovered)
                     packageComponents = filter (not . isHome) (closureComponentSelections recovered)
-                paired <- project (projectPreparedPackageTarget hostBindings finalContext
+                paired <- project (projectPreparedPackageTarget hscEnv hostBindings finalContext
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired
