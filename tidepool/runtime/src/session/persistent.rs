@@ -528,10 +528,6 @@ impl Drop for PersistentSession {
 enum NativeInstallationSource<'a> {
     Unwitnessed,
     Checked(super::turn::CurrentNativeSources<'a>),
-    ClosedEntry {
-        entry: &'a super::PreparedSourceEntry,
-        source: &'a super::resident::CapturedSourceOrigin,
-    },
 }
 
 impl PersistentSession {
@@ -890,24 +886,6 @@ impl PersistentSession {
         )
     }
 
-    pub(super) fn resolve_closed_source_entry_in(
-        &self,
-        scope: ScopeId,
-        entry: &super::PreparedSourceEntry,
-        source: &super::resident::CapturedSourceOrigin,
-    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
-        let code = entry.compiled().code();
-        let certification = code
-            .certification()
-            .expect("PreparedSourceEntry retains sealed original certification");
-        self.resolve_certification_with_sources(
-            scope,
-            code.prepared(),
-            certification,
-            NativeInstallationSource::ClosedEntry { entry, source },
-        )
-    }
-
     pub(crate) fn resolve_runtime_target_in(
         &self,
         scope: ScopeId,
@@ -1151,10 +1129,6 @@ impl PersistentSession {
                 .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?,
                 sources: match &origin {
                     NativeInstallationSource::Checked(current) => current.group(pending),
-                    NativeInstallationSource::ClosedEntry { entry, source } => {
-                        debug_assert!(std::ptr::eq(prepared, entry.compiled().prepared().as_ref()));
-                        source.for_closed_entry_sites(pending.group().definitions().sites())
-                    }
                     NativeInstallationSource::Unwitnessed => NativeSourceCustody::unknown(
                         pending
                             .group()
@@ -1178,9 +1152,6 @@ impl PersistentSession {
             groups,
             target_sources: match &origin {
                 NativeInstallationSource::Checked(current) => current.target(),
-                NativeInstallationSource::ClosedEntry { source, .. } => {
-                    source.for_closed_entry_sites(prepared.sites())
-                }
                 NativeInstallationSource::Unwitnessed => {
                     NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
                 }
@@ -1292,7 +1263,7 @@ impl PersistentSession {
             .or(self.machine.as_mut())
             .expect("certified machine exists or was constructed");
         engine.set_invocation_cancel(self.invocation_cancel.clone());
-        let mut staged = engine.install_certified_turn(
+        let staged = engine.install_certified_turn(
             target,
             source_evidence,
             inherited_needed,
@@ -1301,6 +1272,54 @@ impl PersistentSession {
             &self.bindings,
             &exact_sources,
         )?;
+        self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
+    }
+
+    pub(super) fn install_closed_turn_in(
+        &mut self,
+        scope: ScopeId,
+        metadata: &DataConTable,
+        plan: &super::prepared::ClosedInstantiationPlan,
+        origin: &super::resident::CapturedSourceOrigin,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
+        self.admit_source_work_in(scope)?;
+        let selection = self
+            .bindings
+            .native_domain_selection_in(&self.scopes, scope)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        let admitted_metadata = self.stage_install_metadata(
+            Some(metadata),
+            plan.target_constructors(),
+            plan.dependency_constructors(),
+        )?;
+        let mut bootstrap = if self.machine.is_none() {
+            Some(PreparedEngine::empty_certified(
+                self.nursery_size,
+                self.image_registry.clone(),
+            )?)
+        } else {
+            None
+        };
+        let engine = bootstrap
+            .as_mut()
+            .or(self.machine.as_mut())
+            .expect("closed machine exists or was constructed");
+        engine.set_invocation_cancel(self.invocation_cancel.clone());
+        let staged = engine.install_closed_turn(plan, origin, selection.current())?;
+        self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
+    }
+
+    fn finish_certified_turn_in(
+        &mut self,
+        scope: ScopeId,
+        mut bootstrap: Option<PreparedEngine>,
+        mut staged: super::prepared::CertifiedTurnInstall,
+        admitted_metadata: DataConTable,
+    ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
+        let engine = bootstrap
+            .as_mut()
+            .or(self.machine.as_mut())
+            .expect("staged machine remains installed");
         let tokens = std::mem::take(&mut staged.leases);
         let admitted = engine
             .admit_source_instances(

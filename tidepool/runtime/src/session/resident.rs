@@ -3187,7 +3187,16 @@ impl PreparedCheckedTurn {
 struct AdmittedTurnCode<'a> {
     code: TurnCode<'a>,
     scope: ScopeId,
-    resolved: Option<super::persistent::ResolvedCertifiedTurn>,
+    resolved: NativeTurnAdmission<'a>,
+}
+
+enum NativeTurnAdmission<'a> {
+    Portable,
+    Scoped(super::persistent::ResolvedCertifiedTurn),
+    Closed {
+        plan: &'a super::prepared::ClosedInstantiationPlan,
+        origin: &'a CapturedSourceOrigin,
+    },
 }
 
 /// Fallible compiler/display composition completed before native installation.
@@ -7627,7 +7636,7 @@ where
         Ok(AdmittedTurnCode {
             code,
             scope,
-            resolved,
+            resolved: resolved.map_or(NativeTurnAdmission::Portable, NativeTurnAdmission::Scoped),
         })
     }
 
@@ -7648,7 +7657,7 @@ where
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
         let mut retained = Vec::new();
-        if let Some(resolved) = &admission.resolved {
+        if let NativeTurnAdmission::Scoped(resolved) = &admission.resolved {
             let imports = resolved.target_owners.iter().chain(
                 resolved
                     .groups
@@ -8076,49 +8085,59 @@ where
             .admit_source_work_in(scope)
             .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
-        let (program, source_keys, native_sources) = if let Some(resolved) = resolved {
-            let target = match images {
-                TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
+        let (program, source_keys, native_sources) = match resolved {
+            NativeTurnAdmission::Closed { plan, origin } => self
+                .state
+                .install_closed_turn_in(scope, &metadata, plan, origin)?
+                .into_parts(),
+            NativeTurnAdmission::Scoped(resolved) => {
+                let target = match images {
+                    TurnImageAcquisition::Ready { bundle } => {
+                        super::prepared::ScopedTargetImage::lookup_scoped(
+                            prepared, &resolved, bundle,
+                        )?
+                    }
+                    TurnImageAcquisition::Compile => {
+                        let registry = self.state.certified_image_registry();
+                        super::prepared::ScopedTargetImage::compile_scoped(
+                            prepared, &resolved, &registry,
+                        )?
+                    }
+                };
+                let retained_sources =
+                    |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+                        self.binding_provenance
+                            .get(&input.id().raw())
+                            .map(|p| p.source_custody())
+                    };
+                match checked {
+                    Some(checked) => checked.install_certified_turn_in(
+                        &mut self.state,
+                        scope,
+                        &metadata,
+                        target,
+                        &resolved.source_evidence,
+                        &resolved.inherited_needed,
+                        &retained_sources,
+                    )?,
+                    None => self.install_certified_turn_in(
+                        scope,
+                        &metadata,
+                        target,
+                        &resolved.source_evidence,
+                        &resolved.inherited_needed,
+                    )?,
                 }
-                TurnImageAcquisition::Compile => {
-                    let registry = self.state.certified_image_registry();
-                    super::prepared::ScopedTargetImage::compile_scoped(
-                        prepared, &resolved, &registry,
-                    )?
+                .into_parts()
+            }
+            NativeTurnAdmission::Portable => {
+                if matches!(images, TurnImageAcquisition::Ready { .. }) {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
                 }
-            };
-            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                self.binding_provenance
-                    .get(&input.id().raw())
-                    .map(|p| p.source_custody())
-            };
-            match checked {
-                Some(checked) => checked.install_certified_turn_in(
-                    &mut self.state,
-                    scope,
-                    &metadata,
-                    target,
-                    &resolved.source_evidence,
-                    &resolved.inherited_needed,
-                    &retained_sources,
-                )?,
-                None => self.install_certified_turn_in(
-                    scope,
-                    &metadata,
-                    target,
-                    &resolved.source_evidence,
-                    &resolved.inherited_needed,
-                )?,
+                let (program, native_sources) =
+                    self.install_prepared_with_sources(prepared, &metadata)?;
+                (program, Default::default(), native_sources)
             }
-            .into_parts()
-        } else {
-            if matches!(images, TurnImageAcquisition::Ready { .. }) {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
-            }
-            let (program, native_sources) =
-                self.install_prepared_with_sources(prepared, &metadata)?;
-            (program, Default::default(), native_sources)
         };
         // Every fallible metadata check preceded installation. Runtime sources
         // come only from this exact installed outcome; missing evidence is Unknown.
@@ -8223,7 +8242,7 @@ where
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let (admission, compile_identity, native) = match input {
+        let (admission, compile_identity) = match input {
             StartupInput::Closed { entry, origin } => {
                 let code = entry.compiled().code();
                 let proof = code
@@ -8233,24 +8252,21 @@ where
                     .and_then(|certification| certification.ordinary_original())
                     .ok_or(ResidentError::UnsealedStartupEntry)?;
                 let identity = StartupCompileIdentity::Issued(proof.clone());
-                let resolved = self
-                    .state
-                    .resolve_closed_source_entry_in(scope, entry, origin)?;
-                let native = entry.retained_native_images(&resolved)?;
                 (
                     AdmittedTurnCode {
                         code,
                         scope,
-                        resolved: Some(resolved),
+                        resolved: NativeTurnAdmission::Closed {
+                            plan: &entry.native,
+                            origin,
+                        },
                     },
                     identity,
-                    Some(native),
                 )
             }
             StartupInput::Ordinary { code, identity } => (
                 self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?,
                 identity,
-                None,
             ),
         };
         let provenance = self.provenance_for(&admission)?;
@@ -8259,16 +8275,8 @@ where
             source_keys,
             provenance,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(
-            admission,
-            native
-                .as_ref()
-                .map_or(TurnImageAcquisition::Compile, |bundle| {
-                    TurnImageAcquisition::Ready { bundle }
-                }),
-            provenance,
-            None,
-        )?;
+        } =
+            self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)

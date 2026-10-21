@@ -13,6 +13,10 @@ use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
+#[path = "prepared/closed.rs"]
+mod closed;
+pub(super) use closed::ClosedInstantiationPlan;
+
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
@@ -707,9 +711,19 @@ impl From<LinkError> for PreparedRuntimeError {
 /// The facts about an installed program the session still needs after the
 /// machine has taken its code: the declared entry and, per top-level binding,
 /// the identity and entry signature an importer links against.
+enum NativeProductProof {
+    Source(tidepool_toolchain::artifacts::OwnedNativeSourceProduct),
+    ClosedHome {
+        selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+        binding: tidepool_toolchain::artifact_inventory::NativeGroupBinding,
+    },
+    Package(tidepool_toolchain::artifact_inventory::PackageCodeBinding),
+    ClosedTarget(Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>),
+}
+
 struct ProgramFacts {
     native_sources: NativeSourceCustody,
-    native_product: Option<tidepool_toolchain::artifacts::OwnedNativeSourceProduct>,
+    native_product: Option<NativeProductProof>,
     entry: Option<ValueId>,
     definitions: Arc<DefinitionFacts>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
@@ -770,44 +784,6 @@ pub(crate) struct ScopedTargetImage {
     sources: NativeSourceCustody,
 }
 
-/// Immutable native definitions without runtime import or scope authority.
-struct NativeCodePlan {
-    target: ImageTarget,
-    groups: Vec<NativeGroupImage>,
-}
-
-struct NativeGroupImage {
-    code: CertifiedGroupCode,
-    image: Arc<CompiledProgram>,
-}
-
-impl NativeCodePlan {
-    fn retained_images(
-        &self,
-        registry: &Arc<ImageRegistry>,
-        resolved: &super::persistent::ResolvedCertifiedTurn,
-    ) -> Result<NativeImageBundle, PreparedRuntimeError> {
-        if self.groups.len() != resolved.groups.len()
-            || self
-                .groups
-                .iter()
-                .zip(&resolved.groups)
-                .any(|(saved, current)| saved.code != current.group().original().code_identity())
-        {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-        }
-        let target = Arc::as_ptr(&self.target.image) as usize;
-        Ok(NativeImageBundle {
-            registry: registry.clone(),
-            images: std::iter::once(self.target.image.clone())
-                .chain(self.groups.iter().map(|group| group.image.clone()))
-                .map(|image| (Arc::as_ptr(&image) as usize, image))
-                .collect(),
-            target,
-        })
-    }
-}
-
 /// Native code and source evidence from the same selected runtime group.
 pub(crate) struct SelectedNativeImage {
     native: DemandedImage,
@@ -861,22 +837,6 @@ impl std::ops::Deref for ScopedTargetImage {
 }
 
 impl ScopedTargetImage {
-    /// Discard scoped admission, retaining code only. The result cannot install
-    /// or certify that its inputs form a closed runtime instantiation.
-    fn into_neutral_code(self) -> NativeCodePlan {
-        NativeCodePlan {
-            target: self.base,
-            groups: self
-                .demanded
-                .into_iter()
-                .map(|selected| NativeGroupImage {
-                    code: selected.native.group().code_identity(),
-                    image: selected.native.image().clone(),
-                })
-                .collect(),
-        }
-    }
-
     pub(crate) fn demanded(&self) -> &[SelectedNativeImage] {
         &self.demanded
     }
@@ -1214,7 +1174,7 @@ fn immutable_literal_owners(
 pub struct PreparedSourceEntry {
     compiled: Arc<super::turn::CompiledTurn>,
     registry: Arc<ImageRegistry>,
-    native: NativeCodePlan,
+    pub(super) native: ClosedInstantiationPlan,
 }
 
 impl PreparedSourceEntry {
@@ -1253,23 +1213,11 @@ impl PreparedSourceEntry {
         ) {
             return Err(super::resident::ResidentError::UnsealedStartupEntry);
         }
-        // Resolution uses the existing source-group owner with an empty lexical
-        // environment. Any retained notebook dependency is therefore refused.
-        let state = super::persistent::PersistentSession::new(None, 0);
-        let resolved = state.resolve_certification_in(
-            tidepool_codegen::scope::ScopeId::ROOT,
-            &compiled.prepared(),
-            certification,
-        )?;
-        let target = ScopedTargetImage::compile_scoped(
-            compiled.prepared().as_ref().clone(),
-            &resolved,
-            &registry,
-        )?;
+        let native = ClosedInstantiationPlan::prepare(&compiled, &registry)?;
         Ok(Self {
             compiled,
             registry,
-            native: target.into_neutral_code(),
+            native,
         })
     }
 
@@ -1308,13 +1256,6 @@ impl PreparedSourceEntry {
 
     pub fn image_registry(&self) -> &Arc<ImageRegistry> {
         &self.registry
-    }
-
-    pub(super) fn retained_native_images(
-        &self,
-        resolved: &super::persistent::ResolvedCertifiedTurn,
-    ) -> Result<NativeImageBundle, PreparedRuntimeError> {
-        self.native.retained_images(&self.registry, resolved)
     }
 }
 
@@ -4947,7 +4888,7 @@ impl PreparedEngine {
                     facts.native_sources = selected
                         .sources
                         .select(facts.sites.iter().map(|site| site.site));
-                    facts.native_product = selected.proof.clone();
+                    facts.native_product = selected.proof.clone().map(NativeProductProof::Source);
                     facts
                 })
                 .collect();
