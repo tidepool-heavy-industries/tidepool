@@ -5139,21 +5139,83 @@ enum BuildActionExport<'a> {
 /// durable custody before execution and preserve it through every failure.
 enum CompilationOutputOwner {
     Scratch(TempDir),
-    Original(production_entry::EntryPreparation),
+    Inspection(PathBuf),
+    Original {
+        preparation: production_entry::EntryPreparation,
+        diagnostics: OriginalFailureDiagnostics,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum OriginalFailureDiagnostics {
+    Hosted,
+    BuildAction,
 }
 
 impl CompilationOutputOwner {
     fn path(&self) -> &Path {
         match self {
             Self::Scratch(directory) => directory.path(),
-            Self::Original(preparation) => preparation.raw(),
+            Self::Inspection(directory) => directory,
+            Self::Original { preparation, .. } => preparation.raw(),
+        }
+    }
+
+    fn retain_failure(
+        &self,
+        command: &ExtractCmd,
+        stderr: &[u8],
+        error: CompileError,
+    ) -> CompileError {
+        let metadata_failure = if !matches!(self, Self::Scratch(_))
+            && std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1")
+        {
+            retain_compiler_failure_metadata(self.path(), command, stderr).err()
+        } else {
+            None
+        };
+        match self {
+            Self::Scratch(directory) => {
+                retain_compiler_failure(directory.path(), command, stderr, error)
+            }
+            Self::Original {
+                diagnostics: OriginalFailureDiagnostics::Hosted,
+                ..
+            } => {
+                if let Some(failure) = metadata_failure {
+                    tracing::warn!(%failure, path = %self.path().display(), "compiler diagnostic metadata is incomplete");
+                }
+                tracing::warn!(path = %self.path().display(), "retained failed compiler artifacts");
+                error
+            }
+            Self::Inspection(_)
+            | Self::Original {
+                diagnostics: OriginalFailureDiagnostics::BuildAction,
+                ..
+            } => {
+                // Build CLIs have no tracing subscriber. A diagnostic write
+                // cannot replace the typed primary failure.
+                use std::io::Write;
+                if let Some(failure) = metadata_failure {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "compiler diagnostic metadata is incomplete: {failure}"
+                    );
+                }
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "compiler artifacts retained at {}",
+                    self.path().display()
+                );
+                error
+            }
         }
     }
 
     fn begin_execution(&mut self) -> Option<production_entry::EntrySubmission> {
         match self {
-            Self::Original(preparation) => Some(preparation.begin_execution()),
-            Self::Scratch(_) => None,
+            Self::Original { preparation, .. } => Some(preparation.begin_execution()),
+            Self::Scratch(_) | Self::Inspection(_) => None,
         }
     }
 
@@ -5162,7 +5224,7 @@ impl CompilationOutputOwner {
         error: &tidepool_extract_cmd::SpawnError,
         previous: Option<production_entry::EntrySubmission>,
     ) {
-        if let Self::Original(preparation) = self {
+        if let Self::Original { preparation, .. } = self {
             if error.definitely_unsubmitted() {
                 if let Some(previous) = previous {
                     preparation.confirm_unsubmitted_attempt(previous);
@@ -5655,33 +5717,34 @@ fn compile_invocation_inner(
     };
     let allow_candidates = matches!(&policy, CompilationPolicy::Runtime { .. });
     let mut output_owner = match &policy {
-        CompilationPolicy::RetainedEntry { output, .. }
-        | CompilationPolicy::BuildAction {
+        CompilationPolicy::RetainedEntry { output, .. } => CompilationOutputOwner::Original {
+            preparation: production_entry::EntryPreparation::reserve(output)?,
+            diagnostics: OriginalFailureDiagnostics::Hosted,
+        },
+        CompilationPolicy::BuildAction {
             export:
                 BuildActionExport::ProductionEntry {
                     output_root: output,
                     ..
                 },
             ..
-        } => CompilationOutputOwner::Original(production_entry::EntryPreparation::reserve(output)?),
+        } => CompilationOutputOwner::Original {
+            preparation: production_entry::EntryPreparation::reserve(output)?,
+            diagnostics: OriginalFailureDiagnostics::BuildAction,
+        },
         CompilationPolicy::BuildAction {
             export: BuildActionExport::CatalogInventory { output_root, .. },
             ..
         } => {
             let raw = output_root.join("raw");
             std::fs::create_dir(&raw)?;
-            CompilationOutputOwner::Scratch(TempDir::new_in(raw)?)
+            CompilationOutputOwner::Inspection(TempDir::new_in(raw)?.keep())
         }
         CompilationPolicy::BuildAction { scratch, .. } => {
             CompilationOutputOwner::Scratch(TempDir::new_in(scratch)?)
         }
         _ => CompilationOutputOwner::Scratch(compiler_scratch_directory()?),
     };
-    if let (Some(_), CompilationOutputOwner::Scratch(directory)) =
-        (inventory_export, &mut output_owner)
-    {
-        directory.disable_cleanup(true);
-    }
     // GHC derives the module name from the filename (capitalize(basename));
     // see `CompileInvocation::fallback_module_name`'s doc for why this
     // differs per lane.
@@ -5931,7 +5994,8 @@ fn compile_invocation_inner(
                     CompileAttemptError::Endpoint(error)
                 }
                 error => {
-                    if let CompilationOutputOwner::Original(preparation) = &mut output_owner {
+                    if let CompilationOutputOwner::Original { preparation, .. } = &mut output_owner
+                    {
                         preparation.mark_uncertain_submission();
                     }
                     CompileAttemptError::Diagnostic(error)
@@ -5960,7 +6024,7 @@ fn compile_invocation_inner(
                     | CompileAttemptError::ModulePackage(crate::toolchain::ModulePackageError::Interrupted(error))
                     if error.kind() == std::io::ErrorKind::Interrupted)
             {
-                if let CompilationOutputOwner::Original(preparation) = output_owner {
+                if let CompilationOutputOwner::Original { preparation, .. } = output_owner {
                     preparation.release_if_unsubmitted()?;
                 }
             }
@@ -6000,7 +6064,7 @@ fn compile_invocation_inner(
     );
 
     if inventory_export.is_some()
-        || matches!(&output_owner, CompilationOutputOwner::Original(_))
+        || matches!(&output_owner, CompilationOutputOwner::Original { .. })
         || matches!(
             &policy,
             CompilationPolicy::BuildAction {
@@ -6079,7 +6143,7 @@ fn compile_invocation_inner(
         invocation_timing.finish(portable.is_ok());
         return portable;
     }
-    if let CompilationOutputOwner::Original(preparation) = output_owner {
+    if let CompilationOutputOwner::Original { preparation, .. } = &output_owner {
         let original_layout = invocation_output::InvocationOutputLayout::original(inv.targets)?;
         let extracted = invocation_output::extract_native(
             &run,
@@ -6095,14 +6159,8 @@ fn compile_invocation_inner(
         );
         // Candidate admission misses are handled before source execution by the
         // worker. A completed request is never replayed because of its response.
-        let native = extracted.map_err(|error| match &policy {
-            CompilationPolicy::BuildAction {
-                export: BuildActionExport::PreparedFixture { .. },
-                ..
-            } => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
-            CompilationPolicy::BuildAction { .. } => error,
-            _ => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
-        })?;
+        let native = extracted
+            .map_err(|error| output_owner.retain_failure(&cmd, &compiler_stderr, error))?;
         let bundle = &native.bundle;
         let admitted = (|| {
             if let CompilationPolicy::BuildAction { source_path, .. } = &policy {
@@ -6132,10 +6190,7 @@ fn compile_invocation_inner(
             };
             preparation.admit(&input_path, inv.source, &native, &offer)
         })()
-        .map_err(|error| match &policy {
-            CompilationPolicy::BuildAction { .. } => error,
-            _ => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
-        })?;
+        .map_err(|error| output_owner.retain_failure(&cmd, &compiler_stderr, error))?;
         invocation_timing.advance("retained_entry_seal");
         let (source_path, sources, catalog) = match &policy {
             CompilationPolicy::RetainedEntry {
@@ -6157,6 +6212,9 @@ fn compile_invocation_inner(
                     "original output owner has a different compilation policy".into(),
                 ))
             }
+        };
+        let CompilationOutputOwner::Original { preparation, .. } = output_owner else {
+            unreachable!("original output owner was borrowed for admission")
         };
         let original = preparation.seal(
             admitted,
@@ -6183,14 +6241,8 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let native = extracted.map_err(|error| match &policy {
-        CompilationPolicy::BuildAction {
-            export: BuildActionExport::PreparedFixture { .. },
-            ..
-        } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        CompilationPolicy::BuildAction { .. } => error,
-        _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-    })?;
+    let native =
+        extracted.map_err(|error| output_owner.retain_failure(&cmd, &compiler_stderr, error))?;
     let bundle = &native.bundle;
     let native_output = native.native_output();
     let meta_bytes = bundle.metadata();
@@ -6533,20 +6585,55 @@ fn compile_invocation_inner(
     })();
     let artifacts = assembled.map_err(|error| {
         invocation_timing.retry("failure_retention");
-        let error = match &policy {
-            CompilationPolicy::BuildAction {
-                export: BuildActionExport::PreparedFixture { .. },
-                ..
-            } => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-            CompilationPolicy::BuildAction { .. } => error,
-            _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
-        };
+        let error = output_owner.retain_failure(&cmd, &compiler_stderr, error);
         invocation_timing.advance("refusal_return");
         error
     })?;
     invocation_timing.advance("retained_entry_seal");
     invocation_timing.finish(true);
     Ok(CompilationOutput::Ordinary(artifacts))
+}
+
+// Persistent output owners already hold all raw payloads. Add only diagnostic
+// metadata absent from that owner, using the existing bounded source capture.
+fn retain_compiler_failure_metadata(
+    directory: &Path,
+    command: &ExtractCmd,
+    stderr: &[u8],
+) -> std::io::Result<()> {
+    fn write_missing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file.write_all(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::symlink_metadata(path)?.is_file() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other(
+                        "diagnostic metadata is not a regular file",
+                    ))
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    write_missing(
+        &directory.join("compiler-request.bin"),
+        &command.request_bytes(),
+    )?;
+    write_missing(
+        &directory.join("compiler-cwd.bin"),
+        std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+    )?;
+    write_missing(&directory.join("compiler.stderr"), stderr)?;
+    if !directory.join("consumed-sources.json").try_exists()? {
+        failure_sources::retain(directory, Vec::new())?;
+    }
+    Ok(())
 }
 
 /// Retain worker outputs and stderr after compilation or final sealing fails.
@@ -6779,14 +6866,39 @@ fn retain_program_compile_diagnostics(source: &Path, destination: &Path) -> std:
         }
         Ok(())
     }
+    fn copy_native_products(
+        source: &Path,
+        destination: &Path,
+        remaining: &mut u64,
+        entries_left: &mut usize,
+    ) -> std::io::Result<()> {
+        for name in ["package-interfaces", "package-products"] {
+            let directory = source.join(name);
+            match std::fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.file_type().is_dir() => copy_scope(
+                    &directory,
+                    &destination.join(name),
+                    remaining,
+                    entries_left,
+                    0,
+                )?,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
     let mut remaining = 128 * 1024 * 1024;
+    let mut entries_left = 4096;
+    copy_native_products(source, destination, &mut remaining, &mut entries_left)?;
     let exact_scope = source.join("exact-scope");
     if std::fs::symlink_metadata(&exact_scope).is_ok_and(|metadata| metadata.file_type().is_dir()) {
         copy_scope(
             &exact_scope,
             &destination.join("exact-scope"),
             &mut remaining,
-            &mut 4096,
+            &mut entries_left,
             0,
         )?;
     }
@@ -6811,11 +6923,13 @@ fn retain_program_compile_diagnostics(source: &Path, destination: &Path) -> std:
         }
         let output = destination.join(name);
         copy_files(&entry.path(), &output, &mut remaining)?;
+        copy_native_products(&entry.path(), &output, &mut remaining, &mut entries_left)?;
         copy_receipts(&entry.path(), &output, &mut remaining)?;
         let planned = entry.path().join("planned-declaration");
         if std::fs::symlink_metadata(&planned).is_ok_and(|metadata| metadata.file_type().is_dir()) {
             let output = output.join("planned-declaration");
             copy_files(&planned, &output, &mut remaining)?;
+            copy_native_products(&planned, &output, &mut remaining, &mut entries_left)?;
             copy_receipts(&planned, &output, &mut remaining)?;
         }
     }
@@ -7874,6 +7988,21 @@ mod module_product_tests {
         }
         let scratch = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
+        let packets = [
+            ("certified-products.cbor", b"receipt".as_slice()),
+            ("module-package-imports.cbor", b"imports".as_slice()),
+            ("package-interfaces/interface.hi", b"interface".as_slice()),
+            ("package-products/product.cbor", b"package".as_slice()),
+            (
+                "item-0/package-interfaces/interface.hi",
+                b"nested-interface".as_slice(),
+            ),
+        ];
+        for &(name, bytes) in &packets {
+            let path = output.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
         let input = scratch.path().join("turn.txt");
         let source = b"value <- pure (41 :: Int)\n";
         std::fs::write(&input, source).unwrap();
@@ -7905,7 +8034,8 @@ mod module_product_tests {
             panic!("worker report must retain its typed failure cause");
         };
         let original = original.clone();
-        let error = retain_compiler_failure(output.path(), &command, stderr.as_bytes(), error);
+        let output = CompilationOutputOwner::Scratch(output);
+        let error = output.retain_failure(&command, stderr.as_bytes(), error);
         drop(output);
         drop(scratch);
 
@@ -7915,6 +8045,9 @@ mod module_product_tests {
             .collect::<Vec<_>>();
         assert_eq!(retained.len(), 1);
         let retained = &retained[0];
+        for &(name, bytes) in &packets {
+            assert_eq!(std::fs::read(retained.join(name)).unwrap(), bytes);
+        }
         let CompileError::WorkerFailure(diagnostics) = &error else {
             panic!("retention must not replace the worker failure variant");
         };
@@ -7945,6 +8078,111 @@ mod module_product_tests {
                 .unwrap()
                 .as_os_str()
                 .as_encoded_bytes()
+        );
+        // An inaccessible retention destination cannot replace the worker failure.
+        unsafe {
+            std::env::set_var(
+                "TIDEPOOL_TEST_ARTIFACT_ROOT",
+                retained.join("compiler-request.bin"),
+            );
+        }
+        let error = retain_compiler_failure(
+            retained,
+            &command,
+            stderr.as_bytes(),
+            CompileError::WorkerFailure(original.clone()),
+        );
+        let CompileError::WorkerFailure(diagnostics) = error else {
+            panic!("failed retention must preserve the primary worker failure");
+        };
+        assert_eq!(diagnostics, original);
+        let declared_source = root.path().join("Owned.hs");
+        let source_bytes = b"module Owned where\n";
+        std::fs::write(&declared_source, source_bytes).unwrap();
+        let source_hash = crate::checked_cell::hash(source_bytes);
+        let evidence = crate::cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![crate::cache::SourceEvidence {
+                path: declared_source.clone(),
+                sha256: source_hash.clone(),
+            }],
+            resolutions: vec![],
+            packages: vec![],
+            modules: vec![],
+        };
+        let mut kept_paths = Vec::new();
+        let inspection = tempfile::tempdir_in(root.path()).unwrap().keep();
+        let preparation =
+            production_entry::EntryPreparation::reserve(&root.path().join("entry")).unwrap();
+        let hosted =
+            production_entry::EntryPreparation::reserve(&root.path().join("hosted-entry")).unwrap();
+        for owner in [
+            CompilationOutputOwner::Inspection(inspection),
+            CompilationOutputOwner::Original {
+                preparation: hosted,
+                diagnostics: OriginalFailureDiagnostics::Hosted,
+            },
+            CompilationOutputOwner::Original {
+                preparation,
+                diagnostics: OriginalFailureDiagnostics::BuildAction,
+            },
+        ] {
+            let path = owner.path().to_owned();
+            std::fs::write(path.join("owned-raw-packet"), b"already retained").unwrap();
+            std::fs::write(
+                path.join("dependencies.json"),
+                serde_json::to_vec(&evidence).unwrap(),
+            )
+            .unwrap();
+            // Existing compiler output remains in place while missing metadata is added.
+            std::fs::write(path.join("compiler.stderr"), stderr.as_bytes()).unwrap();
+            let error = owner.retain_failure(
+                &command,
+                stderr.as_bytes(),
+                CompileError::WorkerFailure(original.clone()),
+            );
+            let CompileError::WorkerFailure(diagnostics) = error else {
+                panic!("durable reporting must preserve the primary worker failure");
+            };
+            assert_eq!(diagnostics, original);
+            drop(owner);
+            assert_eq!(
+                std::fs::read(path.join("owned-raw-packet")).unwrap(),
+                b"already retained"
+            );
+            assert_eq!(
+                std::fs::read(path.join("compiler-request.bin")).unwrap(),
+                executed_request
+            );
+            assert_eq!(
+                std::fs::read(path.join("compiler.stderr")).unwrap(),
+                stderr.as_bytes()
+            );
+            assert_eq!(
+                std::fs::read(path.join("compiler-cwd.bin")).unwrap(),
+                std::env::current_dir()
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+            );
+            assert!(path.join("consumed-sources.json").is_file());
+            kept_paths.push(path);
+        }
+        std::fs::remove_file(declared_source).unwrap();
+        for path in kept_paths {
+            assert_eq!(
+                std::fs::read(path.join("consumed-sources").join(&source_hash)).unwrap(),
+                source_bytes
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(root.path().join("compiler-failures"))
+                .unwrap()
+                .count(),
+            1,
+            "already retained owners do not create diagnostic copies"
         );
     }
 

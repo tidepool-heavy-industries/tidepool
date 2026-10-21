@@ -2707,11 +2707,7 @@ pub(crate) fn package_validation_error(
         {
             CertificationError::Interrupted(error)
         }
-        error @ (crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_)
-        | crate::recovery_artifacts::RecoveryArtifactError::CompletedSourceEvidence {
-            ..
-        }) => CertificationError::CapturedModulePayload(error),
-        _ => CertificationError::StaleEvidence,
+        error => CertificationError::CapturedModulePayload(error),
     }
 }
 
@@ -9687,9 +9683,12 @@ pub(crate) fn certify_products_with_validation(
     let exact = source.exact();
     // This is a fresh physical observation at the publication boundary, not a
     // reconstruction of correspondence already issued by source admission.
-    if final_evidence.revalidate(final_target_source).is_err() {
-        return Err(CertificationError::StaleEvidence);
-    }
+    final_evidence
+        .revalidate(final_target_source)
+        .map_err(|failure| CertificationError::CompletedSourceEvidence {
+            input: fresh_input_path.to_path_buf(),
+            failure: Box::new(failure),
+        })?;
     if let Some(admission) = authored {
         let owner = admission.owner();
         let rows = final_evidence
@@ -12065,7 +12064,9 @@ pub(crate) mod tests {
         std::fs::write(&path, b"changed interface").unwrap();
         assert!(matches!(
             certify_target_package_interfaces(&target, &packages),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -22812,7 +22813,9 @@ pub(crate) mod tests {
                     std::slice::from_ref(&product),
                     &mut PackageInterfaceValidation::default(),
                 ),
-                Err(CertificationError::StaleEvidence)
+                Err(CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+                ))
             ));
             std::fs::write(&first, [0x43]).unwrap();
             assert_eq!(
@@ -22945,7 +22948,9 @@ pub(crate) mod tests {
                 consumer,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
         assert!(matches!(
             certify_owned_products_with_validation(
@@ -22953,7 +22958,9 @@ pub(crate) mod tests {
                 &[],
                 &mut PackageInterfaceValidation::default()
             ),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -23140,7 +23147,9 @@ pub(crate) mod tests {
         std::fs::write(path, [0x43]).unwrap();
         assert!(matches!(
             validate_home_certification(&sealed, &a),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -27601,6 +27610,89 @@ None,
     }
 
     #[test]
+    fn final_product_admission_preserves_consumed_source_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = "module Fresh where";
+        let input = directory.path().join("Fresh.hs");
+        std::fs::write(&input, source).unwrap();
+        let dependency = directory.path().join("Dependency.hs");
+        let original = "module Dependency where";
+        std::fs::write(&dependency, original).unwrap();
+        let mut worker = evidence(source);
+        worker.sources[0].path = input.clone();
+        worker.modules[0].source = input.clone();
+        worker.sources.push(SourceEvidence {
+            path: dependency.clone(),
+            sha256: hex(&sha(original.as_bytes())),
+        });
+        let raw_evidence = serde_json::to_vec(&worker).unwrap();
+        let body = sidecar();
+        let parsed = ParsedModuleProducts::decode(&body, &empty_package_bundle()).unwrap();
+        let admitted = crate::artifacts::admit_compiler_source(
+            parsed.operation(),
+            &raw_evidence,
+            &input,
+            source,
+        )
+        .unwrap();
+        let mut accepted = receipt(&body, &worker, source);
+        accepted.dependency_witness_sha256 = sha(&raw_evidence);
+        let receipt = CertifiedReceipt {
+            package_products: Vec::new(),
+            source_recipe: WorkerExecutionSource::Ordinary,
+            finalization: fixture_finalization(
+                Some(directory.path()),
+                std::slice::from_ref(&accepted),
+            ),
+            modules: vec![accepted],
+            targets: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        };
+        let certify = || {
+            certify_products(
+                None,
+                &receipt,
+                &parsed,
+                &admitted,
+                directory.path(),
+                b"producer",
+                &[],
+                None,
+            )
+        };
+        certify().unwrap();
+        let changed = "module Dependency where; changed = True";
+        std::fs::write(&dependency, changed).unwrap();
+        let error = certify().err().expect("changed consumed dependency");
+        let expected = crate::cache::DependencyEvidenceFailure::Source {
+            index: 1,
+            reason: crate::cache::SourceWitnessFailure::Changed {
+                expected: hex(&sha(original.as_bytes())),
+                actual: hex(&sha(changed.as_bytes())),
+            },
+        };
+        assert!(
+            matches!(&error, CertificationError::CompletedSourceEvidence { input: actual, failure }
+            if actual == &input && failure.as_ref() == &expected)
+        );
+        let classified = crate::failclass::classify_compile(
+            &crate::CompileError::CompilerEvidence(Box::new(error)),
+        );
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::SourceEvidence {
+                    input: input.clone(),
+                    failure: expected
+                },
+            })
+        );
+        std::fs::write(&dependency, original).unwrap();
+        certify().unwrap();
+    }
+
+    #[test]
     fn fresh_product_requires_exact_sidecar_and_evidence() {
         let source = "module Fresh where";
         let bytes = sidecar();
@@ -29044,20 +29136,60 @@ None,
             ..InventoryDecodeLimits::default()
         }));
         let mut limited = PackageInterfaceValidation::with_inventory(operation);
+        let error = verify_package_interface(&mut limited, &witness).unwrap_err();
         assert!(matches!(
-            verify_package_interface(&mut limited, &witness),
-            Err(CertificationError::CapturedModulePayload(
+            &error,
+            CertificationError::CapturedModulePayload(
                 crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(
                     crate::recovery_artifacts::RecoveryAdmissionFailure::Decode(
                         tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
                     )
                 )
-            ))
+            )
         ));
+        let classified = crate::failclass::classify_compile(
+            &crate::CompileError::CompilerEvidence(Box::new(error)),
+        );
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::Budget {
+                    resource: "work".into()
+                },
+            })
+        );
+        let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let outcome = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || verify_package_interface(&mut PackageInterfaceValidation::default(), &witness),
+        );
+        assert_eq!(
+            outcome.close,
+            tidepool_extract_cmd::CompilerTransactionClose::NotStarted
+        );
+        let error = outcome.action.unwrap_err();
+        assert!(
+            matches!(&error, CertificationError::Interrupted(error) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        let classified = crate::failclass::classify_compile(
+            &crate::CompileError::CompilerEvidence(Box::new(error)),
+        );
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::Interrupted,
+            })
+        );
         std::fs::write(path, b"changed interface").unwrap();
         assert!(matches!(
             verify_package_interface(&mut PackageInterfaceValidation::default(), &witness),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
 
@@ -29089,7 +29221,9 @@ None,
         std::fs::write(&selected_path, b"changed interface").unwrap();
         assert!(matches!(
             resolve_receipt_owner(import, &SourceGroupMap::new(), &packages),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
     #[test]

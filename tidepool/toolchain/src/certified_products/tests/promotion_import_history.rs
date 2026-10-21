@@ -952,7 +952,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let mut recapture = PackageInterfaceValidation::with_inventory(shared.operation().clone());
         assert!(matches!(
             shared.select_item(&mut cursor, addition(), &target, None, &mut recapture),
-            Err(CertificationError::StaleEvidence)
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
         ));
     }
     let mut other_validation = PackageInterfaceValidation::default();

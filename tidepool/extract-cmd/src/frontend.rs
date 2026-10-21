@@ -310,14 +310,126 @@ impl OwnedCompilerEvidence<'_> {
             );
     }
 
-    fn write_lifecycle(&self, report: &Path, confirmed: bool, code: Option<u8>) -> io::Result<()> {
+    fn write_lifecycle(&self, report: &Path, state: OwnedLifecycleState<'_>) -> io::Result<()> {
+        let (confirmed, code, execution) = match state {
+            OwnedLifecycleState::Running => (false, None, "{\"status\":\"running\"}".to_owned()),
+            OwnedLifecycleState::Observed { child, cleanup } => {
+                let (code, execution) = match child {
+                    Ok(status) => {
+                        use std::os::unix::process::ExitStatusExt;
+                        (
+                            Some(exit_code(*status)),
+                            format!(
+                                "{{\"status\":\"exited\",\"success\":{},\"signal\":{}}}",
+                                status.success(),
+                                status
+                                    .signal()
+                                    .map_or("null".into(), |signal| signal.to_string()),
+                            ),
+                        )
+                    }
+                    Err(error) => (
+                        None,
+                        format!(
+                            "{{\"status\":\"status_failed\",\"kind\":{},\"message\":{}}}",
+                            json_string(&format!("{:?}", error.kind())),
+                            json_string(&error.to_string()),
+                        ),
+                    ),
+                };
+                (
+                    matches!(cleanup, OwnedCleanupState::Complete(Ok(()))),
+                    code,
+                    execution,
+                )
+            }
+        };
         atomic_write_manifest(report, format!(
-            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"socket_path\":{},\"cleanup_confirmed\":{},\"exit_code\":{}}}\n",
+            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"socket_path\":{},\"cleanup_confirmed\":{},\"exit_code\":{},\"execution\":{}}}\n",
             json_string(&self.identity.producer_hex()), json_string(&self.identity.to_hex()),
             json_string(&crate::endpoint::hex(self.epoch)), self.pid,
             json_string(&self.socket.display().to_string()), confirmed,
-            code.map_or("null".into(), |value| value.to_string())
+            code.map_or("null".into(), |value| value.to_string()), execution
         ).as_bytes())
+    }
+}
+
+enum OwnedLifecycleState<'a> {
+    Running,
+    Observed {
+        child: &'a io::Result<ExitStatus>,
+        cleanup: OwnedCleanupState<'a>,
+    },
+}
+
+enum OwnedCleanupState<'a> {
+    Pending,
+    Complete(&'a Result<(), FrontendError>),
+}
+
+/// Observation precedes cleanup even when publishing that observation fails.
+struct OwnedChildLifecycle<'a> {
+    evidence: OwnedCompilerEvidence<'a>,
+    report: &'a Path,
+    outcome_path: &'a Path,
+    child: io::Result<ExitStatus>,
+    publication: Vec<io::Error>,
+}
+
+impl<'a> OwnedChildLifecycle<'a> {
+    fn observe(
+        evidence: OwnedCompilerEvidence<'a>,
+        report: &'a Path,
+        outcome_path: &'a Path,
+        child: io::Result<ExitStatus>,
+    ) -> Self {
+        let mut owner = Self {
+            evidence,
+            report,
+            outcome_path,
+            child,
+            publication: Vec::new(),
+        };
+        owner.publish(OwnedCleanupState::Pending);
+        owner
+    }
+
+    fn publish(&mut self, cleanup: OwnedCleanupState<'_>) {
+        if let Err(error) = self.evidence.write_lifecycle(
+            self.report,
+            OwnedLifecycleState::Observed {
+                child: &self.child,
+                cleanup,
+            },
+        ) {
+            self.publication.push(error);
+        }
+    }
+
+    fn finish(
+        mut self,
+        cleanup: impl FnOnce(bool) -> Result<(), FrontendError>,
+    ) -> Result<u8, FrontendError> {
+        let cleanup = cleanup(self.child.as_ref().is_ok_and(|status| status.success()));
+        self.publish(OwnedCleanupState::Complete(&cleanup));
+        if cleanup.is_ok() {
+            if let Err(error) = atomic_write_manifest(
+                self.outcome_path,
+                b"{\"schema\":1,\"cleanup\":{\"status\":\"confirmed\"}}\n",
+            ) {
+                self.publication.push(error);
+            }
+        }
+        if cleanup.is_ok() && self.publication.is_empty() {
+            if let Ok(status) = &self.child {
+                return Ok(exit_code(*status));
+            }
+        }
+        Err(FrontendError::OwnedRun {
+            child: self.child,
+            cleanup: cleanup.map_err(Box::new),
+            publication: self.publication,
+        })
     }
 }
 
@@ -547,7 +659,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         socket: &socket,
     };
     evidence
-        .write_lifecycle(&report, false, None)
+        .write_lifecycle(&report, OwnedLifecycleState::Running)
         .map_err(FrontendError::Io)?;
     let mut descendants =
         crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?;
@@ -563,53 +675,47 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
         .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
         .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
-        .status()
-        .map_err(FrontendError::Io);
-    descendants.extend(crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?);
-    daemon::request_stop(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let stopped = loop {
-        if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(FrontendError::Daemon(
-                "owned compiler shutdown remains unconfirmed".into(),
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    };
-    if !stopped.success() || socket.exists() {
-        return Err(FrontendError::Daemon(format!(
-            "owned compiler cleanup remains unconfirmed: {stopped}"
-        )));
-    }
-    for (pid, start) in descendants {
-        if crate::process::process_start_ticks(pid).map_err(FrontendError::Io)? == Some(start) {
+        .status();
+    let lifecycle = OwnedChildLifecycle::observe(evidence, &report, &outcome_path, child);
+    lifecycle.finish(|child_succeeded| {
+        descendants
+            .extend(crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?);
+        daemon::request_stop(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let stopped = loop {
+            if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(FrontendError::Daemon(
+                    "owned compiler shutdown remains unconfirmed".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        if !stopped.success() || socket.exists() {
             return Err(FrontendError::Daemon(format!(
-                "owned compiler descendant {pid} remains live or unreaped"
+                "owned compiler cleanup remains unconfirmed: {stopped}"
             )));
         }
-    }
-    if let Some(configuration) = &service_configuration {
-        configuration
-            .release_after_complete(root, binding.epoch)
-            .map_err(FrontendError::Io)?;
-    }
-    socket_directory.cleanup().map_err(FrontendError::Io)?;
-    let code = exit_code(child?);
-    if code == 0 {
-        std::fs::remove_dir_all(&cache).map_err(FrontendError::Io)?;
-    }
-    evidence
-        .write_lifecycle(&report, true, Some(code))
-        .map_err(FrontendError::Io)?;
-    atomic_write_manifest(
-        &outcome_path,
-        b"{\"schema\":1,\"cleanup\":{\"status\":\"confirmed\"}}\n",
-    )
-    .map_err(FrontendError::Io)?;
-    Ok(code)
+        for (pid, start) in descendants {
+            if crate::process::process_start_ticks(pid).map_err(FrontendError::Io)? == Some(start) {
+                return Err(FrontendError::Daemon(format!(
+                    "owned compiler descendant {pid} remains live or unreaped"
+                )));
+            }
+        }
+        if let Some(configuration) = &service_configuration {
+            configuration
+                .release_after_complete(root, binding.epoch)
+                .map_err(FrontendError::Io)?;
+        }
+        socket_directory.cleanup().map_err(FrontendError::Io)?;
+        if child_succeeded {
+            std::fs::remove_dir_all(&cache).map_err(FrontendError::Io)?;
+        }
+        Ok(())
+    })
 }
 
 fn connect(args: &[OsString]) -> Result<u8, FrontendError> {
@@ -1172,6 +1278,11 @@ pub struct ScratchCleanupFailure {
 
 #[derive(Debug)]
 pub enum FrontendError {
+    OwnedRun {
+        child: io::Result<ExitStatus>,
+        cleanup: Result<(), Box<FrontendError>>,
+        publication: Vec<io::Error>,
+    },
     Usage(String),
     ScratchCleanup {
         status: std::process::ExitStatus,
@@ -1276,6 +1387,20 @@ impl std::fmt::Display for FrontendError {
                     worker_version,
                     WORKER_REQUEST_FLAG,
                 )
+            }
+            Self::OwnedRun { child, cleanup, publication } => {
+                match child {
+                    Ok(status) => write!(f, "owned producer exited with {status}")?,
+                    Err(error) => write!(f, "owned producer status failed: {error}")?,
+                }
+                match cleanup {
+                    Ok(()) => f.write_str("; compiler cleanup confirmed")?,
+                    Err(error) => write!(f, "; compiler cleanup unconfirmed: {error}")?,
+                }
+                for error in publication {
+                    write!(f, "; outcome publication failed: {error}")?;
+                }
+                Ok(())
             }
             Self::Io(error) => error.fmt(f),
         }
@@ -1484,6 +1609,7 @@ mod tests {
             pid in 1_u32..u32::MAX,
             code in proptest::prelude::any::<u8>(),
             suffix in "[a-z\"\\\\]{0,12}",
+            cleanup_fails in proptest::prelude::any::<bool>(),
         ) {
             let directory = tempfile::tempdir().unwrap();
             let report = directory.path().join("lifecycle.json");
@@ -1493,29 +1619,150 @@ mod tests {
             let mut command = Command::new("unused-child");
             for key in OWNED_COMPILER_ENV { command.env(key, "foreign-owner"); }
             evidence.configure_child(&mut command);
-            // Readiness and settled reports must carry the same issued facts;
-            // only terminal cleanup and exit evidence change.
-            for (confirmed, exit) in [(false, None), (true, Some(code))] {
-                evidence.write_lifecycle(&report, confirmed, exit).unwrap();
-                let lifecycle: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
-                let environment: std::collections::BTreeMap<_, _> = command.get_envs()
-                    .filter_map(|(key, value)| value.map(|value| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())))
-                    .collect();
-                proptest::prop_assert_eq!(lifecycle["daemon_pid"].as_u64(), Some(u64::from(pid)));
-                proptest::prop_assert_eq!(environment["TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID"].as_str(), pid.to_string());
-                for (key, field, expected) in [
-                    ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER", "producer", producer.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
-                    ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH", "daemon_epoch", epoch.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
-                    (crate::DAEMON_SOCKET_ENV, "socket_path", socket.display().to_string()),
-                ] {
-                    proptest::prop_assert_eq!(&environment[key], &expected);
-                    proptest::prop_assert_eq!(lifecycle[field].as_str(), Some(expected.as_str()));
+            evidence.write_lifecycle(&report, OwnedLifecycleState::Running).unwrap();
+            let outcome = directory.path().join("owned-compiler-outcome.json");
+            let child = crate::process::command(
+                std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"),
+            ).args(["-c", &format!("exit {code}")]).status();
+            let observed = OwnedChildLifecycle::observe(evidence, &report, &outcome, child);
+            let result = observed.finish(|succeeded| {
+                let before_cleanup: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+                assert_eq!(before_cleanup["cleanup_confirmed"], false);
+                assert_eq!(before_cleanup["exit_code"], code);
+                assert_eq!(succeeded, code == 0);
+                if cleanup_fails {
+                    Err(FrontendError::Daemon("injected shutdown refusal".into()))
+                } else {
+                    Ok(())
                 }
-                proptest::prop_assert_eq!(lifecycle["cleanup_confirmed"].as_bool(), Some(confirmed));
-                proptest::prop_assert_eq!(lifecycle["exit_code"].as_u64(), exit.map(u64::from));
-                proptest::prop_assert_eq!(lifecycle["endpoint"].as_str(), Some(environment[crate::REQUIRED_DAEMON_ENDPOINT_ENV].as_str()));
+            });
+            proptest::prop_assert_eq!(result.is_ok(), !cleanup_fails);
+            let confirmed = !cleanup_fails;
+            let exit = Some(code);
+            let lifecycle: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+            let environment: std::collections::BTreeMap<_, _> = command.get_envs()
+                .filter_map(|(key, value)| value.map(|value| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())))
+                .collect();
+            proptest::prop_assert_eq!(lifecycle["daemon_pid"].as_u64(), Some(u64::from(pid)));
+            proptest::prop_assert_eq!(environment["TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID"].as_str(), pid.to_string());
+            for (key, field, expected) in [
+                ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER", "producer", producer.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+                ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH", "daemon_epoch", epoch.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+                (crate::DAEMON_SOCKET_ENV, "socket_path", socket.display().to_string()),
+            ] {
+                proptest::prop_assert_eq!(&environment[key], &expected);
+                proptest::prop_assert_eq!(lifecycle[field].as_str(), Some(expected.as_str()));
             }
+            proptest::prop_assert_eq!(lifecycle["cleanup_confirmed"].as_bool(), Some(confirmed));
+            proptest::prop_assert_eq!(lifecycle["exit_code"].as_u64(), exit.map(u64::from));
+            proptest::prop_assert_eq!(lifecycle["endpoint"].as_str(), Some(environment[crate::REQUIRED_DAEMON_ENDPOINT_ENV].as_str()));
         }
+    }
+
+    #[test]
+    fn owned_producer_failure_survives_cleanup_and_publication_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let report = directory.path().join("lifecycle.json");
+        let outcome = directory.path().join("owned-compiler-outcome.json");
+        let socket = directory.path().join("compiler.sock");
+        let epoch = [3; 32];
+        let identity = crate::CompilerIdentity::daemon([1; 32], [2; 32], epoch);
+        for fail_initial_publication in [false, true] {
+            let evidence = OwnedCompilerEvidence {
+                identity: &identity,
+                epoch: &epoch,
+                pid: 1,
+                socket: &socket,
+            };
+            if fail_initial_publication {
+                std::fs::create_dir(&report).unwrap();
+            }
+            let child = crate::process::command(
+                std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"),
+            )
+            .args(["-c", "exit 37"])
+            .status();
+            let owner = OwnedChildLifecycle::observe(evidence, &report, &outcome, child);
+            let mut cleanup_ran = false;
+            let result = owner.finish(|succeeded| {
+                cleanup_ran = true;
+                assert!(!succeeded);
+                if !fail_initial_publication {
+                    let observed: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+                    assert_eq!(observed["exit_code"], 37);
+                    assert_eq!(observed["cleanup_confirmed"], false);
+                    std::fs::remove_file(&report).unwrap();
+                    std::fs::create_dir(&report).unwrap();
+                }
+                Err(FrontendError::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected root release refusal",
+                )))
+            });
+            assert!(cleanup_ran, "publication failure must not bypass cleanup");
+            match result.unwrap_err() {
+                FrontendError::OwnedRun {
+                    child,
+                    cleanup,
+                    publication,
+                } => {
+                    assert_eq!(child.unwrap().code(), Some(37));
+                    assert!(
+                        matches!(*cleanup.unwrap_err(), FrontendError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied)
+                    );
+                    assert_eq!(
+                        publication.len(),
+                        if fail_initial_publication { 2 } else { 1 }
+                    );
+                }
+                other => panic!("lost owned producer result: {other:?}"),
+            }
+            assert!(
+                !outcome.exists(),
+                "failed cleanup cannot publish confirmation"
+            );
+            std::fs::remove_dir(&report).unwrap();
+        }
+    }
+
+    #[test]
+    fn owned_status_failure_retains_independent_confirmed_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let report = directory.path().join("lifecycle.json");
+        let outcome = directory.path().join("owned-compiler-outcome.json");
+        let socket = directory.path().join("compiler.sock");
+        let epoch = [3; 32];
+        let identity = crate::CompilerIdentity::daemon([1; 32], [2; 32], epoch);
+        let evidence = OwnedCompilerEvidence {
+            identity: &identity,
+            epoch: &epoch,
+            pid: 1,
+            socket: &socket,
+        };
+        let child = crate::process::command(directory.path().join("missing-child")).status();
+        let result =
+            OwnedChildLifecycle::observe(evidence, &report, &outcome, child).finish(|succeeded| {
+                assert!(!succeeded);
+                Ok(())
+            });
+        match result.unwrap_err() {
+            FrontendError::OwnedRun {
+                child,
+                cleanup,
+                publication,
+            } => {
+                assert_eq!(child.unwrap_err().kind(), io::ErrorKind::NotFound);
+                assert!(cleanup.is_ok());
+                assert!(publication.is_empty());
+            }
+            other => panic!("lost owned producer status failure: {other:?}"),
+        }
+        let observed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+        assert_eq!(observed["execution"]["status"], "status_failed");
+        assert_eq!(observed["exit_code"], serde_json::Value::Null);
+        assert_eq!(observed["cleanup_confirmed"], true);
     }
 
     #[test]

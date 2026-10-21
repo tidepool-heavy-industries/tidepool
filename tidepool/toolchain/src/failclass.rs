@@ -197,6 +197,9 @@ pub enum EvidenceByteLimitOwner {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EvidenceReadCause {
     NonAbsolutePath,
+    Unavailable,
+    Unreadable,
+    DigestMismatch,
     NotFile,
     SizeLimit {
         actual: u64,
@@ -236,6 +239,25 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
                     failure: (**failure).clone(),
                 }
             }
+            CertificationError::CapturedModulePayload(RecoveryArtifactError::Unavailable(path)) => {
+                Self::Read {
+                    path: path.clone(),
+                    failure: EvidenceReadCause::Unavailable,
+                }
+            }
+            CertificationError::CapturedModulePayload(RecoveryArtifactError::Unreadable {
+                path,
+                ..
+            }) => Self::Read {
+                path: path.clone(),
+                failure: EvidenceReadCause::Unreadable,
+            },
+            CertificationError::CapturedModulePayload(RecoveryArtifactError::DigestMismatch(
+                path,
+            )) => Self::Read {
+                path: path.clone(),
+                failure: EvidenceReadCause::DigestMismatch,
+            },
             CertificationError::EvidenceRead { path, failure } => Self::Read {
                 path: path.clone(),
                 failure: match failure {
@@ -424,7 +446,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
             let failure = CompilerEvidenceFailure::from(error.as_ref());
             let class = match failure {
                 CompilerEvidenceFailure::Read {
-                    failure: EvidenceReadCause::NonAbsolutePath,
+                    failure: EvidenceReadCause::NonAbsolutePath | EvidenceReadCause::DigestMismatch,
                     ..
                 }
                 | CompilerEvidenceFailure::Contract

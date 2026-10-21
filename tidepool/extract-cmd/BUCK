@@ -148,6 +148,12 @@ tidepool_rust_isolated_test(
     test_fixtures = [
         "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
     ],
+    resources = [
+        "toolchains//:bash",
+    ],
+    resource_env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+    },
     visibility = ["PUBLIC"],
 )
 
@@ -185,7 +191,12 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/extract-cmd/tests/build_products_frontend.rs",
     ],
-
+    resources = [
+        "toolchains//:bash",
+    ],
+    resource_env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+    },
     compile_env = {"CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)"},
     visibility = ["PUBLIC"],
 )

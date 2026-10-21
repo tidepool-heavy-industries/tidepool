@@ -921,9 +921,7 @@ fn recovery_validation_error(
                 limit,
             })
         }
-        CertificationError::CapturedModulePayload(
-            error @ RecoveryArtifactError::InventoryAccounting(_),
-        ) => error,
+        CertificationError::CapturedModulePayload(error) => error,
         CertificationError::EvidenceRead {
             path,
             failure: crate::certified_products::EvidenceReadFailure::SizeLimit { actual, limit },
@@ -933,7 +931,6 @@ fn recovery_validation_error(
             limit,
         }),
         CertificationError::EvidenceRead { .. }
-        | CertificationError::CapturedModulePayload(_)
         | CertificationError::UnsupportedVersion { .. }
         | CertificationError::Receipt(_)
         | CertificationError::Mismatch(_)
@@ -3635,6 +3632,109 @@ mod tests {
                 RecoveryAdmissionFailure::Decode(ParseError::LimitExceeded(_))
             ))
         ));
+    }
+
+    #[test]
+    fn package_interface_primary_causes_survive_recovery_and_classification() {
+        use crate::certified_products::{
+            certify_target_package_interfaces, package_validation_error, CertificationError,
+            PackageInterfaceWitness,
+        };
+        use crate::failclass::{
+            classify_compile, CompileFailureCause, CompilerEvidenceFailure, EvidenceReadCause,
+            FailureClass, Phase,
+        };
+        use tidepool_repr::execution_schema::testing;
+
+        fn check(
+            error: CertificationError,
+            path: &Path,
+            expected: EvidenceReadCause,
+            class: FailureClass,
+        ) {
+            let recovery =
+                recovery_validation_error(error, RecoveryArtifactError::InvalidReference);
+            match (&recovery, &expected) {
+                (RecoveryArtifactError::Unavailable(actual), EvidenceReadCause::Unavailable)
+                | (
+                    RecoveryArtifactError::DigestMismatch(actual),
+                    EvidenceReadCause::DigestMismatch,
+                ) => assert_eq!(actual, path),
+                (
+                    RecoveryArtifactError::Unreadable {
+                        path: actual,
+                        error,
+                    },
+                    EvidenceReadCause::Unreadable,
+                ) => {
+                    assert_eq!(actual, path);
+                    assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+                }
+                _ => panic!("primary recovery cause changed: {recovery:?}"),
+            }
+            let failure = classify_compile(&crate::CompileError::CompilerEvidence(Box::new(
+                package_validation_error(recovery),
+            )));
+            assert_eq!((failure.class, failure.phase), (class, Phase::Compile));
+            assert!(failure.message.contains(path.to_str().unwrap()));
+            let expected = CompileFailureCause::CompilerEvidence {
+                failure: CompilerEvidenceFailure::Read {
+                    path: path.to_path_buf(),
+                    failure: expected,
+                },
+            };
+            assert_eq!(failure.cause, Some(expected.clone()));
+            let encoded = serde_json::to_vec(&expected).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<CompileFailureCause>(&encoded).unwrap(),
+                expected
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("package");
+        fs::create_dir(&parent).unwrap();
+        let path = parent.join("Selected.hi");
+        let bytes = b"selected package interface";
+        fs::write(&path, bytes).unwrap();
+        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let packages = BTreeMap::from([(
+            ("package-unit".into(), "Selected".into()),
+            PackageInterfaceWitness {
+                selected_path: path.clone(),
+                sha256: Sha256::digest(bytes).into(),
+            },
+        )]);
+        let admit = || certify_target_package_interfaces(&target, &packages);
+        admit().unwrap();
+        fs::write(&path, b"changed package interface").unwrap();
+        check(
+            admit().unwrap_err(),
+            &path,
+            EvidenceReadCause::DigestMismatch,
+            FailureClass::VersionSkew,
+        );
+        fs::remove_file(&path).unwrap();
+        check(
+            admit().unwrap_err(),
+            &path,
+            EvidenceReadCause::Unavailable,
+            FailureClass::Infra,
+        );
+        // A non-directory ancestor exercises inaccessible storage without
+        // depending on the test account's permission capabilities.
+        fs::remove_dir(&parent).unwrap();
+        fs::write(&parent, b"not a directory").unwrap();
+        check(
+            admit().unwrap_err(),
+            &path,
+            EvidenceReadCause::Unreadable,
+            FailureClass::Infra,
+        );
+        fs::remove_file(&parent).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(&path, bytes).unwrap();
+        admit().unwrap();
     }
 
     #[test]
