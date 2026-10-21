@@ -11844,27 +11844,28 @@ pub(crate) fn certify_products_with_validation(
             .iter()
             .filter(|(_, current, _, _)| current == owner)
             .map(|(_, _, group, _)| {
-                let mut imports = resolved[&group.original_ordinal()]
+                let imports = resolved[&group.original_ordinal()]
                     .iter()
-                    .map(retained_core::NominalImportOwner::receipt)
+                    .map(|import| match import {
+                        retained_core::NominalImportOwner::Source {
+                            owner,
+                            original_ordinal,
+                            binder,
+                        } => ReceiptImportOwner::Source {
+                            unit: owner.unit.clone(),
+                            module: owner.module.clone(),
+                            module_version: Some(
+                                promotion_owners
+                                    .get(owner)
+                                    .unwrap_or(&owner.module_version)
+                                    .clone(),
+                            ),
+                            original_ordinal: *original_ordinal,
+                            binder: binder.clone(),
+                        },
+                        _ => import.receipt(),
+                    })
                     .collect::<Vec<_>>();
-                for import in &mut imports {
-                    if let ReceiptImportOwner::Source {
-                        unit,
-                        module,
-                        module_version,
-                        ..
-                    } = import
-                    {
-                        if let Some((_, version)) = promotion_owners.iter().find(|(owner, _)| {
-                            owner.unit == *unit
-                                && owner.module == *module
-                                && module_version.as_ref() == Some(&owner.module_version)
-                        }) {
-                            *module_version = Some(version.clone());
-                        }
-                    }
-                }
                 (group, imports)
             })
             .collect::<Vec<_>>();
