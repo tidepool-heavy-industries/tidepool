@@ -9004,27 +9004,54 @@ mod module_product_tests {
             CompilerTransactionOrigin,
         };
         let initial = if mixed {
-            let compiled = crate::artifacts::test_support::compile_invocation(
-                &CompileInvocation {
-                    source: include_str!("../tests/fixtures/world-native/StageInputG.hs"),
-                    targets: &["g"],
-                    include: &[],
-                    fallback_module_name: "StageInputG",
-                },
-                |_, _, _| {},
+            let producer = PathBuf::from(
+                std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+                    .expect("the rooted case owns its initial finite producer output"),
             )
-            .expect("actual finite producer for the initial World Original");
-            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                compiled
-                    .source_selection
-                    .as_ref()
-                    .expect("actual finite source selection"),
-                &compiled.artifact_view,
+            .join("initial-published-source");
+            std::fs::create_dir(&producer).unwrap();
+            let sources = producer.join("sources");
+            std::fs::create_dir(&sources).unwrap();
+            std::fs::write(
+                sources.join("StageInputG.hs"),
+                include_str!("../tests/fixtures/world-native/StageInputG.hs"),
             )
-            .expect("carry the finite producer's issued availability");
-            let support =
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .expect("actual initial compiler support");
+            .unwrap();
+            let wrapper = sources.join("StageInputEntry.hs");
+            std::fs::write(
+                &wrapper,
+                "module StageInputEntry where\nimport qualified StageInputG\n__prepared :: Int\n__prepared = StageInputG.g\n",
+            )
+            .unwrap();
+            let frozen = FrozenEntrySources::capture(&[sources], &wrapper).unwrap();
+            let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+                &frozen,
+                &producer,
+                &producer.join("entry"),
+            )
+            .expect("actual frozen entry producer for the initial World Original");
+            let publication = entry
+                .products()
+                .published_source_original_selection(
+                    &frozen
+                        .source_revision(b"World mixed history source")
+                        .unwrap(),
+                    &crate::declaration_join::ExactModuleIdentity {
+                        unit: "main".into(),
+                        module: "StageInputG".into(),
+                    },
+                )
+                .expect("the same finite output issues its published source selection");
+            let context =
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap()
+                    .with_published_source_originals(&publication)
+                    .expect("carry the published source's exact lexical and compiler selection");
+            assert!(context
+                .lexical_graph()
+                .iter()
+                .any(|node| node.owner.unit == "main" && node.owner.module == "StageInputG"));
+            let support = context.compiler_source_support();
             let row = support
                 .native_availability()
                 .rows()
@@ -9070,12 +9097,7 @@ mod module_product_tests {
                 row.permits(used) && row.permits(unused),
                 "initial genuine availability includes the unused sibling"
             );
-            Some(Arc::new(
-                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
-                    .unwrap()
-                    .extend_issued_compiler_support(&support)
-                    .unwrap(),
-            ))
+            Some(Arc::new(context))
         } else {
             None
         };
