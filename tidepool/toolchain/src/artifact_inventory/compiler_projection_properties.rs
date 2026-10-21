@@ -868,20 +868,24 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let observed =
                 AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
                     .unwrap();
-            let refused = inventory.select_native_target(
-                physical.physical_inputs().physical_cohort().unwrap(),
-                &receipt,
-                observed,
-                None,
-                None,
-                &[],
-                &BTreeMap::new(),
-                &mut validation,
-            );
+            let refused = inventory
+                .select_native_target(
+                    physical.physical_inputs().physical_cohort().unwrap(),
+                    &receipt,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .map(|_| ());
             assert!(
-                matches!(refused, Err(crate::CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 11 }
-                    if artifact == catalog.original(0, 1 - version).descriptor.id))
+                matches!(&refused, Err(crate::CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(
+                    "source module version"
+                ))),
+                "a different Original version must refuse at Source owner validation: {refused:?}",
             );
             assert_eq!(inventory.metrics().issued_scope_nodes, before_targets);
         }
