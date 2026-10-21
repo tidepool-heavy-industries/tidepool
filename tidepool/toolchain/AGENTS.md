@@ -93,7 +93,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   and ordered import interfaces as custody. They grant no compiler role, HOME
   original, source authority or executable readiness. Restore their explicit
   versioned references through the same bounded acquisition and exact graph;
-  never turn package interface bodies into canonical compiler entries.
+  never turn package interface bodies into canonical compiler entries. Package
+  execution bindings carry their ordered exact package imports separately from
+  compiler namespace roles. Reuse a held binding directly, or reconcile only
+  against explicitly held issued graphs with the same product and exact children;
+  matching a module, symbol or interface seal alone cannot choose a binding.
 - Pure activation renderers preserve the original instance graph separately from
   native availability. Authored dictionary bodies use retained originals matching
   that capture's canonical interfaces; type custody alone cannot replace native

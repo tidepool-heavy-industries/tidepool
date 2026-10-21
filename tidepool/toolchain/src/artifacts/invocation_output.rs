@@ -16,6 +16,7 @@ enum Artifact {
     YieldSites(Option<String>),
     ModuleProducts,
     ModulePackageImports,
+    CertifiedProducts,
     PortableReceipt,
     Dependencies,
 }
@@ -29,6 +30,7 @@ impl Artifact {
             Self::YieldSites(None) => "asks.json".into(),
             Self::ModuleProducts => "module-products.cbor".into(),
             Self::ModulePackageImports => "module-package-imports.cbor".into(),
+            Self::CertifiedProducts => "certified-products.cbor".into(),
             Self::PortableReceipt => "portable-output.mode".into(),
             Self::Dependencies => "dependencies.json".into(),
         }
@@ -48,7 +50,11 @@ impl InvocationOutputLayout<NativeOutput> {
     pub(crate) fn new(targets: &[&str]) -> Result<Self, CompileError> {
         Self::for_members(
             targets,
-            [Artifact::ModuleProducts, Artifact::ModulePackageImports],
+            [
+                Artifact::ModuleProducts,
+                Artifact::ModulePackageImports,
+                Artifact::CertifiedProducts,
+            ],
         )
     }
 }
@@ -56,7 +62,7 @@ impl InvocationOutputLayout<NativeOutput> {
 impl InvocationOutputLayout<OriginalOutput> {
     /// Original product sidecars are acquired by their one semantic issuer.
     pub(crate) fn original(targets: &[&str]) -> Result<Self, CompileError> {
-        Self::for_members(targets, [])
+        Self::for_members(targets, [Artifact::CertifiedProducts])
     }
 }
 
@@ -268,6 +274,7 @@ enum NativeOutputOwner<'a> {
 
 struct FiniteNativeOutput {
     root: PathBuf,
+    issuing_root: PathBuf,
     producer: [u8; 32],
     profile: [u8; 32],
     operation: Arc<InventoryOperation>,
@@ -282,6 +289,13 @@ impl<'a> CapturedNativeOutput<'a> {
     }
 
     pub(crate) fn directory(&self) -> &Path {
+        match &self.owner {
+            NativeOutputOwner::World(program) => program.directory().path(),
+            NativeOutputOwner::Finite(output) => &output.issuing_root,
+        }
+    }
+
+    pub(crate) fn physical_directory(&self) -> &Path {
         match &self.owner {
             NativeOutputOwner::World(program) => program.directory().path(),
             NativeOutputOwner::Finite(output) => &output.root,
@@ -307,6 +321,39 @@ impl<'a> CapturedNativeOutput<'a> {
             NativeOutputOwner::World(program) => &program.validation().inventory,
             NativeOutputOwner::Finite(output) => &output.operation,
         }
+    }
+
+    pub(crate) fn validate_interfaces(
+        &self,
+        receipt: &certified_products::CertifiedReceipt,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        if !Arc::ptr_eq(self.operation(), &validation.inventory) {
+            return Err(CompileError::ExtractFailed(
+                "native output has another inventory owner".into(),
+            ));
+        }
+        for witness in receipt.packages.values() {
+            let relative = witness
+                .selected_path
+                .strip_prefix(self.directory())
+                .map_err(|_| {
+                    CompileError::ExtractFailed(
+                        "package interface is outside completed output".into(),
+                    )
+                })?;
+            validation
+                .verify_captured(
+                    &witness.selected_path,
+                    &self.physical_directory().join(relative),
+                    &witness.sha256,
+                    self.bytes(relative)?,
+                )
+                .map_err(|error| {
+                    compiler_evidence_failure(certified_products::package_validation_error(error))
+                })?;
+        }
+        Ok(())
     }
 
     pub(crate) fn bytes(&self, relative: &Path) -> Result<&Arc<[u8]>, CompileError> {
@@ -340,6 +387,28 @@ pub(super) struct CompletedNativeOutputBundle<P> {
 }
 
 impl<P> CompletedNativeOutputBundle<P> {
+    pub(super) fn record_captured_members(
+        &self,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        validation
+            .record_captured_bytes(
+                &self.output.root.join("certified-products.cbor"),
+                self.bundle.get(&Artifact::CertifiedProducts),
+            )
+            .map_err(|error| {
+                compiler_evidence_failure(certified_products::package_validation_error(error))
+            })?;
+        for (relative, bytes) in &self.output.files {
+            validation
+                .record_captured_bytes(&self.output.root.join(relative), bytes)
+                .map_err(|error| {
+                    compiler_evidence_failure(certified_products::package_validation_error(error))
+                })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn native_output(&self) -> CapturedNativeOutput<'_> {
         CapturedNativeOutput {
             owner: NativeOutputOwner::Finite(&self.output),
@@ -347,14 +416,20 @@ impl<P> CompletedNativeOutputBundle<P> {
     }
 }
 
-pub(super) trait NativeOutputPurpose {}
+mod native_purpose {
+    pub trait Sealed {}
+    impl Sealed for super::NativeOutput {}
+    impl Sealed for super::OriginalOutput {}
+}
+
+pub(super) trait NativeOutputPurpose: native_purpose::Sealed {}
 impl NativeOutputPurpose for NativeOutput {}
 impl NativeOutputPurpose for OriginalOutput {}
 
 /// Keep the actual completed transaction, selected deployment, physical root,
 /// decoded receipt and its captured members together at the compile front door.
 pub(super) fn extract_native<P: NativeOutputPurpose>(
-    run: tidepool_extract_cmd::ExtractRun,
+    run: &tidepool_extract_cmd::ExtractRun,
     deployment: &crate::toolchain::AdmittedCompilerDeployment,
     root: &Path,
     layout: &InvocationOutputLayout<P>,
@@ -367,25 +442,78 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
             "native output requires an admitted package service profile".into(),
         )
     })?;
+    capture_native_bundle(
+        bundle,
+        root,
+        deployment.producer_identity,
+        *association.profile_id(),
+        root,
+    )
+}
+
+/// Reopening uses the entry owner's checked manifest and inventory. It does not
+/// manufacture a compiler transaction or a live package-service association.
+pub(super) fn capture_retained(
+    entry: &super::production_entry::VerifiedEntryOutput<'_>,
+    operation: Arc<InventoryOperation>,
+) -> Result<CompletedNativeOutputBundle<OriginalOutput>, CompileError> {
+    let layout = InvocationOutputLayout::original(&["__prepared"])?;
+    let bundle = layout.read(entry.root(), operation)?;
+    capture_native_bundle(
+        bundle,
+        entry.root(),
+        entry.producer(),
+        entry.profile(),
+        entry.issuing_root(),
+    )
+}
+
+fn capture_native_bundle<P: NativeOutputPurpose>(
+    bundle: InvocationOutputBundle<P>,
+    root: &Path,
+    producer: [u8; 32],
+    profile: [u8; 32],
+    issuing_root: &Path,
+) -> Result<CompletedNativeOutputBundle<P>, CompileError> {
     let root = std::fs::canonicalize(root)?;
-    let receipt_bytes =
-        super::CompilerSidecar::CertifiedProducts.read(&root, bundle.operation())?;
+    if !issuing_root.is_absolute()
+        || issuing_root
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::RootDir))
+    {
+        return Err(CompileError::ExtractFailed(
+            "invalid native issuing output root".into(),
+        ));
+    }
+    let receipt_bytes = bundle.get(&Artifact::CertifiedProducts);
     if receipt_bytes.is_empty() {
         return Err(CompileError::ExtractFailed(
             "native output product certificate unavailable".into(),
         ));
     }
     let receipt = certified_products::decode_receipt_with_operation(
-        &receipt_bytes,
+        receipt_bytes,
         Some(&root),
         bundle.operation(),
     )
     .map_err(compiler_evidence_failure)?;
+    bundle
+        .operation()
+        .reserve::<FiniteNativeOutput>(1)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    bundle
+        .operation()
+        .charge(
+            root.as_os_str()
+                .len()
+                .saturating_add(issuing_root.as_os_str().len()),
+        )
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
     let mut files = BTreeMap::new();
     for path in receipt
         .package_products
         .iter()
-        .map(|product| root.join(&product.relative_path))
+        .map(|product| issuing_root.join(&product.relative_path))
         .chain(
             receipt
                 .packages
@@ -393,7 +521,7 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
                 .map(|witness| witness.selected_path.clone()),
         )
     {
-        let relative = path.strip_prefix(&root).map_err(|_| {
+        let relative = path.strip_prefix(issuing_root).map_err(|_| {
             CompileError::ExtractFailed("native package member is outside completed output".into())
         })?;
         if relative.as_os_str().is_empty()
@@ -408,7 +536,15 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
         if files.contains_key(relative) {
             continue;
         }
-        if std::fs::canonicalize(&path)? != path {
+        let path = root.join(relative);
+        let canonical = std::fs::canonicalize(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CompileError::MissingOutput(path.clone())
+            } else {
+                CompileError::Io(error)
+            }
+        })?;
+        if canonical != path {
             return Err(CompileError::ExtractFailed(
                 "native package member aliases another path".into(),
             ));
@@ -423,15 +559,20 @@ pub(super) fn extract_native<P: NativeOutputPurpose>(
             bundle.operation(),
         )
         .map_err(compiler_evidence_failure)?;
+        bundle
+            .operation()
+            .charge(relative.as_os_str().len().saturating_add(bytes.len()))
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
         files.insert(relative.to_path_buf(), bytes.into());
     }
     let output = FiniteNativeOutput {
         root,
+        issuing_root: issuing_root.to_path_buf(),
         producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-            &deployment.producer_identity,
+            &producer,
         )
         .sha256(),
-        profile: *association.profile_id(),
+        profile,
         operation: Arc::clone(bundle.operation()),
         files,
     };
@@ -461,10 +602,15 @@ mod portable_tests {
             .unwrap();
         assert_eq!(
             observed,
-            ["meta.cbor", "__prepared.prepared.cbor", "asks.json"]
+            [
+                "meta.cbor",
+                "__prepared.prepared.cbor",
+                "asks.json",
+                "certified-products.cbor"
+            ]
         );
         assert_eq!(bundle.targets().len(), 1);
-        assert_eq!(bundle.bytes_len(), 3);
+        assert_eq!(bundle.bytes_len(), 4);
     }
 
     #[test]
@@ -563,6 +709,7 @@ mod tests {
                     "asks.json",
                     "module-products.cbor",
                     "module-package-imports.cbor",
+                    "certified-products.cbor",
                 ],
             ),
             (
@@ -575,6 +722,7 @@ mod tests {
                     "first.asks.json",
                     "module-products.cbor",
                     "module-package-imports.cbor",
+                    "certified-products.cbor",
                 ],
             ),
         ] {
@@ -649,6 +797,7 @@ mod tests {
             "asks.json",
             "module-products.cbor",
             "module-package-imports.cbor",
+            "certified-products.cbor",
         ];
         physical_outputs(root.path(), &names);
         let layout = InvocationOutputLayout::new(&["result"]).unwrap();

@@ -2693,7 +2693,7 @@ fn verify_package_interface(
         .map_err(package_validation_error)
 }
 
-fn package_validation_error(
+pub(crate) fn package_validation_error(
     error: crate::recovery_artifacts::RecoveryArtifactError,
 ) -> CertificationError {
     match error {
@@ -5419,6 +5419,18 @@ fn validate_package_owner(
     packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
+    let witness = package_owner_witness(unit, module, binder, interface_digest, sources, packages)?;
+    verify_package_interface(validation, witness)
+}
+
+fn package_owner_witness<'a>(
+    unit: &str,
+    module: &str,
+    binder: &SymbolIdentity,
+    interface_digest: &[u8; 32],
+    sources: &SourceGroupMap,
+    packages: &'a impl PackageInterfaceLookup,
+) -> CertResult<&'a PackageInterfaceWitness> {
     if sources.contains_module(unit, module) {
         return Err(CertificationError::Mismatch(
             "home owner downgraded to package",
@@ -5433,7 +5445,7 @@ fn validate_package_owner(
     if witness.sha256 != *interface_digest || !witness.selected_path.is_absolute() {
         return Err(CertificationError::Mismatch("package interface witness"));
     }
-    verify_package_interface(validation, witness)
+    Ok(witness)
 }
 
 #[cfg(test)]

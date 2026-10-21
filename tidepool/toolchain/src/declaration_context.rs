@@ -785,7 +785,7 @@ impl OriginalCompilerInputs {
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
                 native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-            native_completions: source.native_completions().clone(),
+                native_completions: source.native_completions().clone(),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -881,7 +881,9 @@ impl OriginalCompilerInputs {
         }
     }
 
-    pub(crate) fn issued_native_completions(&self) -> &crate::artifact_inventory::NativeSelectionCompletions {
+    pub(crate) fn issued_native_completions(
+        &self,
+    ) -> &crate::artifact_inventory::NativeSelectionCompletions {
         &self.native_completions
     }
 
@@ -1194,6 +1196,20 @@ pub(crate) struct WorldPrimaryProgramSupport {
     pub(crate) context: Arc<ExactDeclarationContext>,
     pub(crate) changed_owners: Vec<ExactModuleIdentity>,
     pub(crate) promotion_qualifier_invocations: usize,
+}
+
+impl WorldPrimaryProgramSupport {
+    /// Extend the same public projection with a checked item's completed native
+    /// support, preserving any declaration TYPE/lexical changes already issued.
+    pub(crate) fn with_native_completion_from(
+        mut self,
+        issued: &Arc<ExactDeclarationContext>,
+    ) -> Result<Self, CompileError> {
+        let completed = self.inputs.with_native_completion_from(issued)?;
+        self.inputs = completed.inputs;
+        self.context = completed.context;
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2336,55 +2352,100 @@ impl DemandCertifiedGroups {
     /// Append only already resolved batches from this same request. Each
     /// scoped occurrence keeps its own ordered links, even when code is shared.
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        if !Arc::ptr_eq(&self.basis, &other.basis) || !Arc::ptr_eq(&self.operation, &other.operation) {
-            return Err(failure("native demand batches belong to different input operations"));
+        if !Arc::ptr_eq(&self.basis, &other.basis)
+            || !Arc::ptr_eq(&self.operation, &other.operation)
+        {
+            return Err(failure(
+                "native demand batches belong to different input operations",
+            ));
         }
         let budget = NativeDemandBudget(Some(&self.operation));
         let resolved_originals = match (&self.resolved_originals, &other.resolved_originals) {
-            (Some(left), Some(right)) => Some(left.merge(right).map_err(compiler_evidence_failure)?),
-            _ => return Err(failure("native demand batch lost its Original resolution owner")),
+            (Some(left), Some(right)) => {
+                Some(left.merge(right).map_err(compiler_evidence_failure)?)
+            }
+            _ => {
+                return Err(failure(
+                    "native demand batch lost its Original resolution owner",
+                ))
+            }
         };
-        budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow)>(
-            self.rows.len().saturating_add(other.rows.len()),
-        )?;
-        let mut rows = BTreeMap::<crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow>::new();
+        budget.reserve::<(
+            crate::artifact_inventory::NativeGroupBinding,
+            SelectedNativeGroupRow,
+        )>(self.rows.len().saturating_add(other.rows.len()))?;
+        let mut rows =
+            BTreeMap::<crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow>::new(
+            );
         for (binding, row) in self.rows.iter().chain(&other.rows) {
             budget.checkpoint()?;
             if let Some(prior) = rows.get(binding) {
                 if !prior.product.same_issuance(&row.product)
-                    || prior.dependencies != row.dependencies || prior.imports != row.imports {
+                    || prior.dependencies != row.dependencies
+                    || prior.imports != row.imports
+                {
                     return Err(failure("native demand changed an issued occurrence"));
                 }
             } else {
-                budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(row.dependencies.len())?;
+                budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(
+                    row.dependencies.len(),
+                )?;
                 rows.insert(*binding, row.clone());
             }
         }
         budget.reserve::<PendingCertifiedGroup>(rows.len())?;
         let products = rows.values().map(|row| row.product.clone()).collect();
         let mut retained_bindings = BTreeSet::new();
-        for requirement in self.retained_bindings.iter().chain(&other.retained_bindings) {
+        for requirement in self
+            .retained_bindings
+            .iter()
+            .chain(&other.retained_bindings)
+        {
             budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(1)?;
             let identity = &requirement.identity;
-            budget.strings(identity.unit.len().saturating_add(identity.module.len())
-                .saturating_add(identity.namespace.len()).saturating_add(identity.occurrence.len())
-                .saturating_add(identity.record_parent.as_ref().map_or(0, String::len)))?;
+            budget.strings(
+                identity
+                    .unit
+                    .len()
+                    .saturating_add(identity.module.len())
+                    .saturating_add(identity.namespace.len())
+                    .saturating_add(identity.occurrence.len())
+                    .saturating_add(identity.record_parent.as_ref().map_or(0, String::len)),
+            )?;
             retained_bindings.insert(requirement.clone());
         }
         let mut package_obligations = BTreeSet::new();
-        for requirement in self.package_obligations.iter().chain(&other.package_obligations) {
+        for requirement in self
+            .package_obligations
+            .iter()
+            .chain(&other.package_obligations)
+        {
             budget.reserve::<NativePackageObligation>(1)?;
             let identity = &requirement.identity;
-            budget.strings(identity.unit.len().saturating_add(identity.module.len())
-                .saturating_add(identity.namespace.len()).saturating_add(identity.occurrence.len())
-                .saturating_add(identity.record_parent.as_ref().map_or(0, String::len)))?;
+            budget.strings(
+                identity
+                    .unit
+                    .len()
+                    .saturating_add(identity.module.len())
+                    .saturating_add(identity.namespace.len())
+                    .saturating_add(identity.occurrence.len())
+                    .saturating_add(identity.record_parent.as_ref().map_or(0, String::len)),
+            )?;
             package_obligations.insert(requirement.clone());
         }
-        budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(retained_bindings.len())?;
+        budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(
+            retained_bindings.len(),
+        )?;
         budget.reserve::<NativePackageObligation>(package_obligations.len())?;
-        Ok(Self { basis: Arc::clone(&self.basis), operation: Arc::clone(&self.operation),
-            rows, products, resolved_originals, retained_bindings: retained_bindings.into_iter().collect(),
-            package_obligations: package_obligations.into_iter().collect() })
+        Ok(Self {
+            basis: Arc::clone(&self.basis),
+            operation: Arc::clone(&self.operation),
+            rows,
+            products,
+            resolved_originals,
+            retained_bindings: retained_bindings.into_iter().collect(),
+            package_obligations: package_obligations.into_iter().collect(),
+        })
     }
 
     pub(crate) fn belongs_to_source(
@@ -2916,7 +2977,9 @@ impl ResolvedNativeDemand {
         Arc::ptr_eq(self.demand.cold(), inputs)
     }
 
-    pub(crate) fn into_groups(self) -> DemandCertifiedGroups { self.groups }
+    pub(crate) fn into_groups(self) -> DemandCertifiedGroups {
+        self.groups
+    }
 }
 
 impl RequestCompilerInputs {
@@ -6807,7 +6870,9 @@ impl ProgramSourceSupportState {
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
         )?;
-        self.program_source_lexical = self.program_source_lexical.replace(program_source_lexical)?;
+        self.program_source_lexical = self
+            .program_source_lexical
+            .replace(program_source_lexical)?;
         self.program_support = Some(program_support);
         self.source_selected_support
             .extend(selected_originals.into_keys());
@@ -10007,7 +10072,11 @@ pub(crate) struct WorldProgramSegment {
 }
 
 impl WorldProgramSegment {
-    pub(crate) fn package_products(&self) -> &[Arc<crate::certified_products::CertifiedPackageCodeProduct>] { &self.package_products }
+    pub(crate) fn package_products(
+        &self,
+    ) -> &[Arc<crate::certified_products::CertifiedPackageCodeProduct>] {
+        &self.package_products
+    }
 
     pub(crate) fn planned_declaration(
         &mut self,
@@ -10566,15 +10635,31 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         )
         .map_err(compiler_evidence_failure)?;
 
-        validation.inventory.reserve::<Arc<crate::certified_products::CertifiedPackageCodeProduct>>(receipt.package_products.len())
+        validation
+            .inventory
+            .reserve::<Arc<crate::certified_products::CertifiedPackageCodeProduct>>(
+                receipt.package_products.len(),
+            )
             .map_err(|error| compiler_evidence_failure(error.into()))?;
-        let relative_prefix = outputs.certified_products().relative().parent()
+        let relative_prefix = outputs
+            .certified_products()
+            .relative()
+            .parent()
             .ok_or_else(|| failure("World package products have no stage namespace"))?;
-        let package_products = receipt.package_products.iter().map(|output| {
-            crate::certified_products::CertifiedPackageCodeProduct::from_world_output(
-                program, relative_prefix, output, &receipt, validation,
-            ).map_err(compiler_evidence_failure)
-        }).collect::<Result<Vec<_>, _>>()?;
+        let package_products = receipt
+            .package_products
+            .iter()
+            .map(|output| {
+                crate::certified_products::CertifiedPackageCodeProduct::from_native_output(
+                    &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(program),
+                    relative_prefix,
+                    output,
+                    &receipt,
+                    validation,
+                )
+                .map_err(compiler_evidence_failure)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let operation = program.validation().inventory.as_ref();
         let native_inputs = ReceiptNativeInputDemand::from_products(
             &receipt,
@@ -11395,7 +11480,9 @@ impl ExactDeclarationContext {
         self,
         completed: &crate::artifact_inventory::CompletedNativeSelection,
     ) -> Result<Self, CompileError> {
-        let support = self.compiler_source_support().with_native_selection_completion(completed)?;
+        let support = self
+            .compiler_source_support()
+            .with_native_selection_completion(completed)?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
 
@@ -14310,7 +14397,9 @@ pub(crate) fn bind_certified_segment_artifacts_with_validation(
     if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
         return Err(failure("segment artifacts have another accounting owner"));
     }
-    originals.bound_artifacts().map_err(compiler_evidence_failure)
+    originals
+        .bound_artifacts()
+        .map_err(compiler_evidence_failure)
 }
 
 /// Each item adds only ordinal-visible values to its admitted prefix, then
@@ -23098,9 +23187,16 @@ mod tests {
         ])
         .remove(0)
         .product;
-        let interface_ids = products.iter().chain(std::iter::once(&baseline))
-            .map(|product| product.owner().skinny_iface_sha256).collect::<BTreeSet<_>>();
-        assert_eq!(interface_ids.len(), 3, "different module interfaces must not alias sidecar filenames");
+        let interface_ids = products
+            .iter()
+            .chain(std::iter::once(&baseline))
+            .map(|product| product.owner().skinny_iface_sha256)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            interface_ids.len(),
+            3,
+            "different module interfaces must not alias sidecar filenames"
+        );
         let inputs = match support_offer(&[baseline]) {
             CompilerSupportFixture::Complete(inputs) => inputs,
             _ => unreachable!(),
@@ -23337,8 +23433,12 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let weak_first = Arc::downgrade(&first_owner);
         let weak_second = Arc::downgrade(&second_owner);
-        let captured_artifacts = joined_metadata.retained.artifacts.iter()
-            .map(|(id, entry)| (*id, Arc::clone(entry))).collect::<BTreeMap<_, _>>();
+        let captured_artifacts = joined_metadata
+            .retained
+            .artifacts
+            .iter()
+            .map(|(id, entry)| (*id, Arc::clone(entry)))
+            .collect::<BTreeMap<_, _>>();
         let captured = RetainedArtifactMaterialization::capture_custody(
             &[first_owner, second_owner],
             &captured_artifacts,

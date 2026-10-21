@@ -682,6 +682,12 @@ impl AppliedModuleCandidateOffer {
                 "admitted turn endpoint differs from applied request".into(),
             ));
         }
+        let deployment = endpoint.deployment().clone();
+        if deployment.package_source_association().is_none() {
+            return Err(CompileError::ExtractFailed(
+                "native turn requires an admitted package service profile".into(),
+            ));
+        }
         let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &self.command);
         let run = endpoint
             .execute_with_input_files(&self.command, self.input_transport_files(), |close| {
@@ -699,10 +705,24 @@ impl AppliedModuleCandidateOffer {
         let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
-            self.read_admitted_turn(directory.path(), request.supports_compile_input_identity())
+            if self
+                .activation_preview_unavailable(directory.path())
                 .map_err(|error| {
                     self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
                 })?
+            {
+                (None, None)
+            } else {
+                self.read_admitted_turn(
+                    directory.path(),
+                    request.supports_compile_input_identity(),
+                    &run,
+                    &deployment,
+                )
+                .map_err(|error| {
+                    self.retain_failure(directory.path(), &self.command, &run.output.stderr, error)
+                })?
+            }
         } else {
             (None, None)
         };
@@ -1023,7 +1043,13 @@ pub fn prepare_world_cell_program(
                 let admitted = admit_native_target_products(
                     *program.producer_sha256(),
                     &target,
+                    &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
+                    segment.package_products(),
+                    segment
+                        .product_admission()
+                        .compiler_inputs()
+                        .compiler_source_support(),
                     &globals,
                     &segment_package_availability(&segment.originals, &packages),
                     Some(&segment.originals),
@@ -1509,7 +1535,8 @@ fn immutable_candidates_in_context_with_catalog(
                 crate::artifact_inventory::ArtifactPayload::Original(product) => {
                     product.module_interface()?
                 }
-                crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return None,
+                crate::artifact_inventory::ArtifactPayload::Interface(_, _)
+                | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return None,
             };
             Some((
                 (canonical.unit().to_owned(), canonical.module().to_owned()),
@@ -2384,8 +2411,7 @@ impl ModuleCandidateOffer {
         let prepared = (|| -> Result<_, CompileError> {
             let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-            if self.exact.is_some()
-                || !request.is_turn()
+            if !request.is_turn()
                 || request.include_paths()
                     != self
                         .include
@@ -2467,6 +2493,8 @@ impl SelectedModuleCandidateOffer {
         &self,
         directory: &Path,
         issue_identity: bool,
+        run: &tidepool_extract_cmd::ExtractRun,
+        deployment: &crate::toolchain::AdmittedCompilerDeployment,
     ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
         let turn: Arc<[u8]> =
             crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
@@ -2489,7 +2517,32 @@ impl SelectedModuleCandidateOffer {
             }
         };
         let sites = decode_turn_yield_sites(site_observations)?;
-        let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
+        let native = invocation_output::extract_native(
+            run,
+            deployment,
+            directory,
+            &invocation_output::InvocationOutputLayout::original(&["__prepared"])?,
+            &mut |_, _, _| {},
+            |_, _| {},
+        )?;
+        let targets = native.bundle.targets();
+        let [target] = targets.as_slice() else {
+            return Err(CompileError::ExtractFailed(
+                "native turn output target count".into(),
+            ));
+        };
+        let mut output = ProgramNativeOutput {
+            directory: directory.to_path_buf(),
+            target: Arc::new(tidepool_repr::execution_schema::parse_program(
+                &target.prepared_bytes,
+                &crate::prepared_artifact::production_requirements()?,
+                DecodeLimits::default(),
+            )?),
+            turn: turn.clone(),
+            metadata: native.bundle.metadata().into(),
+            source: source.to_owned(),
+            products: None,
+        };
         let deserialize_start = Instant::now();
         let (table, warnings) =
             tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
@@ -2503,8 +2556,11 @@ impl SelectedModuleCandidateOffer {
         let module = extract_module_name(source).ok_or_else(|| {
             CompileError::ExtractFailed("admitted turn source module missing".into())
         })?;
-        output.products = seal_turn_outputs_inner(
+        output.products = seal_turn_outputs_with_validation(
             self,
+            self.exact
+                .as_ref()
+                .map(|request| request.receipt_admission()),
             directory,
             &directory.join(format!("{module}.hs")),
             source,
@@ -2513,6 +2569,14 @@ impl SelectedModuleCandidateOffer {
             issue_identity.then_some((&table, sites.as_slice())),
             None,
             OriginalOutputPublication::Transaction,
+            None,
+            None,
+            None,
+            None,
+            Some((&native.native_output(), &native.receipt)),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+                native.bundle.operation(),
+            )),
         )?
         .map(Arc::new);
         Ok((
@@ -3085,6 +3149,7 @@ impl SelectedModuleCandidateOffer {
                 Some((typed_segments, item_index, admission_digest)),
                 Some(source_segment),
                 Some(cursor),
+                None,
                 validation,
             )?
             .ok_or_else(|| {
@@ -3247,6 +3312,7 @@ impl SelectedModuleCandidateOffer {
             Some(&authored),
             OriginalOutputPublication::Transaction,
             produced_types,
+            None,
             None,
             None,
             None,
@@ -3471,8 +3537,14 @@ impl SealedOriginalEvidence {
         target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
     ) -> Result<Self, CompileError> {
         let context = admission.original_execution_context(output.compiler_inputs())?;
-        let execution =
-            Arc::new(Arc::unwrap_or_clone(context).retain_native_target_custody(target)?);
+        let completed = target.completed_selection().ok_or_else(|| {
+            CompileError::ExtractFailed("exact native target lacks its issued completion".into())
+        })?;
+        let execution = Arc::new(
+            Arc::unwrap_or_clone(context)
+                .retain_native_target_custody(target)?
+                .retain_completed_native_selection(completed)?,
+        );
         target
             .resolve()?
             .ensure_original_execution_custody(&execution)?;
@@ -3979,6 +4051,7 @@ fn seal_turn_outputs_inner(
         None,
         None,
         None,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -4010,6 +4083,10 @@ fn seal_turn_outputs_with_validation(
     )>,
     source_segment: Option<&crate::declaration_context::ExactProgramSegmentAdmission>,
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
+    native_output: Option<(
+        &invocation_output::CapturedNativeOutput<'_>,
+        &certified_products::CertifiedReceipt,
+    )>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -4027,7 +4104,11 @@ fn seal_turn_outputs_with_validation(
             )
         })
         .transpose()?;
-    let receipt_bytes = CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?;
+    let receipt_bytes = if native_output.is_some() {
+        Vec::new()
+    } else {
+        CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?
+    };
     let (ordinary_products, ordinary_evidence_bytes) = if source_segment.is_none() {
         let product_bytes =
             CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
@@ -4108,7 +4189,7 @@ fn seal_turn_outputs_with_validation(
         || !fresh_products.products().is_empty()
         || !prepared.globals().is_empty()
         || evidence.is_some_and(|evidence| has_ready_home_module(evidence));
-    if receipt_bytes.is_empty() {
+    if native_output.is_none() && receipt_bytes.is_empty() {
         if needs_certificate {
             return Err(CompileError::ExtractFailed(
                 "turn required product certificate unavailable".into(),
@@ -4117,17 +4198,24 @@ fn seal_turn_outputs_with_validation(
         return Ok(None);
     }
     let ordinary_receipt = if source_segment.is_none() {
-        Some(
-            certified_products::decode_receipt_with_validation(
-                &receipt_bytes,
-                output_dir,
-                validation,
-            )
-            .map_err(compiler_evidence_failure)?,
-        )
+        Some(match native_output {
+            Some((_, receipt)) => std::borrow::Cow::Borrowed(receipt),
+            None => std::borrow::Cow::Owned(
+                certified_products::decode_receipt_with_validation(
+                    &receipt_bytes,
+                    output_dir,
+                    validation,
+                )
+                .map_err(compiler_evidence_failure)?,
+            ),
+        })
     } else {
         None
     };
+    let package_products = native_output
+        .map(|(output, receipt)| certify_native_package_products(output, receipt, validation))
+        .transpose()?
+        .unwrap_or_default();
     let valid =
         evidence.filter(|evidence| source_segment.is_some() || evidence.revalidate(source).is_ok());
     let Some(valid) = valid else {
@@ -4254,11 +4342,23 @@ fn seal_turn_outputs_with_validation(
         }
         None => None,
     };
+    let physical_native_output = native_output.map(|(output, _)| output).ok_or_else(|| {
+        CompileError::ExtractFailed("native target lacks completed output authority".into())
+    })?;
+    let inherited_inputs = request_admission.map(|request| request.compiler_inputs());
+    let no_inherited_inputs = crate::artifact_inventory::CompilerSourceSupport::empty();
+    let inherited_support = inherited_inputs
+        .as_ref()
+        .map(|inputs| inputs.compiler_source_support())
+        .unwrap_or(&no_inherited_inputs);
     let admitted = admit_native_target_products(
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
             .sha256(),
         prepared,
+        physical_native_output,
         &certified,
+        &package_products,
+        inherited_support,
         accepted,
         &package_catalog,
         segment_originals,
@@ -4335,17 +4435,29 @@ fn seal_turn_outputs_with_validation(
             })?;
             SealedOriginalEvidence::issue_exact(admission, output, &target_native)?
         }
-        None => original_compile_input
-            .as_ref()
-            .map(|proof| SealedOriginalEvidence::Ordinary {
-                execution: proof.issued_original_execution(),
+        None => match original_compile_input.as_ref() {
+            Some(proof) => {
+                let completed = target_native.completed_selection().ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "ordinary native target lacks its issued completion".into(),
+                    )
+                })?;
+                let execution = Arc::new(
+                    Arc::unwrap_or_clone(proof.issued_original_execution())
+                        .retain_native_target_custody(&target_native)?
+                        .retain_completed_native_selection(completed)?,
+                );
+                SealedOriginalEvidence::Ordinary {
+                    execution,
+                    artifacts: artifact_view.clone(),
+                    selection: certified.source_selection.clone(),
+                }
+            }
+            None => SealedOriginalEvidence::Absent {
                 artifacts: artifact_view.clone(),
                 selection: certified.source_selection.clone(),
-            })
-            .unwrap_or_else(|| SealedOriginalEvidence::Absent {
-                artifacts: artifact_view.clone(),
-                selection: certified.source_selection.clone(),
-            }),
+            },
+        },
     };
     drop(original_execution_span);
     let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
@@ -4419,6 +4531,34 @@ fn seal_turn_outputs_with_validation(
     }))
 }
 
+fn certify_native_package_products(
+    output: &invocation_output::CapturedNativeOutput<'_>,
+    receipt: &certified_products::CertifiedReceipt,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<Vec<Arc<certified_products::CertifiedPackageCodeProduct>>, CompileError> {
+    output.validate_interfaces(receipt, validation)?;
+    validation
+        .inventory
+        .reserve::<Arc<certified_products::CertifiedPackageCodeProduct>>(
+            receipt.package_products.len(),
+        )
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    receipt
+        .package_products
+        .iter()
+        .map(|product| {
+            certified_products::CertifiedPackageCodeProduct::from_native_output(
+                output,
+                Path::new(""),
+                product,
+                receipt,
+                validation,
+            )
+            .map_err(compiler_evidence_failure)
+        })
+        .collect()
+}
+
 struct AdmittedNativeTargetProducts {
     target: crate::artifact_inventory::CertifiedTargetNativeInputs,
     certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
@@ -4431,7 +4571,10 @@ struct AdmittedNativeTargetProducts {
 fn admit_native_target_products(
     producer: [u8; 32],
     prepared: &Arc<PreparedProgram>,
+    output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
+    packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
+    inherited: &crate::artifact_inventory::CompilerSourceSupport,
     accepted: &[certified_products::AcceptedGlobal],
     package_catalog: &PackageInterfaceCatalog<'_>,
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
@@ -4550,7 +4693,14 @@ fn admit_native_target_products(
     Ok(AdmittedNativeTargetProducts {
         target: admitted_target
             .bind_target(typed_entry, pending_imports)
-            .with_certified_groups(Arc::clone(&selected_groups))?,
+            .with_certified_groups(Arc::clone(&selected_groups))?
+            .complete_native_selection(
+                prepared,
+                output,
+                packages,
+                inherited,
+                &validation.inventory,
+            )?,
         certified_groups: Arc::clone(selected_groups.groups()),
         package_interfaces,
     })
@@ -5656,6 +5806,18 @@ fn compile_invocation_inner(
             }
             let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
+            let portable = matches!(
+                &policy,
+                CompilationPolicy::BuildAction {
+                    export: BuildActionExport::PreparedFixture { .. },
+                    ..
+                }
+            );
+            if !portable && deployment.package_source_association().is_none() {
+                return Err(CompileAttemptError::Deployment(
+                    crate::toolchain::DeploymentAdmissionError::PackageSourceRequired,
+                ));
+            }
             match &policy {
                 CompilationPolicy::BuildAction { .. } => {
                     cmd.build_products_dir(output_owner.path().join("build-products"));
@@ -5792,6 +5954,7 @@ fn compile_invocation_inner(
         Ok(attempt) => attempt,
         Err(error) => {
             if matches!(&error, CompileAttemptError::Endpoint(error) if error.definitely_unsubmitted())
+                || matches!(&error, CompileAttemptError::Deployment(_))
                 || matches!(&error, CompileAttemptError::Diagnostic(CompileError::Io(error))
                     | CompileAttemptError::ModulePackage(crate::toolchain::ModulePackageError::Interrupted(error))
                     if error.kind() == std::io::ErrorKind::Interrupted)
@@ -5873,7 +6036,7 @@ fn compile_invocation_inner(
         let portable = (|| {
             let layout = invocation_output::InvocationOutputLayout::portable(inv.targets)?;
             let bundle = extract_and_read(
-                run,
+                &run,
                 output_owner.path(),
                 &layout,
                 &mut on_stage,
@@ -5917,8 +6080,9 @@ fn compile_invocation_inner(
     }
     if let CompilationOutputOwner::Original(preparation) = output_owner {
         let original_layout = invocation_output::InvocationOutputLayout::original(inv.targets)?;
-        let extracted = extract_and_read(
-            run,
+        let extracted = invocation_output::extract_native(
+            &run,
+            &deployment,
             preparation.raw(),
             &original_layout,
             &mut on_stage,
@@ -5930,7 +6094,7 @@ fn compile_invocation_inner(
         );
         // Candidate admission misses are handled before source execution by the
         // worker. A completed request is never replayed because of its response.
-        let bundle = extracted.map_err(|error| match &policy {
+        let native = extracted.map_err(|error| match &policy {
             CompilationPolicy::BuildAction {
                 export: BuildActionExport::PreparedFixture { .. },
                 ..
@@ -5938,6 +6102,7 @@ fn compile_invocation_inner(
             CompilationPolicy::BuildAction { .. } => error,
             _ => retain_compiler_failure(preparation.raw(), &cmd, &compiler_stderr, error),
         })?;
+        let bundle = &native.bundle;
         let admitted = (|| {
             if let CompilationPolicy::BuildAction { source_path, .. } = &policy {
                 let evidence =
@@ -5964,7 +6129,7 @@ fn compile_invocation_inner(
                 },
                 selected_session_values,
             };
-            preparation.admit(&input_path, inv.source, &bundle, &offer)
+            preparation.admit(&input_path, inv.source, &native, &offer)
         })()
         .map_err(|error| match &policy {
             CompilationPolicy::BuildAction { .. } => error,
@@ -6003,8 +6168,9 @@ fn compile_invocation_inner(
         invocation_timing.finish(true);
         return Ok(CompilationOutput::Original(original));
     }
-    let extracted = extract_and_read(
-        run,
+    let extracted = invocation_output::extract_native(
+        &run,
+        &deployment,
         output_owner.path(),
         &layout,
         &mut on_stage,
@@ -6016,7 +6182,7 @@ fn compile_invocation_inner(
     );
     // Candidate admission misses are handled before source execution by the
     // worker. A completed request is never replayed because of its response.
-    let bundle = extracted.map_err(|error| match &policy {
+    let native = extracted.map_err(|error| match &policy {
         CompilationPolicy::BuildAction {
             export: BuildActionExport::PreparedFixture { .. },
             ..
@@ -6024,6 +6190,8 @@ fn compile_invocation_inner(
         CompilationPolicy::BuildAction { .. } => error,
         _ => retain_compiler_failure(output_owner.path(), &cmd, &compiler_stderr, error),
     })?;
+    let bundle = &native.bundle;
+    let native_output = native.native_output();
     let meta_bytes = bundle.metadata();
     let raw = bundle.targets();
     let product_bytes = bundle.products();
@@ -6089,62 +6257,10 @@ fn compile_invocation_inner(
         if let Some((output, _)) = inventory_export {
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
-        let receipt_bytes =
-            CompilerSidecar::CertifiedProducts.read(output_owner.path(), &validation.inventory)?;
-        if receipt_bytes.is_empty() {
-            if inventory_export.is_some() {
-                return Err(CompileError::ExtractFailed(
-                    "catalog inventory product certificate unavailable".into(),
-                ));
-            }
-            if exact_request.is_some() {
-                return Err(CompileError::ExtractFailed(
-                    "exact compile product certificate unavailable".into(),
-                ));
-            }
-            if candidate_set
-                .as_ref()
-                .is_some_and(|set| !set.by_owner.is_empty())
-            {
-                return Err(CompileError::ExtractFailed(
-                    "candidate product certificate unavailable".into(),
-                ));
-            }
-            let requirements = crate::prepared_artifact::production_requirements()
-                .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-            let fresh_products = inventory_operation
-                .parse_module_products(&product_bytes, &requirements)
-                .map_err(|error| compiler_evidence_failure(error.into()))?;
-            if !fresh_products.is_empty() {
-                return Err(CompileError::ExtractFailed(
-                    "fresh module product certificate unavailable".into(),
-                ));
-            }
-            if evidence_facts.is_some_and(has_ready_home_module) {
-                return Err(CompileError::ExtractFailed(
-                    "ready module product certificate unavailable".into(),
-                ));
-            }
-            let artifacts = assemble_with_products(
-                &meta_bytes,
-                &raw,
-                fresh_products,
-                Vec::new(),
-                evidence_facts,
-                None,
-                None,
-                &mut *on_stage,
-            )?;
-            ensure_no_uncertified_globals(&artifacts)?;
-            return Ok(artifacts);
-        }
+        let receipt = &native.receipt;
+        let package_products =
+            certify_native_package_products(&native_output, receipt, &mut validation)?;
         invocation_timing.advance("product_decode_and_freshness");
-        let receipt = certified_products::decode_receipt_with_operation(
-            &receipt_bytes,
-            Some(output_owner.path()),
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
             &package_bundle_bytes,
@@ -6347,7 +6463,19 @@ fn compile_invocation_inner(
                 target.native_inputs = Some(
                     admitted_targets
                         .for_ordinary_target(target.pending_imports.clone())?
-                        .with_certified_groups(Arc::clone(&selected_groups))?,
+                        .with_certified_groups(Arc::clone(&selected_groups))?
+                        .complete_native_selection(
+                            target.prepared.prepared(),
+                            &native_output,
+                            &package_products,
+                            compiler_inputs
+                                .as_ref()
+                                .map(|inputs| inputs.compiler_source_support())
+                                .unwrap_or(
+                                    &crate::artifact_inventory::CompilerSourceSupport::empty(),
+                                ),
+                            &validation.inventory,
+                        )?,
                 );
             }
         }
@@ -6801,7 +6929,7 @@ pub(crate) struct RawTargetOutput {
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
 pub(crate) fn extract_and_read<P>(
-    run: tidepool_extract_cmd::ExtractRun,
+    run: &tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
     layout: &invocation_output::InvocationOutputLayout<P>,
     mut on_stage: impl FnMut(&str, Duration, u64),

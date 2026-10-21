@@ -193,6 +193,28 @@ impl AdmittedOriginalEntry {
     }
 }
 
+/// Retained native output authenticated by the original-entry loader. This is
+/// completed artifact provenance, separate from live compiler service readiness.
+pub(super) struct VerifiedEntryOutput<'a> {
+    root: &'a Path,
+    manifest: &'a EntryManifest,
+}
+
+impl VerifiedEntryOutput<'_> {
+    pub(super) fn root(&self) -> &Path {
+        self.root
+    }
+    pub(super) fn producer(&self) -> [u8; 32] {
+        self.manifest.producer
+    }
+    pub(super) fn profile(&self) -> [u8; 32] {
+        self.manifest.profile
+    }
+    pub(super) fn issuing_root(&self) -> &Path {
+        &self.manifest.issuing_output_root
+    }
+}
+
 // Only entry acquisition can turn physical inputs into an original entry.
 // This retains the existing product issuer rather than recreating its facts.
 fn admit_original_entry(
@@ -203,14 +225,15 @@ fn admit_original_entry(
     metadata: &[u8],
     asks: &[u8],
     offer: &SelectedModuleCandidateOffer,
-    inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    native: &invocation_output::CompletedNativeOutputBundle<invocation_output::OriginalOutput>,
 ) -> Result<AdmittedOriginalEntry, CompileError> {
     let root = std::fs::canonicalize(raw)?;
     let ((output, dependency_selection), physical) =
         crate::recovery_artifacts::PackageInterfaceValidation::capture_entry(
             &root,
-            inventory,
+            Arc::clone(native.bundle.operation()),
             |validation| {
+                native.record_captured_members(validation)?;
                 for (name, bytes) in [
                     (prepared_artifact_name("__prepared"), prepared_bytes),
                     ("meta.cbor".to_owned(), metadata),
@@ -246,6 +269,7 @@ fn admit_original_entry(
                     None,
                     None,
                     None,
+                    Some((&native.native_output(), &native.receipt)),
                     validation,
                 )?
                 .ok_or_else(|| invalid("original native custody unavailable"))?;
@@ -320,6 +344,8 @@ struct EntryManifest {
     purpose: EntryPurpose,
     producer: [u8; 32],
     worker: [u8; 32],
+    profile: [u8; 32],
+    issuing_output_root: PathBuf,
     target: String,
     source: PathBuf,
     sources: ProductionEntrySources,
@@ -345,7 +371,7 @@ enum EntryPurpose {
 }
 
 const MANIFEST: &str = "entry.json";
-const ENTRY_SCHEMA: u32 = 4;
+const ENTRY_SCHEMA: u32 = 5;
 const MANIFEST_BYTES_LIMIT: u64 = 16 << 20;
 const MAX_FILES: usize = 32_768;
 const MAX_FILE_BYTES: u64 = 256 << 20;
@@ -565,9 +591,10 @@ impl EntryPreparation {
         &self,
         source_path: &Path,
         source: &str,
-        bundle: &invocation_output::InvocationOutputBundle<invocation_output::OriginalOutput>,
+        native: &invocation_output::CompletedNativeOutputBundle<invocation_output::OriginalOutput>,
         offer: &SelectedModuleCandidateOffer,
     ) -> Result<AdmittedOriginalEntry, CompileError> {
+        let bundle = &native.bundle;
         let targets = bundle.targets();
         let [target] = targets.as_slice() else {
             return Err(invalid("original output requires one named target"));
@@ -584,7 +611,7 @@ impl EntryPreparation {
             bundle.metadata(),
             &target.asks_bytes,
             offer,
-            Arc::clone(bundle.operation()),
+            native,
         )
         .map_err(|error| {
             if let CompileError::CompilerEvidence(cause) = &error {
@@ -644,6 +671,11 @@ impl EntryPreparation {
             purpose: EntryPurpose::OriginalSource,
             producer: deployment.producer_identity,
             worker: deployment.consumed_worker_identity,
+            profile: *deployment
+                .package_source_association()
+                .ok_or_else(|| invalid("original output requires admitted package profile"))?
+                .profile_id(),
+            issuing_output_root: std::fs::canonicalize(self.raw())?,
             target: "__prepared".into(),
             source: source.to_owned(),
             sources: sources.clone(),
@@ -875,6 +907,18 @@ pub fn load_selected_production_entry_with_catalog(
     CompilerDeploymentConfiguration::Configured(authority.clone())
         .validate_product_provenance(manifest.producer, manifest.worker)
         .map_err(invalid)?;
+    let crate::toolchain::ConfiguredPackageSource::Rooted {
+        supported_profile_id,
+        ..
+    } = &authority.package_source
+    else {
+        return Err(invalid(
+            "original native output requires configured rooted package profile",
+        ));
+    };
+    if manifest.profile == [0; 32] || &manifest.profile != supported_profile_id {
+        return Err(invalid("original native output package profile differs"));
+    }
     sources.revalidate(&manifest.source)?;
     let selection_scratch = tempfile::tempdir()?;
     let selected = if let Some(dependencies) = &manifest.dependencies {
@@ -915,10 +959,20 @@ pub fn load_selected_production_entry_with_catalog(
     }
     let source = String::from_utf8(crate::host_work::read(&manifest.source)?)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let prepared_bytes =
-        crate::checked_cell::read(raw.join(prepared_artifact_name("__prepared")), 128 << 20)?;
-    let metadata = crate::checked_cell::read(raw.join("meta.cbor"), 32 << 20)?;
-    let asks = crate::checked_cell::read(raw.join("asks.json"), 16 << 20)?;
+    let verified = VerifiedEntryOutput {
+        root: &raw,
+        manifest: &manifest,
+    };
+    let native = invocation_output::capture_retained(
+        &verified,
+        Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        )),
+    )?;
+    let targets = native.bundle.targets();
+    let [target] = targets.as_slice() else {
+        return Err(invalid("retained output target count"));
+    };
     let offer = ModuleCandidateOffer {
         selected,
         producer: manifest.producer.to_vec(),
@@ -939,13 +993,11 @@ pub fn load_selected_production_entry_with_catalog(
         &raw,
         &manifest.source,
         source,
-        &prepared_bytes,
-        &metadata,
-        &asks,
+        &target.prepared_bytes,
+        native.bundle.metadata(),
+        &target.asks_bytes,
         &offer,
-        Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
-            Default::default(),
-        )),
+        &native,
     )?;
     if admitted.dependency_selection.as_ref()
         != manifest
@@ -1122,6 +1174,14 @@ mod source_selection_tests {
         let original = std::fs::read(output.join(MANIFEST)).unwrap();
         let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
         assert_eq!(manifest["schema"], ENTRY_SCHEMA);
+        assert_eq!(
+            manifest["issuing_output_root"],
+            root.path().join("entry.preparing/raw").to_str().unwrap()
+        );
+        assert!(
+            !root.path().join("entry.preparing").exists(),
+            "successful seal renamed the actual issuing container"
+        );
         assert!(original.len() as u64 <= MANIFEST_BYTES_LIMIT);
         assert_eq!(
             manifest["dependencies"]["catalog_path"],
@@ -1170,6 +1230,28 @@ mod source_selection_tests {
             &CatalogSelection::Acquired(None)
         )
         .is_err());
+        for field in ["profile", "issuing_output_root"] {
+            let saved = manifest[field].clone();
+            manifest[field] = if field == "profile" {
+                serde_json::json!(vec![0; 32])
+            } else {
+                serde_json::json!(root.path().join("another-issuer/raw"))
+            };
+            std::fs::write(
+                output.join(MANIFEST),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                load_selected_production_entry_with_catalog(
+                    &output, &authority, &selected, &catalog,
+                )
+                .is_err(),
+                "retained native output rejects changed {field}"
+            );
+            manifest[field] = saved;
+        }
+
         for field in ["catalog_identity", "catalog_path", "source_identity"] {
             let saved = manifest["dependencies"][field].clone();
             manifest["dependencies"][field] = serde_json::json!("mismatched");

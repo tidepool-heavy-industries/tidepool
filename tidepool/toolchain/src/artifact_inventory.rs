@@ -21829,13 +21829,18 @@ mod package_code {
             &self.graph.rows[&self.binding].product
         }
         pub fn imports(&self) -> impl ExactSizeIterator<Item = Self> + '_ {
-            self.graph.rows[&self.binding]
-                .imports
-                .iter()
-                .map(|binding| Self {
-                    graph: Arc::clone(&self.graph),
-                    binding: *binding,
-                })
+            self.import_links().map(|(binding, _)| binding)
+        }
+        pub fn import_links(&self) -> impl ExactSizeIterator<Item = (Self, ValueId)> + '_ {
+            self.graph.rows[&self.binding].imports.iter().map(|link| {
+                (
+                    Self {
+                        graph: Arc::clone(&self.graph),
+                        binding: link.binding,
+                    },
+                    link.value,
+                )
+            })
         }
         pub(crate) fn resolve_export(
             &self,
@@ -21880,10 +21885,16 @@ mod package_code {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct PackageCodeImport {
+        binding: ArtifactBinding,
+        value: ValueId,
+    }
+
     #[derive(Debug)]
     struct PackageCodeRow {
         product: Arc<CertifiedPackageCodeProduct>,
-        imports: Arc<[ArtifactBinding]>,
+        imports: Arc<[PackageCodeImport]>,
     }
 
     /// One admitted package graph. Rows retain ordered slots; the inventory view
@@ -21899,6 +21910,8 @@ mod package_code {
         pub(crate) fn artifacts(&self) -> &ArtifactView {
             &self.artifacts
         }
+        /// Exact bindings in request-slot order, including repeated imports.
+        /// The retained custody frontier is separately deduplicated.
         pub(crate) fn roots(&self) -> &[ArtifactBinding] {
             &self.roots
         }
@@ -22085,11 +22098,21 @@ mod package_code {
                     .ok_or_else(|| refusal(*id, PackageCodeRefusal::MissingProduct)),
             }
         };
+            let mut exported_values = BTreeMap::new();
             for id in &required {
-                for (index, target) in plans[id].imports.iter().enumerate() {
-                    let target = product_for(target)?;
-                    validate_import(*id, &plans[id].product, index, target.as_ref())?;
-                }
+                operation
+                    .reserve::<ValueId>(plans[id].imports.len())
+                    .map_err(account)?;
+                let values = plans[id]
+                    .imports
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| {
+                        let target = product_for(target)?;
+                        validate_import(*id, &plans[id].product, index, target.as_ref())
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?;
+                exported_values.insert(*id, values);
             }
             // Only actual prior package owners supply reuse candidates. Matching
             // immutable code is insufficient: every ordered child must remain
@@ -22128,10 +22151,14 @@ mod package_code {
                                 .iter()
                                 .zip(&plans[id].imports)
                                 .all(|(child, target)| match target {
-                                    PackageCodeTarget::Held(exact) => *child == exact.binding,
-                                    PackageCodeTarget::Fresh(id) => candidates
-                                        .get(id)
-                                        .is_some_and(|options| options.contains_key(child)),
+                                    PackageCodeTarget::Held(exact) => {
+                                        child.binding == exact.binding
+                                    }
+                                    PackageCodeTarget::Fresh(id) => {
+                                        candidates.get(id).is_some_and(|options| {
+                                            options.contains_key(&child.binding)
+                                        })
+                                    }
                                 });
                         if !matches {
                             operation
@@ -22239,6 +22266,7 @@ mod package_code {
             };
             let mut payloads = BTreeMap::new();
             for id in &required {
+                operation.reserve::<PackageCodeImport>(plans[id].imports.len()).map_err(account)?;
                 let binding = resolve(&PackageCodeTarget::Fresh(*id))?;
                 let product = Arc::clone(&plans[id].product);
                 payloads.insert(
@@ -22254,8 +22282,14 @@ mod package_code {
                         imports: plans[id]
                             .imports
                             .iter()
-                            .map(&resolve)
-                            .collect::<Result<Vec<_>, _>>()?
+                            .zip(&exported_values[id])
+                            .map(|(target, value)| {
+                                Ok(PackageCodeImport {
+                                    binding: resolve(target)?,
+                                    value: *value,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, CompileError>>()?
                             .into(),
                     }),
                 );
@@ -22270,7 +22304,7 @@ mod package_code {
                             .enumerate()
                             .map(|(index, target)| {
                                 (
-                                    InventoryNodeKey::Artifact(*target),
+                                    InventoryNodeKey::Artifact(target.binding),
                                     ArtifactDependency::PackageCodeImport {
                                         global_index: index as u32,
                                     },
@@ -22344,11 +22378,11 @@ mod package_code {
             let state = inventory.0.lock().expect("inventory lock");
             let owned = &artifacts.read_projection(&state).nodes;
             let mut pending = roots.to_vec();
-            let mut rows = BTreeMap::new();
+            let mut unvalidated = BTreeMap::new();
             while let Some(binding) = pending.pop() {
                 crate::host_work::checkpoint()?;
                 operation.charge(1).map_err(account)?;
-                if rows.contains_key(&binding) {
+                if unvalidated.contains_key(&binding) {
                     continue;
                 }
                 if !owned.contains(&InventoryNodeKey::Artifact(binding)) {
@@ -22357,7 +22391,11 @@ mod package_code {
                         PackageCodeRefusal::MissingBinding { binding },
                     ));
                 }
-                let entry = &artifacts.lease.payloads[&binding.artifact];
+                let entry = artifacts
+                    .lease
+                    .payloads
+                    .get(&binding.artifact)
+                    .ok_or_else(|| refusal(binding.artifact, PackageCodeRefusal::MissingProduct))?;
                 let ArtifactPayload::PackageCode(product) = &entry.payload else {
                     return Err(refusal(binding.artifact, PackageCodeRefusal::WrongKind));
                 };
@@ -22398,24 +22436,41 @@ mod package_code {
                     .collect::<Option<Vec<_>>>()
                     .expect("every actual package slot was checked");
                 pending.extend(imports.iter().copied());
+                unvalidated.insert(binding, (Arc::clone(product), imports));
+            }
+            let mut rows = BTreeMap::new();
+            for (binding, (product, children)) in &unvalidated {
+                operation
+                    .reserve::<PackageCodeImport>(children.len())
+                    .map_err(account)?;
+                let imports = children
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| {
+                        let (target_product, _) = unvalidated.get(target).ok_or_else(|| {
+                            refusal(
+                                binding.artifact,
+                                PackageCodeRefusal::MissingBinding { binding: *target },
+                            )
+                        })?;
+                        Ok(PackageCodeImport {
+                            binding: *target,
+                            value: validate_import(
+                                binding.artifact,
+                                product,
+                                index,
+                                target_product,
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?;
                 rows.insert(
-                    binding,
+                    *binding,
                     Arc::new(PackageCodeRow {
                         product: Arc::clone(product),
                         imports: imports.into(),
                     }),
                 );
-            }
-            for (binding, row) in &rows {
-                for (index, target) in row.imports.iter().enumerate() {
-                    let target = rows.get(target).ok_or_else(|| {
-                        refusal(
-                            binding.artifact,
-                            PackageCodeRefusal::MissingBinding { binding: *target },
-                        )
-                    })?;
-                    validate_import(binding.artifact, &row.product, index, &target.product)?;
-                }
             }
             drop(state);
             let roots = roots.to_vec();
