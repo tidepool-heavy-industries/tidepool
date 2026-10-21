@@ -7050,10 +7050,11 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             &mut validation,
         );
         assert!(
-            matches!(&denied, Err(CompileError::ArtifactInventory(error))
-            if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 }
-                if artifact == unrelated_entry.descriptor.id)),
-            "unoffered dependency custody cannot authorize native demand; actual={denied:?}"
+            matches!(&denied, Err(CompileError::CompilerEvidence(error))
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(
+                "source outside compiler selection"
+            ))),
+            "unoffered dependency custody cannot manufacture a Source owner; actual={denied:?}"
         );
     }
 }
