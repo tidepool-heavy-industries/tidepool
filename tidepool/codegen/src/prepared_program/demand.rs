@@ -2526,7 +2526,7 @@ mod selection_tests {
             };
             assert_eq!(
                 selected
-                    .domain_for_owner(domain, &home.binder().owner)
+                    .domain_for_owner(domain, home.owner())
                     .unwrap(),
                 domain
             );
