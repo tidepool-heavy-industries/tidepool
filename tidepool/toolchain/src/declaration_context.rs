@@ -10451,6 +10451,9 @@ impl WorldProgramContinuation {
                 "World stage inputs lack their actual immediate predecessor",
             ));
         }
+        if !Arc::ptr_eq(products.operation(), initial.operation()) {
+            return Err(failure("World stage products have another accounting owner"));
+        }
         current_product_owners(receipt, products)?;
         let operation = Arc::clone(initial.operation());
         let demand = decoded.prefix_inputs(&self.inputs)?;
