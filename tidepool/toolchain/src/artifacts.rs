@@ -6430,54 +6430,9 @@ fn compile_invocation_inner(
         invocation_timing.advance("target_admission");
         let package_catalog =
             package_availability_with_validation(&receipt.packages, &certified, &mut validation)?;
-        let mut target_imports = Vec::new();
-        for (name, target) in &artifacts.targets {
-            let accepted = receipt.targets.get(name).ok_or_else(|| {
-                CompileError::ExtractFailed("target product receipt missing".into())
-            })?;
-            if valid_evidence.is_some() {
-                target_imports.extend(
-                    certified_products::certify_target_available_owners_with_validation(
-                        target.prepared.prepared(),
-                        accepted,
-                        &certified.recovery_products,
-                        &[],
-                        &certified.source_selection,
-                        &package_catalog,
-                        &mut validation,
-                    )
-                    .map_err(compiler_evidence_failure)?,
-                );
-            }
-        }
         let physical = physical_inputs.issued_artifacts();
-        let admitted_targets = physical
-            .inventory()
-            .admit_product_artifacts(
-                physical,
-                Vec::new(),
-                crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                    &target_imports,
-                ),
-                Some(&certified.source_selection),
-            )?
-            .into_target()?;
-        artifacts.artifact_view = admitted_targets.artifacts().clone();
-        let selected_groups = Arc::new(
-            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
-                &artifacts.artifact_view,
-                &certified.groups,
-                exact_request
-                    .as_ref()
-                    .map(|request| request.groups.as_ref()),
-                &mut validation,
-            )?,
-        );
-        let package_closure = package_catalog.select(
-            selected_groups.groups(),
-            &target_imports,
-            &validation.inventory,
-        )?;
+        artifacts.artifact_view = physical.clone();
+        let mut selected_products = BTreeMap::new();
         let mut inherited_completion_support = compiler_inputs
             .as_ref()
             .map(|inputs| inputs.compiler_source_support().clone())
@@ -6487,15 +6442,49 @@ fn compile_invocation_inner(
                 CompileError::ExtractFailed("target product receipt missing".into())
             })?;
             if valid_evidence.is_some() {
-                target.pending_imports = certified_products::certify_target_owners_with_validation(
-                    target.prepared.prepared(),
+                let observed = certified_products::AuthenticatedTargetImports::issue(
+                    target.prepared.prepared_shared(),
                     accepted,
-                    selected_groups.groups(),
-                    &certified.source_selection,
-                    &package_closure,
-                    &mut validation,
+                    &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
+                let selected_target = physical.inventory().select_native_target(
+                    physical,
+                    &certified.source_selection,
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &package_catalog,
+                    &mut validation,
+                )?;
+                let selected_groups = Arc::new(
+                    crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                        selected_target.artifacts(), &certified.groups,
+                        exact_request.as_ref().map(|request| request.groups.as_ref()), &mut validation,
+                    )?,
+                );
+                for group in selected_groups.groups().iter() {
+                    let key = (group.owner().clone(), group.group().original_ordinal());
+                    match selected_products.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(group.clone());
+                        }
+                        std::collections::btree_map::Entry::Occupied(previous) => {
+                            if !previous.get().same_issuance(group) {
+                                return Err(CompileError::ExtractFailed(
+                                    "finite targets disagree on a physical native product".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                let package_closure = package_catalog.select(
+                    selected_groups.groups(),
+                    selected_target.imports(),
+                    &validation.inventory,
+                )?;
+                target.pending_imports = selected_target.imports().to_vec();
                 target.package_interfaces =
                     certified_products::certify_target_package_interfaces_with_validation(
                         target.prepared.prepared_shared(),
@@ -6503,8 +6492,7 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                let native_inputs = admitted_targets
-                    .for_ordinary_target(target.pending_imports.clone())?
+                let native_inputs = selected_target
                     .with_certified_groups(Arc::clone(&selected_groups))?
                     .complete_native_selection(
                         target.prepared.prepared(),
@@ -6513,6 +6501,9 @@ fn compile_invocation_inner(
                         &inherited_completion_support,
                         &validation.inventory,
                     )?;
+                artifacts.artifact_view = artifacts
+                    .artifact_view
+                    .retain_custody(native_inputs.artifacts())?;
                 let completed = native_inputs.completed_selection().ok_or_else(|| {
                     CompileError::ExtractFailed("finite target lacks its issued completion".into())
                 })?;
@@ -6531,7 +6522,7 @@ fn compile_invocation_inner(
         );
         invocation_timing.advance("candidate_publication");
         artifacts.source_selection = Some(certified.source_selection);
-        artifacts.certified_groups = Arc::clone(selected_groups.groups());
+        artifacts.certified_groups = selected_products.into_values().collect::<Vec<_>>().into();
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
