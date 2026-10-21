@@ -1,7 +1,10 @@
 //! Immutable literal imports retain their original certified producer. Package
 //! literals additionally require the protected target's interface witness.
 
-use super::{CompileError, CompiledProgram, DemandedImage, GlobalRefusalPhase, SourceBinder};
+use super::{
+    CompileError, CompiledProgram, DemandedImage, DemandedPackageImage, GlobalRefusalPhase,
+    SourceBinder,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
@@ -324,29 +327,58 @@ impl CompiledProgram {
         digest_for: impl Fn(&str, &str) -> Option<[u8; 32]>,
     ) -> BTreeMap<SymbolIdentity, PackageLiteral> {
         self.byte_tops
-            .iter()
-            .filter_map(|(id, storage)| {
-                let export = self.top_exports.get(id)?;
-                let digest = digest_for(&export.identity.unit, &export.identity.module)?;
-                if digest == [0; 32]
-                    || export.identity.namespace != "value"
-                    || export.rep != RuntimeRep::Address
-                    || export.entry_signature.is_some()
-                    || !export.evaluated
-                    || storage.last() != Some(&0)
-                {
+            .keys()
+            .filter_map(|value| {
+                let export = self.top_exports.get(value)?;
+                if export.identity.namespace != "value" {
                     return None;
                 }
-                let identity = export.identity.clone();
-                Some((
-                    identity.clone(),
-                    PackageLiteral {
-                        identity,
-                        interface_digest: digest,
-                        storage: Arc::clone(storage),
-                    },
-                ))
+                let digest = digest_for(&export.identity.unit, &export.identity.module)?;
+                self.package_literal_export(*value, &export.identity, digest)
+                    .map(|literal| (literal.identity.clone(), literal))
             })
             .collect()
+    }
+
+    fn package_literal_export(
+        &self,
+        value: ValueId,
+        identity: &SymbolIdentity,
+        digest: [u8; 32],
+    ) -> Option<PackageLiteral> {
+        let export = self.top_exports.get(&value)?;
+        let storage = self.byte_tops.get(&value)?;
+        if digest == [0; 32]
+            || export.identity != *identity
+            || export.rep != RuntimeRep::Address
+            || export.entry_signature.is_some()
+            || !export.evaluated
+            || storage.last() != Some(&0)
+        {
+            return None;
+        }
+        Some(PackageLiteral {
+            identity: identity.clone(),
+            interface_digest: digest,
+            storage: Arc::clone(storage),
+        })
+    }
+}
+
+impl DemandedPackageImage {
+    /// Lend bytes for this exact export of the paired package code and image.
+    /// Compiler-generated local binders remain private to their selected product;
+    /// this storage observation grants neither a machine handle nor source authority.
+    pub fn package_literal(&self, value: ValueId) -> Option<PackageLiteral> {
+        let identity = self
+            .group()
+            .exported_values()
+            .find_map(|(identity, selected)| (selected == value).then_some(identity))?;
+        let owner = self.group().owner();
+        if identity.unit != owner.unit || identity.module != owner.module {
+            return None;
+        }
+        self.image()
+            .package_literal_export(value, identity, owner.interface_sha256)
     }
 }

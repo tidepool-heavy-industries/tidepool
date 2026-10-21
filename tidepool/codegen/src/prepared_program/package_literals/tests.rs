@@ -1257,3 +1257,162 @@ fn neutral_home_image_preserves_literal_contracts_without_runtime_import_owners(
     .unwrap();
     assert!(Arc::ptr_eq(image.image(), existing.image()));
 }
+
+#[test]
+fn paired_package_local_bytes_keep_exact_export_and_storage() {
+    use crate::prepared_program::DemandedPackageImage;
+    use tidepool_repr::execution_schema::{PackageCodeOwner, PackageGroupCode};
+
+    let registry = ImageRegistry::new();
+    let mut local = identity();
+    local.namespace = "local".into();
+    local.occurrence = "$tp.package.0.2".into();
+    let code = |wire, unit: &str, module: &str| {
+        PackageGroupCode::admit(
+            PackageCodeOwner {
+                unit: unit.into(),
+                module: module.into(),
+                compiler_sha256: [1; 32],
+                profile_sha256: [2; 32],
+                interface_sha256: DIGEST,
+                defining_version_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 0).unwrap(),
+        )
+        .unwrap()
+    };
+    let producer = |bytes: &[u8]| {
+        let mut wire = testing::wire_program();
+        wire.expressions.nodes.clear();
+        wire.bindings = vec![Group::NonRecursive(TopBinding {
+            identity: local.clone(),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Bytes(bytes.to_vec()),
+            },
+        })];
+        DemandedPackageImage::prepare(
+            code(wire, "package", "Package"),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap()
+    };
+    let original = producer(BYTES);
+    assert!(
+        original
+            .image()
+            .package_literals(|_, _| Some(DIGEST))
+            .is_empty(),
+        "the generic external inventory still excludes local names"
+    );
+    assert!(
+        original.package_literal(ValueId(1)).is_none(),
+        "an absent export is not storage"
+    );
+    let supplied = BTreeMap::from([(local.clone(), original.package_literal(ValueId(0)).unwrap())]);
+    let mut consumer = group_wire(false, true);
+    consumer.globals[0].identity = local.clone();
+    let mut retained = consumer.clone();
+    retained.globals[0].required_generation = Some(7);
+    let retained = testing::prepare(retained).unwrap();
+    let consumer = testing::prepare(consumer).unwrap();
+    let owner = |binder, digest| {
+        Some(LiteralOwner::Package {
+            unit: "package".into(),
+            module: "Package".into(),
+            binder,
+            interface_digest: digest,
+        })
+    };
+    let before = (registry.hits(), registry.misses());
+    assert!(
+        matches!(
+            CompiledProgram::prepare_target_code(
+                &retained,
+                &[None],
+                &supplied,
+                &BTreeMap::new(),
+                &registry,
+            ),
+            Err(CompileError::Unsupported(_))
+        ),
+        "an actual retained-generation Address declaration is not immutable package storage"
+    );
+    assert!(matches!(
+        CompiledProgram::prepare_target_code(
+            &consumer,
+            &[owner(local.clone(), [8; 32])],
+            &supplied,
+            &BTreeMap::new(),
+            &registry,
+        ),
+        Err(CompileError::PackageLiteralContract(_))
+    ));
+    let mut wrong_binder = local.clone();
+    wrong_binder.occurrence = "other".into();
+    assert!(matches!(
+        CompiledProgram::prepare_target_code(
+            &consumer,
+            &[owner(wrong_binder, DIGEST)],
+            &supplied,
+            &BTreeMap::new(),
+            &registry,
+        ),
+        Err(CompileError::PackageLiteralContract(_))
+    ));
+    assert_eq!(
+        (registry.hits(), registry.misses()),
+        before,
+        "wrong exact binding facts refuse before image admission"
+    );
+    let reader = CompiledProgram::prepare_target_code(
+        &consumer,
+        &[owner(local.clone(), DIGEST)],
+        &supplied,
+        &BTreeMap::new(),
+        &registry,
+    )
+    .unwrap();
+    let batch = |source: &DemandedPackageImage, value| {
+        vec![
+            BatchProgram {
+                image: Arc::clone(&reader),
+                imports: vec![BatchImport::Source {
+                    group: 1,
+                    binding: value,
+                }],
+            },
+            BatchProgram {
+                image: Arc::clone(source.image()),
+                imports: vec![],
+            },
+        ]
+    };
+    let mut machine = machine();
+    let before = machine.residency();
+    assert!(machine
+        .install_shared_batch(batch(&original, ValueId(1)))
+        .is_err());
+    assert_eq!(machine.residency(), before);
+    let different = producer(b"other");
+    assert!(matches!(
+        machine.install_shared_batch(batch(&different, ValueId(0))),
+        Err(ExecutionError::BatchSourceContract(_))
+    ));
+    assert_eq!(machine.residency(), before);
+    let ids = machine
+        .install_shared_batch(batch(&original, ValueId(0)))
+        .unwrap();
+    machine.pin(ids[0]).unwrap();
+    assert_bytes(address(&mut machine, ids[0]));
+    assert!(
+        !machine.import_slot_is_registered_root(ids[0], &local),
+        "literal bytes are not a heap root"
+    );
+    assert!(machine.unpin(ids[0]));
+    machine.collect_major(machine.quiesce().unwrap()).unwrap();
+    assert_eq!(machine.residency().programs, 0);
+}
