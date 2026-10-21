@@ -173,7 +173,7 @@ impl PackageInterfaceCustody {
         }
         let mut interfaces = BTreeMap::new();
         for ((unit, module), witness) in &receipt.packages {
-            crate::host_work::checkpoint()?;
+            crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
             let token = CertifiedPackageInterface::from_native_output(
                 output, unit, module, witness, validation,
             )?;
@@ -201,7 +201,7 @@ impl PackageInterfaceCustody {
     ) -> CertResult<Self> {
         let mut interfaces = BTreeMap::new();
         for (owner, seal) in expected {
-            crate::host_work::checkpoint()?;
+            crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
             let (unit, module) = owner;
             let token = self.interfaces.get(owner)
                 .filter(|token| token.sha256() == seal)
