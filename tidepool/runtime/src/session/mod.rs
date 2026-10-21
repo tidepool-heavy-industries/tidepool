@@ -2017,6 +2017,13 @@ impl SessionLib {
         self.log.projection_at(self.scope_tip(scope)).cloned()
     }
 
+    pub(crate) fn current_joined_declaration_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::AcceptedJoin>> {
+        self.log.joined_evidence_at(self.scope_tip(scope))
+    }
+
     /// The retained compiler proof of a cold-restored lexical interface.
     #[must_use]
     pub fn current_recovered_declaration_in(

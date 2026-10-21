@@ -1348,6 +1348,10 @@ impl DeclarationPublicationBase {
 }
 
 impl AcceptedDeclarationPublication {
+    #[cfg(test)]
+    pub(crate) fn accepted_join_for_test(&self) -> &Arc<AcceptedJoin> {
+        self.receipt.receipt()
+    }
     pub fn reserved_generation(&self) -> Generation {
         self.base.reservation.generation
     }
