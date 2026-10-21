@@ -6484,6 +6484,17 @@ pub(crate) fn original_reference_payload_member<'a>(
         }
     }
     let ordinal = ordinal.ok_or_else(|| {
+        eprintln!(
+            "DEBUG membership miss owner={:?} requested={binder:?} reexported={reexported:?} groups={:?}",
+            product.owner(),
+            witness
+                .groups
+                .iter()
+                .flat_map(|group| group.group.binders().iter())
+                .take(16)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         CertificationError::OriginalMembership(Box::new(OriginalMembershipFailure::MissingSymbol {
             owner: product.owner().clone(),
             symbol: binder.clone(),
