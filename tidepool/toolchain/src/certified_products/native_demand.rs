@@ -277,12 +277,31 @@ mod tests {
         let operation = InventoryOperation::new(Default::default());
         let originals = vec![original("A"), original("B")];
         let decoded = NativeDemandPacket::decode(&packet(originals.clone()), &operation).unwrap();
+        let demander = serde_json::from_value(serde_json::json!({
+            "binding": {"artifact": vec![1u8;32], "selection": vec![2u8;32]},
+            "original_ordinal": 7,
+        }))
+        .unwrap();
+        let package = SymbolIdentity {
+            unit: "pkg".into(),
+            module: "Pkg".into(),
+            namespace: "value".into(),
+            occurrence: "root".into(),
+            record_parent: None,
+        };
+        let obligations = [crate::declaration_context::NativePackageObligation {
+            demander,
+            global_index: 0,
+            identity: package.clone(),
+            interface_digest: [8; 32],
+        }];
         let replies = decoded
             .originals()
             .iter()
-            .map(|original| NativeDemandUseReply {
+            .enumerate()
+            .map(|(index, original)| NativeDemandUseReply {
                 original,
-                obligations: &[],
+                obligations: if index == 0 { &obligations } else { &[] },
             })
             .collect::<Vec<_>>();
         let bytes = encode_reply(&replies, &operation).unwrap();
@@ -294,7 +313,18 @@ mod tests {
                 Value::Array(
                     originals
                         .into_iter()
-                        .map(|original| Value::Array(vec![original, Value::Array(vec![])]))
+                        .enumerate()
+                        .map(|(index, original)| Value::Array(vec![
+                            original,
+                            if index == 0 {
+                                value_array([value_array([
+                                    value_identity(&package),
+                                    Value::Bytes(vec![8; 32]),
+                                ])])
+                            } else {
+                                value_array([])
+                            }
+                        ]))
                         .collect()
                 )
             ])
