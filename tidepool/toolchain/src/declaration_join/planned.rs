@@ -1477,28 +1477,17 @@ mod tests {
                         if product.owner().module == dependency.module)
                     })
                     .unwrap();
-                let ArtifactPayload::Original(selected) = &native.payload else {
-                    unreachable!()
-                };
-                let demand = crate::certified_products::PendingImportOwner::Source {
-                    owner: selected.owner().clone(),
-                    original_ordinal: 7,
-                    binder: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: dependency.unit.clone(),
-                        module: dependency.module.clone(),
-                        namespace: "value".into(),
-                        occurrence: "entry_7".into(),
-                        record_parent: None,
-                    },
-                };
+                // This control selects a persisted graph prefix, independent of
+                // target observations or executable input permission.
                 let first = view
                     .inventory()
-                    .admit_shared_with_demand(
+                    .admit_recovery_selection(
                         &view,
-                        vec![native],
-                        crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&[
-                            demand,
-                        ]),
+                        vec![Arc::clone(&native)],
+                        &BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
+                            artifact: native.descriptor.id,
+                            original_ordinal: 7,
+                        }]),
                     )
                     .unwrap();
                 let first = first.retain_custody(&first).unwrap();
