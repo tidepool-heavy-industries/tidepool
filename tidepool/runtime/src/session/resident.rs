@@ -7588,7 +7588,7 @@ where
         authority: TurnInstallationAdmission<'_>,
         images: Option<&super::prepared::NativeImageBundle>,
     ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
-        match authority {
+        match &authority {
             TurnInstallationAdmission::Compilation => {
                 refuse_generic_activation_preview_install(code.certification())?;
             }
@@ -7607,7 +7607,31 @@ where
         self.state
             .admit_source_work_in(scope)
             .map_err(SessionError::SourceAdmission)?;
-        let resolved = if code.certification().is_some() {
+        let preview = match &authority {
+            TurnInstallationAdmission::Compilation => None,
+            TurnInstallationAdmission::ActivationPreviewFresh(admission) => Some(*admission),
+            TurnInstallationAdmission::ActivationPreviewSpent(spent) => Some(spent.admission()),
+        };
+        if let Some(admission) = preview {
+            self.state
+                .source_transaction
+                .as_ref()
+                .ok_or(super::SourceAdmissionError::MissingTransaction)
+                .and_then(|source| {
+                    source.admit_original(
+                        &admission.original_source(),
+                        Some(admission.source_lease()),
+                    )
+                })
+                .map_err(SessionError::SourceAdmission)?;
+        }
+        let resolved = if let Some(certification) = code.certification() {
+            if matches!(
+                certification.purpose(),
+                super::turn::TurnPurpose::Ordinary { original: None }
+            ) {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+            }
             let plan = match images {
                 Some(images) => images.native_plan(&code)?,
                 None => Arc::new(super::prepared::NativeInstantiationPlan::prepare_code(
@@ -7621,12 +7645,55 @@ where
                     .get(&input.id().raw())
                     .map(|owner| owner.source_custody())
             };
-            NativeTurnAdmission::Native(self.state.resolve_native_turn_in(
-                scope,
-                &code,
-                plan,
-                &retained_sources,
-            )?)
+            match certification.purpose() {
+                super::turn::TurnPurpose::Execution { .. } => NativeTurnAdmission::Native(
+                    self.state
+                        .resolve_native_turn_in(scope, &code, plan, &retained_sources)?,
+                ),
+                super::turn::TurnPurpose::Ordinary {
+                    original: Some(original),
+                } => {
+                    if !original.matches_bundle(
+                        code.prepared(),
+                        &certification.groups,
+                        &certification.target_owners,
+                        &certification.package_interfaces,
+                        code.table(),
+                        code.sites(),
+                    ) {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                    }
+                    let plan = Arc::new(super::prepared::ClosedInstantiationPlan::restrict(plan)?);
+                    let transaction = self
+                        .state
+                        .source_transaction
+                        .as_ref()
+                        .ok_or(super::SourceAdmissionError::MissingTransaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    let origin = CapturedSourceOrigin::capture(transaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    NativeTurnAdmission::Closed { plan, origin }
+                }
+                super::turn::TurnPurpose::ActivationPreview(_)
+                | super::turn::TurnPurpose::HostPrototype(_) => {
+                    if plan.has_request_sites() {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                    }
+                    let plan = Arc::new(super::prepared::ClosedInstantiationPlan::restrict(plan)?);
+                    let transaction = self
+                        .state
+                        .source_transaction
+                        .as_ref()
+                        .ok_or(super::SourceAdmissionError::MissingTransaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    let origin = CapturedSourceOrigin::capture(transaction)
+                        .map_err(SessionError::SourceAdmission)?;
+                    NativeTurnAdmission::Closed { plan, origin }
+                }
+                super::turn::TurnPurpose::Ordinary { original: None } => {
+                    unreachable!("unsealed ordinary refused before preparation")
+                }
+            }
         } else {
             if images.is_some() {
                 return Err(PreparedRuntimeError::MissingPreparedNativeImage.into());
@@ -8085,8 +8152,12 @@ where
             .map_err(SessionError::from)?;
         if let TurnImageAcquisition::Ready { bundle } = images {
             let held = bundle.native_plan(&code)?;
-            if !matches!(&resolved, NativeTurnAdmission::Native(resolved) if resolved.shares_plan(&held))
-            {
+            let shares_plan = match &resolved {
+                NativeTurnAdmission::Native(resolved) => resolved.shares_plan(&held),
+                NativeTurnAdmission::Closed { plan, .. } => Arc::ptr_eq(plan.native(), &held),
+                NativeTurnAdmission::Portable => false,
+            };
+            if !shares_plan {
                 return Err(PreparedRuntimeError::MissingPreparedNativeImage.into());
             }
         }

@@ -817,8 +817,9 @@ impl PersistentSession {
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
         let current = certification
             .current_native_sources(code.prepared())
-            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        let sources = super::prepared::NativeInstallationSources::current(&plan, current.as_ref());
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        let sources = super::prepared::NativeInstallationSources::current(&plan, &current);
         let selection = self
             .bindings
             .native_domain_selection_in(&self.scopes, scope)

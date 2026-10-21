@@ -243,7 +243,9 @@ impl ClosedInstantiationPlan {
         if has_retained_inputs(selection) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
-        Self::restrict(Arc::new(NativeInstantiationPlan::prepare_code(code, registry)?))
+        Self::restrict(Arc::new(NativeInstantiationPlan::prepare_code(
+            code, registry,
+        )?))
     }
 
     /// Restrict this exact prepared plan without rebuilding its imports or images.
@@ -443,6 +445,14 @@ impl NativeInstantiationPlan {
                 .certification()
                 .and_then(|certification| certification.native_selection.as_ref())
                 .is_some_and(|selection| Arc::ptr_eq(selection, &self.selection))
+    }
+
+    pub(in crate::session) fn has_request_sites(&self) -> bool {
+        !self.target_definitions.sites().is_empty()
+            || self
+                .programs
+                .iter()
+                .any(|program| !program.native.definitions().sites().is_empty())
     }
 
     pub(in crate::session) fn target_image(&self) -> &Arc<CompiledProgram> {
@@ -653,47 +663,18 @@ pub(in crate::session) struct NativeInstallationSources {
 impl NativeInstallationSources {
     pub(in crate::session) fn current(
         plan: &NativeInstantiationPlan,
-        current: Option<&super::super::turn::CurrentNativeSources<'_>>,
+        current: &super::super::turn::CurrentNativeSources<'_>,
     ) -> Self {
         Self {
-            target: current.map_or_else(
-                || {
-                    NativeSourceCustody::unknown(
-                        plan.target_definitions.sites().iter().map(|site| site.site),
-                    )
-                },
-                |current| current.target(),
-            ),
+            target: current.target(),
             programs: plan
                 .programs
                 .iter()
                 .map(|program| match &program.native {
-                    NativeCompiledProduct::Home { row, .. } => current.map_or_else(
-                        || {
-                            NativeSourceCustody::unknown(
-                                program
-                                    .native
-                                    .definitions()
-                                    .sites()
-                                    .iter()
-                                    .map(|site| site.site),
-                            )
-                        },
-                        |current| current.group(row),
-                    ),
-                    NativeCompiledProduct::Package { binding, .. } => current.map_or_else(
-                        || {
-                            NativeSourceCustody::unknown(
-                                program
-                                    .native
-                                    .definitions()
-                                    .sites()
-                                    .iter()
-                                    .map(|site| site.site),
-                            )
-                        },
-                        |current| current.package(ClosedPackageDefinition { binding }),
-                    ),
+                    NativeCompiledProduct::Home { row, .. } => current.group(row),
+                    NativeCompiledProduct::Package { binding, .. } => {
+                        current.package(ClosedPackageDefinition { binding })
+                    }
                 })
                 .collect(),
         }
