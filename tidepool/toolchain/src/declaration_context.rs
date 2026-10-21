@@ -369,9 +369,29 @@ impl PreparedValueSourceSupport {
             ));
         }
         timing.advance("derive_source_support");
+        // A value's direct imports are its actual source dependencies. Their
+        // compiler roles keep the selected Original implementation, so omit
+        // them only when the retained artifact has no Original body. Unrelated
+        // transitive dependencies stay interface-only.
+        let compiler_roles = self
+            .context
+            .compiler_source_support()
+            .projection()
+            .snapshot_roles();
         let source_owners = lexical
             .iter()
-            .map(|node| node.owner.clone())
+            .flat_map(|node| {
+                std::iter::once(node.owner.clone()).chain(
+                    node.imports
+                        .iter()
+                        .filter(|owner| {
+                            compiler_roles
+                                .get(owner)
+                                .is_some_and(|role| role.original().is_some())
+                        })
+                        .cloned(),
+                )
+            })
             .chain(value_owners.iter().cloned())
             .collect();
         let support = self
