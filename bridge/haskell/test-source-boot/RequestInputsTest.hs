@@ -1583,10 +1583,10 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
     facts <- readWorldInputsWithOwner owner packetPath
     -- These are distinct admitted Originals that expose one defining Name.
     -- Reexport membership must not compete with its defining association.
-    let references = [worldOriginalReferenceFor facts
+    let selectedReferences = [worldOriginalReferenceFor facts
           (mkModule (stringToUnit "main") (mkModuleName name))
           | name <- "CanonicalPartialConsumer" : facadeNames]
-    unless (all (/= Nothing) references && Set.size (Set.fromList references) == 3)
+    unless (all (/= Nothing) selectedReferences && Set.size (Set.fromList selectedReferences) == 3)
       (fail "reexport fixture omitted distinct defining/facade Original associations")
     unless (all (\root -> all (\name -> not (Map.member (name ++ ".hs") (worldSourceFiles root))) names)
         (worldSourceRoots (worldInputsSources facts)))
