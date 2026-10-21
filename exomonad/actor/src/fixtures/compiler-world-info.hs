@@ -1,6 +1,7 @@
 frontendAnswer <- do
   view <- currentScopeView
   answer <- info (NameQuery (PublicModule "WorldQuestion") ValueName "known")
+  let bounded label value = label ++ ": " ++ take 2048 (show value)
   case (view, answer) of
     (Right snapshot, Right details) -> do
       before <- scopeBindings (Just snapshot)
@@ -43,5 +44,23 @@ frontendAnswer <- do
               && refListProvenance initialBindings == snapshot
               && initialBindings == finalBindings
               && finalSnapshot == snapshot -> pure (7 :: Int)
-        _ -> error "wrong world query answer"
-    _ -> error "world query refused"
+        _ -> error ("wrong world query answer\n" ++ unlines
+          [ bounded "entry snapshot" snapshot
+          , bounded "public info" details
+          , bounded "scopeBindings before (counts, provenance, first 8 refs)"
+              (fmap (\value -> (refsObserved value, refsLimit value,
+                refListProvenance value, take 8 (refs value))) before)
+          , bounded "rowFit" fit
+          , bounded "typeOfExpression" expression
+          , bounded "typeSearch (counts, provenance, first 8 matches)"
+              (fmap (\value -> (typeMatchesObserved value, typeMatchesLimit value,
+                typeMatchesProvenance value, take 8 (typeMatches value))) matches)
+          , bounded "scopeBindings after (counts, provenance, first 8 refs)"
+              (fmap (\value -> (refsObserved value, refsLimit value,
+                refListProvenance value, take 8 (refs value))) after)
+          , bounded "final currentScopeView" finalView
+          ])
+    _ -> error ("world query refused\n" ++ unlines
+      [ bounded "currentScopeView" view
+      , bounded "public info" answer
+      ])
