@@ -1065,6 +1065,14 @@ pub(crate) fn complete_native_selection(
         for completed in inherited.iter() {
             if let Some(old) = completed.rows.get(&row.binding()) {
                 if !old.product.same_issuance(row.group()) {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        binding = ?row.binding(), owner = ?row.group().owner(),
+                        previous_origin = ?old.product.origin(), incoming_origin = ?row.group().origin(),
+                        owner_equal = old.product.owner() == row.group().owner(),
+                        group_pointer_equal = std::ptr::eq(old.product.group(), row.group().group()),
+                        imports_pointer_equal = std::ptr::eq(old.product.imports(), row.group().imports()),
+                        physical_current = row.physical_current().is_some(),
+                        "completed HOME occurrence identity refused");
                     return Err(failure("completed HOME row changed its exact product"));
                 }
                 if prior
