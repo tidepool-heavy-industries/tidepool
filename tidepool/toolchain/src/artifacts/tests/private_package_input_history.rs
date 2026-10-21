@@ -491,13 +491,38 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     );
     assert!(!inherited.contains_key(&arbitrary_owner));
     std::fs::write(&witness.selected_path, b"changed package interface").unwrap();
-    assert!(selected_package_closure(
-        &BTreeMap::new(),
-        &issued,
-        request.groups.as_ref(),
-        &mut PackageInterfaceValidation::default(),
-    )
-    .is_err());
+    assert!(matches!(
+        PackageInterfaceValidation::default().verify(&witness.selected_path, &witness.sha256),
+        Err(crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_))
+    ));
+    assert_eq!(
+        selected_package_closure(
+            &BTreeMap::new(),
+            &issued,
+            request.groups.as_ref(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap(),
+        inherited,
+        "already captured package custody survives mutation of its original path"
+    );
+    std::fs::remove_file(&witness.selected_path).unwrap();
+    assert!(matches!(
+        PackageInterfaceValidation::default().verify(&witness.selected_path, &witness.sha256),
+        Err(crate::recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. })
+            if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert_eq!(
+        selected_package_closure(
+            &BTreeMap::new(),
+            &issued,
+            request.groups.as_ref(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap(),
+        inherited,
+        "already captured package custody survives removal of its original path"
+    );
     std::fs::write(&witness.selected_path, package_bytes).unwrap();
     let conflicting_path = directory.path().join("Conflicting.hi");
     std::fs::write(&conflicting_path, package_bytes).unwrap();
