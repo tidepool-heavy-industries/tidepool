@@ -3057,7 +3057,7 @@ proptest! {
         for ordinal in queries.into_iter().chain(0..40) {
             let expected = edges.iter().filter(|(_, dependency)| match dependency {
                 ArtifactDependency::NativeGroup { dependent_ordinal, .. } | ArtifactDependency::NativeBinding { dependent_ordinal, .. } => *dependent_ordinal == ordinal,
-                ArtifactDependency::Interface => false,
+                ArtifactDependency::Interface | ArtifactDependency::PackageCodeImport { .. } => false,
             }).cloned().collect::<BTreeSet<_>>();
             let actual = indexed.get(&ordinal).into_iter().flatten().cloned().collect::<BTreeSet<_>>();
             prop_assert_eq!(&actual, &expected);
