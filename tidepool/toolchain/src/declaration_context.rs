@@ -386,7 +386,7 @@ impl PreparedValueSourceSupport {
                         .iter()
                         .filter(|owner| {
                             compiler_roles
-                                .get(owner)
+                                .get(*owner)
                                 .is_some_and(|role| role.original().is_some())
                         })
                         .cloned(),
