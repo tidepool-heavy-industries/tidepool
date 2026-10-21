@@ -1189,6 +1189,8 @@ pub(crate) fn package_interface_io() -> (u64, u64) {
 pub(crate) struct PackageInterfaceValidation {
     pub(crate) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
+    // Budget for copied file-read payloads. Captured-output Arcs already have
+    // a physical owner and share their bytes without another payload copy.
     retained_bytes: usize,
     hash_bytes: u64,
     read_bytes: u64,
@@ -1343,16 +1345,13 @@ impl PackageInterfaceValidation {
             .charge(bytes.len())
             .map_err(accounting_charge_error)?;
         let sha256 = self.verify_bytes(path, physical_path, bytes, expected_sha256, true)?;
-        if !self.captured.contains_key(path)
-            && bytes.len() <= PACKAGE_VALIDATION_RETAIN_LIMIT.saturating_sub(self.retained_bytes)
-        {
+        if !self.captured.contains_key(path) {
             self.inventory
                 .reserve::<CapturedPackageInterface>(1)
                 .map_err(accounting_charge_error)?;
             self.inventory
                 .charge(path.as_os_str().as_encoded_bytes().len())
                 .map_err(accounting_charge_error)?;
-            self.retained_bytes += bytes.len();
             self.captured.insert(
                 path.to_path_buf(),
                 CapturedPackageInterface {
@@ -4590,7 +4589,9 @@ mod tests {
                 validation.retained_bytes = PACKAGE_VALIDATION_RETAIN_LIMIT;
                 let uncached = root.path().join("another-issuing-output/package.hi");
                 validation.verify_captured(&uncached, &physical_path, &expected, &bytes)?;
-                assert!(!validation.captured.contains_key(&uncached));
+                assert!(validation.captured.contains_key(&uncached));
+                validation.verify(&uncached, &expected)?;
+                assert_eq!(validation.retained_bytes, PACKAGE_VALIDATION_RETAIN_LIMIT);
                 assert!(matches!(
                     validation.verify_captured(
                         &issuing_path,
