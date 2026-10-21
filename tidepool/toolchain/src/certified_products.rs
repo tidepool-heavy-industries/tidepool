@@ -20387,9 +20387,12 @@ pub(crate) mod tests {
                 } else if mode == "issued" && ordinal == 9001 {
                     assert!(matches!(
                         &outcome,
-                        Err(crate::CompileError::CompilerEvidence(error))
-                            if matches!(error.as_ref(), CertificationError::OriginalAvailability(refusal)
-                                if refusal.owner == *product.owner() && refusal.original_ordinal == 9001)
+                        Err(crate::CompileError::ArtifactInventory(error))
+                            if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                                artifact: entry.descriptor.id, original_ordinal: 9001,
+                            } && matches!(error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::InputPermissionDenied {
+                                body_present: true, ..
+                            }))
                     ));
                 }
                 let expected = mode == "full" || (mode == "issued" && ordinal == 7);
@@ -20778,9 +20781,12 @@ pub(crate) mod tests {
                         }
                     } else if !matches!(
                         &outcome,
-                        Err(crate::CompileError::CompilerEvidence(error))
-                            if matches!(error.as_ref(), CertificationError::OriginalAvailability(refusal)
-                                if refusal.owner == *product.owner() && refusal.original_ordinal == ordinal)
+                        Err(crate::CompileError::ArtifactInventory(error))
+                            if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                                artifact: entry.descriptor.id, original_ordinal: ordinal,
+                            } && matches!(error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::InputPermissionDenied {
+                                body_present: true, ..
+                            }))
                     ) {
                         unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected typed refusal actual={outcome:?}"));
                     }
@@ -22922,8 +22928,9 @@ pub(crate) mod tests {
                     &mut validation,
                 ),
                 Err(crate::CompileError::CompilerEvidence(error))
-                    if matches!(error.as_ref(), CertificationError::OriginalAvailability(refusal)
-                        if refusal.owner == *original.owner() && refusal.original_ordinal == 100)
+                    if matches!(error.as_ref(), CertificationError::Mismatch(
+                        "target Source exact native membership"
+                    ))
             ));
             let missing = vec![entries[0].clone()];
             let partial_inventory = ArtifactInventory::default();
