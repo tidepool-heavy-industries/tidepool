@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module LoggingTest (runLoggingTests) where
 
 import Control.Exception
@@ -5,6 +7,7 @@ import Control.Exception
   , asyncExceptionFromException, asyncExceptionToException, bracket, throw, throwIO
   , try )
 import Control.Monad (unless)
+import qualified Data.ByteString as BS
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List (isInfixOf)
@@ -28,6 +31,7 @@ runLoggingTests = do
   checkEscaping
   checkBoundedValue
   checkFieldCap
+  checkWorstCaseBound
   checkHandles
   checkEnvironment
   checkDisabledLaziness
@@ -101,14 +105,39 @@ checkBoundedValue = withScratch $ \path -> do
 checkFieldCap :: IO ()
 checkFieldCap = withScratch $ \path -> do
   let logger = newLogger "target" LogTrace
-      overflow = [("field" ++ show index, LogInteger index) | index <- [1 .. 40 :: Int64]]
+      overflowing =
+        [("field" ++ show index, LogInteger index) | index <- [1 .. 32 :: Int64]]
+        ++ [error "field cap traversed its omitted tail"]
   withFile path WriteMode $ \handle ->
-    logEventTo handle logger LogTrace "field-cap" overflow
+    logEventTo handle logger LogTrace "field-cap" overflowing
   capped <- readFile' path
-  unless ("\"omitted_fields\":8" `isInfixOf` capped)
-    (fail "field cap did not report the omitted field count")
-  unless ("field32" `isInfixOf` capped && not ("field33" `isInfixOf` capped))
-    (fail "field cap kept or dropped the wrong fields")
+  unless ("\"fields_truncated\":true" `isInfixOf` capped)
+    (fail "field cap did not encode fixed-width truncation")
+  unless ("field32" `isInfixOf` capped)
+    (fail "field cap dropped a field inside the retained window")
+
+-- Exercise the declared ceiling through the actual UTF-8 sink. Every bounded
+-- input is longer than its rendered prefix and uses control characters, the
+-- worst JSON escape; the start of an unevaluated overflow tail proves the cap
+-- does not scan beyond its fixed field window.
+checkWorstCaseBound :: IO ()
+checkWorstCaseBound = withScratch $ \path -> do
+  let logger = newLogger (replicate 257 '\x01') LogTrace
+      event = replicate 257 '\x01'
+      fields =
+        [ ( show index ++ replicate 128 '\x01' ++ "unique"
+          , LogText (replicate 4097 '\x01') )
+        | index <- [0 .. 31 :: Int]
+        ]
+        ++ [error "worst-case bound traversed its omitted tail"]
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogTrace event fields
+  rendered <- BS.readFile path
+  unless (BS.length rendered <= maxRenderedLogBytes + 1)
+    (fail ("structured logging exceeded its byte ceiling: "
+      ++ show (BS.length rendered) ++ " > " ++ show (maxRenderedLogBytes + 1)))
+  unless (BS.isInfixOf "\"fields_truncated\":true" rendered)
+    (fail "worst-case event omitted its fixed-width truncation marker")
 
 checkHandles :: IO ()
 checkHandles = do

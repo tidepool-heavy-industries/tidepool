@@ -6,15 +6,13 @@
 -- best effort: a closed or otherwise unavailable stderr must not replace the
 -- compiler result, while asynchronous cancellation still escapes.
 --
--- /Bounded events./ Every value is drawn from a finite vocabulary: 'LogText'
--- is capped at 4096 characters, field names at 128, the target and event at
--- 256, and 'LogInteger' carries an 'Int64'. Each event also renders at most
--- 'maxFields' distinct caller fields. The field cap is diagnostic payload
--- control: production events are trace records with small static field lists
--- (the largest current site, @finalized.owner@, has twelve distinct fields),
--- and the cap stops a future call site from growing a diagnostic line without
--- bound. When the cap drops distinct fields the event records an explicit
--- @omitted_fields@ count instead of silently losing them.
+-- /Bounded events./ Every rendered value has bounded width: 'LogText' renders
+-- at most 4096 leading characters plus an ellipsis, field names at 128 plus an
+-- ellipsis, the target and event at 256 plus an ellipsis, and
+-- 'LogInteger' carries an 'Int64'. At most the first 'maxFields' caller field
+-- entries are inspected and rendered. A duplicate or later entry sets the
+-- fixed-width @fields_truncated:true@ marker instead of requiring an unbounded
+-- scan or an arbitrarily wide omission count.
 --
 -- /Total encoding bound./ @jsonString@'s worst case is a control character
 -- rendered as @\\u00XX@, six bytes, so a bounded string of @n@ characters
@@ -25,18 +23,17 @@
 --   "tidepool-log {"                                  14
 --   "schema":1                                        10
 --   "level":"trace"                                   15
---   "target":2 + 6*256                              1547
---   "event":2 + 6*256                               1546
+--   "target":2 + 6*256+3                            1550
+--   "event":2 + 6*256+3                             1549
 --   "observed_ns":20                                  34
---   "fields":{32*(2+6*128 + 1 + 2+6*4096) + 31}    811210
---   "omitted_fields":20 (only when capped)            37
---   member separators and closing brace                21
+--   "fields":{32*(2+6*128+3 + 1 + 2+6*4096+3)+31} 811402
+--   "fields_truncated":true (only when capped)        23
+--   member separators and closing brace                 7
 -- @
 --
--- i.e. about 814420 bytes (~795 KiB) in the absolute worst case, with the
--- omission marker included. This is a static ceiling that follows from finite
--- inputs, so no per-event byte budget manager is needed for the current
--- workload.
+-- i.e. 814604 bytes (~795 KiB) in the absolute worst case, with the truncation
+-- marker included and the three-byte UTF-8 ellipsis charged to every capped
+-- string. Newline termination is outside this event bound.
 module Tidepool.Logging
   ( LogLevel(..)
   , Logger
@@ -49,12 +46,14 @@ module Tidepool.Logging
   , logEvent
   , logEventTo
   , logTrace
+  , maxRenderedLogBytes
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (toLower)
 import Data.Int (Int64)
 import Data.List (intercalate)
+import qualified Data.Set as Set
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Environment (lookupEnv)
@@ -115,7 +114,7 @@ loggerEnabled logger level =
 -- tests observe the actual sink rather than a duplicated JSON rule.
 renderLogEvent :: Word64 -> LogLevel -> String -> String -> [LogField] -> String
 renderLogEvent observed loggerLevel target event fields =
-  let (kept, omitted) = boundedFields fields
+  let (kept, truncated) = boundedFields fields
       members =
         [ "\"schema\":1"
         , "\"level\":" ++ jsonString (levelName loggerLevel)
@@ -123,8 +122,12 @@ renderLogEvent observed loggerLevel target event fields =
         , "\"event\":" ++ jsonString (boundedText 256 event)
         , "\"observed_ns\":" ++ show observed
         , "\"fields\":{" ++ intercalate "," (renderField <$> kept) ++ "}"
-        ] ++ [ "\"omitted_fields\":" ++ show omitted | omitted > 0 ]
+        ] ++ [ "\"fields_truncated\":true" | truncated ]
   in "tidepool-log {" ++ intercalate "," members ++ "}"
+
+-- | Static byte ceiling for one rendered event, excluding line termination.
+maxRenderedLogBytes :: Int
+maxRenderedLogBytes = 814604
 
 -- | Emit through the process diagnostic channel. The level check precedes the
 -- clock read, rendering and exception boundary, so disabled trace sites are
@@ -170,25 +173,27 @@ renderValue value = case value of
 
 -- Repeated names would make a JSON object ambiguous. The first field wins;
 -- call sites should carry distinct keys and treat omission as a programming
--- error rather than a reason to fail the compiler operation. Distinct fields
--- beyond 'maxFields' are dropped, and the returned count makes that omission
--- explicit at the event boundary.
-boundedFields :: [LogField] -> ([LogField], Int)
+-- error rather than a reason to fail the compiler operation. Only the first
+-- 'maxFields' entries are inspected. A duplicate or any later entry makes the
+-- omission explicit through the fixed-width truncation marker.
+boundedFields :: [LogField] -> ([LogField], Bool)
 boundedFields fields =
-  let normalized = [(boundedText 128 name, value) | (name, value) <- fields]
-      (kept, dropped) = splitAt maxFields (dedupe normalized)
-  in (kept, length dropped)
+  let (window, later) = splitAt maxFields fields
+      (kept, duplicate) = dedupe window
+  in (reverse kept, duplicate || not (null later))
   where
-    dedupe = go []
+    dedupe = go Set.empty []
       where
-        go _ [] = []
-        go seen (field@(name, _):rest)
-          | name `elem` seen = go seen rest
-          | otherwise = field : go (name : seen) rest
+        go _ kept [] = (kept, False)
+        go seen kept ((name, value):rest)
+          | name' `Set.member` seen = go seen kept rest
+          | otherwise = go (Set.insert name' seen) ((name', value):kept) rest
+          where
+            name' = boundedText 128 name
 
--- | The most distinct caller fields one event renders. Production events are
--- small (twelve fields at the largest current site); this caps pathological
--- growth while leaving headroom for the current workload.
+-- | The most caller field entries one event inspects and renders. Production
+-- events are small (twelve fields at the largest current site); this caps
+-- pathological growth while leaving headroom for the current workload.
 maxFields :: Int
 maxFields = 32
 
