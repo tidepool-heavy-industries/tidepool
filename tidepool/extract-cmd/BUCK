@@ -98,6 +98,7 @@ rust_filegroup(
     mapped_srcs = {
         "//bridge/haskell:extract_request_source": "bridge/haskell/src/Tidepool/ExtractRequest.hs",
         "//bridge/haskell:ghc_pipeline_source": "bridge/haskell/src/Tidepool/GhcPipeline.hs",
+        "//bridge/haskell:logging_source": "bridge/haskell/src/Tidepool/Logging.hs",
         "//bridge/haskell:timing_source": "bridge/haskell/src/Tidepool/Timing.hs",
         "//bridge/haskell:worker_server_source": "bridge/haskell/src/Tidepool/WorkerServer.hs",
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",

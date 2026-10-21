@@ -137,6 +137,7 @@ library tidepool-extract-internal
     Tidepool.ExecutionIR
     Tidepool.ExecutionProjection
     Tidepool.Json
+    Tidepool.Logging
     Tidepool.Resolve
     Tidepool.Session
     Tidepool.SessionArtifacts
@@ -213,6 +214,7 @@ test-suite cell-splitter-test
                     CheckedAdmissionTest
                     HarnessSourceTest
                     InspectionRunnerTest
+                    LoggingTest
                     WorkerDiagnosticsTest
                     QuasiQuoteOccurrencesTest
   build-depends: tidepool-execution-schema,

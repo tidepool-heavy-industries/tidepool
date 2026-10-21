@@ -1875,7 +1875,6 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
     worldDirectory <- canonicalizePath work
-    ifaceTrace <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
     withRootedCompilerEnvironment worldDirectory $ do
       (outcome,diagnostics) <- withQuietStdout $ captureDiagnostics $
         withResidentCompilerScopes [] $ \runScope -> do
@@ -1889,7 +1888,6 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
             -- lexical base under the shipped NoImplicitPrelude dialect.
             let template = unlines
                   ["{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
-                  ,if ifaceTrace == Just "1" then "{-# OPTIONS_GHC -ddump-if-trace #-}" else ""
                   ,"{{CELL_PRAGMAS}}","module CellCheck where"
                   ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
                   ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"

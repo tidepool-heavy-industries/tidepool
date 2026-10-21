@@ -372,17 +372,16 @@ where
     O: OutputSink + Sync + 'static,
 {
     #[cfg(test)]
-    if std::env::var_os("TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS").is_some() {
-        eprintln!(
-            "actor child launch layout prepared_bytes={} completed_bytes={} behavior_bytes={} error_bytes={} boundary_bytes={} wait_bytes={}",
-            std::mem::size_of::<PreparedChildLaunch>(),
-            std::mem::size_of::<CompletedChildLaunch>(),
-            std::mem::size_of::<ResidentKernelBehavior<H, O>>(),
-            std::mem::size_of::<ResidentActorWorkbenchError>(),
-            std::mem::size_of::<ResidentActorBoundary>(),
-            std::mem::size_of::<OwnedWorkbenchWait>(),
-        );
-    }
+    tracing::trace!(
+        target: "exomonad_actor::async_layout",
+        prepared_bytes = std::mem::size_of::<PreparedChildLaunch>(),
+        completed_bytes = std::mem::size_of::<CompletedChildLaunch>(),
+        behavior_bytes = std::mem::size_of::<ResidentKernelBehavior<H, O>>(),
+        error_bytes = std::mem::size_of::<ResidentActorWorkbenchError>(),
+        boundary_bytes = std::mem::size_of::<ResidentActorBoundary>(),
+        wait_bytes = std::mem::size_of::<OwnedWorkbenchWait>(),
+        "actor child launch layout"
+    );
     let PreparedChildLaunch {
         continuation,
         admission,
