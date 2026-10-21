@@ -2607,6 +2607,36 @@ impl CompilerSourceSupport {
         }))
     }
 
+    /// Compose independently issued initial native choices with this actual
+    /// prefix's compiler projection. The ordinary same-basis projection keeps
+    /// its guards; only the checked emitted stage can add historical edges.
+    pub(crate) fn project_world_stage_inputs(
+        self: &Arc<Self>,
+        demand: &DemandCompilerProjection,
+        availability: &crate::declaration_context::RequestNativeAvailability,
+        issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
+        prefix_groups: &crate::declaration_context::DemandCertifiedGroups,
+        stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Arc<Self>, CompileError> {
+        if !Arc::ptr_eq(stage.operation(), operation) || !prefix_groups.groups().is_empty() {
+            return Err(failure(
+                "World prefix projection cannot issue native group demand",
+            ));
+        }
+        let projected = self.project_demanded_inputs(
+            demand,
+            availability,
+            issued_delta,
+            prefix_groups,
+            operation,
+        )?;
+        let artifacts = projected.artifacts.with_world_stage_initial_inputs(stage)?;
+        let mut support = projected.as_ref().clone();
+        support.artifacts = artifacts;
+        Ok(Arc::new(support))
+    }
+
     #[tracing::instrument(
         target = "exomonad_harness::timing", name = "exact.compiler_support.new",
         level = "debug", skip_all, fields(inclusive = true, role_count = projection.roles.len())

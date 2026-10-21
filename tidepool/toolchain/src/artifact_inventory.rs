@@ -9438,6 +9438,37 @@ impl ArtifactView {
         self.merge_validated_namespace(prior, self.namespace().clone())
     }
 
+    /// Carry the initial request's exact selected stage edges alongside the
+    /// advancing compiler namespace. Only the checked emitted-stage owner can
+    /// name this selection; custody or another stage's acquisition cannot.
+    pub(crate) fn with_world_stage_initial_inputs(
+        &self,
+        stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+    ) -> Result<Self, CompileError> {
+        let initial = stage.initial_inputs().artifacts();
+        if !Arc::ptr_eq(&self.lease.inventory.0, &initial.lease.inventory.0) {
+            return Err(failure(
+                "World stage native inputs belong to another inventory",
+            ));
+        }
+        let Some(selected) = stage.selection() else {
+            return Ok(self.clone());
+        };
+        let selected = initial.select_acquired_compiler_bindings(
+            &BTreeMap::new(),
+            selected
+                .selected_groups()
+                .bound_rows()
+                .map(|(binding, _)| binding),
+            stage.operation(),
+        )?;
+        stage
+            .operation()
+            .reserve::<(ArtifactId, ArtifactBinding)>(self.namespace().len())
+            .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error.into())))?;
+        self.merge_validated_namespace(&selected, self.namespace().clone())
+    }
+
     /// Both views and the exact namespace have already crossed their issuing
     /// owner. Historical edges remain in their immutable scopes, independently
     /// of the compiler namespace selected for this receiving view.
