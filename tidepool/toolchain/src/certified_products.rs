@@ -6303,6 +6303,56 @@ fn authenticate_original_binding_membership(
         owner: owner.clone(),
         reason,
     };
+    // GHC resolves a re-exported symbol to its defining site, so the nominal
+    // listing module's pair did not issue the symbol. Carry the defining
+    // module's own authenticated primary pair and prove membership against
+    // its witness groups; the listing provenance stays in the receipt.
+    if binder.unit != owner.unit || binder.module != owner.module {
+        let defining = crate::declaration_join::ExactModuleIdentity {
+            unit: binder.unit.clone(),
+            module: binder.module.clone(),
+        };
+        let refuse_defining = |reason| CertificationError::InputDecision {
+            owner: defining.clone(),
+            reason,
+        };
+        let primary = source
+            .compiler_primary_input(&defining)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+            .ok_or_else(|| refuse_defining(InputDecisionRefusal::RoleMismatch))?;
+        let Some(defining_original) = primary.original() else {
+            return Err(refuse_defining(InputDecisionRefusal::RoleMismatch));
+        };
+        let interface_entry = source
+            .artifacts()
+            .observed_payload(&primary.interface().artifact)
+            .ok_or_else(|| {
+                refuse_defining(InputDecisionRefusal::ArtifactIdentityMismatch(
+                    ArtifactIdentityMismatch {
+                        stage: ArtifactIdentityStage::MissingInterfacePayload,
+                        expected_canonical: Some(primary.interface().artifact),
+                        expected_original: Some(defining_original.artifact),
+                        ..ArtifactIdentityMismatch::refused(
+                            ArtifactIdentityStage::MissingInterfacePayload,
+                        )
+                    },
+                ))
+            })?;
+        let reference = ReceiptImportOwner::OriginalBinding {
+            unit: defining.unit.clone(),
+            module: defining.module.clone(),
+            interface: primary.interface(),
+            original: defining_original,
+            binder: binder.clone(),
+        };
+        return original_reference_payload_member(
+            &reference,
+            interface_entry,
+            primary.entry(),
+            Some(operation),
+        )
+        .map(|(owner, ordinal)| (owner.clone(), ordinal));
+    }
     let primary = source
         .compiler_primary_input(owner)
         .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
