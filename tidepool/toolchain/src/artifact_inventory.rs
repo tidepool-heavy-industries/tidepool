@@ -21863,6 +21863,8 @@ mod package_code {
         pub(crate) fn artifacts(&self) -> &ArtifactView {
             &self.artifacts
         }
+        /// Exact bindings in request-slot order, including repeated imports.
+        /// The retained custody frontier is separately deduplicated.
         pub(crate) fn roots(&self) -> &[ArtifactBinding] {
             &self.roots
         }
@@ -22321,7 +22323,8 @@ mod package_code {
                         PackageCodeRefusal::MissingBinding { binding },
                     ));
                 }
-                let entry = &artifacts.lease.payloads[&binding.artifact];
+                let entry = artifacts.lease.payloads.get(&binding.artifact)
+                    .ok_or_else(|| refusal(binding.artifact, PackageCodeRefusal::MissingProduct))?;
                 let ArtifactPayload::PackageCode(product) = &entry.payload else {
                     return Err(refusal(binding.artifact, PackageCodeRefusal::WrongKind));
                 };
