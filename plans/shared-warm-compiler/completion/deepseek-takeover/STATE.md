@@ -1,5 +1,9 @@
 # Exact takeover checkpoint
 
+Historical snapshot, superseded by
+[the current closeout state](../deepseek-g2-closeout/STATE.md).
+Do not use its branch, failures or worker assignments as the current frontier.
+
 Observed 2026-10-21 after the morning review. No implementation or deployment was
 performed during that review. All admitted morning checks are terminal; no new
 Sol work is pending. Recheck actual jobs and refs before taking ownership.

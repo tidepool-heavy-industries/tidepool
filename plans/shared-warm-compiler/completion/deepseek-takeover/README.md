@@ -1,6 +1,12 @@
-# DeepSeek takeover: close G2 without another compiler redesign
+# Previous DeepSeek takeover: historical work pack
 
-Reviewed 2026-10-21. This directory is the next-wave execution plan. Read
+Superseded on 2026-10-21 by
+[B closeout with C investigation](../deepseek-g2-closeout/README.md).
+The following A/B/C/D assignments, source checkpoint and no-format-change
+assumption describe the preceding wave. They are historical context, not new
+work orders or current qualification. Use the new pack's STATE and contracts.
+
+Earlier review, 2026-10-21. This directory was the preceding execution plan. Read
 [STATE.md](STATE.md) before assigning work: G2 is **not accepted**. The user wants
 DeepSeek workers to continue from this review, preserving OpenAI budget for
 later architectural judgment. Do not start another Sol implementation wave.

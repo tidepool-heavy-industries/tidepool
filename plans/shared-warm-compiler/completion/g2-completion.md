@@ -1,15 +1,18 @@
 # G2: complete the native compiler/runtime join
 
-2026-10-21 review: [DeepSeek takeover](deepseek-takeover/README.md) supplies the
-current source/evidence checkpoint and remaining repair sequence. This document's
-acceptance and authority contracts remain in force; older progress descriptions
-are not current qualification evidence.
+2026-10-21 accepted continuation:
+[G2 boundary cleanup with parallel producer-demand investigation](deepseek-g2-closeout/README.md)
+supplies the current source/evidence checkpoint, assignments and remaining repair
+sequence. This document's acceptance and authority contracts remain in force;
+older implementation splits and progress descriptions are historical design
+context, not new assignments or current qualification evidence. The new pack
+explicitly permits the necessary atomic package-linkage receipt version change.
 
-Accepted implementation contract, revised 2026-10-20 after joined architecture
+Underlying implementation contract, revised 2026-10-20 after joined architecture
 review, consolidated at `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`. Controlling branch:
 `integration/compiler-query-warm-final`.
 
-This document owns the remaining G2 sequencing and boundary decisions. It
+This document records the G2 semantic and acceptance boundaries. It
 refines [ownership-completion.md](ownership-completion.md) and
 [package-runtime-join.md](package-runtime-join.md). Earlier implementation
 shapes may be replaced. No second compiler route, package registry, test
@@ -27,11 +30,11 @@ wrong historical links, accidental A-state reuse or caller-loss corruption of
 published B. Full force/fork/callback/process-recovery matrices and full M1–M3
 belong to G3. Unsupported G3 operations must refuse explicitly.
 
-## Current implementation: Plan B
+## Underlying implementation contract
 
-Complete these existing owners together; this section governs the current
-implementation split. The detailed invariants below remain constraints, not a
-request to rebuild completed infrastructure.
+The following owners implement the G2 contract. The active work pack linked
+above owns assignments and sequencing; these detailed invariants remain
+constraints, not a request to rebuild completed infrastructure.
 
 ### Ordered target admission
 

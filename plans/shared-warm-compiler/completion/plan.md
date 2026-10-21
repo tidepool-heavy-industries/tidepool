@@ -1,15 +1,15 @@
 # Complete the compiler-native architecture
 
-Current continuation (2026-10-21): [DeepSeek takeover](deepseek-takeover/README.md).
-Its [state](deepseek-takeover/STATE.md) supersedes older checkpoint/status prose
-below; [cause analysis](deepseek-takeover/06-cause-analysis.md) and the numbered
-leaf plans govern the next bounded G2 repair wave. G2 is not yet accepted.
+Current continuation (2026-10-21):
+[DeepSeek G2 closeout: B with C investigation](deepseek-g2-closeout/README.md).
+Its [state](deepseek-g2-closeout/STATE.md),
+[contracts](deepseek-g2-closeout/CONTRACTS.md) and worker plans govern the active
+wave. G2 is not accepted. Reviewed implementation base is
+`0ea5b8e2a9168752c05bcba9cd927635d9004b5a` on
+`g2-closeout/deepseek-20261021`; `integration/compiler-query-warm-final` remains
+the broader consolidation destination. Reconcile current refs before promotion.
 
-Status: implementation resumed after architectural review on 2026-10-20.
-Controlling branch: `integration/compiler-query-warm-final`.
-Consolidated source checkpoint: `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`.
-Current implementation contract: [g2-completion.md](g2-completion.md).
-It owns this wave's work split, constructor boundaries, sequencing and acceptance.
+The [G2 contract](g2-completion.md) owns acceptance and semantic boundaries.
 [ownership-completion.md](ownership-completion.md) and
 [package-runtime-join.md](package-runtime-join.md) supply supporting contracts.
 [contracts.md](contracts.md) remains the shared semantic contract except where
@@ -36,29 +36,23 @@ their recorded source. The current map and exact receipts live in
 [the compiler map](../../../docs/compiler-work-map.md) and
 [the verification ledger](tests/verification-ledger.md).
 
-The remaining production repairs are ordered exact target selection, nominal
-RetainedCore identity without executable-demand resolution, prior-stage produced
-Source support, captured TYPE hydration in Haskell, and actual source ownership
-through Ordinary installation. These are distinct boundaries; fixing an earlier
-failure does not qualify downstream behavior.
+The current three repair fronts are exact package occurrence linkage, selected
+interface provenance versus retained-copy location, and compiler-progress evidence
+for native no-cell publication. Defining-Name correction is a reviewed unmerged
+prerequisite. Required cold/eviction and joined bundle evidence remain incomplete.
 
 Common `NativeInstantiationPlan` installation and deletion of `code_exports`
 are already implemented. Preserve them; do not restart their migration. The
-accepted Plan B in [g2-completion.md](g2-completion.md) owns the remaining work.
+active work pack owns the next changes; do not restart previously integrated
+closed-support, HOME census, affine initialization or logging work.
 
 ## Ownership and integration
 
-| Owner | Current work | Completion evidence |
-| --- | --- | --- |
-| original_reference_boundary | Exact target slots and entry occurrence; remove logical rematching | Imported HOME, exact historical selection, stage/permission refusals |
-| common_native_output | Nominal RetainedCore hashing and sharing | Matched Haskell encoding, identity sensitivity, unused/ungranted imports |
-| stage_input_design | Existing source-support row carries actual prior produced completion | Actual multiple stages, first later use, initial-empty refusal |
-| engine_completion | Captured TYPE import basis, hydration and exact Name references | Source-less imported module, lexical constraints, no TYPE-to-native promotion |
-| compiler_demand_transport | Ordinary closed source transaction, checked current-source obligation | Actual effect sites, callback custody, reused-instance provenance |
-| audit_native_selection | Independent exact-selection review and real-producer alias history | Same issuance under distinct full bindings; ordered slots stay distinct |
-| closed_recipe_pairing | Joined controls, catalog and frozen-bundle qualification | Counted production histories and exact artifact receipts |
-| compiler_map_concision | Current map and evidence ledger | Source claims distinguished from executed acceptance |
-| root | Critical boundary review, conflict resolution, consolidation and launch | Reviewed joined revision; selected Persona and real DeepSeek smoke |
+The [current worker tree](deepseek-g2-closeout/README.md#worker-tree) assigns a
+package producer/consumer subtree, independent witness and publication owners,
+four quality leaves, history work, two producer-demand investigators, resource
+inspection, review and qualification. Its supervisor maintains actual owner,
+branch, dependency and evidence state; a proposed role is not a running worker.
 
 Reuse existing isolated warm checkouts. Children report proposal, blocker,
 review-ready and settled events; parents continue the ready frontier. Each area
@@ -72,13 +66,16 @@ integration checkpoints labelled with their actual qualification state.
 
 ## Sequence and gates
 
-1. Complete the accepted target, nominal, stage, TYPE and source-owner repairs.
-2. Join reviewed commits and compile production plus cfg(test) consumers early.
-3. First execute genuine imported HOME installation and mixed World history,
-   then finite source → installer → public B and remaining ordinary controls.
-   Uncertain-END qualification may run independently on the common checkpoint.
-4. Freeze one matched bundle and deliver the next Persona candidate after G2.
-5. Complete G3 and reconcile/push reviewed release/main checkpoints.
+1. Merge the defining-Name prerequisite, freeze the package-linkage contract and
+   dispatch the independent repairs/cleanup. Preserve D's dirty history work.
+2. Join reviewed tranches and compile production plus test consumers early.
+   Run real imported HOME, package, native publication and interface-copy controls.
+3. Run unchanged Discovery/notebook and required finite/cold/eviction, cutoff,
+   private-input, reload/caller-loss and uncertain-END controls on the joined tip.
+4. Freeze and qualify one matched bundle, reconcile the map, publish the candidate
+   and deliver a fresh Persona conversation. C investigation does not block B.
+5. Complete G3 and reconcile/push reviewed release/main checkpoints under their
+   integration policy; do not claim main containment from local replication.
 
 ### G2: early Persona candidate
 
