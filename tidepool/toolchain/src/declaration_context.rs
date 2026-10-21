@@ -10806,6 +10806,8 @@ impl WorldProgramContinuation {
             &prefix_groups,
             &initial,
             &original_bindings,
+            receipt,
+            products,
             &operation,
         )?;
         let groups = match initial.selection() {
