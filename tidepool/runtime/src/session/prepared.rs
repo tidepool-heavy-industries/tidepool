@@ -8618,19 +8618,7 @@ pub(super) mod tests {
             assert!(engine.release(value));
             assert_eq!(engine.handle_count(), 0);
             assert_eq!(engine.stowed_roots_count(), 0);
-            assert_eq!(engine.code_export_count(), 2);
-            assert!(engine
-                .code_exports
-                .contains_key(&testing::identity("Fixture", "entry")));
-            assert!(engine
-                .code_exports
-                .contains_key(&testing::identity("Fixture", PREPARED_RESUME_TARGET)));
-            assert_eq!(engine.residency().root_cells, 2);
-            // Bootstrap's exports retain their own roots after result custody ends.
-            for export in std::mem::take(&mut engine.code_exports).into_values() {
-                assert_eq!(export.program, program);
-                assert!(engine.release(export.handle));
-            }
+            assert_eq!(engine.residency().root_cells, 0);
             assert!(engine.unpin(program));
             engine.quiesce_and_collect_now().unwrap();
             assert_eq!(engine.residency().root_cells, 0);
@@ -8695,16 +8683,9 @@ pub(super) mod tests {
         assert_eq!(engine.handle_count(), 0);
         assert_eq!(engine.parked_count(), 0);
         assert_eq!(engine.stowed_roots_count(), 0);
-        assert_eq!(engine.code_export_count(), 1);
-        assert!(engine.code_exports.contains_key(&producer_identity()));
-        assert_eq!(engine.residency().root_cells, 1);
+        assert_eq!(engine.residency().root_cells, 0);
         assert!(engine.handle_slot(handle.raw()).is_none());
         assert!(!engine.release(handle));
-        // The native export is separate from the explicit transferred handles.
-        for export in std::mem::take(&mut engine.code_exports).into_values() {
-            assert_eq!(export.program, program);
-            assert!(engine.release(export.handle));
-        }
         assert!(engine.unpin(program));
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().root_cells, 0);
@@ -11115,9 +11096,6 @@ pub(super) mod tests {
             )
             .is_err());
         assert_eq!(engine.programs.len(), programs_before);
-        for export in std::mem::take(&mut engine.code_exports).into_values() {
-            assert!(engine.release(export.handle));
-        }
         assert!(engine.unpin(first));
         engine.quiesce_and_collect_now().unwrap();
         assert!(
@@ -12037,9 +12015,6 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(engine.sites[&7].owner, first);
         assert_eq!(engine.constructor_replies[&DataConId(77)].owner, first);
-        for export in std::mem::take(&mut engine.code_exports).into_values() {
-            assert!(engine.release(export.handle));
-        }
         assert!(engine.unpin(first));
         assert!(engine.unpin(second));
         engine.quiesce_and_collect_now().unwrap();
@@ -12130,9 +12105,6 @@ pub(super) mod tests {
             .unwrap();
         assert!(engine.unpin(first));
         assert!(engine.unpin(second));
-        for export in std::mem::take(&mut engine.code_exports).into_values() {
-            assert!(engine.release(export.handle));
-        }
         engine.quiesce_and_collect_now().unwrap();
         assert!(
             engine.programs.contains_key(&first),
