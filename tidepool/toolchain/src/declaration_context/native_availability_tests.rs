@@ -3093,7 +3093,12 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     let binder = group.binders()[0].clone();
     // The later compiler explicitly acquires the exact held pair. Full private
     // availability supplies code; this request's resolver issues the use choice.
-    let namespace = full.capture_graph_selection().namespace;
+    let namespace = full
+        .capture_graph_selection()
+        .namespace
+        .into_iter()
+        .map(|binding| (binding.artifact, binding))
+        .collect::<BTreeMap<_, _>>();
     let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface().unwrap());
     let pair = |binding: &crate::artifact_inventory::ArtifactBinding| {
         Value::Array(vec![
