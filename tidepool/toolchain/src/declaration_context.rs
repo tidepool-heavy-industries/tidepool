@@ -10911,6 +10911,21 @@ pub(crate) fn assert_world_repeated_source_refusals(
             &mut validation,
         )
         .expect("actual produced interfaces");
+        if matches!(observation, Observation::Unchanged) {
+            let later = decode_world_source_receipt(program, 1).unwrap();
+            let later_produced = produced.for_segment(1..1).unwrap();
+            match later.issue_segment_originals(
+                None,
+                Some(&later_produced),
+                &mut validation,
+                WorldProgramContinuation::begin(program),
+            ) {
+                Err(CompileError::ExtractFailed(detail)) if detail ==
+                    "exact declaration context: World stage inputs lack their actual immediate predecessor" => {}
+                Err(other) => panic!("later stage refused for another reason: {other:?}"),
+                Ok(_) => panic!("later stage admitted without its actual prefix"),
+            }
+        }
         let first = &program.stages()[0];
         let end = first.ordinals().last().expect("actual first stage") + 1;
         let stage_produced = produced.for_segment(0..end).unwrap();
