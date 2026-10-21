@@ -1841,6 +1841,21 @@ tidepool_buildscript_run(
                     runtime_arguments(host_env, host_resources, host_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                end_history = "session::resident::activation_input_tests::compiler_end_history::physical_cell_response_without_end_ack_refuses_publication"
+                end_env, end_resources, end_worker = compiler_service_test_inputs(
+                    package_name, "runtime_compiler_end_history_test"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_compiler_end_history_test",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([end_history], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(end_history) + ': "owned-resident"},',
+                    runtime_arguments(end_env, end_resources, end_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 package_history = "session::resident::activation_input_tests::finite_source_world_history::finite_source_original_feeds_public_world_cells_after_prior_cutoff"
                 package_env, package_resources, package_worker = compiler_service_test_inputs(
                     package_name, "runtime_package_source_history_test"
