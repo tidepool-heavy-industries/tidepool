@@ -3642,11 +3642,6 @@ impl NativeInputSelection {
                             identity,
                             generation,
                         } => Some((identity, *generation)),
-                        crate::certified_products::ReceiptImportOwner::RetainedPackage {
-                            binder,
-                            generation,
-                            ..
-                        } => Some((binder, *generation)),
                         crate::certified_products::ReceiptImportOwner::Source { .. }
                         | crate::certified_products::ReceiptImportOwner::Package { .. }
                         | crate::certified_products::ReceiptImportOwner::OriginalBinding {
@@ -11796,9 +11791,6 @@ fn pending_retained_generation_tag(
             identity,
             generation,
         } => Some((identity, *generation)),
-        PendingImportOwner::RetainedPackage {
-            binder, generation, ..
-        } => Some((binder, *generation)),
         PendingImportOwner::Source { .. } | PendingImportOwner::Package { .. } => None,
     }
 }
@@ -17357,14 +17349,7 @@ mod tests {
                 identity: binder,
                 generation: row.1,
             },
-            1 => PendingImportOwner::RetainedPackage {
-                unit,
-                module,
-                binder,
-                generation: row.1,
-                interface_digest: [1; 32],
-            },
-            2 => PendingImportOwner::Source {
+            1 => PendingImportOwner::Source {
                 owner: tidepool_repr::execution_schema::CachedHomeOwner {
                     unit,
                     module,
@@ -17375,7 +17360,7 @@ mod tests {
                 original_ordinal: 0,
                 binder,
             },
-            3 => PendingImportOwner::Package {
+            2 => PendingImportOwner::Package {
                 unit,
                 module,
                 binder,
@@ -17400,7 +17385,7 @@ mod tests {
         #[test]
         fn retained_purpose_matrix_matches_list_oracle_under_unrelated_and_repeated_imports(
             tail in proptest::collection::vec(
-                ((0u8..3, 0u8..3, 0u8..2, 0u8..3, proptest::option::of(0u8..3)), 1u64..4, 0u8..4),
+                ((0u8..3, 0u8..3, 0u8..2, 0u8..3, proptest::option::of(0u8..3)), 1u64..4, 0u8..3),
                 0..20,
             ),
             explicit in proptest::collection::vec(
@@ -17409,17 +17394,17 @@ mod tests {
             ),
         ) {
             // Representation-only policy rows issue no certificate or site authority.
-            // Every case includes both retained roles, ignored conflicting rows,
+            // Every case includes retained identities, ignored Source and Package rows,
             // exact duplication, and each identity field distinguished independently.
             let first = (0, 0, 0, 0, None);
-            let package = (1, 1, 0, 1, None);
+            let other = (1, 1, 0, 1, None);
             let mut rows = vec![
-                (first, 1, 0), (package, 2, 1), (first, 3, 2),
-                (package, 3, 3), (first, 1, 0), ((0, 0, 0, 0, Some(0)), 2, 0),
-                ((1, 0, 0, 0, None), 2, 1),
+                (first, 1, 0), (other, 2, 0), (first, 3, 1),
+                (other, 3, 2), (first, 1, 0), ((0, 0, 0, 0, Some(0)), 2, 0),
+                ((1, 0, 0, 0, None), 2, 0),
                 ((0, 1, 0, 0, None), 3, 0),
                 ((0, 0, 1, 0, None), 2, 0),
-                ((0, 0, 0, 1, None), 3, 1),
+                ((0, 0, 0, 1, None), 3, 0),
             ];
             rows.extend(tail);
             let explicit: BTreeMap<_, _> = explicit.into_iter()
@@ -17427,7 +17412,7 @@ mod tests {
             for request in [
                 BTreeMap::new(), explicit,
                 BTreeMap::from([(policy_symbol(first), 3)]),
-                BTreeMap::from([(policy_symbol(package), 1)]),
+                BTreeMap::from([(policy_symbol(other), 1)]),
             ] {
                 // Independent oracle scans semantic pairs; it never calls the
                 // production union routine or constructs admitted native evidence.
@@ -17435,7 +17420,7 @@ mod tests {
                     (key.unit.clone(), key.module.clone(), key.namespace.clone(),
                         key.occurrence.clone(), key.record_parent.clone()), *generation,
                 )).collect::<Vec<_>>();
-                pairs.extend(rows.iter().filter(|row| row.2 < 2)
+                pairs.extend(rows.iter().filter(|row| row.2 == 0)
                     .map(|row| (policy_key(row.0), row.1)));
                 let conflicts = pairs.iter().any(|(key, generation)| pairs.iter()
                     .any(|(other, value)| key == other && generation != value));
@@ -17482,19 +17467,16 @@ mod tests {
             identity: identity.clone(),
             generation: 1,
         };
-        let mut package_identity = identity.clone();
-        package_identity.unit = "package".into();
-        package_identity.module = "PackageModule".into();
-        let package = PendingImportOwner::RetainedPackage {
-            unit: package_identity.unit.clone(),
-            module: package_identity.module.clone(),
-            binder: package_identity,
+        let mut other_identity = identity.clone();
+        other_identity.unit = "other-unit".into();
+        other_identity.module = "OtherModule".into();
+        let other = PendingImportOwner::Retained {
+            identity: other_identity,
             generation: 3,
-            interface_digest: [4; 32],
         };
         let tags = certified_retained_generation_tags(
             BTreeMap::new(),
-            [&retained, &package]
+            [&retained, &other]
                 .into_iter()
                 .filter_map(pending_retained_generation_tag),
         )

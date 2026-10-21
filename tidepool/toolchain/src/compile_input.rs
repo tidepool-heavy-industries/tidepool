@@ -739,12 +739,7 @@ pub(crate) fn seal(
     if target_owners
         .iter()
         .chain(groups.iter().flat_map(PendingCertifiedGroup::imports))
-        .any(|owner| {
-            matches!(
-                owner,
-                PendingImportOwner::Retained { .. } | PendingImportOwner::RetainedPackage { .. }
-            )
-        })
+        .any(|owner| matches!(owner, PendingImportOwner::Retained { .. }))
         || evidence.modules.iter().any(|module| {
             module.module.starts_with("Tidepool.Session.")
                 || module

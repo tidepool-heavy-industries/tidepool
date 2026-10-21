@@ -4825,12 +4825,6 @@ impl PackageInterfaceCatalog<'_> {
                     module,
                     interface_digest,
                     ..
-                }
-                | certified_products::PendingImportOwner::RetainedPackage {
-                    unit,
-                    module,
-                    interface_digest,
-                    ..
                 } => (unit, module, interface_digest),
                 _ => continue,
             };
