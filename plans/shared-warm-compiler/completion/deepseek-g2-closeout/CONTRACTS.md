@@ -201,7 +201,7 @@ carries no digest and must never be resolved by search.
   `PreparedPackageTarget.packageTargetGroups` **before** the `concatMap` at
   `CompilerProducts.hs:514`, where the ordered groups are still paired.
 - Target slot order is the package globals of `packageTargetProgram` in program
-  order (the non-HOME globals computed at `CompilerRequest.hs:855-867`), not an
+  order (the non-HOME globals computed at `CompilerRequest.hs:849-855`), not an
   arbitrary map order.
 - Occurrence import slot order is `projectedGlobals (projectedBody group)` for
   that group's `ProjectedGroupEvidence`, matching
@@ -234,7 +234,7 @@ carries no digest and must never be resolved by search.
    imports through unchanged. Absent or more than one exact held binding is a
    refusal, never seal+symbol first-match.
 6. Keep every existing check at conversion/install: producer/profile match
-   (`compiler_projection.rs:1037` `check_product`), `validate_export`
+   (`compiler_projection.rs:1031` `check_product`), `validate_export`
    (`artifact_inventory.rs:22881`), `validate_import` (`artifact_inventory.rs:22925`),
    `PackageGroupCode::admit` (`execution_schema.rs:1363`),
    `ProjectedGroup::validate_code_owner` (`execution_schema.rs:1229`), envelope
