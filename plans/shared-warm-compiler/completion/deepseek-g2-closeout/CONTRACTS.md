@@ -158,14 +158,24 @@ contract removes.
 
 - Add a required field `package_links` (the occurrence/linkage manifest) to the
   completed-product receipt and bump the receipt layout once, atomically:
-  - Haskell encode `CertifiedProducts.hs:520-541` (`TPCERT`, current version 11)
-    gains one payload element for both the `"ordinary"` and
-    `"segment-originals"` variants.
-  - Rust decode `decode_receipt_value_in` (`certified_products.rs`, array
-    lengths 9/8 today) accepts only the new length and refuses the old length
-    as `Receipt("complete product output variant")`.
-- Reject any receipt lacking the manifest; do not reconstruct choices for
-  backward compatibility. `TPPACKAGEGROUP1`/TPGRP envelope bytes, the
+  - Haskell encode `CertifiedProducts.hs:520-541` (`TPCERT`) bumps the header
+    version 11 -> 12. The `"ordinary"` variant gains the new payload element
+    (arity 9 -> 10) and the `"segment-originals"` variant also gains it
+    (arity 8 -> 9).
+  - The separate `"segment-item"` variant emitted by `certifyItemProducts`
+    (`CertifiedProducts.hs:610-646`) shares the TPCERT version 12 header but
+    retains its existing payload shape/arity `(tag, witnesses, additions, [])`;
+    it carries no `package_links` element.
+  - Rust decode accepts version 12 only: `decode_receipt_value_in`
+    (`certified_products.rs`) takes `"ordinary"` arity 10 and
+    `"segment-originals"` arity 9, while `decode_segment_item_with_operation`
+    keeps `"segment-item"` arity 4. Version 11 and any other arity are refused
+    (`Receipt("complete product output variant")` / `"segment item output
+    arity"`).
+- Reject any `"ordinary"` or `"segment-originals"` receipt lacking the manifest;
+  the `"segment-item"` variant has no manifest slot and keeps its arity
+  unchanged. Do not reconstruct choices for backward compatibility.
+  `TPPACKAGEGROUP1`/TPGRP envelope bytes, the
   `tidepool.package-code-product.v1` product hash (`package_code.rs:559,655,777`)
   and `ArtifactDescriptor::package_code` (`artifact_inventory.rs:1974`) are
   unchanged.
@@ -182,9 +192,10 @@ PackageLinks {
                                              # one Link per non-HOME package
                                              # global in that target's program
                                              # order
-  home_roots: Map<(String,String), [Link]>,  # key = fresh HOME group (unit,module);
-                                             # one Link per package global in
-                                             # that group's program order
+  home_roots: Map<(String,String,u32), [Link]>,  # key = fresh HOME group
+                                                 # (unit,module,original_ordinal);
+                                                 # one Link per package global in
+                                                 # that group's program order
 }
 OccurrenceRow {
   id: u32,                                   # == position in `occurrences`
@@ -220,17 +231,33 @@ no digest and must never be resolved by search.
 - Occurrence import slot order is `projectedGlobals (projectedBody group)` for
   that group's `ProjectedGroupEvidence`, matching
   `CertifiedPackageCodeProduct.code().globals()` order.
-- Fresh HOME roots: each fresh HOME group's package imports resolve through the
-  same per-target occurrence map that issued them; they are not derived from a
-  target-only map or a global `(unit,module)` interface lookup. P1 carries the
-  paired value into `encodeCertifiedOriginalProductsWithPrior` beside
+- Fresh HOME roots are keyed `(unit,module,original_ordinal)`: `moduleRows`
+  already carries `candidateGroupOrdinal` (`CertifiedProducts.hs:547-548`) and
+  Rust `NativeGroupBinding` keys `original_ordinal`, so `(unit,module)` alone
+  cannot name one of two HOME groups sharing a module. Each fresh HOME group's
+  package imports resolve through the same per-target occurrence map that issued
+  them; they are not derived from a target-only map or a global `(unit,module)`
+  interface lookup. P1 carries the paired value into
+  `encodeCertifiedOriginalProductsWithPrior` beside
   `packageProducts`/`capturedPackages` (`CertifiedProducts.hs:286-297`).
 - A cache/dedup map may share encoded bytes; it must not erase projection
   membership, slot multiplicity, selected children, or original order. Refuse
   at the owning construction boundary (typed failure) if a demanded link cannot
   be issued; never emit an incomplete optional manifest with a Rust fallback.
+- No global binder map. A request-wide `Map SymbolIdentity OccurrenceId`
+  (`PackageLinkIndex`) is forbidden: two targets may export the same binder at
+  different occurrences and a request-lifetime map overwrites the first.
+  Resolution is target/occurrence-scoped — each `target_roots[k]` list is
+  resolved against its specific `PreparedPackageTarget`, and each occurrence
+  `imports` list is resolved while that parent group's `ProjectedGroupEvidence`
+  is still available. The coordinate's lifetime is the paired projection; it
+  never becomes a request-lifetime symbol table.
 
 ### Decoder checks (typed refusals at one boundary)
+
+Checks 1-5 apply to the `"ordinary"` and `"segment-originals"` manifests; the
+`"segment-item"` variant carries no manifest and skips them. Check 6 applies to
+all three variants.
 
 1. Manifest present at the new version; every `Link::Local.occurrence` is in
    `[0, occurrences.len())` and row ids are exactly `0..n-1` with no duplicates
@@ -246,10 +273,11 @@ no digest and must never be resolved by search.
    equal the authenticated product owner, `defining_interface()` and defining
    version; a Local ref whose row envelope matches but whose owner or defining
    seal disagrees is a crossed-scope refusal.
-5. `Link::Inherited` resolves only to the exact held binding already carried in
-   the inherited completions for that slot; retained HOME rows pass their prior
-   imports through unchanged. Absent or more than one exact held binding is a
-   refusal, never seal+symbol first-match.
+5. `Link::Inherited` resolves only to the unique exact held binding already
+   carried in the inherited completions for that target/HOME slot; retained HOME
+   rows pass their prior imports through unchanged. Zero or more than one exact
+   held binding at that slot is a refusal; never a seal/symbol or first-match
+   search.
 6. Keep every existing check at conversion/install: producer/profile match
    (`compiler_projection.rs:1031` `check_product`), `validate_export`
    (`artifact_inventory.rs:22881`), `validate_import` (`artifact_inventory.rs:22925`),
@@ -306,11 +334,15 @@ no digest and must never be resolved by search.
   avoid it; if one real projection needs two such occurrences under one
   envelope with equal import seals, P stops and brings the graph-owner
   extension to S/P review before widening the key.
-- The exact `Link::Inherited` representation (whether a fresh occurrence may
-  import an inherited terminal at all, or inherited subtrees always pass
-  through a retained parent row) is confirmed by P1's trace against the
-  recovery/reuse path before P2 freezes the decoder; either way the decoder
-  must not re-introduce seal+symbol search.
+- `Link::Inherited` is an exact held terminal at its target/HOME slot; it never
+  resolves through seal/symbol search or first match. Whether a fresh occurrence
+  may import an inherited terminal directly, or inherited subtrees always pass
+  through a retained parent row, is confirmed by P1's trace against the
+  recovery/reuse path before P2 freezes the decoder.
+- P1/P2/P3 routing: P1 builds no request-wide `Map SymbolIdentity OccurrenceId`
+  and resolves each root/import list against its paired projection; P2 decodes
+  only the emitted per-target/per-occurrence slot lists; P3's negative oracle
+  must fail a global binder map and a seal/symbol first-match regression.
 
 ## 2. A storage path is not a new interface selection
 
