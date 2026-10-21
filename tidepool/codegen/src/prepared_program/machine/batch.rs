@@ -1,9 +1,9 @@
 //! Atomic installation of mutually importing native group images.
 
 use super::super::{
-    DemandedImage, DemandedPackageImage, InheritedSourceDemand, NativeArtifactBinding,
-    NativeHomeBinding, NativeInstanceLease, PackageInstanceLease, SourceBinder,
-    SourceInstanceLease,
+    DemandedHomeImage, DemandedImage, DemandedPackageImage, InheritedSourceDemand,
+    NativeArtifactBinding, NativeHomeBinding, NativeInstanceLease, PackageInstanceLease,
+    SourceBinder, SourceInstanceLease,
 };
 use super::*;
 use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
@@ -164,9 +164,32 @@ impl NativeExportRequest {
         domain: super::super::SourceInstanceDomain,
         value: ValueId,
     ) -> Result<Self, ExecutionError> {
-        let source = demanded.group();
-        let export = demanded
-            .image()
+        Self::home_export(
+            &demanded.group().code_identity(),
+            demanded.image(),
+            key,
+            domain,
+            value,
+        )
+    }
+
+    pub fn for_home_code(
+        demanded: &DemandedHomeImage,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        Self::home_export(demanded.code(), demanded.image(), key, domain, value)
+    }
+
+    fn home_export(
+        source: &tidepool_repr::execution_schema::CertifiedGroupCode,
+        image: &Arc<CompiledProgram>,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        let export = image
             .top_exports
             .get(&value)
             .ok_or(ExecutionError::MissingEntry(value))?;
@@ -178,7 +201,7 @@ impl NativeExportRequest {
             )));
         }
         Ok(Self {
-            image: Arc::clone(demanded.image()),
+            image: Arc::clone(image),
             binding: value,
             domain,
             evidence: LeaseRequestEvidence::Home {
@@ -270,6 +293,17 @@ impl BatchLeaseRequest {
         NativeExportRequest::for_home(demanded, key, domain, value)
             .map(|export| Self::new(group, export))
     }
+    pub fn for_home_code(
+        group: usize,
+        demanded: &DemandedHomeImage,
+        key: NativeHomeBinding,
+        domain: super::super::SourceInstanceDomain,
+        value: ValueId,
+    ) -> Result<Self, ExecutionError> {
+        NativeExportRequest::for_home_code(demanded, key, domain, value)
+            .map(|export| Self::new(group, export))
+    }
+
     pub fn for_package(
         group: usize,
         demanded: Arc<DemandedPackageImage>,
@@ -1806,6 +1840,146 @@ mod tests {
             machine.handle_current_pointer(*returned),
             machine.handle_current_pointer(source_lease.handle())
         );
+        assert!(machine.release(*returned));
+        assert!(machine.release(source_lease.handle()));
+    }
+
+    #[test]
+    fn neutral_home_image_installs_exact_root_and_executes_without_live_import_ids() {
+        let groups = [certified_caf_group()];
+        let binder = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "caf"),
+        };
+        let registry = ImageRegistry::new();
+        let neutral = DemandedHomeImage::prepare(
+            groups[0].code_identity(),
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap();
+        let legacy = DemandedImage::compile_source_with_literals(
+            groups[0].clone(),
+            &registry,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(neutral.image(), legacy.image()));
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+        };
+        wire.globals.push(GlobalDecl {
+            identity: binder.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let target = registry
+            .get_or_compile_prepared(&prepared, || {
+                CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
+            })
+            .unwrap();
+        let lease = BatchLeaseRequest::for_home_code(
+            0,
+            &neutral,
+            NativeHomeBinding {
+                issuer: NativeArtifactBinding {
+                    artifact: [1; 32],
+                    selection: [2; 32],
+                },
+                original_ordinal: neutral.code().original_ordinal(),
+            },
+            super::super::super::SourceInstanceDomain::single(),
+            ValueId(0),
+        )
+        .unwrap();
+        assert!(matches!(
+            NativeExportRequest::for_home_code(
+                &neutral,
+                NativeHomeBinding {
+                    issuer: NativeArtifactBinding {
+                        artifact: [1; 32],
+                        selection: [2; 32]
+                    },
+                    original_ordinal: neutral.code().original_ordinal() + 1
+                },
+                super::super::super::SourceInstanceDomain::single(),
+                ValueId(0),
+            ),
+            Err(ExecutionError::BatchSourceContract(_))
+        ));
+        assert!(matches!(
+            NativeExportRequest::for_home_code(
+                &neutral,
+                NativeHomeBinding {
+                    issuer: NativeArtifactBinding {
+                        artifact: [1; 32],
+                        selection: [2; 32]
+                    },
+                    original_ordinal: neutral.code().original_ordinal()
+                },
+                super::super::super::SourceInstanceDomain::single(),
+                ValueId(999),
+            ),
+            Err(ExecutionError::MissingEntry(ValueId(999)))
+        ));
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let installed = machine
+            .install_shared_batch_with_leases(
+                vec![
+                    BatchProgram {
+                        image: Arc::clone(neutral.image()),
+                        imports: vec![],
+                    },
+                    BatchProgram {
+                        image: target,
+                        imports: vec![BatchImport::Source {
+                            group: 0,
+                            binding: ValueId(0),
+                        }],
+                    },
+                ],
+                vec![lease],
+            )
+            .unwrap();
+        assert_eq!(installed.programs.len(), 2);
+        let [source_lease] = installed.leases.as_slice() else {
+            panic!("one requested source binder must be materialized");
+        };
+        assert_eq!(source_lease.instance().program(), installed.programs[0]);
+        assert_eq!(source_lease.export(), &binder.binder);
+        assert!(!machine.handle_is_evaluated(source_lease.handle()).unwrap());
+        let target_result = machine
+            .run_entry_retained(
+                installed.programs[1],
+                prepared.entry(),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(returned)] = target_result.values.as_slice() else {
+            panic!("target must return its certified source CAF");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*returned),
+            machine.handle_current_pointer(source_lease.handle())
+        );
+        assert!(machine.handle_is_evaluated(source_lease.handle()).unwrap());
         assert!(machine.release(*returned));
         assert!(machine.release(source_lease.handle()));
     }

@@ -1209,3 +1209,51 @@ fn target_package_literals_require_exact_storage_and_import_contract() {
     machine.pin(ids[0]).unwrap();
     assert_bytes(address(&mut machine, ids[0]));
 }
+
+#[test]
+fn neutral_home_image_preserves_literal_contracts_without_runtime_import_owners() {
+    let producer = compile_target(BYTES);
+    let registry = ImageRegistry::new();
+    let code = tidepool_repr::execution_schema::CertifiedGroupCode::admit(
+        CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        },
+        testing::projected_group(group_wire(false, true), 183).unwrap(),
+    )
+    .unwrap();
+    let prepare = |digest, packages: &BTreeMap<SymbolIdentity, PackageLiteral>| {
+        crate::prepared_program::DemandedHomeImage::prepare(
+            code.clone(),
+            &[Some(LiteralOwner::Package {
+                unit: "package".into(),
+                module: "Package".into(),
+                binder: identity(),
+                interface_digest: digest,
+            })],
+            packages,
+            &BTreeMap::new(),
+            &registry,
+        )
+    };
+    assert!(matches!(
+        prepare(DIGEST, &BTreeMap::new()),
+        Err(CompileError::Unsupported(_))
+    ));
+    assert!(matches!(
+        prepare([8; 32], &tokens(&producer)),
+        Err(CompileError::PackageLiteralContract(_))
+    ));
+    let image = prepare(DIGEST, &tokens(&producer)).unwrap();
+    let existing = DemandedImage::compile_source_with_literals(
+        group(false, DIGEST, true),
+        &registry,
+        &tokens(&producer),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(image.image(), existing.image()));
+}

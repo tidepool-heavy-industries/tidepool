@@ -110,7 +110,7 @@ mod bytes_tests;
 mod data_tag;
 mod demand;
 pub use demand::{
-    DemandError, DemandedImage, DemandedPackageImage, GroupInventory, InheritedSourceDemand,
+    DemandError, DemandedHomeImage, DemandedImage, DemandedPackageImage, GroupInventory, InheritedSourceDemand,
     NativeArtifactBinding, NativeBindingKey, NativeDomainSelection, NativeHomeBinding,
     NativeInstanceAttachment, NativeInstanceLease, PackageInstanceLease, PendingGroupInventory,
     PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup, ScopedDemandedImage,

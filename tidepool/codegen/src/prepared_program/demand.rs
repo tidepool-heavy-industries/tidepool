@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, CertifiedGroup, DefinitionsView, Group, ImportOwner, ModuleVersion,
-    PackageGroupCode, ProjectedGroup, Signature, SymbolIdentity, ValueId,
+    CachedHomeOwner, CertifiedGroup, CertifiedGroupCode, DefinitionsView, Group, ImportOwner,
+    ModuleVersion, PackageGroupCode, ProjectedGroup, Signature, SymbolIdentity, ValueId,
 };
 
 use super::{CompileError, CompiledProgram, GroupInstanceId, ImageRegistry, PreparedHandle};
@@ -962,6 +962,35 @@ impl ScopedDemandedImage {
     }
     pub fn demand(&self) -> &ScopedSourceGroupDemand {
         &self.demand
+    }
+}
+
+/// HOME code paired with its definitions-only image, before live import
+/// identities or source domains are admitted by the runtime.
+pub struct DemandedHomeImage {
+    code: CertifiedGroupCode,
+    image: Arc<CompiledProgram>,
+}
+
+impl DemandedHomeImage {
+    pub fn prepare(
+        code: CertifiedGroupCode,
+        owners: &[Option<super::LiteralOwner>],
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Self, CompileError> {
+        let image =
+            CompiledProgram::prepare_source_group_code(&code, owners, packages, sources, registry)?;
+        Ok(Self { code, image })
+    }
+
+    pub fn code(&self) -> &CertifiedGroupCode {
+        &self.code
+    }
+
+    pub fn image(&self) -> &Arc<CompiledProgram> {
+        &self.image
     }
 }
 
