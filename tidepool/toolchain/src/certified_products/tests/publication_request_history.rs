@@ -474,10 +474,13 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     };
                     selection.admit_current(product.owner(), origin,
                         product.module_interface().unwrap(), &operation).unwrap();
-                    let physical = request.compiler_inputs().artifacts().inventory()
-                        .admit_shared_with_demand(request.compiler_inputs().artifacts(), vec![output.clone()],
-                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces).unwrap();
-                    let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+                    selection.bind_produced_originals(
+                        &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&product)).unwrap(),
+                    ).unwrap();
+                    let completed = OriginalCompilerInputs::issue_segment_native_availability(
+                        &mut selection, request.compiler_inputs().artifacts(), vec![output.clone()],
+                        &mut PackageInterfaceValidation::default(),
+                    ).unwrap();
                     let actual_role = &completed.role_projection().snapshot_roles()[&output.descriptor.owner];
                     prop_assert_eq!(actual_role, &expected_output_role,
                         "completed output role: step={} ordinal={} owner={:?} origin={:?} input_role={:?}",

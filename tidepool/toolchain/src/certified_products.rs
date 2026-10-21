@@ -20551,11 +20551,8 @@ pub(crate) mod tests {
                     vec![entry.clone()],
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
-                .unwrap()
-                .issued_artifacts()
-                .clone();
-                let private =
-                    OriginalCompilerInputs::from_selection(&physical, &completed).unwrap();
+                .unwrap();
+                let private = completed;
                 let support =
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                         &private,
@@ -20663,24 +20660,37 @@ pub(crate) mod tests {
                     )
                     .unwrap();
             }
+            let current_output = if mode == "current" {
+                Some(
+                    OriginalCompilerInputs::issue_segment_native_availability(
+                        &mut selection,
+                        request.compiler_inputs().artifacts(),
+                        vec![entry.clone()],
+                        &mut validation,
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            let baseline = current_output
+                .as_ref()
+                .map_or(request.compiler_inputs().artifacts(), |output| {
+                    output.issued_artifacts()
+                });
             for broaden in [false, true] {
                 let custody = if broaden {
                     // A separately issued complete carrier is legitimate new custody;
                     // it cannot rewrite this earlier request's availability choice.
-                    request
-                        .compiler_inputs()
-                        .artifacts()
+                    baseline
                         .retain_custody(
                             &inventory
-                                .admit_shared(
-                                    request.compiler_inputs().artifacts(),
-                                    vec![entry.clone()],
-                                )
+                                .admit_shared(baseline, vec![entry.clone()])
                                 .unwrap(),
                         )
                         .unwrap()
                 } else {
-                    request.compiler_inputs().artifacts().clone()
+                    baseline.clone()
                 };
                 let private = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
                 if mode != "current" {
@@ -23768,7 +23778,6 @@ pub(crate) mod tests {
         let fixed = inventory
             .bind_segment(&physical, vec![native.clone()], &selection, &mut validation)
             .unwrap();
-        let physical = fixed.physical_inputs().issued_artifacts();
         let selection = fixed.source_selection();
         let definitions = original_native_group_definitions(product, 7).unwrap();
         let contracts = definitions

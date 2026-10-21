@@ -893,17 +893,18 @@ fn replay_native_transport_history(
             &operation,
         )
         .unwrap();
-    let physical = actual_request
-        .compiler_inputs()
-        .artifacts()
-        .inventory()
-        .admit_shared_with_demand(
-            actual_request.compiler_inputs().artifacts(),
-            vec![dependent_entry.clone()],
-            NativeArtifactDemand::ScopeInterfaces,
+    output_selection
+        .bind_produced_originals(
+            &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&dependent)).unwrap(),
         )
         .unwrap();
-    let produced = OriginalCompilerInputs::from_selection(&output_selection, &physical).unwrap();
+    let produced = OriginalCompilerInputs::issue_segment_native_availability(
+        &mut output_selection,
+        actual_request.compiler_inputs().artifacts(),
+        vec![dependent_entry.clone()],
+        &mut validation,
+    )
+    .unwrap();
     assert_eq!(
         produced.issued_artifacts().selected_native_groups(),
         actual_request
