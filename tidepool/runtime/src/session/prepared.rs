@@ -6356,17 +6356,58 @@ pub(super) mod tests {
     ) -> (
         ProgramId,
         tidepool_codegen::binding_table::SourceScopeAdmission,
+        Option<Arc<super::super::RuntimeLexicalScopeLease>>,
     ) {
-        let targets = compile_source_publication_fixture();
-        let (program, admission, _) = session
-            .install_runtime_target_in(scope, targets, "result")
-            .expect("install the same complete producer in its actual target scope")
-            .into_parts();
+        let installed = install_runtime_fixture_in(
+            session,
+            scope,
+            compile_source_publication_fixture(),
+            "result",
+        );
         assert!(
-            !admission.is_empty(),
+            !installed.1.is_empty(),
             "the producer must select native source custody"
         );
-        (program, admission)
+        installed
+    }
+
+    pub(in crate::session) fn install_runtime_fixture_in(
+        session: &mut super::super::PersistentSession,
+        scope: tidepool_codegen::scope::ScopeId,
+        targets: &crate::RuntimePreparedTargets,
+        target: &str,
+    ) -> (
+        ProgramId,
+        tidepool_codegen::binding_table::SourceScopeAdmission,
+        Option<Arc<super::super::RuntimeLexicalScopeLease>>,
+    ) {
+        let placement = (scope != tidepool_codegen::scope::ScopeId::ROOT)
+            .then(|| session.prepared_lexical_scope_lease(scope).unwrap());
+        let settled = session
+            .with_source_compiler_transaction(
+                targets.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    if let Some(placement) = &placement {
+                        session.admit_source_lease(placement.clone()).unwrap();
+                    }
+                    session.install_runtime_target_in(scope, targets, target)
+                },
+            )
+            .expect("admit the actual compiled source owner");
+        let outcome = settled.into_outcome();
+        assert!(matches!(
+            outcome.close,
+            crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
+        ));
+        let (program, admission, _) = outcome
+            .action
+            .expect("install the same complete producer in its actual target scope")
+            .into_parts();
+        (program, admission, placement)
     }
 
     pub(in crate::session) fn install_selected_source_fixture(
@@ -6510,7 +6551,7 @@ pub(super) mod tests {
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(), None, |_| {},
             |session, _| {
-                let (installed, source_keys) = install_source_publication_fixture(session, scope);
+                let (installed, source_keys, _placement) = install_source_publication_fixture(session, scope);
                 assert_eq!(session.bindings().source_instances_in(session.scope_tree(), scope).len(),
                     source_keys.len());
                 let before = session.residency().unwrap();
@@ -6572,7 +6613,8 @@ pub(super) mod tests {
         session
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
-        let (target, admission) = install_source_publication_fixture(&mut session, private);
+        let (target, admission, _placement) =
+            install_source_publication_fixture(&mut session, private);
         let mut keys = admission.to_vec();
         keys.sort();
         assert!(!keys.is_empty());

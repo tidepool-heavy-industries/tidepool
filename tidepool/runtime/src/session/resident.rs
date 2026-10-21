@@ -11652,10 +11652,11 @@ mod authored_publication_tests {
                     ..SessionRunContext::ROOT
                 })
                 .unwrap();
-            let (producer, _) = crate::session::prepared::tests::install_source_publication_fixture(
-                &mut session.state,
-                scope,
-            );
+            let (producer, _, _placement) =
+                crate::session::prepared::tests::install_source_publication_fixture(
+                    &mut session.state,
+                    scope,
+                );
             let entry = session
                 .prepare_startup_entry_installed(
                     startup_code(false),
@@ -11719,10 +11720,11 @@ mod authored_publication_tests {
     #[test]
     fn startup_rejects_changed_original_source_inventory() {
         let (_root, mut session) = startup_session();
-        let (producer, keys) = crate::session::prepared::tests::install_source_publication_fixture(
-            &mut session.state,
-            ScopeId::ROOT,
-        );
+        let (producer, keys, _placement) =
+            crate::session::prepared::tests::install_source_publication_fixture(
+                &mut session.state,
+                ScopeId::ROOT,
+            );
         let entry = session
             .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
             .unwrap();
@@ -11825,10 +11827,11 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(403), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session =
             ResidentSession::unbootstrapped(frunk::HNil, PanicCloneOutput, 1024 * 1024, Some(lib));
-        let (prior, _) = crate::session::prepared::tests::install_source_publication_fixture(
-            &mut session.state,
-            ScopeId::ROOT,
-        );
+        let (prior, _, _placement) =
+            crate::session::prepared::tests::install_source_publication_fixture(
+                &mut session.state,
+                ScopeId::ROOT,
+            );
         let before = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap();

@@ -6574,7 +6574,10 @@ mod checkpoint_scope_tests {
         session.bindings.commit_declaration_binding_changes(changes);
     }
 
-    fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
+    fn assert_unrelated_certified_turn_admitted(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+    ) -> Option<std::sync::Arc<super::super::RuntimeLexicalScopeLease>> {
         use std::collections::BTreeSet;
         let before = session
             .bindings()
@@ -6583,10 +6586,9 @@ mod checkpoint_scope_tests {
             .map(|lease| (lease.instance(), lease.value()))
             .collect::<BTreeSet<_>>();
         let targets = super::super::prepared::tests::compile_source_publication_fixture();
-        let (program, added, _) = session
-            .install_runtime_target_in(scope, targets, "result")
-            .unwrap()
-            .into_parts();
+        let (program, added, placement) = super::super::prepared::tests::install_runtime_fixture_in(
+            session, scope, targets, "result",
+        );
         assert!(
             !added.is_empty(),
             "unselected custody must not silently select a prior instance"
@@ -6603,17 +6605,16 @@ mod checkpoint_scope_tests {
             .map(|lease| (lease.instance(), lease.value()))
             .collect::<BTreeSet<_>>();
         assert_eq!(after, before);
+        placement
     }
 
     #[test]
     fn binding_publication_retains_independent_source_instances_without_selecting_them() {
         let targets = super::super::prepared::tests::compile_source_publication_fixture();
         let install = |session: &mut PersistentSession, scope| {
-            let (program, keys, _) = session
-                .install_runtime_target_in(scope, targets, "result")
-                .unwrap()
-                .into_parts();
-            (program, keys)
+            super::super::prepared::tests::install_runtime_fixture_in(
+                session, scope, targets, "result",
+            )
         };
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
@@ -6625,8 +6626,8 @@ mod checkpoint_scope_tests {
         session
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
-        let (target_a, keys_a) = install(&mut session, a);
-        let (target_b, keys_b) = install(&mut session, b);
+        let (target_a, keys_a, _placement_a) = install(&mut session, a);
+        let (target_b, keys_b, _placement_b) = install(&mut session, b);
         assert!(!keys_a.is_empty());
         assert_eq!(keys_b.len(), keys_a.len());
         let combined = keys_a.len() + keys_b.len();
@@ -6642,7 +6643,7 @@ mod checkpoint_scope_tests {
             combined
         );
         assert!(selected_sources(&session, external).is_empty());
-        assert_unrelated_certified_turn_admitted(&mut session, external);
+        let _external_placement = assert_unrelated_certified_turn_admitted(&mut session, external);
         assert_eq!(session.retire_scope(external).roots_released, 0);
         let capture_a = session.mint_detached_scope(a).unwrap();
         let capture_b = session.mint_detached_scope(b).unwrap();
@@ -6668,13 +6669,15 @@ mod checkpoint_scope_tests {
             combined
         );
         assert!(selected_sources(&session, public).is_empty());
-        assert_unrelated_certified_turn_admitted(&mut session, public);
+        let _public_placement = assert_unrelated_certified_turn_admitted(&mut session, public);
         assert!(session.prepared_mut().unwrap().unpin(target_a));
         assert!(session.prepared_mut().unwrap().unpin(target_b));
         assert_eq!(session.retire_scope(a).roots_released, 0);
         assert_eq!(session.retire_scope(b).roots_released, 0);
+        let mut capture_placements = Vec::new();
         for (capture, original) in [(capture_a, &keys_a), (capture_b, &keys_b)] {
-            let (reused, added) = install(&mut session, capture);
+            let (reused, added, placement) = install(&mut session, capture);
+            capture_placements.push(placement);
             assert!(added.is_empty());
             assert!(selected_sources(&session, capture)
                 .iter()
@@ -6684,7 +6687,7 @@ mod checkpoint_scope_tests {
             assert!(session.prepared_mut().unwrap().unpin(reused));
         }
         let fresh = session.mint_detached_scope(public).unwrap();
-        let (fresh_target, fresh_keys) = install(&mut session, fresh);
+        let (fresh_target, fresh_keys, _placement_fresh) = install(&mut session, fresh);
         assert_eq!(fresh_keys.len(), keys_a.len());
         assert!(fresh_keys.iter().all(|key| !keys_a
             .iter()
@@ -6995,14 +6998,20 @@ mod checkpoint_scope_tests {
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let d = session.mint_detached_scope(public).unwrap();
         let e = session.mint_detached_scope(public).unwrap();
-        let (target_d, keys_d, _) = session
-            .install_runtime_target_in(d, targets, "dFirst")
-            .unwrap()
-            .into_parts();
-        let (target_e, keys_e, _) = session
-            .install_runtime_target_in(e, targets, "eFirst")
-            .unwrap()
-            .into_parts();
+        let (target_d, keys_d, _placement_d) =
+            super::super::prepared::tests::install_runtime_fixture_in(
+                &mut session,
+                d,
+                targets,
+                "dFirst",
+            );
+        let (target_e, keys_e, _placement_e) =
+            super::super::prepared::tests::install_runtime_fixture_in(
+                &mut session,
+                e,
+                targets,
+                "eFirst",
+            );
         let support = |session: &PersistentSession, scope| {
             selected_sources(session, scope)
                 .into_iter()
@@ -7032,10 +7041,13 @@ mod checkpoint_scope_tests {
             session.bindings.commit_exact_binding_promotion(publication);
         }
         let later = session.mint_detached_scope(public).unwrap();
-        let (target_late, _, _) = session
-            .install_runtime_target_in(later, targets, "dLater")
-            .unwrap()
-            .into_parts();
+        let (target_late, _, _placement_late) =
+            super::super::prepared::tests::install_runtime_fixture_in(
+                &mut session,
+                later,
+                targets,
+                "dLater",
+            );
         let later_support = support(&session, later);
         assert_eq!(later_support.instance(), original_support.instance());
         assert_eq!(later_support.handle(), original_support.handle());

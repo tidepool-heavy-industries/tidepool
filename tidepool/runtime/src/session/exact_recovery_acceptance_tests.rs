@@ -1403,7 +1403,8 @@ fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let target = session.mint_isolated_scope();
-        let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
+        let (_, keys, _placement) =
+            prepared::tests::install_source_publication_fixture(&mut session, target);
         assert!(!keys.is_empty());
         let snapshot = session.public_visibility_snapshot_in(target).unwrap();
         assert_eq!(snapshot.declaration_tip, Generation(0));
@@ -1489,7 +1490,8 @@ fn successor_initialization_refuses_changed_or_released_native_dependencies() {
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let target = session.mint_isolated_scope();
-        let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
+        let (_, keys, _placement) =
+            prepared::tests::install_source_publication_fixture(&mut session, target);
         session.seal_recovery_initialization_scope(target).unwrap();
         let reason = if released {
             let lease = session
