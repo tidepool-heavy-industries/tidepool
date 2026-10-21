@@ -5059,15 +5059,27 @@ impl OriginalBindingSelection {
         &self,
         references: impl IntoIterator<Item = &'a ReceiptImportOwner>,
     ) -> CertResult<Self> {
+        let mut additional = references
+            .into_iter()
+            .filter(|reference| {
+                matches!(reference, ReceiptImportOwner::OriginalBinding { .. })
+                    && self.authenticated.get(reference).is_none()
+            })
+            .peekable();
+        if additional.peek().is_none() {
+            return Ok(self.clone());
+        }
         let additional = AuthenticatedOriginalBindings::issue(
             Arc::clone(&self.authenticated.basis),
             Arc::clone(&self.authenticated.operation),
-            references,
+            additional,
         )?;
-        Self::from_authenticated(
-            self.authenticated.merge(&additional)?,
-            self.resolved.clone(),
-        )
+        // Extending the same acquisition preserves every existing member and
+        // its already checked executable subset.
+        Ok(Self {
+            authenticated: self.authenticated.merge(&additional)?,
+            resolved: self.resolved.clone(),
+        })
     }
 
     pub(crate) fn metadata(
@@ -14074,6 +14086,69 @@ pub(crate) mod tests {
             [&references[0]],
         )
         .unwrap();
+        let initial = OriginalBindingSelection::from_resolved(Arc::clone(&resolved));
+        let before = operation.work_usage().unwrap();
+        let repeated = initial
+            .with_metadata([&references[0], &references[0]])
+            .unwrap();
+        assert_eq!(operation.work_usage().unwrap(), before);
+        assert_eq!(
+            repeated.executable(&references[0], &operation).unwrap(),
+            initial.executable(&references[0], &operation).unwrap(),
+        );
+        let before = operation.work_usage().unwrap().0;
+        let extended = initial.with_metadata([&references[1]]).unwrap();
+        let only_new_work = operation.work_usage().unwrap().0 - before;
+        assert!(only_new_work > 0);
+        let before = operation.work_usage().unwrap().0;
+        let mixed = initial
+            .with_metadata([
+                &references[0],
+                &references[1],
+                &references[0],
+                &references[1],
+            ])
+            .unwrap();
+        assert_eq!(operation.work_usage().unwrap().0 - before, only_new_work);
+        assert_eq!(
+            extended.metadata(&references[1]),
+            Some(&(product.owner().clone(), 11))
+        );
+        assert_eq!(
+            mixed.metadata(&references[0]),
+            initial.metadata(&references[0])
+        );
+        assert_eq!(
+            mixed.metadata(&references[1]),
+            extended.metadata(&references[1])
+        );
+        assert_eq!(
+            mixed.executable(&references[0], &operation).unwrap(),
+            initial.executable(&references[0], &operation).unwrap()
+        );
+        assert!(mixed
+            .executable(&references[1], &operation)
+            .unwrap()
+            .is_none());
+        let before = operation.work_usage().unwrap();
+        let unchanged = mixed.with_metadata(&references).unwrap();
+        assert_eq!(operation.work_usage().unwrap(), before);
+        assert_eq!(
+            unchanged.metadata(&references[1]),
+            extended.metadata(&references[1])
+        );
+        let mut conflicting = references[0].clone();
+        let ReceiptImportOwner::OriginalBinding { original, .. } = &mut conflicting else {
+            unreachable!()
+        };
+        *original = alternate_pair;
+        assert!(matches!(
+            initial.with_metadata([&references[0], &conflicting]),
+            Err(CertificationError::InputDecision {
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                ..
+            })
+        ));
         let bindings = OriginalBindingSelection::issue(
             Arc::clone(&acquisition),
             Arc::clone(&operation),
