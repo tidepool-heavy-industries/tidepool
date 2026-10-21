@@ -6964,10 +6964,39 @@ pub(crate) struct ExactCompilationRequest {
 struct ProgramSourceSupportState {
     program_support: Option<ProgramSourceSupport>,
     program_source_lexical: crate::exact_context::ExactLexicalSnapshot,
-    source_selected_support: BTreeSet<ExactModuleIdentity>,
+    source_selected_support: imbl::OrdSet<Arc<ExactModuleIdentity>>,
 }
 
 impl ProgramSourceSupportState {
+    fn append_source_selected_support<'a>(
+        &mut self,
+        owners: impl IntoIterator<Item = &'a ExactModuleIdentity>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<(), CompileError> {
+        let mut selected = self.source_selected_support.clone();
+        for owner in owners {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            if selected.contains(owner) {
+                continue;
+            }
+            // New facts own their strings. Persistent path copies share those
+            // owners and charge fixed-size reference work like the other maps.
+            operation
+                .reserve::<ExactModuleIdentity>(1)
+                .and_then(|_| operation.reserve::<Arc<ExactModuleIdentity>>(4))
+                .and_then(|_| operation.charge(owner.unit.len()))
+                .and_then(|_| operation.charge(owner.module.len()))
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            selected.insert(Arc::new(owner.clone()));
+        }
+        crate::host_work::checkpoint()?;
+        self.source_selected_support = selected;
+        Ok(())
+    }
+
     fn admit_program_support_inner(
         &mut self,
         producer_sha256: [u8; 32],
@@ -7167,12 +7196,19 @@ impl ProgramSourceSupportState {
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
         )?;
-        self.program_source_lexical = self
+        let program_source_lexical = self
             .program_source_lexical
             .replace(program_source_lexical)?;
+        let mut source_selected_support = self.source_selected_support.clone();
+        for owner in selected_originals.into_keys() {
+            crate::host_work::checkpoint()?;
+            if !source_selected_support.contains(&owner) {
+                source_selected_support.insert(Arc::new(owner));
+            }
+        }
+        self.program_source_lexical = program_source_lexical;
         self.program_support = Some(program_support);
-        self.source_selected_support
-            .extend(selected_originals.into_keys());
+        self.source_selected_support = source_selected_support;
         Ok(context)
     }
 }
@@ -8340,7 +8376,7 @@ struct ProductInputFacts<'a> {
     groups: &'a [PendingCertifiedGroup],
     source_lexical: &'a [ExactLexicalNode],
     program_support: Option<&'a ProgramSourceSupport>,
-    source_selected_support: &'a BTreeSet<ExactModuleIdentity>,
+    source_selected_support: imbl::OrdSet<Arc<ExactModuleIdentity>>,
     source_search_include: Option<&'a [PathBuf]>,
     scaffold_imports: &'a [GeneratedScaffoldImportAuthority],
     checked_values: &'a crate::checked_cell::CheckedValueImportAuthority,
@@ -8360,7 +8396,7 @@ impl<'a> ProductInputFacts<'a> {
             groups,
             source_lexical: &program.program_source_lexical,
             program_support: program.program_support.as_ref(),
-            source_selected_support: &program.source_selected_support,
+            source_selected_support: program.source_selected_support.clone(),
             source_search_include: request.source_search_include.as_deref(),
             scaffold_imports: &request.generated_scaffold_imports,
             checked_values: &request.checked_value_imports,
@@ -8378,7 +8414,6 @@ impl<'a> ProductInputFacts<'a> {
         support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         checked_values: &'a crate::checked_cell::CheckedValueImportAuthority,
     ) -> Self {
-        static EMPTY_SELECTED_SUPPORT: BTreeSet<ExactModuleIdentity> = BTreeSet::new();
         Self {
             context,
             compiler: ProductCompilerInputs::from_semantic_support(
@@ -8393,7 +8428,7 @@ impl<'a> ProductInputFacts<'a> {
             // executable demand remains with the checked stage.
             source_lexical: &[],
             program_support: None,
-            source_selected_support: &EMPTY_SELECTED_SUPPORT,
+            source_selected_support: imbl::OrdSet::new(),
             source_search_include: None,
             scaffold_imports: &[],
             checked_values,
@@ -8490,7 +8525,7 @@ impl DemandedWorldCompilerInputs {
         let mut facts = self.facts();
         facts.source_lexical = &program.program_source_lexical;
         facts.program_support = program.program_support.as_ref();
-        facts.source_selected_support = &program.source_selected_support;
+        facts.source_selected_support = program.source_selected_support.clone();
         facts
     }
 
@@ -10407,25 +10442,15 @@ impl WorldProgramContinuation {
         Ok(())
     }
 
-    fn pending_successor(&self) -> Result<Self, CompileError> {
-        let operation = self.request.operation();
-        operation
-            .reserve::<ExactModuleIdentity>(self.program.source_selected_support.len())
-            .map_err(|error| compiler_evidence_failure(error.into()))?;
-        for owner in &self.program.source_selected_support {
-            crate::host_work::checkpoint()?;
-            operation
-                .charge(owner.unit.len().saturating_add(owner.module.len()))
-                .map_err(|error| compiler_evidence_failure(error.into()))?;
-        }
-        Ok(Self {
+    fn pending_successor(&self) -> Self {
+        Self {
             request: Arc::clone(&self.request),
             context: Arc::clone(&self.context),
             inputs: Arc::clone(&self.inputs),
             program: self.program.clone(),
             private_input: self.private_input.clone(),
             native_prefix: self.native_prefix.clone(),
-        })
+        }
     }
 }
 
@@ -10563,7 +10588,7 @@ impl WorldProgramSegment {
         ) {
             return Err(failure("World native prefix has another accounting owner"));
         }
-        let mut continuation = self.continuation.pending_successor()?;
+        let mut continuation = self.continuation.pending_successor();
         let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
             program,
             &self.stage,
@@ -10694,10 +10719,10 @@ impl WorldProgramSegment {
             .program
             .program_source_lexical
             .append_issued(lexical)?;
-        continuation
-            .program
-            .source_selected_support
-            .extend(self.source.selected_originals.keys().cloned());
+        continuation.program.append_source_selected_support(
+            self.source.selected_originals.keys(),
+            continuation.request.operation(),
+        )?;
         continuation.inputs = advanced.inputs;
         continuation.context = advanced.context;
         Ok(continuation)
@@ -27072,6 +27097,66 @@ mod tests {
         let (mut request, context, receipt) = source_selected_receipt(directory.path(), true, None);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         assert_eq!(admission.selected_originals.len(), 2);
+        {
+            use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+            let owners = admission.selected_originals.keys().collect::<Vec<_>>();
+            let operation = InventoryOperation::new(Default::default());
+            let mut prefix = ProgramSourceSupportState::default();
+            prefix
+                .append_source_selected_support([owners[0]], &operation)
+                .unwrap();
+            let first_work = operation.work_usage().unwrap().0;
+            let mut successor = prefix.clone();
+            assert_eq!(operation.work_usage().unwrap().0, first_work);
+            successor
+                .append_source_selected_support([owners[1]], &operation)
+                .unwrap();
+            assert!(prefix.source_selected_support.contains(owners[0]));
+            assert!(!prefix.source_selected_support.contains(owners[1]));
+            assert_eq!(
+                successor
+                    .source_selected_support
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>(),
+                owners
+            );
+            let before_repeat = operation.work_usage().unwrap().0;
+            successor
+                .append_source_selected_support(owners.iter().copied(), &operation)
+                .unwrap();
+            assert_eq!(
+                operation.work_usage().unwrap().0 - before_repeat,
+                owners.len(),
+                "known identities charge visits without copying strings or reserving new facts"
+            );
+            assert_eq!(
+                first_work - owners[0].unit.len() - owners[0].module.len(),
+                before_repeat - first_work - owners[1].unit.len() - owners[1].module.len(),
+                "new-fact work excludes the size of the already retained prefix"
+            );
+            let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+                max_work: first_work + 1,
+                ..Default::default()
+            });
+            let mut refused = ProgramSourceSupportState::default();
+            assert!(refused
+                .append_source_selected_support(owners.iter().copied(), &exhausted)
+                .is_err());
+            assert!(
+                refused.source_selected_support.is_empty(),
+                "refusal after staging the first new identity preserves the previous prefix"
+            );
+            let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+                max_work: owners.len(),
+                ..Default::default()
+            });
+            let before = prefix.source_selected_support.clone();
+            assert!(prefix
+                .append_source_selected_support(owners.iter().copied(), &exhausted)
+                .is_err());
+            assert_eq!(prefix.source_selected_support, before);
+        }
         assert_eq!(
             admission.home_imports().unwrap()[&identity("main", "Consumer")],
             vec![identity("main", "A")]
