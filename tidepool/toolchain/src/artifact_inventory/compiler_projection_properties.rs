@@ -914,11 +914,15 @@ fn reference_source_islands_distinguish_exact_helper_variants() {
         _ => unreachable!(),
     };
     let imports = crate::certified_products::original_native_group_imports(consumer, 11).unwrap();
+    let helper = match &catalog.original(1, 1).payload {
+        ArtifactPayload::Original(product) => product.owner(),
+        _ => unreachable!(),
+    };
     assert!(imports.iter().any(|import| matches!(import,
-        PendingImportOwner::Source { owner, original_ordinal: 3, .. }
-        if owner == match &catalog.original(1, 1).payload {
-            ArtifactPayload::Original(product) => product.owner(), _ => unreachable!(),
-        }
+        crate::certified_products::ReceiptImportOwner::Source {
+            unit, module, module_version, original_ordinal: 3, ..
+        } if unit == &helper.unit && module == &helper.module
+            && module_version.as_ref() == Some(&helper.module_version)
     )));
     assert_ne!(
         catalog.expected_ids([Some(0); MODULES]),
