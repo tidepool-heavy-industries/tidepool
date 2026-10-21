@@ -216,7 +216,7 @@ pub struct PackageProductOutput {
 ///               defining_interface_sha256, defining_version_sha256, imports]
 /// link = ["local", occurrence] | ["inherited"]
 /// target_roots = [[target_name, [link, ..]], ..]
-/// home_roots   = [[[unit, module], [link, ..]], ..]
+/// home_roots   = [[[unit, module, original_ordinal], [link, ..]], ..]
 /// ```
 /// Digest fields are raw 32-byte CBOR byte strings, matching `package_products`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,12 +224,13 @@ pub struct PackageLinks {
     version: u8,
     occurrences: Vec<PackageOccurrenceRow>,
     target_roots: BTreeMap<String, Vec<PackageLink>>,
-    home_roots: BTreeMap<(String, String), Vec<PackageLink>>,
+    home_roots: BTreeMap<(String, String, u32), Vec<PackageLink>>,
 }
 
 impl PackageLinks {
     /// Empty, version-1 manifest used by fixtures and receipts without any
     /// selected package occurrence. It is not production authority.
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
             version: 1,
@@ -248,15 +249,20 @@ impl PackageLinks {
     pub fn target_roots(&self) -> &BTreeMap<String, Vec<PackageLink>> {
         &self.target_roots
     }
-    pub fn home_roots(&self) -> &BTreeMap<(String, String), Vec<PackageLink>> {
+    pub fn home_roots(&self) -> &BTreeMap<(String, String, u32), Vec<PackageLink>> {
         &self.home_roots
     }
     pub fn target_links(&self, name: &str) -> Option<&[PackageLink]> {
         self.target_roots.get(name).map(Vec::as_slice)
     }
-    pub fn home_links(&self, unit: &str, module: &str) -> Option<&[PackageLink]> {
+    pub fn home_links(
+        &self,
+        unit: &str,
+        module: &str,
+        original_ordinal: u32,
+    ) -> Option<&[PackageLink]> {
         self.home_roots
-            .get(&(unit.to_owned(), module.to_owned()))
+            .get(&(unit.to_owned(), module.to_owned(), original_ordinal))
             .map(Vec::as_slice)
     }
 }
@@ -2659,16 +2665,21 @@ fn decode_package_links(
     let mut home_roots = BTreeMap::new();
     for entry in array(&row[3])? {
         let entry = sized(entry, 2)?;
-        let owner = sized(&entry[0], 2)?;
+        let owner = sized(&entry[0], 3)?;
         let unit = string(&owner[0])?.to_owned();
         let module = string(&owner[1])?.to_owned();
+        let original_ordinal = u32::try_from(number(&owner[2])?)
+            .map_err(|_| CertificationError::Receipt("package links home ordinal"))?;
         if unit.is_empty() || module.is_empty() {
             return Err(CertificationError::Receipt("package links home owner"));
         }
         let links = decode_package_links_list(&entry[1], operation)?;
         check_package_link_range(&links, occurrences.len())?;
         operation.charge(unit.len().saturating_add(module.len()))?;
-        if home_roots.insert((unit, module), links).is_some() {
+        if home_roots
+            .insert((unit, module, original_ordinal), links)
+            .is_some()
+        {
             return Err(CertificationError::Receipt("duplicate package links home"));
         }
     }
@@ -33469,10 +33480,24 @@ None,
                 value_text("target"),
                 value_array([package_links_local(1)]),
             ])],
-            vec![value_array([
-                value_array([value_text("home"), value_text("Home")]),
-                value_array([package_links_local(0)]),
-            ])],
+            vec![
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(3.into()),
+                    ]),
+                    value_array([package_links_local(0)]),
+                ]),
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(9.into()),
+                    ]),
+                    value_array([package_links_inherited()]),
+                ]),
+            ],
         );
         let decoded = decode_package_links(&manifest, &products, &targets, &operation).unwrap();
         assert_eq!(decoded.version(), 1);
@@ -33480,7 +33505,9 @@ None,
         assert_eq!(decoded.occurrences()[0].id(), 0);
         assert_eq!(decoded.occurrences()[1].id(), 1);
         assert_eq!(decoded.target_links("target").unwrap().len(), 1);
-        assert_eq!(decoded.home_links("home", "Home").unwrap().len(), 1);
+        assert_eq!(decoded.home_links("home", "Home", 3).unwrap().len(), 1);
+        assert_eq!(decoded.home_links("home", "Home", 9).unwrap().len(), 1);
+        assert!(decoded.home_links("home", "Home", 7).is_none());
     }
 
     #[test]
@@ -33519,7 +33546,11 @@ None,
             vec![package_links_occurrence(0, [1; 32], value_array([]))],
             vec![],
             vec![value_array([
-                value_array([value_text("home"), value_text("Home")]),
+                value_array([
+                    value_text("home"),
+                    value_text("Home"),
+                    Value::Integer(7.into()),
+                ]),
                 value_array([package_links_local(7)]),
             ])],
         );
@@ -33570,6 +33601,35 @@ None,
             Err(CertificationError::Receipt(
                 "package links target is not a target"
             ))
+        ));
+
+        // A HOME owner key is (unit, module, original ordinal); a duplicate
+        // ordinal refuses, while distinct ordinals of one module are allowed.
+        let duplicate_home = package_links_manifest(
+            vec![],
+            vec![],
+            vec![
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(7.into()),
+                    ]),
+                    value_array([]),
+                ]),
+                value_array([
+                    value_array([
+                        value_text("home"),
+                        value_text("Home"),
+                        Value::Integer(7.into()),
+                    ]),
+                    value_array([]),
+                ]),
+            ],
+        );
+        assert!(matches!(
+            decode(&duplicate_home),
+            Err(CertificationError::Receipt("duplicate package links home"))
         ));
     }
 }
