@@ -145,7 +145,7 @@ mod tests {
         fs::write(
             &catalog,
             serde_json::to_vec(&serde_json::json!({
-                "schema": 4,
+                "schema": 5,
                 "source_selection": selection,
             }))
             .unwrap(),
@@ -167,6 +167,16 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 catalog, root = Path(sys.argv[2]), Path(sys.argv[3])
 original = json.loads(catalog.read_text())
+assert original["schema"] == 5
+legacy = {**original, "schema": 4}
+catalog.write_text(json.dumps(legacy))
+try:
+    module.native_catalog_selection(catalog, root)
+except ValueError as error:
+    assert "expected 5, observed 4" in str(error)
+else:
+    raise AssertionError("legacy catalog schema four was accepted")
+catalog.write_text(json.dumps(original))
 selection = module.native_catalog_selection(catalog, root)
 assert len(selection["source_files"]) == 7
 paths = [file["path"] for file in selection["source_files"]]
