@@ -6257,6 +6257,77 @@ pub(super) mod tests {
         assert!(engine.unpin(bootstrap));
     }
 
+    pub(in crate::session) fn authored_domain_fixture() -> &'static crate::RuntimePreparedTargets {
+        static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, crate::RuntimePreparedTargets)> =
+            std::sync::OnceLock::new();
+        &FIXTURE
+            .get_or_init(|| {
+                tidepool_testing::eval_harness::require_extract();
+                let source = tempfile::tempdir().unwrap();
+                for (name, body) in [
+                    (
+                        "SourceDomainSupport.hs",
+                        include_str!("../../tests/fixtures/SourceDomainSupport.hs"),
+                    ),
+                    (
+                        "SourceDomainD.hs",
+                        include_str!("../../tests/fixtures/SourceDomainD.hs"),
+                    ),
+                    (
+                        "SourceDomainE.hs",
+                        include_str!("../../tests/fixtures/SourceDomainE.hs"),
+                    ),
+                ] {
+                    std::fs::write(source.path().join(name), body).unwrap();
+                }
+                let targets = tidepool_testing::with_settlement(|settlement| {
+                    crate::compile_runtime_targets(
+                        &tidepool_toolchain::artifacts::CompileInvocation {
+                            source: include_str!("../../tests/fixtures/SourceDomainEntry.hs"),
+                            targets: &["dFirst", "dLater", "eFirst", "eLater"],
+                            include: &[
+                                source.path().to_path_buf(),
+                                tidepool_testing::eval_harness::prelude_path(),
+                            ],
+                            fallback_module_name: "SourceDomainEntry",
+                        },
+                        |_, _, _| {},
+                        settlement,
+                    )
+                })
+                .expect("compile the actual independent authored-domain producer");
+                (source, targets)
+            })
+            .1
+    }
+
+    pub(in crate::session) fn authored_domain_owner(module: &str) -> CachedHomeOwner {
+        let compiled = super::super::turn::CompiledTurn::from_runtime_target(
+            authored_domain_fixture(),
+            "eLater",
+        )
+        .unwrap();
+        let code = compiled.code();
+        let selection = code
+            .certification()
+            .unwrap()
+            .native_selection
+            .as_ref()
+            .unwrap();
+        let owners = selection
+            .completion()
+            .rows()
+            .filter(|row| row.product().owner().module == module)
+            .map(|row| row.product().owner().clone())
+            .collect::<Vec<_>>();
+        let owner = owners
+            .first()
+            .expect("real producer must retain the requested authored owner")
+            .clone();
+        assert!(owners.iter().all(|candidate| candidate == &owner));
+        owner
+    }
+
     pub(in crate::session) fn compile_source_publication_fixture(
     ) -> &'static crate::RuntimePreparedTargets {
         static TARGETS: std::sync::OnceLock<crate::RuntimePreparedTargets> =

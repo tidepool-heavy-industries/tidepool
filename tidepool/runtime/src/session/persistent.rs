@@ -6567,39 +6567,46 @@ mod checkpoint_scope_tests {
     }
 
     fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
-        use tidepool_repr::execution_schema::testing;
-        let mut wire = testing::wire_program();
-        let tidepool_repr::execution_schema::Group::NonRecursive(entry) = &mut wire.bindings[0]
-        else {
-            unreachable!()
-        };
-        entry.identity.unit = "main".into();
-        let prepared = testing::prepare(wire).unwrap();
-        let resolved = session
-            .resolve_certification_in(scope, &prepared, &TurnCertification::default())
-            .unwrap();
-        assert!(resolved.groups.is_empty());
-        let target =
-            ScopedTargetImage::compile_scoped(prepared, &resolved, &ImageRegistry::new()).unwrap();
-        assert!(target.demanded().is_empty());
-        let (program, keys, _) = session
-            .install_certified_turn_in(
-                scope,
-                &target.fixture_constructor_metadata(),
-                target,
-                &BTreeMap::new(),
-                &[],
-                &|_| None,
-            )
+        use std::collections::BTreeSet;
+        let before = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .into_iter()
+            .map(|lease| (lease.instance(), lease.value()))
+            .collect::<BTreeSet<_>>();
+        let targets = super::super::prepared::tests::compile_source_publication_fixture();
+        let (program, added, _) = session
+            .install_runtime_target_in(scope, targets, "result")
             .unwrap()
             .into_parts();
-        assert!(keys.is_empty());
+        assert!(
+            !added.is_empty(),
+            "unselected custody must not silently select a prior instance"
+        );
+        assert!(added
+            .iter()
+            .all(|key| !before.contains(&(key.instance, key.value))));
+        assert!(session.retire_failed_turn_source_instances(scope, &added));
         assert!(session.prepared_mut().unwrap().unpin(program));
+        let after = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .into_iter()
+            .map(|lease| (lease.instance(), lease.value()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(after, before);
     }
 
     #[test]
     fn binding_publication_retains_independent_source_instances_without_selecting_them() {
-        use super::super::prepared::tests::install_selected_source_fixture;
+        let targets = super::super::prepared::tests::compile_source_publication_fixture();
+        let install = |session: &mut PersistentSession, scope| {
+            let (program, keys, _) = session
+                .install_runtime_target_in(scope, targets, "result")
+                .unwrap()
+                .into_parts();
+            (program, keys)
+        };
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 821);
@@ -6610,10 +6617,11 @@ mod checkpoint_scope_tests {
         session
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
-        let (target_a, keys_a) = install_selected_source_fixture(&mut session, a, "a");
-        let (target_b, keys_b) = install_selected_source_fixture(&mut session, b, "a");
-        assert_eq!(keys_a.len(), 2);
-        assert_eq!(keys_b.len(), 2);
+        let (target_a, keys_a) = install(&mut session, a);
+        let (target_b, keys_b) = install(&mut session, b);
+        assert!(!keys_a.is_empty());
+        assert_eq!(keys_b.len(), keys_a.len());
+        let combined = keys_a.len() + keys_b.len();
         assert_ne!(keys_a[0].instance, keys_b[0].instance);
         let external = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         assert!(session.retain_scope_dependencies(a, external));
@@ -6623,7 +6631,7 @@ mod checkpoint_scope_tests {
                 .bindings
                 .source_instances_in(&session.scopes, external)
                 .len(),
-            4
+            combined
         );
         assert!(selected_sources(&session, external).is_empty());
         assert_unrelated_certified_turn_admitted(&mut session, external);
@@ -6649,7 +6657,7 @@ mod checkpoint_scope_tests {
                 .bindings
                 .source_instances_in(&session.scopes, public)
                 .len(),
-            4
+            combined
         );
         assert!(selected_sources(&session, public).is_empty());
         assert_unrelated_certified_turn_admitted(&mut session, public);
@@ -6658,7 +6666,7 @@ mod checkpoint_scope_tests {
         assert_eq!(session.retire_scope(a).roots_released, 0);
         assert_eq!(session.retire_scope(b).roots_released, 0);
         for (capture, original) in [(capture_a, &keys_a), (capture_b, &keys_b)] {
-            let (reused, added) = install_selected_source_fixture(&mut session, capture, "a");
+            let (reused, added) = install(&mut session, capture);
             assert!(added.is_empty());
             assert!(selected_sources(&session, capture)
                 .iter()
@@ -6668,8 +6676,8 @@ mod checkpoint_scope_tests {
             assert!(session.prepared_mut().unwrap().unpin(reused));
         }
         let fresh = session.mint_detached_scope(public).unwrap();
-        let (fresh_target, fresh_keys) = install_selected_source_fixture(&mut session, fresh, "a");
-        assert_eq!(fresh_keys.len(), 2);
+        let (fresh_target, fresh_keys) = install(&mut session, fresh);
+        assert_eq!(fresh_keys.len(), keys_a.len());
         assert!(fresh_keys.iter().all(|key| !keys_a
             .iter()
             .chain(&keys_b)
@@ -6678,7 +6686,7 @@ mod checkpoint_scope_tests {
         assert_eq!(session.retire_scope(fresh).roots_released, fresh_keys.len());
         assert_eq!(session.retire_scope(capture_a).roots_released, 0);
         assert_eq!(session.retire_scope(capture_b).roots_released, 0);
-        assert_eq!(session.retire_scope(public).roots_released, 4);
+        assert_eq!(session.retire_scope(public).roots_released, combined);
         session
             .prepared_mut()
             .unwrap()
@@ -6969,38 +6977,38 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn independent_authored_domains_keep_late_group_original_support() {
-        use super::super::prepared::tests::{
-            certified_source_group_modules, install_selected_groups_fixture,
-        };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        use super::super::prepared::tests::{authored_domain_fixture, authored_domain_owner};
+        let targets = authored_domain_fixture();
+        let d_owner = authored_domain_owner("SourceDomainD");
+        let e_owner = authored_domain_owner("SourceDomainE");
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 824);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let d = session.mint_detached_scope(public).unwrap();
         let e = session.mint_detached_scope(public).unwrap();
-        let groups = [
-            certified_source_group_modules("D", "d1", 1, "Support", "support"),
-            certified_source_group_modules("D", "d2", 2, "Support", "support"),
-            certified_source_group_modules("E", "e1", 1, "Support", "support"),
-            certified_source_group_modules("Support", "support", 5, "Support", "support"),
-        ];
-        let source = |module, name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity(module, name),
+        let (target_d, keys_d, _) = session
+            .install_runtime_target_in(d, targets, "dFirst")
+            .unwrap()
+            .into_parts();
+        let (target_e, keys_e, _) = session
+            .install_runtime_target_in(e, targets, "eFirst")
+            .unwrap()
+            .into_parts();
+        let support = |session: &PersistentSession, scope| {
+            selected_sources(session, scope)
+                .into_iter()
+                .find(|lease| {
+                    lease.binder().binder.module == "SourceDomainSupport"
+                        && lease.binder().binder.occurrence == "support"
+                })
+                .expect("the real producer must retain its exact support export")
         };
-        let (target_d, keys_d) =
-            install_selected_groups_fixture(&mut session, d, &groups, source("D", "d1"));
-        let (target_e, keys_e) =
-            install_selected_groups_fixture(&mut session, e, &groups, source("E", "e1"));
-        let original_support = selected_sources(&session, d)
-            .into_iter()
-            .find(|lease| lease.binder().binder.module == "Support")
-            .unwrap();
-        for (scope, keys, owner) in [
-            (d, &keys_d, groups[0].owner().clone()),
-            (e, &keys_e, groups[2].owner().clone()),
-        ] {
+        let original_support = support(&session, d);
+        let independent_support = support(&session, e);
+        assert_ne!(original_support.instance(), independent_support.instance());
+        assert_eq!(original_support.binding(), independent_support.binding());
+        for (scope, keys, owner) in [(d, &keys_d, d_owner), (e, &keys_e, e_owner)] {
             mint_fixture_origin(&mut session, scope, owner.clone());
             let publication = session
                 .bindings
@@ -7015,21 +7023,28 @@ mod checkpoint_scope_tests {
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
-        // d2 must inherit D's original support instance despite E's independently
-        // retained support. A single ambient map cannot express both domains.
         let later = session.mint_detached_scope(public).unwrap();
-        let (target_late, _) =
-            install_selected_groups_fixture(&mut session, later, &groups, source("D", "d2"));
-        assert!(selected_sources(&session, later)
-            .iter()
-            .any(|lease| lease.instance() == original_support.instance()
-                && lease.handle() == original_support.handle()));
+        let (target_late, _, _) = session
+            .install_runtime_target_in(later, targets, "dLater")
+            .unwrap()
+            .into_parts();
+        let later_support = support(&session, later);
+        assert_eq!(later_support.instance(), original_support.instance());
+        assert_eq!(later_support.handle(), original_support.handle());
+        assert_ne!(later_support.instance(), independent_support.instance());
         for target in [target_d, target_e, target_late] {
-            session.prepared_mut().unwrap().unpin(target);
+            assert!(session.prepared_mut().unwrap().unpin(target));
         }
         for scope in [d, e, later, public] {
             session.retire_scope(scope);
         }
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
+            .unwrap();
+        assert_eq!(session.persistent_roots_count(), 0);
+        assert_eq!(session.residency().unwrap().programs, 0);
     }
 
     #[test]
