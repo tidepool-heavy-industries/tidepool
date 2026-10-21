@@ -22964,6 +22964,7 @@ mod tests {
             // admission. The actual existing group issuer supplies the proof.
             let mut receipt = CertifiedReceipt {
                 package_products: Vec::new(),
+                package_links: crate::certified_products::PackageLinks::empty(),
                 modules: Vec::new(),
                 targets: BTreeMap::from([(
                     "target".into(),
@@ -23126,6 +23127,7 @@ mod tests {
         let binder = group.binders().iter().next().unwrap().clone();
         CertifiedReceipt {
             package_products: Vec::new(),
+            package_links: crate::certified_products::PackageLinks::empty(),
             modules: Vec::new(),
             targets: BTreeMap::from([(
                 "target".into(),
@@ -23180,6 +23182,7 @@ mod tests {
         ] {
             let mut receipt = CertifiedReceipt {
                 package_products: Vec::new(),
+                package_links: crate::certified_products::PackageLinks::empty(),
                 modules: vec![CertifiedModuleReceipt {
                     origin,
                     unit: "fixture".into(),

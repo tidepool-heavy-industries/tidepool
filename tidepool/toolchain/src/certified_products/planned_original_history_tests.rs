@@ -326,6 +326,7 @@ pub(super) fn issue_planned_original_with_retained_child(
     accepted.dependency_witness_sha256 = sha(&evidence_bytes);
     let packet = CertifiedReceipt {
         package_products: Vec::new(),
+        package_links: PackageLinks::empty(),
         source_recipe: WorkerExecutionSource::ExactUnavailable(
             SourceRecipeUnavailable::IncompleteSourceEvidence,
         ),
@@ -465,6 +466,7 @@ pub(super) fn issue_planned_original_with_source_value(
     accepted.dependency_witness_sha256 = sha(&evidence_bytes);
     let packet = CertifiedReceipt {
         package_products: Vec::new(),
+        package_links: PackageLinks::empty(),
         source_recipe: WorkerExecutionSource::ExactUnavailable(
             SourceRecipeUnavailable::IncompleteSourceEvidence,
         ),
