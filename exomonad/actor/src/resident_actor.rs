@@ -3063,6 +3063,31 @@ struct PreparedInteractivePublication {
     installation: LocalResidentInstallation,
 }
 
+/// Completed initialization preparation, handed across the phase boundary.
+///
+/// `initialize_inner` prepares every phase under the caller's registration
+/// and returns exactly one of these. The outer owner then drops the
+/// preparation future before polling stabilization, so the preparation poll
+/// frame never stays live under publication. The large carriers are heap-owned
+/// at issuance so this phase enum stays small in the caller's poll frame.
+#[allow(clippy::large_enum_variant)]
+enum InitializationPhase {
+    /// Workbench/replacement/shutdown early returns: nothing left to stabilize.
+    Settled(KernelStep<()>),
+    /// Explicit-installer startup already published its surface and installed
+    /// its receiver; only the commit remains, run once by the outer owner.
+    Installer(Box<LocalResidentInstallation>),
+    /// Ordinary startup: the outcome plus optional prepared interactive
+    /// publication, consumed exactly once by `stabilize_program`.
+    Program(Box<PreparedProgram>),
+}
+
+/// The affine carrier for ordinary startup stabilization.
+struct PreparedProgram {
+    outcome: ResidentOutcome,
+    prepared_installation: Option<PreparedInteractivePublication>,
+}
+
 struct AdmittedTypedExit {
     destination: Arc<crate::owned_result::RequestResultDestination>,
     publication: TypedExitPublication,
@@ -9321,9 +9346,39 @@ where
                     .with_source_dependency(context.source_dependency()),
             );
         let registration = guard.registration();
-        // Keep initialization state out of the enclosing task-local scope future.
+        // Run both initialization phases under the SAME registration, compiler
+        // owner, selected context, task-local scopes and serialized actor
+        // borrow. Preparation completes and its future is dropped before the
+        // continuation is polled, so the preparation poll frame never stays
+        // live under stabilization/publication.
         let result = registration
-            .scope(Box::pin(self.initialize_inner(kernel, context, boot)))
+            .scope(Box::pin(async {
+                let phase = self.initialize_inner(kernel, context, boot).await?;
+                match phase {
+                    InitializationPhase::Settled(step) => Ok(step),
+                    InitializationPhase::Installer(installation) => {
+                        // Publication and receiver installation already
+                        // completed during preparation; commit exactly once.
+                        self.commit_interactive_installation(kernel, context, *installation)
+                            .await?;
+                        Ok(KernelStep::Continue(()))
+                    }
+                    InitializationPhase::Program(program) => {
+                        let PreparedProgram {
+                            outcome,
+                            prepared_installation,
+                        } = *program;
+                        self.stabilize_program(
+                            kernel,
+                            context,
+                            &crate::CallAncestry::begin(context.actor),
+                            outcome,
+                            prepared_installation,
+                        )
+                        .await
+                    }
+                }
+            }))
             .await;
         if result.is_ok() {
             workbench
@@ -9339,19 +9394,19 @@ where
         kernel: &KernelContext,
         context: &ActorSessionContext,
         boot: ResidentBoot,
-    ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+    ) -> Result<InitializationPhase, ResidentActorWorkbenchError> {
         let boot = match boot {
             ResidentBoot::Replacement(prepared) => {
                 self.boot = Some(ResidentBoot::Replacement(prepared));
-                return Ok(KernelStep::Continue(()));
+                return Ok(InitializationPhase::Settled(KernelStep::Continue(())));
             }
             boot => boot,
         };
         if let Some(terminal) = kernel.requested_shutdown() {
-            return Ok(KernelStep::Stop {
+            return Ok(InitializationPhase::Settled(KernelStep::Stop {
                 output: (),
                 terminal,
-            });
+            }));
         }
         if self.worktree_custody.is_none() {
             if let Some(prepared) = self.prepared_workspace.take() {
@@ -9373,10 +9428,10 @@ where
         }
 
         if let Some(terminal) = kernel.requested_shutdown() {
-            return Ok(KernelStep::Stop {
+            return Ok(InitializationPhase::Settled(KernelStep::Stop {
                 output: (),
                 terminal,
-            });
+            }));
         }
         if matches!(boot, ResidentBoot::Workbench) && self.explicit_installer.is_some() {
             let owner = self.ready_public_owner(context).await?;
@@ -9413,9 +9468,9 @@ where
                 ));
             };
             self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
-            self.commit_interactive_installation(kernel, context, installation)
-                .await?;
-            return Ok(KernelStep::Continue(()));
+            // Surface publication and receiver installation are complete;
+            // hand the commit-only remainder across the phase boundary.
+            return Ok(InitializationPhase::Installer(Box::new(installation)));
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
@@ -9437,7 +9492,7 @@ where
                 .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
             self.set_standing(context.actor, ResidentStanding::Workbench);
             self.policy_installed = true;
-            return Ok(KernelStep::Continue(()));
+            return Ok(InitializationPhase::Settled(KernelStep::Continue(())));
         }
         let public_owner = self.ready_public_owner(context).await?;
         let bootstrap = self
@@ -9475,10 +9530,10 @@ where
                         )
                         .await?;
                     if let Some(terminal) = kernel.requested_shutdown() {
-                        return Ok(KernelStep::Stop {
+                        return Ok(InitializationPhase::Settled(KernelStep::Stop {
                             output: (),
                             terminal,
-                        });
+                        }));
                     }
                     match startup_step {
                         ResidentActorStartupStep::InstallSource {
@@ -9656,14 +9711,10 @@ where
                 .await?;
             None
         };
-        self.stabilize_program(
-            kernel,
-            context,
-            &crate::CallAncestry::begin(context.actor),
+        Ok(InitializationPhase::Program(Box::new(PreparedProgram {
             outcome,
-            prepared,
-        )
-        .await
+            prepared_installation: prepared,
+        })))
     }
 
     async fn run_receiver(
