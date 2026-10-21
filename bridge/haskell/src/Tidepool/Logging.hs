@@ -5,6 +5,38 @@
 -- records, whose grammars have independent consumers. Diagnostic delivery is
 -- best effort: a closed or otherwise unavailable stderr must not replace the
 -- compiler result, while asynchronous cancellation still escapes.
+--
+-- /Bounded events./ Every value is drawn from a finite vocabulary: 'LogText'
+-- is capped at 4096 characters, field names at 128, the target and event at
+-- 256, and 'LogInteger' carries an 'Int64'. Each event also renders at most
+-- 'maxFields' distinct caller fields. The field cap is diagnostic payload
+-- control: production events are trace records with small static field lists
+-- (the largest current site, @finalized.owner@, has twelve distinct fields),
+-- and the cap stops a future call site from growing a diagnostic line without
+-- bound. When the cap drops distinct fields the event records an explicit
+-- @omitted_fields@ count instead of silently losing them.
+--
+-- /Total encoding bound./ @jsonString@'s worst case is a control character
+-- rendered as @\\u00XX@, six bytes, so a bounded string of @n@ characters
+-- contributes at most @2 + 6*n@ bytes and an 'Int64'/'Word64' at most twenty
+-- decimal digits. The rendered event is therefore at most the sum of
+--
+-- @
+--   "tidepool-log {"                                  14
+--   "schema":1                                        10
+--   "level":"trace"                                   15
+--   "target":2 + 6*256                              1547
+--   "event":2 + 6*256                               1546
+--   "observed_ns":20                                  34
+--   "fields":{32*(2+6*128 + 1 + 2+6*4096) + 31}    811210
+--   "omitted_fields":20 (only when capped)            37
+--   member separators and closing brace                21
+-- @
+--
+-- i.e. about 814420 bytes (~795 KiB) in the absolute worst case, with the
+-- omission marker included. This is a static ceiling that follows from finite
+-- inputs, so no per-event byte budget manager is needed for the current
+-- workload.
 module Tidepool.Logging
   ( LogLevel(..)
   , Logger
@@ -17,11 +49,11 @@ module Tidepool.Logging
   , logEvent
   , logEventTo
   , logTrace
-  , renderLogEvent
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (toLower)
+import Data.Int (Int64)
 import Data.List (intercalate)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -46,7 +78,7 @@ type LogField = (String, LogValue)
 
 data LogValue
   = LogText String
-  | LogInteger Integer
+  | LogInteger Int64
   | LogBool Bool
   | LogNull
   deriving (Eq, Show)
@@ -68,6 +100,9 @@ readLogger target = do
   configured <- lookupEnv "TIDEPOOL_LOG"
   pure (newLogger target (maybe LogOff logLevelFromName configured))
 
+-- | Fix a target and threshold without re-reading the environment. This is the
+-- shared compiler-internal constructor behind 'readLogger'; production call
+-- sites go through 'readLogger' while tests build explicit levels directly.
 newLogger :: String -> LogLevel -> Logger
 newLogger = Logger
 
@@ -76,28 +111,32 @@ loggerEnabled logger level =
   level /= LogOff && level <= loggerMinimum logger
 {-# INLINE loggerEnabled #-}
 
--- | Render one bounded structured event. Exporting the exact renderer keeps
--- tests on the production encoding instead of duplicating JSON rules.
+-- | Render one bounded structured event. Internal to the emission path so
+-- tests observe the actual sink rather than a duplicated JSON rule.
 renderLogEvent :: Word64 -> LogLevel -> String -> String -> [LogField] -> String
 renderLogEvent observed loggerLevel target event fields =
-  "tidepool-log {" ++ intercalate ","
-    [ "\"schema\":1"
-    , "\"level\":" ++ jsonString (levelName loggerLevel)
-    , "\"target\":" ++ jsonString (boundedText 256 target)
-    , "\"event\":" ++ jsonString (boundedText 256 event)
-    , "\"observed_ns\":" ++ show observed
-    , "\"fields\":{" ++ intercalate "," (renderField <$> boundedFields fields) ++ "}"
-    ] ++ "}"
+  let (kept, omitted) = boundedFields fields
+      members =
+        [ "\"schema\":1"
+        , "\"level\":" ++ jsonString (levelName loggerLevel)
+        , "\"target\":" ++ jsonString (boundedText 256 target)
+        , "\"event\":" ++ jsonString (boundedText 256 event)
+        , "\"observed_ns\":" ++ show observed
+        , "\"fields\":{" ++ intercalate "," (renderField <$> kept) ++ "}"
+        ] ++ [ "\"omitted_fields\":" ++ show omitted | omitted > 0 ]
+  in "tidepool-log {" ++ intercalate "," members ++ "}"
 
 -- | Emit through the process diagnostic channel. The level check precedes the
 -- clock read, rendering and exception boundary, so disabled trace sites are
 -- cheap and observably silent.
 logEvent :: MonadIO m => Logger -> LogLevel -> String -> [LogField] -> m ()
 logEvent logger level event fields =
-  whenEnabled logger level $ liftIO $ emit stderr logger level event fields
+  logEventTo stderr logger level event fields
 
--- | Handle-directed form used by focused failure tests and any future owned
--- sink. Ordinary compiler code uses 'logEvent'.
+-- | Handle-directed form of the emission boundary. 'logEvent' supplies the
+-- production stderr sink; focused tests supply a scratch handle so they can
+-- observe real emission and ordinary sink failure without duplicating the
+-- renderer.
 logEventTo :: MonadIO m => Handle -> Logger -> LogLevel -> String -> [LogField] -> m ()
 logEventTo handle logger level event fields =
   whenEnabled logger level $ liftIO $ emit handle logger level event fields
@@ -131,16 +170,27 @@ renderValue value = case value of
 
 -- Repeated names would make a JSON object ambiguous. The first field wins;
 -- call sites should carry distinct keys and treat omission as a programming
--- error rather than a reason to fail the compiler operation.
-boundedFields :: [LogField] -> [LogField]
-boundedFields = go []
+-- error rather than a reason to fail the compiler operation. Distinct fields
+-- beyond 'maxFields' are dropped, and the returned count makes that omission
+-- explicit at the event boundary.
+boundedFields :: [LogField] -> ([LogField], Int)
+boundedFields fields =
+  let normalized = [(boundedText 128 name, value) | (name, value) <- fields]
+      (kept, dropped) = splitAt maxFields (dedupe normalized)
+  in (kept, length dropped)
   where
-    go _ [] = []
-    go seen ((name, value):rest)
-      | normalized `elem` seen = go seen rest
-      | otherwise = (normalized, value) : go (normalized : seen) rest
+    dedupe = go []
       where
-        normalized = boundedText 128 name
+        go _ [] = []
+        go seen (field@(name, _):rest)
+          | name `elem` seen = go seen rest
+          | otherwise = field : go (name : seen) rest
+
+-- | The most distinct caller fields one event renders. Production events are
+-- small (twelve fields at the largest current site); this caps pathological
+-- growth while leaving headroom for the current workload.
+maxFields :: Int
+maxFields = 32
 
 boundedText :: Int -> String -> String
 boundedText limit text =
