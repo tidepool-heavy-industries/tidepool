@@ -17,7 +17,8 @@ use tidepool_repr::execution_schema::{
 };
 
 mod package_code;
-pub use package_code::{CertifiedPackageCodeInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageCodeInterfaceRef};
+pub use package_code::{CertifiedPackageInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageInterfaceRef};
+pub(crate) use package_code::PackageInterfaceCustody;
 pub(crate) mod native_demand;
 pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
