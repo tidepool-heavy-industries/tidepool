@@ -951,10 +951,10 @@ data PreparedPackageTarget = PreparedPackageTarget
   , packageTargetHomeImports :: Map.Map (Text, Text, Word) [SymbolIdentity]
   }
 
-projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> ProjectionContext
+projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> ProjectionContext -> ProjectionContext
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings context home components reach = do
+projectPreparedPackageTarget env hostBindings homeContext context home components reach = do
   let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
@@ -980,7 +980,7 @@ projectPreparedPackageTarget env hostBindings context home components reach = do
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
   homeRows <- forM home $ \prepared ->
     forM (projectPreparedModuleGroupResultsFor
-          (OriginalHomeProduct isHomeUnit) context prepared Nothing) $ \(ordinal, _, outcome) ->
+          (OriginalHomeProduct isHomeUnit) homeContext prepared Nothing) $ \(ordinal, _, outcome) ->
          case outcome of
            Left failure -> Left failure
            Right evidence ->

@@ -238,32 +238,41 @@ normalize = reverse . snd . foldl' assign (Map.empty, [])
       Just classId -> (table, classId : out)
       Nothing -> let classId = Map.size table in (Map.insert x classId table, classId : out)
 
--- Resolve each target's captured HOME-group package-import SymbolIdentity list
--- through that target's own raw occurrence map, then require every target that
--- shares a HOME group to agree on the exact ordered link list. Empty lists are
--- retained, so every fresh HOME group keeps a home_roots entry.
+-- Resolve each captured HOME-group package-import SymbolIdentity against the
+-- union of every target's raw occurrence map, then require every target that
+-- shares a HOME group to agree on the exact ordered link list. A symbol
+-- exported by several targets is Local only when its canonical occurrences
+-- collapse to one; distinct occurrences refuse rather than overwriting.
+-- Empty lists are retained, so every fresh HOME group keeps a home_roots entry.
 resolveHomeRoots
   :: Map.Map Int Word32
   -> Map.Map T.Text (Map.Map SymbolIdentity Int)
   -> Map.Map T.Text (Map.Map (T.Text,T.Text,Word) [SymbolIdentity])
   -> Either String (Map.Map (T.Text,T.Text,Word) [PackageLink])
-resolveHomeRoots indexMap targetOwners targetHomeImports = do
-  rows <- forM
-    [ (key, Map.findWithDefault Map.empty target targetOwners, identities)
-    | (target, imports) <- Map.toAscList targetHomeImports
-    , (key, identities) <- Map.toAscList imports ]
-    $ \(key, owners, identities) -> do
-      links <- resolveLinks owners identities
-      pure (key, links)
-  foldM insertAgreeing Map.empty rows
+resolveHomeRoots indexMap targetOwners targetHomeImports =
+  foldM insertAgreeing Map.empty =<< traverse resolveRow rows
   where
-    resolveLinks owners = traverse $ \identity ->
-      case Map.lookup identity owners of
-        Nothing -> Right PackageLinkInherited
-        Just raw -> case Map.lookup raw indexMap of
-          Just canonical -> Right (PackageLinkLocal canonical)
-          Nothing -> Left
-            ("HOME package import lacks canonical occurrence " ++ show raw)
+    rows = [ (key, identities)
+           | (_, imports) <- Map.toAscList targetHomeImports
+           , (key, identities) <- Map.toAscList imports ]
+    unionOwners = Map.fromListWith (++)
+      [ (identity, [raw])
+      | owners <- Map.elems targetOwners
+      , (identity, raw) <- Map.toAscList owners ]
+    resolveRow (key, identities) = (key,) <$> traverse resolveOne identities
+    resolveOne identity = case Map.lookup identity unionOwners of
+      Nothing -> Right PackageLinkInherited
+      Just raws -> do
+        canonical <- traverse canonicalizeRaw raws
+        case Set.toAscList (Set.fromList canonical) of
+          [] -> Right PackageLinkInherited
+          [one] -> Right (PackageLinkLocal one)
+          multiple -> Left
+            ("HOME package import resolves to multiple occurrences across targets: "
+              ++ show identity ++ " -> " ++ show multiple)
+    canonicalizeRaw raw = case Map.lookup raw indexMap of
+      Just canonical -> Right canonical
+      Nothing -> Left ("HOME package import lacks canonical occurrence " ++ show raw)
     insertAgreeing known (key, links) = case Map.lookup key known of
       Nothing -> Right (Map.insert key links known)
       Just prior | prior == links -> Right known
@@ -765,7 +774,8 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   | (product, group, _) <- moduleRows
                   , productOrigin product == FreshProduct ]
             if Map.keysSet homeRoots /= freshHomeKeys
-              then Left "HOME group package links do not match certified fresh HOME groups"
+              then Left ("HOME group package links do not match certified fresh HOME groups: links="
+                  ++ show (Map.keysSet homeRoots) ++ " fresh=" ++ show freshHomeKeys)
               else Right ()
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
             Right (certificateBytes,versions,context,packageInterfaceWrites)

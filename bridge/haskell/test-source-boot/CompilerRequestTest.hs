@@ -147,6 +147,22 @@ homeRootResolutionAgreement = do
   case resolveHomeRoots indexMap owners disagreeing of
     Left _ -> pure ()
     Right actual -> fail ("disagreeing HOME roots were silently merged: " ++ show actual)
+  -- A symbol exported by two targets at one canonical occurrence resolves to
+  -- that shared occurrence; at two distinct occurrences it refuses.
+  let sharedOwners = Map.fromList
+        [ (Text.pack "t1", Map.singleton binderA 0)
+        , (Text.pack "t2", Map.singleton binderA 1) ]
+      sharedIndex = Map.fromList [(0, 0), (1, 0)]
+      sharedImports = Map.fromList
+        [ (Text.pack "t1", Map.singleton home1 [binderA])
+        , (Text.pack "t2", Map.singleton home1 [binderA]) ]
+      ambiguousIndex = Map.fromList [(0, 0), (1, 1)]
+  case resolveHomeRoots sharedIndex sharedOwners sharedImports of
+    Right actual | actual == Map.singleton home1 [PackageLinkLocal 0] -> pure ()
+    other -> fail ("shared HOME occurrence did not collapse: " ++ show other)
+  case resolveHomeRoots ambiguousIndex sharedOwners sharedImports of
+    Left reason | "multiple occurrences" `isInfixOf` reason -> pure ()
+    other -> fail ("ambiguous HOME occurrence was not refused: " ++ show other)
   let missingIndex = Map.singleton (Text.pack "t1")
         (Map.singleton binderA 99)
       onlyFirstTarget = Map.singleton (Text.pack "t1")
