@@ -26,10 +26,9 @@ native_prepared_products(
     producer = "//tidepool/toolchain:tidepool-module-package",
     frontend = "//tidepool/extract-cmd:tidepool-extract",
     worker = "//bridge/haskell:tidepool_extract_bin",
-    deployment = ":compiler_deployment",
+    compiler_service = ":compiler_service_deployment",
     ghc_libdir = read_root_config("nix", "ghc_libdir"),
     declared_ghc_libdir = "toolchains//:native_catalog_ghc_libdir",
-    libraries = ":tidepool_extract_runtime_libraries",
     visibility = ["PUBLIC"],
 )
 

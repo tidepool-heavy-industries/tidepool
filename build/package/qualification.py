@@ -160,6 +160,8 @@ BROWSER_DRIVER_SOURCES = {
 UNSET_ENVIRONMENT = (
     "TIDEPOOL_CACHE_DIR", "TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR",
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT", "TIDEPOOL_COMPILER_MODULES",
+    "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID", "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
+    "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256",
     "TIDEPOOL_COMPILER_PACKAGE_PROFILE", "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256",
     "TIDEPOOL_COMPILER_SERVICE_EPOCH", "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID",
@@ -169,7 +171,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
     "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
     "EXOMONAD_OFFLINE_RUSTC", "EXOMONAD_OFFLINE_CC",
-    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
+    "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
     "bin/exomonad-unwrapped": "//exomonad/host:exomonad",
@@ -1627,6 +1629,40 @@ class CatalogProducerOperation(Enum):
     ENTRY = "entry"
 
 
+def catalog_compiler_environment(args, tools: Path) -> dict:
+    service = args.compiler_service.resolve(strict=True)
+    configuration = service / "compiler-service-source.bin"
+    configuration_hash = sha256(configuration)
+    if (service / "compiler-service-source.sha256").read_text() != configuration_hash + "\n":
+        raise ValueError("declared compiler service configuration seal changed")
+    return {
+        "TIDEPOOL_EXTRACT": str(args.frontend.resolve(strict=True)),
+        "TIDEPOOL_EXTRACT_WORKER": str(args.worker.resolve(strict=True)),
+        "TIDEPOOL_COMPILER_DEPLOYMENT": str((service / "compiler-deployment.json").resolve(strict=True)),
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": str(configuration),
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256": configuration_hash,
+        "TIDEPOOL_GHC_LIBDIR": str(nix_path(args.ghc_libdir)),
+        "PATH": str(tools / "bin"),
+    }
+
+
+def catalog_compiler_settlement(compiler_root: Path, return_code: int | None) -> dict:
+    """Only the process owner's completed retirement can confirm settlement."""
+    records = {}
+    for filename, key in (("owned-compiler-outcome.json", "outcome"), ("lifecycle.json", "lifecycle")):
+        try:
+            records[key] = json.loads((compiler_root / filename).read_text())
+        except (OSError, ValueError) as error:
+            records[key + "_error"] = str(error)
+    outcome, lifecycle = records.get("outcome", {}), records.get("lifecycle", {})
+    confirmed = (isinstance(outcome, dict) and outcome.get("schema") == 1
+                 and outcome.get("cleanup") == {"status": "confirmed"}
+                 and isinstance(lifecycle, dict) and lifecycle.get("schema") == 1
+                 and lifecycle.get("cleanup_confirmed") is True
+                 and return_code is not None and lifecycle.get("exit_code") == return_code)
+    return {"status": "confirmed" if confirmed else "unconfirmed", **records}
+
+
 def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) -> Path:
     """One source/retention/compiler boundary for production and inspection."""
     if operation is CatalogProducerOperation.INSPECT and not 600 <= args.timeout <= 1800:
@@ -1639,56 +1675,60 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
     output = args.output.absolute()
     if output != output.resolve() or output.exists():
         raise ValueError("native catalog requires an absent canonical action output")
-    declared_environment = {
-        "TIDEPOOL_EXTRACT": str(args.frontend.resolve(strict=True)),
-        "TIDEPOOL_EXTRACT_WORKER": str(args.worker.resolve(strict=True)),
-        "TIDEPOOL_COMPILER_DEPLOYMENT": str(args.deployment.resolve(strict=True)),
-        "TIDEPOOL_GHC_LIBDIR": str(nix_path(args.ghc_libdir)),
-        "LD_LIBRARY_PATH": str(args.libraries.resolve(strict=True)),
-        "PATH": str(tools / "bin"),
-    }
+    declared_environment = catalog_compiler_environment(args, tools)
     environment = execution_environment({"environment": declared_environment})
     entry_source = BUILTIN_ENTRY_SOURCES[args.entry_name][0] if getattr(args, "entry_name", None) else ROOT_ENTRY_SOURCE
     probe, target = ((entry_source, "__prepared")
                      if operation is CatalogProducerOperation.ENTRY else ("TidepoolCatalog.hs", "catalogSentinel"))
-    command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / probe),
+    producer_command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / probe),
                "--target", target, "--source-root", str(original), "--output-root", str(output)]
-    invocation_root = output.with_name(output.name + ".invocation") if operation is CatalogProducerOperation.INSPECT else None
+    invocation_root = getattr(args, "invocation_output", None) or output.with_name(output.name + ".invocation")
+    invocation_root = invocation_root.absolute()
+    if (invocation_root != invocation_root.resolve() or invocation_root.exists()
+            or invocation_root == output or invocation_root.is_relative_to(output)
+            or output.is_relative_to(invocation_root)):
+        raise ValueError("native catalog requires separate absent canonical invocation evidence")
+    compiler_root = invocation_root / "compiler"
+    command = [declared_environment["TIDEPOOL_EXTRACT"], "--owned-daemon-run", str(compiler_root),
+               "--workers", "1", "--foreground-jobs", "1", "--preparation-jobs", "1", "--", *producer_command]
     primary = None
     secondary = []
     retention_error = None
+    settlement = None
+    settlement_error = None
     return_code = None
     started = time.monotonic_ns()
     invocation = {
-        "schema": 1, "kind": "native-catalog-producer-inspection",
+        "schema": 1, "kind": "native-catalog-producer", "operation": operation.value,
         "command": command, "declared_environment": declared_environment,
         "unset_environment": UNSET_ENVIRONMENT, "output_root": str(output),
         "retention_record": str(args.retention_record),
         "retention_record_origin": str(args.retention_record_origin),
         "source_inventory_sha256": json.loads(args.retention_record.read_text())["inventory_sha256"],
-        "catalog_qualified": False,
+        "catalog_qualified": False, "completed": False,
+        "compiler_settlement": {"status": "unconfirmed"},
     }
-    if invocation_root is not None:
-        invocation_root.mkdir(parents=True, exist_ok=False)
-        invocation.update(timeout_seconds=args.timeout, cwd=str(invocation_root), stdout=str(invocation_root / "stdout.log"),
-                          stderr=str(invocation_root / "stderr.log"))
-        write_json(invocation_root / "invocation.json", invocation)
+    timeout = args.timeout if operation is CatalogProducerOperation.INSPECT else None
+    invocation_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+    invocation.update(timeout_seconds=timeout, cwd=str(invocation_root), stdout=str(invocation_root / "stdout.log"),
+                      stderr=str(invocation_root / "stderr.log"))
+    write_json(invocation_root / "invocation.json", invocation)
     try:
-        if invocation_root is None:
-            result = subprocess.run(command, env=environment, check=False)
-        else:
-            # The extractor owns child lifetime hooks. subprocess.run kills
-            # and waits for its producer on timeout; do not duplicate that
-            # process-tree policy in this invocation owner.
-            with (invocation_root / "stdout.log").open("wb") as stdout, (invocation_root / "stderr.log").open("wb") as stderr:
-                result = subprocess.run(command, env=environment, check=False,
-                                        stdout=stdout, stderr=stderr, timeout=args.timeout, cwd=invocation_root)
+        # The frontend owns service retirement. A forced stop may leave its
+        # package roots retained; only its complete records confirm settlement.
+        with (invocation_root / "stdout.log").open("wb") as stdout, (invocation_root / "stderr.log").open("wb") as stderr:
+            result = subprocess.run(command, env=environment, check=False,
+                                    stdout=stdout, stderr=stderr, timeout=timeout, cwd=invocation_root)
         return_code = result.returncode
         if return_code != 0:
             primary = subprocess.CalledProcessError(return_code, command)
     except BaseException as error:
         primary = error
     finally:
+        settlement = catalog_compiler_settlement(compiler_root, return_code)
+        if settlement["status"] != "confirmed":
+            settlement_error = ValueError(f"native catalog compiler settlement unconfirmed; retained evidence: {compiler_root}")
+            secondary.append(settlement_error)
         # A refusal or timeout does not waive custody of the consumed originals.
         try:
             verify_retained_catalog_sources(args.retention_record, args.snapshot, tools,
@@ -1697,21 +1737,22 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
             retention_error = error
             error.add_note("catalog source retention recheck failed")
             secondary.append(error)
-        if invocation_root is not None:
-            try:
-                write_json(invocation_root / "outcome.json", {
+        try:
+            write_json(invocation_root / "outcome.json", {
                     **invocation, "producer_exit_code": return_code,
                     "timed_out": isinstance(primary, subprocess.TimeoutExpired),
                     "producer_error": str(primary) if primary is not None else None,
                     "retention_recheck": {"passed": retention_error is None,
                                           "error": str(retention_error) if retention_error is not None else None},
-                    "completed": primary is None and retention_error is None,
+                    "compiler_settlement": settlement,
+                    "completed": primary is None and retention_error is None and settlement_error is None,
                     "elapsed_ns": time.monotonic_ns() - started,
                 })
-            except BaseException as error:
-                error.add_note("catalog invocation outcome publication failed")
-                secondary.append(error)
+        except BaseException as error:
+            error.add_note("catalog invocation outcome publication failed")
+            secondary.append(error)
     if primary is not None:
+        primary.add_note(f"catalog invocation diagnostics: {invocation_root}")
         if secondary:
             if primary.__cause__ is not None:
                 secondary.insert(0, primary.__cause__)
@@ -1729,7 +1770,7 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
 
 def inspect_native_catalog(args) -> Path:
     invoke_retained_catalog_producer(args, CatalogProducerOperation.INSPECT)
-    return args.output.absolute().with_name(args.output.name + ".invocation")
+    return (getattr(args, "invocation_output", None) or args.output.with_name(args.output.name + ".invocation")).absolute()
 
 
 def build_native_catalog(args) -> None:
@@ -3208,11 +3249,13 @@ def main(argv=None) -> int:
     selected = commands.add_parser("select-sources")
     for key in ("record", "snapshot", "runtime-tools"):
         selected.add_argument("--" + key, required=True, type=Path)
-    producer_inputs = ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "deployment", "ghc-libdir", "libraries", "output")
+    producer_inputs = ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "compiler-service", "ghc-libdir", "output")
     for name in ("build-catalog", "inspect-catalog", "build-root-entry", "build-builtin-entry"):
         catalog = commands.add_parser(name)
         for key in producer_inputs:
             catalog.add_argument("--" + key, required=True, type=Path)
+        catalog.add_argument("--invocation-output", type=Path,
+                             help="declared invocation evidence output (default: OUTPUT.invocation)")
         if name == "build-builtin-entry":
             catalog.add_argument("--entry-name", required=True, choices=tuple(BUILTIN_ENTRY_SOURCES))
         if name == "inspect-catalog":
@@ -3325,6 +3368,8 @@ def main(argv=None) -> int:
         return 0
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         print(f"native qualification failed: {error}", file=sys.stderr)
+        for note in getattr(error, "__notes__", ()):
+            print(note, file=sys.stderr)
         if isinstance(error.__cause__, BaseExceptionGroup):
             for secondary in error.__cause__.exceptions:
                 notes = "; ".join(getattr(secondary, "__notes__", ()))

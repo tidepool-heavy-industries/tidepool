@@ -76,6 +76,7 @@ def _native_products_impl(ctx, operation, output_name, category, entry_name = No
     if not ctx.attrs.source_root or not ctx.attrs.retention_record_origin:
         fail("native products require the original retained source selection")
     output = ctx.actions.declare_output(output_name, dir = True)
+    invocation = ctx.actions.declare_output(output_name + ".invocation", dir = True)
     command = cmd_args([
             ctx.attrs.python[RunInfo], ctx.attrs.qualification, operation,
             "--snapshot", ctx.attrs.snapshot,
@@ -87,10 +88,10 @@ def _native_products_impl(ctx, operation, output_name, category, entry_name = No
             "--producer", ctx.attrs.producer[DefaultInfo].default_outputs[0],
             "--frontend", ctx.attrs.frontend[DefaultInfo].default_outputs[0],
             "--worker", ctx.attrs.worker[DefaultInfo].default_outputs[0],
-            "--deployment", ctx.attrs.deployment,
+            "--compiler-service", ctx.attrs.compiler_service,
             "--ghc-libdir", ctx.attrs.ghc_libdir,
-            "--libraries", ctx.attrs.libraries,
             "--output", output.as_output(),
+            "--invocation-output", invocation.as_output(),
         ], hidden = [ctx.attrs.runtime_tools, ctx.attrs.declared_ghc_libdir])
     if entry_name != None:
         command.add("--entry-name", entry_name)
@@ -98,7 +99,7 @@ def _native_products_impl(ctx, operation, output_name, category, entry_name = No
         command,
         category = category,
     )
-    return [DefaultInfo(default_output = output)]
+    return [DefaultInfo(default_output = output, other_outputs = [invocation])]
 
 def _native_catalog_impl(ctx):
     return _native_products_impl(ctx, "build-catalog", "native-catalog", "native_catalog")
@@ -123,10 +124,9 @@ _native_products_attrs = {
     "producer": attrs.exec_dep(providers = [RunInfo]),
     "frontend": attrs.exec_dep(providers = [RunInfo]),
     "worker": attrs.exec_dep(providers = [RunInfo]),
-    "deployment": attrs.source(),
+    "compiler_service": attrs.source(),
     "ghc_libdir": attrs.string(),
     "declared_ghc_libdir": attrs.source(),
-    "libraries": attrs.source(),
     "qualification": attrs.source(default = "//build/package:qualification_script"),
     "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
 }

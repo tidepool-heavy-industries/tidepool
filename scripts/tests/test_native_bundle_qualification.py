@@ -3672,33 +3672,37 @@ class CatalogSourceTests(unittest.TestCase):
 
     def test_native_action_uses_original_probe_and_explicit_compiler_then_rechecks(self):
         original, tools, record, pin, nar = self.retained_fixture()
-        paths = {}
-        for name in ('producer', 'frontend', 'worker', 'deployment'):
-            paths[name] = self.root / name
-            paths[name].write_text(name)
         output = self.root / 'native-products'
+        args = self.producer_args(original, tools, record, output)
         calls = []
         def execute(command, **kwargs):
             calls.append(command)
             if '--verify-path' in command:
                 return subprocess.CompletedProcess(command, 0)
-            self.assertEqual(command, [str(paths['producer']), 'build', '--source', str(original / 'TidepoolCatalog.hs'),
+            producer = self.complete_compiler(command)
+            self.assertEqual(producer, [str(args.producer), 'build', '--source', str(original / 'TidepoolCatalog.hs'),
                 '--target', 'catalogSentinel', '--source-root', str(original), '--output-root', str(output)])
             env = kwargs['env']
-            self.assertEqual(env['TIDEPOOL_EXTRACT'], str(paths['frontend']))
-            self.assertEqual(env['TIDEPOOL_EXTRACT_WORKER'], str(paths['worker']))
-            self.assertEqual(env['TIDEPOOL_COMPILER_DEPLOYMENT'], str(paths['deployment']))
+            self.assertEqual(env['TIDEPOOL_EXTRACT'], str(args.frontend))
+            self.assertEqual(env['TIDEPOOL_EXTRACT_WORKER'], str(args.worker))
+            self.assertEqual(env['TIDEPOOL_COMPILER_DEPLOYMENT'], str(args.compiler_service / 'compiler-deployment.json'))
+            configuration = args.compiler_service / 'compiler-service-source.bin'
+            self.assertEqual(env['TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'], str(configuration))
+            self.assertEqual(env['TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256'], qualification.sha256(configuration))
             self.assertNotIn('TIDEPOOL_COMPILER_MODULES', env)
             self.assertNotIn('TIDEPOOL_EXTRACT_DAEMON_SOCKET', env)
+            self.assertNotIn('TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH', env)
+            for key in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT'):
+                self.assertNotIn(key, env)
             qualification.write_json(output / 'catalog.json', {'schema': 4, 'source_selection': self.selection(original)})
             return subprocess.CompletedProcess(command, 0)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute), \
              patch.dict(os.environ, {'TIDEPOOL_COMPILER_MODULES': '/ambient/catalog',
-                                     'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/ambient/daemon'}):
-            qualification.build_native_catalog(SimpleNamespace(
-                runtime_tools=tools, retention_record=record, snapshot=self.snapshot, retention_record_origin=record,
-                source_root=original, declared_source_root=original, ghc_libdir=tools, libraries=tools,
-                output=output, **paths))
+                                     'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/ambient/daemon',
+                                     'TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH': 'ambient-epoch',
+                                     'LD_LIBRARY_PATH': '/ambient/library',
+                                     'LD_PRELOAD': '/ambient/preload', 'LD_AUDIT': '/ambient/audit'}):
+            qualification.build_native_catalog(args)
         self.assertEqual(sum('--verify-path' in command for command in calls), 2)
         self.assertEqual((output / 'source-retention.json').read_bytes(), record.read_bytes())
         receipt = json.loads((output / qualification.NATIVE_CATALOG_BUILD).read_text())
@@ -3706,20 +3710,41 @@ class CatalogSourceTests(unittest.TestCase):
 
     def producer_args(self, original, tools, record, output):
         paths = {}
-        for name in ('producer', 'frontend', 'worker', 'deployment'):
+        for name in ('producer', 'frontend', 'worker'):
             paths[name] = self.root / name
             paths[name].write_text(name)
+        service = self.root / 'compiler-service'
+        service.mkdir(exist_ok=True)
+        (service / 'compiler-deployment.json').write_text('declared rooted deployment')
+        configuration = service / 'compiler-service-source.bin'
+        configuration.write_bytes(b'declared service configuration')
+        (service / 'compiler-service-source.sha256').write_text(qualification.sha256(configuration) + '\n')
         return SimpleNamespace(runtime_tools=tools, retention_record=record, snapshot=self.snapshot,
             retention_record_origin=record, source_root=original, declared_source_root=original,
-            ghc_libdir=tools, libraries=tools, output=output, timeout=900, **paths)
+            ghc_libdir=tools, compiler_service=service, output=output, timeout=900, **paths)
+
+    def complete_compiler(self, command, code=0):
+        # Script controls supply the native owner's records explicitly. They
+        # do not establish real worker boot or package-root retirement.
+        self.assertEqual(command[1], '--owned-daemon-run')
+        self.assertEqual(command[3:10], ['--workers', '1', '--foreground-jobs', '1', '--preparation-jobs', '1', '--'])
+        root = Path(command[2])
+        qualification.write_json(root / 'owned-compiler-outcome.json',
+                                 {'schema': 1, 'cleanup': {'status': 'confirmed'}})
+        qualification.write_json(root / 'lifecycle.json',
+                                 {'schema': 1, 'cleanup_confirmed': True, 'exit_code': code})
+        return command[10:]
 
     def test_root_entry_producer_selects_retained_direct_target_outside_library_roots(self):
         original, tools, record, pin, nar = self.retained_fixture()
         args = self.producer_args(original, tools, record, self.root / 'entry-products')
+        args.invocation_output = self.root / 'declared-entry-evidence'
         commands = []
         def execute(command, **kwargs):
             if '--verify-path' not in command:
-                commands.append(command)
+                self.assertEqual(command[2], str(args.invocation_output / 'compiler'))
+                self.assertEqual(kwargs['cwd'], args.invocation_output)
+                commands.append(self.complete_compiler(command))
             return subprocess.CompletedProcess(command, 0)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
             self.assertEqual(qualification.invoke_retained_catalog_producer(
@@ -3740,7 +3765,7 @@ class CatalogSourceTests(unittest.TestCase):
             commands = []
             def execute(command, **kwargs):
                 if '--verify-path' not in command:
-                    commands.append(command)
+                    commands.append(self.complete_compiler(command))
                 return subprocess.CompletedProcess(command, 0)
             with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
                 qualification.invoke_retained_catalog_producer(args, qualification.CatalogProducerOperation.ENTRY)
@@ -3780,6 +3805,8 @@ class CatalogSourceTests(unittest.TestCase):
         calls = []
         def execute(command, **kwargs):
             calls.append(command)
+            if '--verify-path' not in command:
+                self.complete_compiler(command, 7)
             return subprocess.CompletedProcess(command, 0 if '--verify-path' in command else 7)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
             with self.assertRaises(subprocess.CalledProcessError) as failure:
@@ -3787,7 +3814,63 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertEqual(failure.exception.returncode, 7)
         self.assertEqual(sum('--verify-path' in command for command in calls), 2)
         self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
-        self.assertFalse(args.output.with_name(args.output.name + '.invocation').exists())
+        outcome = json.loads((args.output.with_name(args.output.name + '.invocation') / 'outcome.json').read_text())
+        self.assertEqual(outcome['compiler_settlement']['status'], 'confirmed')
+        self.assertFalse(outcome['completed'])
+
+    def test_native_service_seal_refuses_before_starting_any_process(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'bad-service-seal')
+        (args.compiler_service / 'compiler-service-source.sha256').write_text('0' * 64 + '\n')
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(ValueError, 'configuration seal changed'):
+                qualification.build_native_catalog(args)
+        self.assertEqual(len(execute.call_args_list), 1)
+        self.assertIn('--verify-path', execute.call_args_list[0].args[0])
+
+    def test_unconfirmed_native_service_cannot_publish_a_build_receipt(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        for changed in ('missing', 'malformed', 'unfinished', 'different-exit'):
+            with self.subTest(changed=changed):
+                args = self.producer_args(original, tools, record, self.root / ('unsettled-' + changed))
+                def execute(command, **kwargs):
+                    if '--verify-path' in command:
+                        return subprocess.CompletedProcess(command, 0)
+                    if changed != 'missing':
+                        self.complete_compiler(command, 7 if changed == 'different-exit' else 0)
+                        root = Path(command[2])
+                        if changed == 'malformed':
+                            (root / 'owned-compiler-outcome.json').write_text('{broken')
+                        elif changed == 'unfinished':
+                            qualification.write_json(root / 'owned-compiler-outcome.json',
+                                                     {'schema': 1, 'cleanup': {'status': 'unconfirmed'}})
+                    qualification.write_json(args.output / 'catalog.json',
+                        {'schema': 4, 'source_selection': self.selection(original)})
+                    return subprocess.CompletedProcess(command, 0)
+                with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    with self.assertRaisesRegex(ValueError, 'compiler settlement unconfirmed'):
+                        qualification.build_native_catalog(args)
+                self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
+                outcome = json.loads((args.output.with_name(args.output.name + '.invocation') / 'outcome.json').read_text())
+                self.assertEqual(outcome['compiler_settlement']['status'], 'unconfirmed')
+                self.assertFalse(outcome['completed'])
+
+    def test_producer_failure_remains_primary_when_native_service_cleanup_is_unknown(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        args = self.producer_args(original, tools, record, self.root / 'unknown-service-after-refusal')
+        def execute(command, **kwargs):
+            if '--verify-path' in command:
+                return subprocess.CompletedProcess(command, 0)
+            kwargs['stderr'].write(b'original native producer refusal\n')
+            return subprocess.CompletedProcess(command, 23)
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                qualification.build_native_catalog(args)
+        self.assertEqual(failure.exception.returncode, 23)
+        self.assertIn('compiler settlement unconfirmed', str(failure.exception.__cause__.exceptions[0]))
+        evidence = args.output.with_name(args.output.name + '.invocation')
+        self.assertEqual((evidence / 'stderr.log').read_bytes(), b'original native producer refusal\n')
+        self.assertFalse((args.output / qualification.NATIVE_CATALOG_BUILD).exists())
 
     def test_inspection_preserves_refusal_and_secondary_retention_failure_distinctly(self):
         original, tools, record, pin, nar = self.retained_fixture()
@@ -3795,7 +3878,7 @@ class CatalogSourceTests(unittest.TestCase):
         def execute(command, **kwargs):
             if '--verify-path' in command:
                 return subprocess.CompletedProcess(command, 0)
-            self.assertEqual(command[1], 'inspect')
+            self.assertEqual(self.complete_compiler(command, 9)[1], 'inspect')
             self.assertEqual(kwargs['cwd'], args.output.with_name(args.output.name + '.invocation'))
             self.assertFalse(args.output.exists())
             kwargs['stderr'].write(b'unsafe cache_safe refusal\n')
@@ -3845,6 +3928,7 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertTrue(report['retention_recheck']['passed'])
         self.assertFalse(report['catalog_qualified'])
         self.assertFalse(report['completed'])
+        self.assertEqual(report['compiler_settlement']['status'], 'unconfirmed')
         self.assertEqual(sum('--verify-path' in command for command in calls), 2)
         self.assertEqual((evidence / 'stdout.log').read_bytes(), b'compiler started\n')
         self.assertEqual((evidence / 'stderr.log').read_bytes(), b'partial compiler diagnostics\n')
@@ -3867,7 +3951,8 @@ class CatalogSourceTests(unittest.TestCase):
         def execute(command, **kwargs):
             if '--verify-path' in command:
                 return subprocess.CompletedProcess(command, 0)
-            result = actual_run(command, **kwargs)
+            producer = self.complete_compiler(command, exit_code)
+            result = actual_run(producer, **kwargs)
             observed.append(result.returncode)
             if interrupt is not None:
                 raise interrupt
@@ -3907,7 +3992,9 @@ class CatalogSourceTests(unittest.TestCase):
         interrupt = KeyboardInterrupt('original invocation cancellation')
         failure, publication = self.real_inspection_with_failed_publication(exit_code=0, interrupt=interrupt)
         self.assertIs(failure, interrupt)
-        self.assertEqual(failure.__cause__.exceptions, (publication,))
+        cleanup, published = failure.__cause__.exceptions
+        self.assertIn('compiler settlement unconfirmed', str(cleanup))
+        self.assertIs(published, publication)
 
     def test_real_inspection_preserves_existing_primary_cause_before_later_publication(self):
         interrupt = KeyboardInterrupt('original invocation cancellation')
@@ -3915,7 +4002,10 @@ class CatalogSourceTests(unittest.TestCase):
         interrupt.__cause__ = cause
         failure, publication = self.real_inspection_with_failed_publication(exit_code=0, interrupt=interrupt)
         self.assertIs(failure, interrupt)
-        self.assertEqual(failure.__cause__.exceptions, (cause, publication))
+        prior, cleanup, published = failure.__cause__.exceptions
+        self.assertIs(prior, cause)
+        self.assertIn('compiler settlement unconfirmed', str(cleanup))
+        self.assertIs(published, publication)
 
     def test_real_inspection_clean_body_publication_failure_remains_nonpass(self):
         failure, publication = self.real_inspection_with_failed_publication(exit_code=0)
@@ -3929,7 +4019,7 @@ class CatalogSourceTests(unittest.TestCase):
         arguments = ['inspect-catalog', '--timeout', '900']
         for name in ('snapshot', 'source-root', 'declared-source-root', 'retention-record',
                      'retention-record-origin', 'runtime-tools', 'producer', 'frontend',
-                     'worker', 'deployment', 'ghc-libdir', 'libraries', 'output'):
+                     'worker', 'compiler-service', 'ghc-libdir', 'output'):
             arguments.extend(['--' + name, str(self.root / name)])
         stderr = io.StringIO()
         with patch.object(qualification, 'inspect_native_catalog', side_effect=primary), \

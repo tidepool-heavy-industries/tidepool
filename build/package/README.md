@@ -164,12 +164,24 @@ build and other Buck clients sequentially.
 `//build/package:native_catalog` rechecks all three source inventories and actual
 Nix retention before invoking the existing Buck `tidepool-module-package` with
 the original `TidepoolCatalog.hs`, `catalogSentinel`, original source root and
-ordinary action output directory. Frontend, worker, compiler deployment, GHC
-libdir and runtime libraries are explicit action inputs. It rechecks source
+ordinary action output directory. Frontend, worker, rooted compiler-service
+deployment and GHC libdir are explicit action inputs. Each producer runs under
+the existing frontend's `--owned-daemon-run` with one foreground worker. The
+frontend authenticates the matched service endpoint, acquires its package roots,
+and owns service shutdown, descendant reaping and root release. The action does
+not inject a loader directory or use an ambient compiler endpoint. It rechecks source
 retention after production and binds the complete product inventory, catalog
 SHA-256 and schema-4 source selection. The roles are ordered as stable effects,
 stdlib, actors and Jev, under one original root. Producer/worker identities,
 source evidence and product metadata are copied without rewriting.
+
+Every product action declares an additional `.invocation` evidence directory
+containing the exact launch, stdout, stderr and compiler retirement records.
+Producer success requires the frontend's confirmed lifecycle and retirement
+outcome before the qualifier can issue a build receipt. Failed or interrupted
+production retains its original error and separate cleanup uncertainty. Missing,
+malformed or incomplete retirement records cannot authorize a successful build,
+output reuse or package-root cleanup.
 
 `//build/package:native_root_entry` uses that same retained source and declared
 compiler boundary. Its separate production entry container preserves the full
@@ -227,7 +239,7 @@ matched native producer. Generic source and cache identities retain BLAKE3.
 When catalog production refuses admission, inspect the same declared inputs
 through the existing owner. `inspect-catalog` invokes the producer's typed
 `inspect` operation with the same original probe, ordered source roots and
-explicit compiler deployment. It never creates a catalog build receipt or
+explicit rooted compiler-service deployment. It never creates a catalog build receipt or
 qualification acceptance. The producer reports inventory only after its real
 product-certification boundary; unsafe or incomplete source evidence remains
 a refusal with retained raw diagnostics.
@@ -239,8 +251,7 @@ swarm-build "$DECLARED_RUNTIME_TOOLS/bin/python3" build/package/qualification.py
   --retention-record "$BUCK_DECLARED_RETENTION_RECORD" --retention-record-origin "$CATALOG_RECORD" \
   --runtime-tools "$DECLARED_RUNTIME_TOOLS" --producer "$BUCK_MODULE_PACKAGE" \
   --frontend "$BUCK_FRONTEND" --worker "$BUCK_WORKER" \
-  --deployment "$BUCK_COMPILER_DEPLOYMENT" --ghc-libdir "$DECLARED_GHC_LIBDIR" \
-  --libraries "$BUCK_WORKER_RUNTIME_LIBRARIES" \
+  --compiler-service "$BUCK_COMPILER_SERVICE_DEPLOYMENT" --ghc-libdir "$DECLARED_GHC_LIBDIR" \
   --output "$INSPECTION_OUTPUT" --timeout 900
 ```
 
@@ -250,8 +261,10 @@ private evidence. The sibling `INSPECTION_OUTPUT.invocation` holds the exact
 argv and declared environment, stdout, stderr and final outcome, and is the producer's working
 directory so retained outer scratch stays with its evidence. The producer owns
 recursive compiler diagnostics under its output. Inspection requires an explicit
-producer wall limit of 600–1800 seconds. Python kills and waits for the producer
-on timeout; extractor launches, including the startup protocol probe in
+invocation wall limit of 600–1800 seconds. Python kills and waits for the owned
+frontend on timeout. This forced stop does not establish package-root release:
+the evidence remains unconfirmed and must not authorize reuse or cleanup.
+Extractor launches, including the startup protocol probe in
 `PreparedWorker::check_request_protocol`, use the process owner's parent-death
 contract. `protocol_probe_uses_the_owned_parent_death_contract` checks that
 probe's signal, and `configured_child_dies_when_its_parent_exits` checks that
