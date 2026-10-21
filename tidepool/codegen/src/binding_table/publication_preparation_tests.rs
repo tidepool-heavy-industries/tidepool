@@ -640,6 +640,47 @@ fn declaration_prospective_owners_refuse_foreign_or_stale_bare_preparations() {
 
 #[test]
 fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
+    fn check_domains(
+        table: &BindingTable,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+    ) {
+        let native = table.native_domain_selection_in(tree, scope).unwrap();
+        let home = table.source_domain_selection_in(tree, scope).unwrap();
+        let view = &table.source_selection[&scope];
+        assert_eq!(native.current(), view.current);
+        for (caller, record) in view.domains.iter() {
+            for (owner, origin) in record.authored.iter() {
+                assert_eq!(
+                    native.domain_for_owner(*caller, owner).unwrap(),
+                    origin.domain
+                );
+                assert_eq!(
+                    native.domain_for_owner(*caller, owner).unwrap(),
+                    home.domain_for_owner(*caller, owner).unwrap()
+                );
+            }
+            assert_eq!(
+                native
+                    .domain_for_owner(*caller, &declaration_owner(99))
+                    .unwrap(),
+                *caller
+            );
+        }
+        assert_ne!(
+            native.domain_for_owner(native.current(), owner).unwrap(),
+            native.current()
+        );
+        // An unrelated scope is not an admitted caller domain in this view.
+        let foreign = table
+            .native_domain_selection_in(tree, ScopeId::ROOT)
+            .unwrap()
+            .current();
+        assert!(
+            matches!(native.domain_for_owner(foreign, owner), Err(crate::prepared_program::DemandError::MissingDomain(actual)) if actual == foreign)
+        );
+    }
     let mut tree = ScopeTree::new();
     let source = tree.mint_isolated();
     let public = tree.mint_isolated();
@@ -677,11 +718,13 @@ fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
         .prepare_authored_source_publication_in(&tree, source, public, &[], &[], &[owner.clone()])
         .unwrap();
     table.commit_exact_binding_promotion(publication);
+    check_domains(&table, &tree, public, &owner);
     assert_eq!(table.lease_count(unrelated), 1);
     table.drain_scope(source);
     assert!(table.get(unrelated).is_none());
     assert!(table.get(selected).is_some());
     table.seed_scope(&tree, public, child);
+    check_domains(&table, &tree, child, &owner);
     let view = &table.source_selection[&child];
     let inherited = &view.domains[&view.current].authored[&owner];
     assert!(Arc::ptr_eq(
@@ -696,10 +739,18 @@ fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
     );
     table.drain_scope(public);
     let publication = table
-        .prepare_authored_source_publication_in(&tree, child, later_public, &[], &[], &[owner])
+        .prepare_authored_source_publication_in(
+            &tree,
+            child,
+            later_public,
+            &[],
+            &[],
+            &[owner.clone()],
+        )
         .unwrap();
     table.commit_exact_binding_promotion(publication);
     table.drain_scope(child);
+    check_domains(&table, &tree, later_public, &owner);
     assert_eq!(table.get(selected).unwrap().id, selected);
     assert_eq!(table.drain_scope(later_public).len(), 1);
     assert!(table.get(selected).is_none());
