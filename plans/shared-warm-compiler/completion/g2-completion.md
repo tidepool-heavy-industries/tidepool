@@ -248,11 +248,24 @@ existing ProgramFacts; codegen consumes validated scalar facts.
 
 Immutable HOME image preparation takes certified code and literal contracts,
 without requiring a runtime instance identity. Proving a selected closure has
-no live captures is separate from compiling its images. Only that closed
-selection and the current operation's admitted source can assign source custody
-to a newly created instance; reused instances keep their original ProgramFacts.
-Keep the same prepared-program owner through these stages instead of copying
-its full graph to establish an association.
+no live captures is separate from compiling its images. An open target can
+contain a closed package subgraph: its exact held PackageCodeBinding and ordered
+package-only links prove that distinction without requiring the whole target to
+be closed. Pair that definition with the actual installing operation's admitted
+source for freshly instantiated package sites. A domain selects the mutable
+environment; its ID does not issue or recover source authority. Inherited HOME
+rows must not acquire current-source authority through this package rule, and
+reused instances keep their original ProgramFacts.
+
+Actual A-to-B runtime captures retain A's source prerequisites before the
+BindingTable view is seeded. Installation admits source work against that
+captured dependency DAG before allocation; fencing A therefore refuses a new
+operation even when a package instance has not yet materialized. Importing
+immutable compiler evidence into an independent B is fresh B execution, not a
+capture of A's live environment. Verify both cases through production admission,
+including an effect site located only in package code. Keep the same
+prepared-program owner through these stages instead of copying its full graph
+to establish an association.
 
 Extend existing BindingTable selection/custody, batch attachments/registration,
 rollback, capture and retirement. No parallel instance registry. Installer I
