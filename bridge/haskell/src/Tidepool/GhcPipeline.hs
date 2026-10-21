@@ -1377,24 +1377,33 @@ mergeWorldLexicalOwners = foldM insert Map.empty . concatMap Map.toAscList
 -- TYPE custody and lexical adjacency are separate: requirement-only rows
 -- hydrate GHC details but never become lexical imports or native grants.
 -- This request-local value retains neither a compiler environment nor Core.
+data PendingWorldImportBasis = PendingWorldImportBasis
+  (Map.Map (String,String) WorldTypeClosureEntry) [WorldLexicalImport]
+  [(String,String)] (Set.Set (String,String))
+
 data WorldImportBasis = WorldImportBasis
-  (Map.Map (String,String) WorldTypeClosureEntry)
-  [WorldLexicalImport]
-  [(String,String)]
+  (Map.Map (String,String) WorldTypeClosureEntry) [WorldLexicalImport]
+
+-- A projection of successful current-source validation, never a TYPE-only
+-- association. It retains neither hydrated homes nor a compiler environment.
+data WorldQualifiedSourceImports = WorldQualifiedSourceImports ModuleGraph DependencyEvidence
+  [(ExactIfaceArtifact,[(String,String)])]
 
 data WorldLexicalImport
   = WorldSourceLexicalImport ExactIfaceArtifact [(String,String)]
   | WorldDeclarationLexicalImport VerifiedWorldDeclarationSurface
+  | WorldQualifiedSourceLexicalImports WorldQualifiedSourceImports
 
 worldLexicalImportGraph :: [WorldLexicalImport] -> [(ExactIfaceArtifact,[(String,String)])]
-worldLexicalImportGraph = map $ \case
-  WorldSourceLexicalImport artifact edges -> (artifact,edges)
+worldLexicalImportGraph = concatMap $ \case
+  WorldSourceLexicalImport artifact edges -> [(artifact,edges)]
   -- The verified join facade owns its chosen instance/family inventory.
   -- Implementation TYPE requirements are not outgoing lexical imports.
-  WorldDeclarationLexicalImport declaration -> (verifiedWorldDeclarationInterface declaration,[])
+  WorldDeclarationLexicalImport declaration -> [(verifiedWorldDeclarationInterface declaration,[])]
+  WorldQualifiedSourceLexicalImports (WorldQualifiedSourceImports _ _ rows) -> rows
 
 readWorldImportBasis :: ExactInputOwner -> HscEnv -> WorldInputFacts
-  -> Maybe VerifiedWorldDeclarationSurface -> [ImportIntent] -> ParsedModuleDemand -> IO WorldImportBasis
+  -> Maybe VerifiedWorldDeclarationSurface -> [ImportIntent] -> ParsedModuleDemand -> IO PendingWorldImportBasis
 readWorldImportBasis owner environment facts declaration intents parsed = do
   -- Exact TYPE hydration registers source-less locations in its Finder. Source
   -- presence must instead be observed under the actual captured search roots;
@@ -1420,7 +1429,7 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
             , isJust (ml_hs_file location) -> Nothing
           _ -> Just key
       _ -> pure Nothing
-  if Set.null roots then pure (WorldImportBasis Map.empty [] []) else do
+  if Set.null roots then pure (PendingWorldImportBasis Map.empty [] [] Set.empty) else do
     entries <- readWorldTypeInputs owner environment facts (Set.toAscList roots)
       >>= either (throwIO . WorldInputsFailure WorldInputsCorrupt) pure
     lexical <- lexicalClosure entries Set.empty (Set.toAscList roots)
@@ -1446,7 +1455,12 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
                 ++ "; authored=" ++ show (any snd requests)
                 ++ "; selected-import-root=" ++ show (key `Set.member` roots)))
           pure Nothing
-    pure (WorldImportBasis entries lexical sources)
+    let currentRoots = Set.fromList [(unitString (homeUnitId (hsc_home_unit environment)),moduleNameString name)
+          | (name,raw,NotBoot) <- moduleImportRequests parsed
+          , let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
+          , qualifier == NoPkgQual || qualifier == ThisPkg (homeUnitId (hsc_home_unit environment))]
+          `Set.intersection` Set.fromList sources
+    pure (PendingWorldImportBasis entries lexical sources currentRoots)
   where
     lexicalClosure _ _ [] = pure []
     lexicalClosure entries visited (key:rest)
@@ -1489,11 +1503,11 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
           CheckedValueEvidence -> "checked-value"))
 
 worldImportEntries :: WorldImportBasis -> [WorldTypeClosureEntry]
-worldImportEntries (WorldImportBasis entries _ _) = Map.elems entries
+worldImportEntries (WorldImportBasis entries _) = Map.elems entries
 
-qualifyWorldImportSources :: WorldImportBasis -> Ghc ()
-qualifyWorldImportSources (WorldImportBasis _ _ []) = pure ()
-qualifyWorldImportSources (WorldImportBasis entries _ sources) = do
+qualifyWorldImportSources :: PendingWorldImportBasis -> Ghc WorldImportBasis
+qualifyWorldImportSources (PendingWorldImportBasis entries lexical [] _) = pure (WorldImportBasis entries lexical)
+qualifyWorldImportSources (PendingWorldImportBasis entries lexical sources roots) = do
   environment <- getSession
   let selected = Map.restrictKeys entries (Set.fromList sources)
       proofs = Map.mapMaybe (\entry -> case worldTypeEntryEvidence entry of
@@ -1502,10 +1516,94 @@ qualifyWorldImportSources (WorldImportBasis entries _ sources) = do
       interfaces = [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems entries]
       readPackages key = maybe (throwIO (ExecutionSourcePackageChanged key))
         (pure . worldTypeEntryPackages) (Map.lookup key entries)
-  _ <- withHeldWorldSourceRefusal $ validateCanonicalSourceInputs True
+  (validated,selectedKeys) <- withHeldWorldSourceRefusal $ validateCanonicalSourceInputs True
     (Just (map worldTypeEntryVerifiedInterface (Map.elems entries))) proofs interfaces
     (map fst interfaces) [] readPackages (hsc_mod_graph environment) sources
-  pure ()
+  qualified <- either (\detail -> liftIO $ do
+    emitWorldAcquisitionRejection "world source lexical qualification" "<held captured source>" detail
+    throwIO WorldCellCorrupt) pure (projectWorldQualifiedSources entries lexical roots validated selectedKeys)
+  pure (WorldImportBasis entries (lexical ++ maybe [] (pure . WorldQualifiedSourceLexicalImports) qualified))
+
+projectWorldQualifiedSources :: Map.Map (String,String) WorldTypeClosureEntry -> [WorldLexicalImport]
+  -> Set.Set (String,String) -> ValidatedOriginalSources -> Set.Set (String,String)
+  -> Either String (Maybe WorldQualifiedSourceImports)
+projectWorldQualifiedSources entries lexical requested validated selectedKeys = do
+  let previous = Map.fromList [(key artifact,(artifact,edges))
+        | (artifact,edges) <- worldLexicalImportGraph lexical]
+      key artifact = (exactUnit artifact,exactModule artifact)
+      imports = validatedOriginalSourceImports validated
+      roots = requested `Set.intersection` selectedKeys
+      visit seen [] = Right seen
+      visit seen (owner:rest)
+        | Map.member owner previous || Set.member owner seen = visit seen rest
+        | otherwise = do
+            unless (Set.member owner selectedKeys) (Left "qualified source edge leaves its validated selection")
+            entry <- maybe (Left "qualified source lost its exact TYPE association") Right (Map.lookup owner entries)
+            unless (key (worldTypeEntryArtifact entry) == owner) (Left "qualified source has a conflicting full owner")
+            case worldTypeEntryEvidence entry of
+              ModuleInterfaceEvidence proof | isSourceOriginal (canonicalOrigin proof) -> pure ()
+              _ -> Left "qualified source has another interface role"
+            edges <- maybe (Left "qualified source lost its checked imports") Right (Map.lookup owner imports)
+            unless (all (\(_,_,boot,_) -> not boot) edges) (Left "qualified source has a SOURCE edge")
+            let children = [(unit,name) | (_,name,_,Just unit) <- edges]
+            unless (all (\child -> Set.member child selectedKeys || Map.member child previous) children)
+              (Left "qualified source imports an unvalidated home owner")
+            visit (Set.insert owner seen) (children ++ rest)
+  reached <- visit Set.empty (Set.toAscList roots)
+  if Set.null reached then pure Nothing else do
+    let nodes = [node | node@(ModuleNode _ summary) <- mgModSummaries' (validatedOriginalGraph validated)
+          , (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary)) `Set.member` reached]
+        summaries = [summary | ModuleNode _ summary <- nodes]
+        owners = Set.fromList [(unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
+          | summary <- summaries,ms_hsc_src summary == HsSrcFile,isJust (ml_hs_file (ms_location summary))]
+    unless (owners == reached && length summaries == Set.size reached)
+      (Left "qualified source selection lost its exact regular source summaries")
+    let rows = [(worldTypeEntryArtifact (entries Map.! owner),Set.toAscList (Set.fromList
+                  [(unit,name) | (_,name,_,Just unit) <- imports Map.! owner]))
+          | owner <- Set.toAscList reached]
+        combined = Map.fromListWith (++) [(key artifact,[(artifact,edges)])
+          | (artifact,edges) <- worldLexicalImportGraph lexical ++ rows]
+    unless (all (\group -> case group of first:rest -> all (== first) rest; [] -> False) (Map.elems combined))
+      (Left "qualified lexical source conflicts with an exact carried interface")
+    let current = validatedOriginalEvidence validated
+        modules = [node | node <- dependencyModules current
+          , (dependencyModuleUnit node,dependencyModuleName node) `Set.member` reached]
+        paths = Set.fromList (map dependencyModuleSource modules)
+        referenced = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
+          | node <- modules,edge <- dependencyModuleImports node]
+        evidence = current
+          {dependencySources=filter ((`Set.member` paths) . dependencySourcePath) (dependencySources current)
+          ,dependencyModules=modules
+          ,dependencyResolutions=filter (\resolution ->
+            (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,dependencyResolutionBoot resolution)
+              `Set.member` referenced) (dependencyResolutions current)}
+    unless (Set.fromList [(dependencyModuleUnit node,dependencyModuleName node) | node <- modules] == reached
+        && all (\node -> any ((== dependencyModuleSource node) . dependencySourcePath)
+          (dependencySources evidence)) modules)
+      (Left "qualified source lost its authenticated source evidence")
+    pure (Just (WorldQualifiedSourceImports (mkModuleGraph nodes) evidence rows))
+
+worldQualifiedSourceGraph :: WorldImportBasis -> ModuleGraph -> IO ModuleGraph
+worldQualifiedSourceGraph (WorldImportBasis _ lexical) actual = do
+  let qualified = [(graph,evidence) | WorldQualifiedSourceLexicalImports (WorldQualifiedSourceImports graph evidence _) <- lexical]
+  forM_ qualified $ \(_,evidence) -> do
+    unchanged <- revalidateDependencyEvidence evidence
+    unless unchanged (throwIO WorldCellUnavailable)
+  let current = mgModSummaries' actual
+      key summary = (ms_mod summary,ms_hsc_src summary)
+      initial = Map.fromList [(key summary,summary) | ModuleNode _ summary <- current]
+      additional = [node | (graph,_) <- qualified,node@(ModuleNode _ _) <- mgModSummaries' graph]
+      insert (known,added) node = case node of
+        ModuleNode _ summary -> case Map.lookup (key summary) known of
+          Nothing -> pure (Map.insert (key summary) summary known,added ++ [node])
+          Just previous -> do
+            unless (ms_hs_hash previous == ms_hs_hash summary
+              && ml_hs_file (ms_location previous) == ml_hs_file (ms_location summary))
+              (throwIO WorldCellCorrupt)
+            pure (known,added)
+        _ -> throwIO WorldCellCorrupt
+  (_,selected) <- foldM insert (initial,[]) additional
+  pure (mkModuleGraph (current ++ selected))
 
 hydrateWorldImportBasis :: WorldImportBasis -> HscEnv -> IO HscEnv
 hydrateWorldImportBasis basis environment = fst <$> hydrateExactScopeWithProducts environment
@@ -1515,7 +1613,7 @@ hydrateWorldImportBasis basis environment = fst <$> hydrateExactScopeWithProduct
 -- admitted interfaces there, while keeping lexical instance reachability on
 -- the exact source-import graph rather than the broader TYPE requirement set.
 restoreWorldImportBasis :: WorldImportBasis -> HscEnv -> IO HscEnv
-restoreWorldImportBasis basis@(WorldImportBasis _ lexical _) environment
+restoreWorldImportBasis basis@(WorldImportBasis _ lexical) environment
   | null lexical = pure environment
   | otherwise = do
       let graph = worldLexicalImportGraph lexical
@@ -2816,14 +2914,14 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         throwIO (case cause of
           WorldInputsUnavailable -> WorldCellUnavailable
           WorldInputsCorrupt -> WorldCellCorrupt)
-  importBasis <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts verifiedDeclaration
+  pendingImports <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts verifiedDeclaration
     (sourceImportIntents purpose) parsedDemand `catch` importFailure)
   prefixImports <- liftIO $ case operation of
     WorldCellSource _ _ prefix _ _ _ -> worldCellPrefixLexicalOwners current prefix
     WorldObservationSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
     WorldCellNameSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
   setSession current
-  qualifyWorldImportSources importBasis
+  importBasis <- qualifyWorldImportSources pendingImports
   qualified <- getSession
   imported <- liftIO (hydrateWorldImportBasis importBasis qualified `catch` importFailure)
   setSession imported
@@ -5044,7 +5142,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           , ms_hsc_src summary == HsSrcFile]
     worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts receipt _ privateInputs imports prefixImports) -> do
       when (isJust (pvExactScope variant)) (liftIO (throwIO WorldCellCorrupt))
-      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts privateInputs imports prefixImports modGraphRaw)
+      selected <- withHeldWorldSourceRefusal $ do
+        sourceGraph <- liftIO (worldQualifiedSourceGraph imports modGraphRaw)
+        captureHeldWorldSourceSelection owner facts privateInputs imports prefixImports sourceGraph
       liftIO (writeIORef receipt (Just selected))
       pure selected
     sourceSelection <- case pvExactScope variant of
