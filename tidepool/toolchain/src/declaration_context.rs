@@ -1254,6 +1254,32 @@ pub(crate) fn validate_current_stage_native_inputs<'a>(
 }
 
 impl NativeTransportAvailability {
+    /// Lend the contribution for an exact choice already held by its selector.
+    /// This observes availability; the caller must retain the selecting owner.
+    pub(crate) fn exact_group_support(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<ChosenNativeGroupSupport> {
+        let key = NativeGroupKey {
+            artifact: binding.binding.artifact(),
+            original_ordinal: binding.original_ordinal,
+        };
+        if key.artifact != self.original_artifact_id() || !self.permits(key.original_ordinal) {
+            return None;
+        }
+        self.contributions
+            .iter()
+            .find(|contribution| {
+                contribution
+                    .groups(key)
+                    .any(|candidate| candidate == binding)
+            })
+            .map(|contribution| ChosenNativeGroupSupport {
+                binding,
+                contribution: Arc::clone(contribution),
+            })
+    }
+
     /// Resolve an acquisition's recorded choice, or its unique genuine issuer.
     /// Only absent permission is unavailable; a broken recorded choice refuses.
     pub(crate) fn choose_group(

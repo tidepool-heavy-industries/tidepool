@@ -3971,6 +3971,147 @@ impl CertifiedSourceSelection {
         Ok(original)
     }
 
+    /// Resolve actual Source membership through its issued selection, never by
+    /// scanning a broader inventory or treating an Original reference as Source.
+    pub(crate) fn target_source_entry(
+        &self,
+        reference: &ReceiptImportOwner,
+    ) -> CertResult<(Arc<crate::artifact_inventory::ArtifactEntry>, u32)> {
+        let ReceiptImportOwner::Source {
+            unit,
+            module,
+            module_version,
+            original_ordinal,
+            binder,
+        } = reference
+        else {
+            return Err(CertificationError::Mismatch("target Source reference kind"));
+        };
+        let owner =
+            self.receipt_source_owner(unit, module, module_version.as_ref(), *original_ordinal)?;
+        let entry = self
+            .target_original(owner)?
+            .ok_or(CertificationError::Mismatch(
+                "target Source lacks its issued original",
+            ))?;
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch(
+                "target Source original payload",
+            ));
+        };
+        if product.owner() != owner
+            || !product.original_native().filter(|native| native.matches_original(product))
+                .and_then(|native| native.group(*original_ordinal))
+                .is_some_and(|group| group.group().binders().contains(binder))
+        {
+            return Err(CertificationError::Mismatch(
+                "target Source exact native membership",
+            ));
+        }
+        Ok((entry, *original_ordinal))
+    }
+
+    /// Same-program source provenance is lent only by an actual produced body
+    /// and its completed physical issuer. Input availability cannot enter it.
+    pub(crate) fn produced_source_receipt(
+        &self,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+        artifacts: &crate::artifact_inventory::ArtifactView,
+    ) -> CertResult<Option<Arc<crate::declaration_context::CompletedNativeProductAvailability>>>
+    {
+        let Some(ReceiptSourceSelection::Native { interface, native }) = self
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))
+        else {
+            return Ok(None);
+        };
+        if !matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+            return Ok(None);
+        }
+        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+            return Err(CertificationError::Mismatch(
+                "produced Source lacks physical completion",
+            ));
+        };
+        let original = native.original_artifact_id()?;
+        let entry = artifacts
+            .observed_payload(&original)
+            .ok_or(CertificationError::Mismatch(
+                "produced Source lacks its physical entry",
+            ))?;
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch(
+                "produced Source original payload",
+            ));
+        };
+        if product.owner() != &native.owner
+            || product
+                .module_interface()
+                .map(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id)
+                != Some(*interface)
+            || receipt.row().original_artifact_id() != original
+            || receipt
+                .row()
+                .target_original(&native.owner)
+                .is_none_or(|actual| actual.as_ref() != entry.as_ref())
+        {
+            return Err(CertificationError::Mismatch(
+                "produced Source exact physical issuer",
+            ));
+        }
+        Ok(Some(Arc::clone(receipt)))
+    }
+
+    pub(crate) fn target_original_group(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> Result<crate::declaration_context::ChosenNativeGroupSupport, crate::CompileError> {
+        self.original_bindings
+            .as_ref()
+            .ok_or_else(|| {
+                crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(
+                    "target Original lacks its selecting input owner",
+                )))
+            })?
+            .target_group(reference, operation)
+    }
+
+    pub(crate) fn target_non_native_import(
+        &self,
+        reference: &ReceiptImportOwner,
+        packages: &impl PackageInterfaceLookup,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<PendingImportOwner> {
+        match reference {
+            ReceiptImportOwner::Retained { .. } => {}
+            ReceiptImportOwner::Package { unit, module, .. } => {
+                if self
+                    .modules
+                    .get(&(unit.clone(), module.clone()))
+                    .and_then(ReceiptSourceSelection::native)
+                    .is_some()
+                {
+                    return Err(CertificationError::Mismatch(
+                        "target home owner downgraded to package",
+                    ));
+                }
+            }
+            _ => {
+                return Err(CertificationError::Mismatch(
+                    "target non-native reference kind",
+                ))
+            }
+        }
+        resolve_receipt_owner_with_validation(
+            reference.clone(),
+            &SourceGroupMap::new(),
+            Some(self),
+            packages,
+            validation,
+        )
+    }
+
     pub(crate) fn native_group_support(
         &self,
         key: crate::artifact_inventory::NativeGroupKey,
@@ -5725,6 +5866,58 @@ impl OriginalBindingSelection {
                 Ok(None)
             }
         }
+    }
+
+    fn target_group(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> Result<crate::declaration_context::ChosenNativeGroupSupport, crate::CompileError> {
+        let evidence = |detail| {
+            crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(detail)))
+        };
+        if self
+            .executable(reference, operation)
+            .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?
+            .is_none()
+        {
+            return Err(evidence(
+                "target Original exceeds its exact executable selection",
+            ));
+        }
+        let selected = match &self.execution {
+            OriginalBindingExecution::WorldStage(_) => {
+                let (binding, _) = self
+                    .executable_group(reference, operation)
+                    .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?
+                    .ok_or_else(|| evidence("target Original lost its actual World occurrence"))?;
+                self.acquisition()
+                    .native_availability()
+                    .issued_row(binding.binding.artifact())
+                    .and_then(|row| row.exact_group_support(binding))
+            }
+            OriginalBindingExecution::Acquired(_) => self.available_group(reference, operation)?,
+            OriginalBindingExecution::MetadataOnly => None,
+        }
+        .ok_or_else(|| evidence("target Original lacks its chosen contribution"))?;
+        let ReceiptImportOwner::OriginalBinding {
+            interface,
+            original,
+            ..
+        } = reference
+        else {
+            return Err(evidence("target Original reference kind"));
+        };
+        if selected
+            .contribution()
+            .group_carrier_pair(selected.binding(), interface.artifact)?
+            != (*original, *interface)
+        {
+            return Err(evidence(
+                "target Original choice differs from its exact carrier pair",
+            ));
+        }
+        Ok(selected)
     }
 }
 

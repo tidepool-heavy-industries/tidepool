@@ -7118,6 +7118,14 @@ impl<K: Ord + Clone + 'static> ArtifactEntryMap<K> for imbl::OrdMap<K, Arc<Artif
         imbl::OrdMap::iter(self)
     }
 }
+impl ArtifactEntryMap<ArtifactId> for ArtifactView {
+    fn get(&self, key: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        self.observed_payload(key)
+    }
+    fn iter(&self) -> impl Iterator<Item = (&ArtifactId, &Arc<ArtifactEntry>)> {
+        self.lease.payloads.iter()
+    }
+}
 /// A role-selected compiler namespace over immutable retained custody.
 pub(crate) struct CompilerArtifactMetadata {
     pub entries: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
