@@ -363,8 +363,14 @@ Every runtime cohort seals `owned-resident` compilation into its descriptor,
 matching the resident daemon used by CLI launch. A direct override, missing mode,
 or unknown mode refuses before execution. The general isolated unit runner still
 defaults to direct compilation for process isolation; release qualification does
-not inherit that default. The separate catalog consumer keeps direct compilation
-inside its cold namespace and refuses an existing daemon. Preserve older frozen
+not inherit that default. The separate catalog consumer starts its own
+bundle-selected compiler service inside its cold namespace. Only the standard
+Nix daemon socket is admitted for actual package acquisition and collector
+checks; authored namespace configuration selects that daemon without exposing
+host Nix configuration or its database. The private evidence directory keeps
+its canonical host path so indirect GC roots remain visible to the collector.
+Checkout, Buck outputs, user caches and external compiler endpoints remain
+inaccessible. Preserve older frozen
 descriptors and their reports with their bundled qualification program; the new
 reader refuses older unsealed cohort contracts. Build and freeze a new candidate
 to qualify the resident runtime contract.
@@ -847,6 +853,17 @@ selection cannot satisfy it.
 for both cohort and catalog namespace launches. The isolated runner resolves
 those declarations and clears ambient compiler selections. Keep this policy in
 the bundle owner; a source helper cannot replace an older frozen bundle's policy.
+
+An owned-resident test declares its frontend, worker, deployment manifest and
+sealed service-source configuration. Mixed source-backed harnesses additionally
+declare `TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT`: only the owned-resident case
+selects that exact manifest, while direct Portable cases keep the observation
+manifest in `TIDEPOOL_COMPILER_DEPLOYMENT`. An unavailable service manifest
+refuses; there is no fallback. Both modes omit generic loader injection. The
+generator's `compiler_service_test_inputs` owns these declarations; the test
+macro and runner reject incomplete owned-resource contracts. Declaring paths
+does not issue compiler authority: the production owner must still acquire the
+actual service profile and epoch receipt.
 
 ```sh
 python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" catalog-gate \

@@ -897,18 +897,19 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     return env, sorted(set(resources)), worker
 
 
-def compiler_service_test_inputs(package_name, target_name):
+def compiler_service_test_inputs(package_name, target_name, *, mixed=False):
     env, resources, worker = test_runtime_inputs(package_name, target_name, unit=True)
     # The Rooted service owns its Nix library closure. Generic finite test
     # loader paths must not enter that service's environment.
     env.pop("LD_LIBRARY_PATH", None)
     env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
     deployment = "//build/package:compiler_service_deployment"
-    env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
+    manifest_key = "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT" if mixed else "TIDEPOOL_COMPILER_DEPLOYMENT"
+    env[manifest_key] = "$(location " + deployment + ")/compiler-deployment.json"
     env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
     resources = [resource for resource in resources
-                 if resource not in {"//build/package:compiler_deployment",
-                                     "//build/package:tidepool_extract_runtime_libraries"}]
+                 if resource != "//build/package:tidepool_extract_runtime_libraries"
+                 and (mixed or resource != "//build/package:compiler_deployment")]
     return env, resources + [deployment], worker
 
 
@@ -916,6 +917,7 @@ def compiler_service_test_inputs(package_name, target_name):
 # runner as declared resources. LD_LIBRARY_PATH here names one declared
 # runtime-libraries directory; scalar controls stay in ordinary env.
 NATIVE_RESOURCE_ENV_KEYS = (
+    "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT",
     "EXOMONAD_OFFLINE_RUSTC",
     "EXOMONAD_OFFLINE_CC",
     "TIDEPOOL_WORKSPACE_SOURCE_ROOT",
@@ -1759,6 +1761,8 @@ tidepool_buildscript_run(
         unit_rule = "tidepool_rust_isolated_test"
         unit_extra = ""
         env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
+        if package_name == "tidepool-toolchain":
+            env, resources, worker = compiler_service_test_inputs(package_name, unit_target["name"], mixed=True)
         unit_extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool-toolchain":
             unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident"},'
@@ -2106,7 +2110,7 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
-            env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
+            env, resources, worker = compiler_service_test_inputs(package_name, "toolchain_source_proof_pairing_test")
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_source_proof_pairing_test",',
@@ -2119,10 +2123,24 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
-            env, resources, worker = test_runtime_inputs(package_name, "toolchain_accepted_join_custody_test", unit=True)
+            retained_case = "artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground"
+            env, resources, worker = compiler_service_test_inputs(package_name, "toolchain_retained_entry_refusal_test")
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_retained_entry_refusal_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [" + json.dumps(retained_case) + "],",
+                "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                '    case_compiler_modes = {' + json.dumps(retained_case) + ': "owned-resident"},',
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
+            env, resources, worker = compiler_service_test_inputs(package_name, "toolchain_accepted_join_custody_test")
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_accepted_join_custody_test",',
+                '    case_compiler_modes = {"declaration_join::authored_tests::accepted_join_preserves_selected_dependencies_with_historical_interface_custody": "owned-resident"},',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "declaration_join::authored_tests::accepted_join_preserves_selected_dependencies_with_historical_interface_custody",',
@@ -2131,12 +2149,13 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
-            env, resources, worker = test_runtime_inputs(package_name, "toolchain_catalog_captured_inputs_test", unit=True)
+            env, resources, worker = compiler_service_test_inputs(package_name, "toolchain_catalog_captured_inputs_test")
             env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
             resources.append("//build/package:native_catalog")
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_catalog_captured_inputs_test",',
+                '    case_compiler_modes = {"artifacts::module_product_tests::real_deployment_package_reuses_cohort_and_invalidates_source_shadow": "owned-resident"},',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "artifacts::module_product_tests::real_deployment_package_reuses_cohort_and_invalidates_source_shadow",',
@@ -2159,12 +2178,13 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
-            env, resources, worker = test_runtime_inputs(package_name, "toolchain_linked_entry_reopen_test", unit=True)
+            env, resources, worker = compiler_service_test_inputs(package_name, "toolchain_linked_entry_reopen_test")
             env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
             resources.append("//build/package:native_catalog")
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_linked_entry_reopen_test",',
+                '    case_compiler_modes = {"artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay": "owned-resident"},',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay",',
@@ -2173,6 +2193,9 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
+            env, resources, worker = test_runtime_inputs(package_name, "toolchain_native_original_recapture_test", unit=True)
+            env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
+            resources.append("//build/package:native_catalog")
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_native_original_recapture_test",',

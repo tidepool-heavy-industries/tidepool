@@ -2367,6 +2367,8 @@ class NativeRunnerResources(NamedTuple):
     def from_environment(cls, environment: dict, *, require_catalog: bool = False):
         return cls(tuple(name for name in (
             *OFFLINE_COMPILERS,
+            "TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_COMPILER_DEPLOYMENT",
+            "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
             "TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
             "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT", "TIDEPOOL_RECIPE_WORKSPACE",
         ) if name in environment or (require_catalog and name == "TIDEPOOL_COMPILER_MODULES")))
@@ -3201,7 +3203,7 @@ def run_catalog_gate(args) -> int:
     output = args.output.absolute()
     if output != output.resolve():
         raise ValueError("catalog gate requires a canonical evidence directory")
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=False, mode=0o700)
     root = Path(descriptor["bundle_root"])
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     command = [str(tools / "bin/bash"), str(root / "share/exomonad/packaged-catalog-consumer.sh"),
