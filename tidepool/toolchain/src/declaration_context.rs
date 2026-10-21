@@ -11032,7 +11032,12 @@ impl WorldProgramContinuation {
         };
         #[cfg(test)]
         stage_type_anchor_tests::assert_actual_type_anchors(
-            self, &inputs, &prefix_groups, receipt, products, produced,
+            &stage_inputs,
+            &inputs,
+            &prefix_groups,
+            receipt,
+            products,
+            produced,
         );
         Ok(inputs)
     }

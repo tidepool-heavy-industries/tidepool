@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn assert_actual_type_anchors(
-    continuation: &WorldProgramContinuation,
+    stage_inputs: &Arc<RequestCompilerInputs>,
     actual: &DemandedWorldCompilerInputs,
     prefix_groups: &DemandCertifiedGroups,
     receipt: &crate::certified_products::CertifiedReceipt,
@@ -33,21 +33,18 @@ pub(super) fn assert_actual_type_anchors(
         return;
     }
     let project = |observed: &crate::certified_products::CertifiedReceipt| {
-        continuation
-            .inputs
-            .source_support
-            .project_world_stage_inputs(
-                &actual.demand.demand,
-                &actual.demand.native_selection.availability,
-                &actual.demand.permission_delta,
-                prefix_groups,
-                &actual.initial,
-                &actual.original_bindings,
-                observed,
-                products,
-                produced,
-                actual.initial.operation(),
-            )
+        stage_inputs.source_support.project_world_stage_inputs(
+            &actual.demand.demand,
+            &actual.demand.native_selection.availability,
+            &actual.demand.permission_delta,
+            prefix_groups,
+            &actual.initial,
+            &actual.original_bindings,
+            observed,
+            products,
+            produced,
+            actual.initial.operation(),
+        )
     };
     let assert_choices_unchanged = |support: &crate::artifact_inventory::CompilerSourceSupport| {
         assert_eq!(support.projection(), actual.support.projection());
@@ -84,8 +81,7 @@ pub(super) fn assert_actual_type_anchors(
     for output in prior_returned {
         let interface = output.interface();
         let owner = identity(interface.unit(), interface.module());
-        let selected = continuation
-            .inputs
+        let selected = stage_inputs
             .source_support
             .compiler_primary_input(&owner)
             .unwrap()
