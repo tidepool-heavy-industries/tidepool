@@ -56,8 +56,7 @@ def rust_toolchain():
     context = SimpleNamespace(attrs=SimpleNamespace(
         python="/pinned/python", test_source_wrapper="wrapper.py", rustc="/pinned/rustc",
         rustdoc="/pinned/rustdoc", clippy="/pinned/clippy",
-        clippy_allow=["clippy::allowed"], clippy_warn=["clippy::warned"],
-        clippy_deny=["clippy::denied"], clippy_forbid=[],
+        clippy_flags=["-Aclippy::allowed", "-Wclippy::warned", "-Dclippy::denied"],
         linker="/pinned/linker", clippy_toml="clippy.toml",
     ))
     return namespace["_nix_rust_toolchain_impl"](context)[1]
@@ -235,12 +234,12 @@ class BuckProfileConfiguration(unittest.TestCase):
                     "-fuse-ld=lld", "-B/pinned/lld/bin/", "-B/pinned/binutils/bin/",
                 ])
 
-    def test_nix_clippy_driver_keeps_flags_in_toolchain_lint_fields(self):
+    def test_nix_clippy_driver_forms_one_command_line(self):
         toolchain = rust_toolchain()
-        self.assertEqual(toolchain["clippy_driver"], {"args": ["/pinned/clippy"]})
-        self.assertEqual(toolchain["allow_lints"], ["clippy::allowed"])
-        self.assertEqual(toolchain["warn_lints"], ["clippy::warned"])
-        self.assertEqual(toolchain["deny_lints"], ["clippy::denied"])
+        self.assertEqual(
+            toolchain["clippy_driver"],
+            {"args": ["/pinned/clippy -Aclippy::allowed -Wclippy::warned -Dclippy::denied"]},
+        )
 
 
 if __name__ == "__main__":
