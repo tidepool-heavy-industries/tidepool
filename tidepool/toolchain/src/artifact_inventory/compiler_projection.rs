@@ -2440,11 +2440,78 @@ impl crate::declaration_context::RequestCompilerInputs {
     }
 }
 
+impl CompilerArtifactMetadata {
+    fn retain_acquisitions(mut self, artifacts: &ArtifactView) -> Result<Self, CompileError> {
+        fn retain<K: Ord + Clone>(
+            entries: &mut imbl::OrdMap<K, Arc<ArtifactEntry>>,
+            artifacts: &ArtifactView,
+        ) -> Result<(), CompileError> {
+            let mut changed = Vec::new();
+            for (key, entry) in entries.iter() {
+                crate::host_work::checkpoint()?;
+                let retained = artifacts
+                    .lease
+                    .payloads
+                    .get(&entry.descriptor.id)
+                    .ok_or_else(|| failure("compiler metadata lost its acquired payload owner"))?;
+                if !Arc::ptr_eq(entry, retained) {
+                    if entry != retained {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::MetadataConflict {
+                                artifact: entry.descriptor.id,
+                            },
+                        ));
+                    }
+                    changed.push((key.clone(), Arc::clone(retained)));
+                }
+            }
+            for (key, entry) in changed {
+                entries.insert(key, entry);
+            }
+            Ok(())
+        }
+        retain(&mut self.entries, artifacts)?;
+        let mut retained = self.retained.as_ref().clone();
+        retain(&mut retained.artifacts, artifacts)?;
+        retain(&mut retained.entries, artifacts)?;
+        retain(&mut retained.interface_representatives, artifacts)?;
+        self.retained = Arc::new(retained);
+        Ok(self)
+    }
+}
+
 impl CompilerSourceSupport {
     fn refreshed_native_facts(mut self) -> Result<Self, CompileError> {
         for completion in self.native_completions.iter() {
             self.artifacts = self.artifacts.retain_custody(completion.artifacts())?;
         }
+        let mut selected = None;
+        for (owner, row) in self.selected.rows.iter() {
+            crate::host_work::checkpoint()?;
+            if std::iter::once(&row.interface)
+                .chain(row.original.iter())
+                .any(|(binding, entry)| {
+                    self.artifacts
+                        .lease
+                        .payloads
+                        .get(&binding.artifact)
+                        .is_none_or(|retained| !Arc::ptr_eq(entry, retained))
+                })
+            {
+                let mut retained = row.clone();
+                retained.retain_acquisitions(&self.artifacts)?;
+                selected
+                    .get_or_insert_with(|| self.selected.as_ref().clone())
+                    .rows
+                    .insert(owner.clone(), retained);
+            }
+        }
+        if let Some(selected) = selected {
+            self.selected = Arc::new(selected);
+        }
+        self.native_availability = self
+            .native_availability
+            .retain_acquisitions(&self.artifacts)?;
         self.native_fact_owner = Some(
             crate::exact_context::PublicationNativeFacts::maintain(
                 self.native_fact_owner.as_ref(),
@@ -3531,10 +3598,11 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        Ok(CompilerArtifactMetadata {
+        CompilerArtifactMetadata {
             entries,
             retained: Arc::new(retained),
-        })
+        }
+        .retain_acquisitions(&self.artifacts)
     }
 
     pub(crate) fn type_interface_metadata(
@@ -3585,10 +3653,11 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        Ok(CompilerArtifactMetadata {
+        CompilerArtifactMetadata {
             entries,
             retained: Arc::new(retained),
-        })
+        }
+        .retain_acquisitions(&self.artifacts)
     }
 
     /// Observe issued canonical interfaces while preserving compiler roles and
