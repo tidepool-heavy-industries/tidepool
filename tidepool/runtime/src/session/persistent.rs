@@ -7271,29 +7271,25 @@ mod checkpoint_scope_tests {
     #[test]
     fn failed_late_sibling_attachment_restores_capture_custody_and_selection() {
         use super::super::prepared::tests::{
-            certified_sibling_fixture, install_selected_groups_fixture,
+            compile_source_publication_fixture, install_runtime_fixture_in,
         };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let targets = compile_source_publication_fixture();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 827);
         let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let groups = [certified_sibling_fixture()];
-        let source = |name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", name),
-        };
-        let (ta, _) = install_selected_groups_fixture(&mut session, a, &groups, source("a"));
+        let (ta, _, _placement_a) = install_runtime_fixture_in(&mut session, a, targets, "first");
         let b = session.mint_detached_scope(a).unwrap();
-        let (tb, _) = install_selected_groups_fixture(&mut session, a, &groups, source("b"));
+        let (tb, _, _placement_a_second) =
+            install_runtime_fixture_in(&mut session, a, targets, "second");
         let original_b = selected_sources(&session, a)
             .into_iter()
-            .find(|lease| lease.binder().binder.occurrence == "b")
+            .find(|lease| lease.binder().binder.occurrence == "second")
             .unwrap();
         let before_custody = session.bindings.source_instance_keys_in(&session.scopes, b);
         let before_selection = selected_sources(&session, b);
-        let (failed, delta) =
-            install_selected_groups_fixture(&mut session, b, &groups, source("b"));
+        let (failed, delta, _placement_b) =
+            install_runtime_fixture_in(&mut session, b, targets, "second");
         assert_eq!(delta.len(), 1);
         assert!(selected_sources(&session, b)
             .iter()
@@ -7320,7 +7316,7 @@ mod checkpoint_scope_tests {
             !session.prepared_mut().unwrap().release(original_b.handle()),
             "failed B admission does not retain A's b root"
         );
-        assert_eq!(selected_sources(&session, b).len(), 1);
+        assert_eq!(selected_sources(&session, b).len(), before_selection.len());
         session.retire_scope(b);
         session
             .prepared_mut()
