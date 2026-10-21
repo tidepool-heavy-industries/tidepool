@@ -1396,6 +1396,11 @@ worldLexicalImportGraph = map $ \case
 readWorldImportBasis :: ExactInputOwner -> HscEnv -> WorldInputFacts
   -> Maybe VerifiedWorldDeclarationSurface -> [ImportIntent] -> ParsedModuleDemand -> IO WorldImportBasis
 readWorldImportBasis owner environment facts declaration intents parsed = do
+  -- Exact TYPE hydration registers source-less locations in its Finder. Source
+  -- presence must instead be observed under the actual captured search roots;
+  -- the subsequent canonical validator checks bytes, imports and package facts.
+  finder <- initFinderCache
+  let sourceEnvironment = environment {hsc_FC=finder}
   roots <- fmap Set.fromList $ fmap catMaybes $ forM (moduleImportRequests parsed) $ \(name,raw,boot) -> do
     let qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
         home = homeUnitId (hsc_home_unit environment)
@@ -1406,7 +1411,7 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
         authored = AuthoredSourceImport name raw `elem` intents
     case selected of
       Just key | boot == NotBoot, not authored, worldHasSelectedPrimary facts key -> do
-        found <- findImportedModule environment name qualifier
+        found <- findImportedModule sourceEnvironment name qualifier
         -- A captured current source is qualified by the existing source
         -- validator, including its exact bytes and SOURCE/boot graph.
         pure $ case found of
@@ -1420,7 +1425,7 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
       >>= either (throwIO . WorldInputsFailure WorldInputsCorrupt) pure
     lexical <- lexicalClosure entries Set.empty (Set.toAscList roots)
     sources <- fmap catMaybes $ forM (Map.toAscList entries) $ \(key,entry) -> do
-      found <- findImportedModule environment (mkModuleName (snd key)) (ThisPkg (homeUnitId (hsc_home_unit environment)))
+      found <- findImportedModule sourceEnvironment (mkModuleName (snd key)) (ThisPkg (homeUnitId (hsc_home_unit environment)))
       case found of
         Found location actual
           | (unitString (moduleUnit actual),moduleNameString (moduleName actual)) == key
