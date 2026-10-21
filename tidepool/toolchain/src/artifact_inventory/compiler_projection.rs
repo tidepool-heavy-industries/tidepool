@@ -834,7 +834,7 @@ fn restore_native_completion(
             *binding,
             Arc::new(CompletedNativeSourceRow {
                 binding: *binding,
-                product: Arc::new(product.clone()),
+                product: Arc::clone(product),
                 imports: imports.into(),
             }),
         );
