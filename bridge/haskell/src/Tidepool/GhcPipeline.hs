@@ -2532,7 +2532,9 @@ runHeldWorldCellPlanning producer universe baseEnv timing attempt
       operand = case operation of
         IssueWorldCellPlan question -> worldCellPlanOperand question
         CheckWorldCellPlan question -> worldCellPrepareOperand question
-  liftIO (emitCount timing "world.cell.admission_parses" 1)
+  liftIO (emitCount timing (case operation of
+    IssueWorldCellPlan {} -> "world.cell.plan_parses"
+    CheckWorldCellPlan {} -> "world.cell.admission_parses") 1)
   plan <- liftIO (parseWorldCellPlan (hsc_dflags baseEnv) recipe)
   (scope,pending) <- if any ((== KExpr) . sbKind . cellAnalysisVerdict) (cellPlanItems plan)
     then do

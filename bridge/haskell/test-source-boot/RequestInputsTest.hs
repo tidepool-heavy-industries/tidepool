@@ -1503,8 +1503,8 @@ consumedChars buffer end
           (character :) <$> go next
 
 -- One genuine preparation exercises the admitted-operation boundary. The
--- held plan is parsed exactly once while binding the prepare request; neither
--- the plan operation nor the consuming validation reparses the same recipe.
+-- held recipe is parsed once per plan or receiving admission; expression
+-- name scope is independently checked by both operations.
 -- Rooted boot supplies the production package profile through its actual
 -- service association rather than an observation-only fixture scope.
 withCapturedWorldContext
@@ -2297,7 +2297,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
         (fail "SOURCE history did not prepare its newly demanded prior source body")
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 12 1)
+      unless (admissionParses == replicate 14 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
