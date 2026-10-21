@@ -2087,8 +2087,9 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                         unless (length completions == length kinds)
                           (fail "ordered World lost an actual stage completion")
                         when (label == "mixed") $ do
-                          let imports = concatMap snd (worldCellExactImports
-                                (worldCompilerCompletionInputs (last completions)))
+                          inputs <- maybe (fail "mixed World completion lost its issued inputs") pure
+                            (preparedCompilationWorldInputs (last completions))
+                          let imports = concatMap snd (worldCellExactImports inputs)
                               owners = Set.fromList [(unit,name,boot) | (_,name,boot,unit) <- imports]
                           unless (Set.fromList [("main","Tidepool.Inspection.Display",False)
                               ,("main","Tidepool.Session.Lib.G32",False)] `Set.isSubsetOf` owners)
