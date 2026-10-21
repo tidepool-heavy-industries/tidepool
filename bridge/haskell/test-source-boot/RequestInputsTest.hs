@@ -1949,8 +1949,9 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                   (BS.replicate 32 10) 17
                   [(fromIntegral ordinal,PlannedExpression (101+fromIntegral ordinal) name) | (ordinal,name) <- renderedNames]
                   (work </> "rendered-expression-names") (work </> "rendered-expression-names.cbor")
-            (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
-              admitted <- scopedValidateWorldCell compiler grant executor renderedPrepare >>= either (fail . show) pure
+            renderedPrepareArgs <- decodeWorldArgs [WorldCellPrepare renderedPrepare]
+            (withBoundCompilerRequest (const (pure ())) compiler renderedPrepareArgs >=> finishCompletion) $ \request -> do
+              admitted <- boundWorldCellPreparation request >>= either (fail . show) pure
               stage <- scopedPrepareWorldCellStage compiler admitted >>= maybe
                 (fail "expression admission lost its real rendered stage") pure
               issued <- maybe (fail "expression stage has no typed source") pure (heldWorldCellStageTypedSource stage)
@@ -1960,10 +1961,11 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                     , plannedItemOrdinal item == 1, ObservationItem probe _ <- [plannedItemBody item]]
               unless (probes == ["__tidepool_segment_probe_1X"])
                 (fail ("generated expression helper shadowed an unused imported export: " ++ show probes))
-              -- This checks the actual generated stage, without issuing native
-              -- products or claiming runtime capture/reservation authority.
-              _ <- scopedCompileWorldCell compiler admitted CheckedEnvironment Set.empty
-              pure ()
+              -- The actual producer owns typed preparation and certification.
+              -- This component control does not execute Rust runtime captures.
+              completed <- prepareWorldCell request >>= either (fail . show) pure
+              unless (length completed == 1) (fail "two expressions lost their single typed producer stage")
+              mapM_ (commitPreparedWorldDependencies request) completed
             let cancellationRecipe = recipe
                   {worldCellTemplate=T.unpack (T.replace "{{CELL_IMPORTS}}"
                     "import WorldCancellationNames\n{{CELL_IMPORTS}}" (T.pack template))
