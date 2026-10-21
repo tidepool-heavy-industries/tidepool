@@ -16,6 +16,8 @@ use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
+#[cfg(test)]
+use tidepool_codegen::prepared_program::SourceInstanceDomain;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
@@ -26,8 +28,6 @@ use tidepool_codegen::prepared_program::{
     PreparedResultBatch, ProgramId, RunOptions, ScopedDemandedImage, ScopedSourceBinder,
     SourceBinder, SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
 };
-#[cfg(test)]
-use tidepool_codegen::prepared_program::{ScopedCertifiedGroup, SourceInstanceDomain};
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
 // separate `tidepool_codegen` dependency of their own.
@@ -7617,7 +7617,7 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(installed.groups.len(), 2);
         assert_eq!(installed.leases.len(), 1);
-        assert_eq!(installed.leases[0].binder().binder.occurrence, "reader");
+        assert_eq!(installed.leases[0].export().occurrence, "reader");
         let leases = std::mem::take(&mut installed.leases);
         let literal_program = installed.groups[1];
         let id = engine.commit_certified_turn(installed);
@@ -8165,7 +8165,7 @@ pub(super) mod tests {
             let lease = installed
                 .leases
                 .iter()
-                .find(|lease| lease.binder().binder == testing::identity("Fixture", name))
+                .find(|lease| lease.export() == &testing::identity("Fixture", name))
                 .unwrap();
             assert_eq!(lease.value(), id);
             let direct = engine
@@ -8428,7 +8428,10 @@ pub(super) mod tests {
             .all(|id| engine.programs[id].entry.is_none()));
         let selected = installed_leases
             .iter()
-            .find(|lease| lease.binder() == &root)
+            .find_map(|lease| match lease {
+                NativeInstanceLease::Home(home) if home.binder() == &root => Some(home),
+                NativeInstanceLease::Home(_) | NativeInstanceLease::Package(_) => None,
+            })
             .unwrap();
         let result = engine
             .machine
@@ -8921,12 +8924,30 @@ pub(super) mod tests {
                 .find(|source| source.instance == key.instance.raw())
                 .unwrap();
             assert_eq!(source.machine_incarnation, incarnation.0);
-            assert_eq!(source.module_version, key.binder.version.0);
-            assert_eq!(source.binder.unit, key.binder.binder.unit);
-            assert_eq!(source.binder.module, key.binder.binder.module);
-            assert_eq!(source.binder.namespace, key.binder.binder.namespace);
-            assert_eq!(source.binder.occurrence, key.binder.binder.occurrence);
-            assert_eq!(source.binder.record_parent, key.binder.binder.record_parent);
+            assert_eq!(source.value, key.value.0);
+            let NativeInstanceLease::Home(lease) = session.bindings().native_instance(key).unwrap()
+            else {
+                panic!("HOME fixture published package custody");
+            };
+            let super::super::recovery::RecoveryNativeBinding::Home {
+                artifact,
+                selection,
+                original_ordinal,
+                module_version,
+                binder,
+            } = &source.binding
+            else {
+                panic!("HOME recovery observation lost its kind");
+            };
+            assert_eq!(*artifact, lease.binding().issuer.artifact);
+            assert_eq!(*selection, lease.binding().issuer.selection);
+            assert_eq!(*original_ordinal, lease.original_ordinal());
+            assert_eq!(*module_version, lease.binder().version.0);
+            assert_eq!(binder.unit, lease.binder().binder.unit);
+            assert_eq!(binder.module, lease.binder().binder.module);
+            assert_eq!(binder.namespace, lease.binder().binder.namespace);
+            assert_eq!(binder.occurrence, lease.binder().binder.occurrence);
+            assert_eq!(binder.record_parent, lease.binder().binder.record_parent);
         }
         let stale = PublicationDecision::new();
         assert!(matches!(
@@ -9232,7 +9253,9 @@ pub(super) mod tests {
         assert_eq!(first_leases.len(), 1);
         assert_eq!(engine.commit_certified_turn(first), first_target);
         assert!(engine.unpin(first_target));
-        let anchor = first_leases.pop().unwrap();
+        let NativeInstanceLease::Home(anchor) = first_leases.pop().unwrap() else {
+            panic!("HOME fixture selected package custody");
+        };
         let existing = BTreeMap::from([(binder("a"), anchor.clone())]);
         let anchors = HashMap::from([((groups[0].owner().clone(), 11), anchor.clone())]);
         let mut wrong_owner = groups[0].owner().clone();

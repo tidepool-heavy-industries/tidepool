@@ -5495,7 +5495,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
                 .map(|(binder, lease)| {
                     (
                         binder.clone(),
-                        tidepool_codegen::binding_table::SourceLeaseKey::of(lease),
+                        tidepool_codegen::binding_table::SourceLeaseKey {
+                            instance: lease.instance(),
+                            value: lease.value(),
+                        },
                         lease.handle(),
                     )
                 })

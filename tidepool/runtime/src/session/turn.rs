@@ -31,8 +31,6 @@ use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 use tidepool_repr::execution_schema::{
     parse_program, DecodeLimits, PreparedProgram, SymbolIdentity,
 };
-#[cfg(test)]
-use tidepool_repr::serial::read_metadata;
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::DataConTable;
 

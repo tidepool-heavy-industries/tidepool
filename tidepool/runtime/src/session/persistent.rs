@@ -6785,6 +6785,12 @@ mod checkpoint_scope_tests {
         session
             .bindings
             .selected_source_instances_in(&session.scopes, scope)
+            .into_iter()
+            .map(|lease| match lease {
+                NativeInstanceLease::Home(home) => home,
+                NativeInstanceLease::Package(_) => panic!("HOME fixture selected package custody"),
+            })
+            .collect()
     }
 
     fn mint_fixture_origin(
@@ -6918,8 +6924,7 @@ mod checkpoint_scope_tests {
                 .iter()
                 .all(|lease| original
                     .iter()
-                    .any(|key| key.instance == lease.instance()
-                        && key.binder.as_ref() == lease.binder())));
+                    .any(|key| key.instance == lease.instance() && key.value == lease.value())));
             assert!(session.prepared_mut().unwrap().unpin(reused));
         }
         let fresh = session.mint_detached_scope(public).unwrap();
@@ -6993,12 +6998,20 @@ mod checkpoint_scope_tests {
         let later = session.mint_detached_scope(public).unwrap();
         let (late_target, late_keys) = install_selected_source_fixture(&mut session, later, "late");
         assert_eq!(late_keys.len(), 1);
-        assert_eq!(late_keys[0].binder.binder.occurrence, "late");
+        assert_eq!(
+            session
+                .bindings
+                .native_instance(&late_keys[0])
+                .unwrap()
+                .export()
+                .occurrence,
+            "late"
+        );
         for original in &keys_a {
             assert!(selected_sources(&session, later)
                 .iter()
                 .any(|lease| lease.instance() == original.instance
-                    && lease.binder() == original.binder.as_ref()));
+                    && lease.value() == original.value));
         }
         for target in [target_a, target_b, late_target] {
             assert!(session.prepared_mut().unwrap().unpin(target));
