@@ -2066,7 +2066,11 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                           ,"let packageAnswerStage = readPackageStage 7"]
                         ,[(0,PlannedDeclaration 81),(1,PlannedBind 82)]
                         ,["declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
-                      let ownRecipe = recipe {worldCellSource=source}
+                      let ownTemplate = if label == "mixed"
+                            then T.unpack (T.replace "{{CELL_IMPORTS}}"
+                              "import qualified Tidepool.Inspection.Display\n{{CELL_IMPORTS}}" (T.pack template))
+                            else template
+                          ownRecipe = recipe {worldCellSource=source,worldCellTemplate=ownTemplate}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
                             ,worldCellPlanOutput=ownDirectory </> "plan.cbor"}
@@ -2082,6 +2086,13 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                           (fail . (("ordered World " ++ label ++ " refused: ") ++) . show) pure
                         unless (length completions == length kinds)
                           (fail "ordered World lost an actual stage completion")
+                        when (label == "mixed") $ do
+                          let imports = concatMap snd (worldCellExactImports
+                                (worldCompilerCompletionInputs (last completions)))
+                              owners = Set.fromList [(unit,name,boot) | (_,name,boot,unit) <- imports]
+                          unless (Set.fromList [("main","Tidepool.Inspection.Display",False)
+                              ,("main","Tidepool.Session.Lib.G32",False)] `Set.isSubsetOf` owners)
+                            (fail "virtualized declaration prefix lost its actual lexical import evidence")
                         bytes <- BS.readFile (worldCellPrepareOutput ownPrepare)
                         case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
                           Right (remaining,TList [TString "TPCWPREP5",_,_,_
