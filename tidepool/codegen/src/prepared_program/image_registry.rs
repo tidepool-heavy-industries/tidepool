@@ -956,16 +956,17 @@ mod tests {
         };
         let mut consumer = testing::wire_program();
         consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        consumer.signatures.push(consumer.signatures[0].clone());
         consumer.globals.push(GlobalDecl {
             identity: testing::identity("Fixture", "entry"),
             rep: RuntimeRep::LiftedRef,
-            entry_signature: Some(SignatureId(0)),
+            entry_signature: Some(SignatureId(1)),
             required_evaluated: false,
             required_generation: None,
         });
         consumer.expressions.nodes[0] = ExprFrame::Enter {
             callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
-            signature: SignatureId(0),
+            signature: SignatureId(1),
         };
         let target = Arc::new(
             CompiledProgram::compile_prepared_definitions(&testing::prepare(consumer).unwrap())
@@ -1157,6 +1158,16 @@ mod tests {
         for root in target_roots {
             assert!(machine.release(root));
         }
+        let capture = tree.mint_child(scopes[0]).unwrap();
+        table.seed_scope(&tree, scopes[0], capture);
+        assert_eq!(
+            table
+                .native_domain_selection_in(&tree, capture)
+                .unwrap()
+                .roots()
+                .len(),
+            2
+        );
         for (scope, admission) in [
             (scopes[0], &sibling_admission),
             (scopes[0], &first_admission),
@@ -1165,6 +1176,23 @@ mod tests {
             for lease in table.rollback_source_admission(scope, admission).unwrap() {
                 assert!(machine.release(lease.handle()));
             }
+        }
+        assert!(
+            machine.handle_is_evaluated(left).unwrap(),
+            "captured package root survives original admission rollback"
+        );
+        let released = table.drain_scope_with_sources(capture);
+        assert_eq!(released.source_instances.len(), 2);
+        assert!(
+            released.bindings.is_empty(),
+            "package custody never creates compiler namespace bindings"
+        );
+        for lease in released.source_instances {
+            assert!(matches!(
+                lease,
+                super::super::NativeInstanceLease::Package(_)
+            ));
+            assert!(machine.release(lease.handle()));
         }
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(machine.residency().programs, 0);

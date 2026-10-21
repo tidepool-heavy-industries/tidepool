@@ -1886,12 +1886,14 @@ impl BindingTable {
             physical.insert(key, token);
             entries.push((domain, token));
         }
-        if crate::prepared_program::NativeDomainSelection::new(
+        if crate::prepared_program::NativeDomainSelection::validate(
             view.current,
             |domain| view.domains.contains_key(domain),
-            entries
-                .into_iter()
-                .map(|(domain, lease)| (domain, lease.clone())),
+            view.domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .map(|origin| origin.domain),
+            entries,
         )
         .is_err()
         {
@@ -2228,9 +2230,11 @@ impl BindingTable {
         crate::prepared_program::NativeDomainSelection::new(
             view.current,
             |domain| view.domains.contains_key(domain),
-            entries
-                .into_iter()
-                .map(|(domain, lease)| (domain, lease.clone())),
+            view.domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .map(|origin| origin.domain),
+            entries,
         )
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
     }
@@ -2284,12 +2288,14 @@ impl BindingTable {
         let empty = SourceSelectionView::for_scope(scope);
         let view = self.source_selection.get(&scope).unwrap_or(&empty);
         let entries = self.source_domain_entries_in(tree, scope, view)?;
-        crate::prepared_program::NativeDomainSelection::new(
+        crate::prepared_program::NativeDomainSelection::validate(
             view.current,
             |domain| view.domains.contains_key(domain),
-            entries
-                .into_iter()
-                .map(|(domain, lease)| (domain, lease.clone())),
+            view.domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .map(|origin| origin.domain),
+            entries,
         )
         .map(|_| ())
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
