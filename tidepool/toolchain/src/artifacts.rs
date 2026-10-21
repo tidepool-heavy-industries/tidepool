@@ -6352,7 +6352,7 @@ fn compile_invocation_inner(
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
         invocation_timing.advance("product_certification");
-        let certified = if let Some(valid) = valid_evidence {
+        let mut certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
                 &receipt,
@@ -6459,6 +6459,19 @@ fn compile_invocation_inner(
                 "target product receipt count".into(),
             ));
         }
+        let compiler_inputs = exact_request
+            .as_ref()
+            .map(|request| request.compiler_inputs());
+        let physical_inputs =
+            crate::declaration_context::issue_certified_product_native_availability(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &producer,
+                )
+                .sha256(),
+                &mut certified,
+                compiler_inputs.as_ref().map(|input| input.artifacts()),
+                &mut validation,
+            )?;
         let target_admission_start = Instant::now();
         invocation_timing.advance("target_admission");
         let package_catalog =
@@ -6483,25 +6496,18 @@ fn compile_invocation_inner(
                 );
             }
         }
-        let compiler_inputs = exact_request
-            .as_ref()
-            .map(|request| request.compiler_inputs());
-        let admitted_targets =
-            crate::declaration_context::certified_selected_product_artifact_view_with_validation(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &producer,
-                )
-                .sha256(),
-                &certified.recovery_products,
-                &certified.module_interfaces,
-                &certified.value_interfaces,
-                compiler_inputs.as_ref().map(|input| input.artifacts()),
+        let physical = physical_inputs.issued_artifacts();
+        let admitted_targets = physical
+            .inventory()
+            .admit_product_artifacts(
+                physical,
+                Vec::new(),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                     &target_imports,
                 ),
-                &mut validation,
-                &certified.source_selection,
-            )?;
+                Some(&certified.source_selection),
+            )?
+            .into_target()?;
         artifacts.artifact_view = admitted_targets.artifacts().clone();
         let selected_groups = Arc::new(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
