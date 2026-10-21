@@ -32,22 +32,19 @@ struct UnitCost {
     code_bytes: u64,
     /// Globals this unit's program declared instead of projecting a body.
     imports: usize,
-    /// Package tops the machine can hand a later unit after this one.
-    exports: usize,
 }
 
 impl UnitCost {
     fn report(&self, index: usize) {
         println!(
             "[unit-cost] {index} {:<28} compile={:>6}ms run={:>6}ms functions={:>5} \
-             code_bytes={:>8} imports={:>5} exports={:>5}",
+             code_bytes={:>8} imports={:>5}",
             self.label,
             self.compile.as_millis(),
             self.run.as_millis(),
             self.functions,
             self.code_bytes,
             self.imports,
-            self.exports,
         );
     }
 }
@@ -238,10 +235,6 @@ impl Notebook {
             functions: after.0 - before.0,
             code_bytes: after.1 - before.1,
             imports,
-            exports: self
-                .session
-                .code_export_count()
-                .expect("a prepared session reports its code exports once bootstrapped"),
         };
         cost.report(self.costs.len());
         self.costs.push(cost);

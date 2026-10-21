@@ -28247,7 +28247,7 @@ pub(crate) mod request_tests {
     }
 
     #[test]
-    fn joined_source_hook_refusal_precedes_binding_and_native_exports() {
+    fn joined_source_hook_refusal_precedes_binding_and_native_installation() {
         let (mut session, _root) = bare_session_at(tidepool_repr::SessionId(878));
         let scope = session.mint_notebook_scope_with_lease(None).unwrap();
         session
@@ -28264,7 +28264,7 @@ pub(crate) mod request_tests {
             .unwrap();
         let (compiled, binder, generation) = lazy_binding_install();
         let before = (
-            session.code_export_count(),
+            session.residency(),
             session.scope_binding_count(scope.scope()),
         );
         let services = crate::capabilities::WorkbenchServices::new();
@@ -28295,7 +28295,7 @@ pub(crate) mod request_tests {
         assert!(result.unwrap().is_err());
         assert_eq!(
             (
-                session.code_export_count(),
+                session.residency(),
                 session.scope_binding_count(scope.scope())
             ),
             before

@@ -6618,7 +6618,7 @@ mod tests {
     }
 
     #[test]
-    fn native_admission_commits_the_live_machine_export_owner() {
+    fn native_admission_commits_only_exact_scoped_value_owners() {
         let root = tempfile::tempdir().unwrap();
         let lib =
             SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default()).unwrap();
@@ -6627,35 +6627,25 @@ mod tests {
         native_source_action(&mut session, &source, |session| {
             let unbound = crate::session::prepared::tests::rooted_publication_fixture(
                 session,
-                "nativeExport",
+                "nativeValue",
                 914,
             );
-            let ordinary_identity = unbound.value.identity;
+            let key = (unbound.value.identity.clone(), unbound.module.gen.0);
+            let handle = unbound.value.handle.raw().0;
             let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-            assert!(!session
-                .capture_admitted_native_imports(scope)
-                .unwrap()
-                .entries
-                .contains(&(ordinary_identity, 0)));
-            let (certified, _) =
-                crate::session::prepared::tests::certified_package_export_fixture([62; 32]);
-            *session.prepared_mut().unwrap() = certified;
-            let identity = tidepool_repr::execution_schema::testing::identity("Fixture", "entry");
+            let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
+            let before = session.capture_admitted_native_imports(scope).unwrap();
+            assert!(!before.entries.contains(&key));
+            session.bind_in(scope, unbound).unwrap();
             let admitted = session.capture_admitted_native_imports(scope).unwrap();
-            assert!(admitted.entries.contains(&(identity.clone(), 0)));
-            let Some(ImportOwner::CodeExport { root_id, .. }) = session
-                .prepared()
-                .unwrap()
-                .retained_code_export_owner(&identity, 0)
-            else {
-                panic!("real installed export must have its native owner")
-            };
-            assert_ne!(root_id, 0);
-            let empty = PersistentSession::new(None, 1024 * 1024)
-                .capture_admitted_native_imports(ScopeId::ROOT)
-                .unwrap();
-            assert!(empty.entries.is_empty());
-            assert_ne!(admitted.commitment, empty.commitment);
+            assert!(admitted.entries.contains(&key));
+            assert_eq!(admitted.owners.get(&key), Some(&handle));
+            assert_ne!(handle, 0);
+            let unrelated = session.capture_admitted_native_imports(sibling).unwrap();
+            assert!(!unrelated.entries.contains(&key));
+            assert!(!unrelated.owners.contains_key(&key));
+            assert_ne!(admitted.commitment, unrelated.commitment);
+            assert_ne!(admitted.commitment, before.commitment);
         });
     }
 

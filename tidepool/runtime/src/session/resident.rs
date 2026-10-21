@@ -11389,7 +11389,7 @@ mod authored_publication_tests {
                     .is_err(),
                 "an open raw gate cannot reissue authority from a stale ancestor"
             );
-            let before_exports = recipient.code_export_count();
+            let before_native = recipient.residency();
             let before_table = recipient.state.session_table().clone();
             let before_public = recipient.public_visibility_snapshot_in(unrelated.scope());
             let refused = unrelated
@@ -11430,7 +11430,7 @@ mod authored_publication_tests {
                 before_requests,
                 "stale issuer starts no worker request"
             );
-            assert_eq!(recipient.code_export_count(), before_exports);
+            assert_eq!(recipient.residency(), before_native);
             assert_eq!(recipient.state.session_table(), &before_table);
             assert_eq!(
                 recipient.public_visibility_snapshot_in(unrelated.scope()),
@@ -13701,12 +13701,6 @@ mod source_origin_tests {
             ImportOwner::Source {
                 version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
                 binder: binder.clone(),
-            },
-            ImportOwner::CodeExport {
-                binder: binder.clone(),
-                generation: 1,
-                root_id: 9,
-                interface_digest: None,
             },
             ImportOwner::Package {
                 unit: binder.unit.clone(),
