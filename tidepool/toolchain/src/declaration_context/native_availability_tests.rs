@@ -3244,19 +3244,18 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         expected_keys,
         "target preserves its actual inherited choices and selects ordinal 9001"
     );
+    // The retained artifact view keeps inherited roots; resolution contains
+    // only this target's exact demanded group and its dependency closure.
     let groups = demanded.resolve().unwrap().groups().clone();
     let expected = offer
         .issued_group_carriers()
         .unwrap()
         .into_keys()
         .filter(|group| {
-            expected_keys.contains(&NativeGroupKey {
-                artifact: group.binding.artifact(),
-                original_ordinal: group.original_ordinal,
-            })
+            group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 9001
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(expected.len(), expected_keys.len());
+    assert_eq!(expected.len(), 1);
     assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
     assert_eq!(context.as_ref(), &before);
 }
