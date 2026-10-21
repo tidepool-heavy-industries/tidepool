@@ -162,6 +162,7 @@ pub struct CertifiedPackageCodeProduct {
     // Authenticated by the issuer before retaining these immutable bytes.
     envelope_sha256: [u8; 32],
     product_sha256: [u8; 32],
+    descriptor: crate::artifact_inventory::ArtifactDescriptor,
     // Positional provenance for the same code.globals(), not a namespace map.
     import_interfaces: Arc<[[u8; 32]]>,
     defining_interface: Arc<CertifiedPackageCodeInterface>,
@@ -317,11 +318,23 @@ impl CertifiedPackageCodeProduct {
         if product_sha256 != reference.product_sha256 {
             return Err(invalid());
         }
+        validation
+            .inventory
+            .charge(owner.unit.len().saturating_add(owner.module.len()))?;
+        let descriptor = crate::artifact_inventory::ArtifactDescriptor::package_code(
+            &owner.unit,
+            &owner.module,
+            owner.compiler_sha256,
+            owner.interface_sha256,
+            product_sha256,
+            import_interfaces.iter().copied(),
+        );
         Ok(Arc::new(Self {
             code,
             bytes,
             envelope_sha256: reference.envelope_sha256,
             product_sha256,
+            descriptor,
             import_interfaces: import_interfaces.into(),
             defining_interface,
             import_interface_witnesses: import_interface_witnesses.into(),
@@ -343,6 +356,12 @@ impl CertifiedPackageCodeProduct {
     }
     pub fn product_sha256(&self) -> &[u8; 32] {
         &self.product_sha256
+    }
+    pub(crate) fn descriptor(&self) -> &crate::artifact_inventory::ArtifactDescriptor {
+        &self.descriptor
+    }
+    pub(crate) fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
+        self.descriptor.id
     }
     pub fn import_interfaces(&self) -> &[[u8; 32]] {
         &self.import_interfaces
@@ -448,11 +467,22 @@ impl CertifiedPackageCodeProduct {
             identity.update(seal);
         }
         let product_sha256 = identity.finalize().into();
+        operation.reserve::<Self>(1)?;
+        operation.charge(owner.unit.len().saturating_add(owner.module.len()))?;
+        let descriptor = crate::artifact_inventory::ArtifactDescriptor::package_code(
+            &owner.unit,
+            &owner.module,
+            owner.compiler_sha256,
+            owner.interface_sha256,
+            product_sha256,
+            import_interfaces.iter().copied(),
+        );
         Ok(Arc::new(Self {
             code,
             bytes: Arc::clone(bytes),
             envelope_sha256: output.sha256,
             product_sha256,
+            descriptor,
             import_interfaces: import_interfaces.into(),
             defining_interface,
             import_interface_witnesses: import_interface_witnesses.into(),
@@ -486,6 +516,38 @@ mod storage_tests {
                 sha256: [5; 32],
             },
             import_interfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn package_descriptor_preserves_captured_reference_identities() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            label: String,
+            reference: RecoveryPackageCodeRef,
+            expected_id: crate::artifact_inventory::ArtifactId,
+        }
+        // Fixed metadata includes captured compiler outputs and unissued ordered,
+        // reversed and repeated-seal references. It cannot issue product authority.
+        let fixtures: Vec<Fixture> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/package-code-descriptor-identities.json"
+        ))
+        .unwrap();
+        assert_eq!(fixtures.len(), 6);
+        eprintln!(
+            "retained package descriptor: {} inline bytes plus owned unit/module text",
+            std::mem::size_of::<crate::artifact_inventory::ArtifactDescriptor>(),
+        );
+        for fixture in fixtures {
+            assert_eq!(
+                crate::artifact_inventory::ArtifactDescriptor::from_recovery_package_code(
+                    &fixture.reference,
+                )
+                .id,
+                fixture.expected_id,
+                "{}",
+                fixture.label,
+            );
         }
     }
 

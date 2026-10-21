@@ -1015,11 +1015,7 @@ pub(crate) fn complete_native_selection(
                 if candidates.iter().any(|other| *other != *product) {
                     return Err(failure("package slot has competing captured code products"));
                 }
-                return Ok(super::PackageCodeTarget::Planned(
-                    ArtifactEntry::package_code(Arc::clone(product))
-                        .descriptor
-                        .id,
-                ));
+                return Ok(super::PackageCodeTarget::Planned(product.artifact_id()));
             }
             let mut held = BTreeMap::new();
             for graph in &graphs {
@@ -1167,12 +1163,7 @@ pub(crate) fn complete_native_selection(
         }
         let product = products
             .iter()
-            .find(|product| {
-                ArtifactEntry::package_code(Arc::clone(product))
-                    .descriptor
-                    .id
-                    == id
-            })
+            .find(|product| product.artifact_id() == id)
             .ok_or_else(|| failure("reached package product is absent from completed output"))?;
         check_product(product)?;
         let imports = product

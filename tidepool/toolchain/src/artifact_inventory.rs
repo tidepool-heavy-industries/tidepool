@@ -2054,21 +2054,41 @@ impl ArtifactDescriptor {
     pub fn from_recovery_package_code(
         reference: &crate::certified_products::RecoveryPackageCodeRef,
     ) -> Self {
-        let seals = reference
-            .import_interfaces
-            .iter()
-            .flat_map(|interface| interface.sha256)
-            .collect::<Vec<_>>();
+        Self::package_code(
+            &reference.unit,
+            &reference.module,
+            reference.producer_sha256,
+            reference.defining_interface.sha256,
+            reference.product_sha256,
+            reference
+                .import_interfaces
+                .iter()
+                .map(|interface| interface.sha256),
+        )
+    }
+
+    pub(crate) fn package_code(
+        unit: &str,
+        module: &str,
+        producer_sha256: [u8; 32],
+        interface_sha256: [u8; 32],
+        product_sha256: [u8; 32],
+        import_interfaces: impl IntoIterator<Item = [u8; 32]>,
+    ) -> Self {
+        let mut imports = Sha256::new();
+        for seal in import_interfaces {
+            imports.update(seal);
+        }
         descriptor(
             ArtifactKind::PackageCode,
             ExactModuleIdentity {
-                unit: reference.unit.clone(),
-                module: reference.module.clone(),
+                unit: unit.to_owned(),
+                module: module.to_owned(),
             },
-            reference.producer_sha256,
-            reference.defining_interface.sha256,
-            Some(reference.product_sha256),
-            digest(&seals),
+            producer_sha256,
+            interface_sha256,
+            Some(product_sha256),
+            imports.finalize().into(),
             None,
         )
     }
@@ -2558,17 +2578,7 @@ impl ArtifactEntry {
     pub(crate) fn package_code(
         product: Arc<crate::certified_products::CertifiedPackageCodeProduct>,
     ) -> Self {
-        let owner = product.code().owner();
-        let imports = digest(&product.import_interfaces().concat());
-        let descriptor = descriptor(
-            ArtifactKind::PackageCode,
-            ExactModuleIdentity { unit: owner.unit.clone(), module: owner.module.clone() },
-            owner.compiler_sha256,
-            owner.interface_sha256,
-            Some(*product.product_sha256()),
-            imports,
-            None,
-        );
+        let descriptor = product.descriptor().clone();
         Self {
             descriptor,
             facts: ArtifactFactsHandle::PackageCode(Arc::clone(&product)),
@@ -22040,9 +22050,7 @@ mod package_code {
 
     impl PackageCodePlan {
         pub(crate) fn artifact_id(&self) -> ArtifactId {
-            ArtifactEntry::package_code(Arc::clone(&self.product))
-                .descriptor
-                .id
+            self.product.artifact_id()
         }
     }
 
