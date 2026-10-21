@@ -5662,7 +5662,7 @@ pub(super) mod tests {
                 crate::compile_runtime_targets(
                     &tidepool_toolchain::artifacts::CompileInvocation {
                         source: include_str!("../../tests/fixtures/SourcePublication.hs"),
-                        targets: &["result"],
+                        targets: &["result", "first", "second"],
                         include: &[tidepool_testing::eval_harness::prelude_path()],
                         fallback_module_name: "SourcePublication",
                     },
@@ -6256,225 +6256,55 @@ pub(super) mod tests {
 
     #[test]
     fn later_sibling_binder_reuses_exact_scoped_group_instance() {
-        use tidepool_codegen::prepared_program::{
-            GroupInventory, PendingGroupInventory, SourceGroupOutline,
-        };
-        use tidepool_repr::execution_schema::{
-            CachedHomeOwner, CertifiedGroup, ImportOwner, ModuleVersion,
-        };
-
-        let mut group_wire = testing::wire_program();
-        let Group::NonRecursive(mut first) = group_wire.bindings[0].clone() else {
-            unreachable!()
-        };
-        first.identity = testing::identity("Fixture", "a");
-        let mut sibling = first.clone();
-        sibling.identity = testing::identity("Fixture", "b");
-        sibling.binding.id = ValueId(1);
-        group_wire
-            .expressions
-            .nodes
-            .push(group_wire.expressions.nodes[0].clone());
-        if let tidepool_repr::execution_schema::HeapRhs::Function { body, .. } =
-            &mut sibling.binding.rhs
-        {
-            *body = 1;
-        }
-        group_wire.bindings = vec![Group::Recursive(vec![first, sibling])];
-        let projected = testing::projected_group(group_wire, 11).unwrap();
-        let group = CertifiedGroup::admit(
-            CachedHomeOwner {
-                unit: "fixture".into(),
-                module: "Fixture".into(),
-                module_version: ModuleVersion([1; 32]),
-                skinny_iface_sha256: [2; 32],
-                product_sha256: [3; 32],
-            },
-            projected.clone(),
-            vec![],
-        )
-        .unwrap();
-        let pending_outline =
-            SourceGroupOutline::from_projected(group.owner().clone(), &projected, vec![]).unwrap();
-        let groups = [group];
-        let source_evidence = certified_source_evidence(&groups);
-        let inventory = GroupInventory::new(&groups).unwrap();
-        let binder = |name| SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("Fixture", name),
-        };
-        let target = |name: &str, registry: &ImageRegistry| {
-            let mut wire = testing::wire_program();
-            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
-            wire.expressions.nodes[0] =
-                ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
-            wire.globals.push(GlobalDecl {
-                identity: testing::identity("Fixture", name),
-                rep: RuntimeRep::LiftedRef,
-                entry_signature: None,
-                required_evaluated: false,
-                required_generation: None,
-            });
-            scoped_single_domain_target(
-                testing::prepare(wire).unwrap(),
-                registry,
-                vec![ImportOwner::Source {
-                    version: ModuleVersion([1; 32]),
-                    binder: testing::identity("Fixture", name),
-                }],
-            )
-        };
-        let registry = ImageRegistry::new();
-        let (mut engine, bootstrap) =
-            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
-        let first_demand = inventory.seal([binder("a")]).unwrap();
-        let mut first = engine
-            .install_certified_turn(
-                ScopedTargetImage {
-                    demanded: (first_demand.compile(&registry).unwrap())
-                        .into_iter()
-                        .map(SelectedNativeImage::unqualified)
-                        .collect(),
-                    ..target("a", &registry)
-                },
-                &source_evidence,
-                &[],
-                &BTreeMap::new(),
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            )
-            .unwrap();
-        assert_eq!(first.groups.len(), 1);
-        let first_target = first.target;
-        let mut first_leases = std::mem::take(&mut first.leases);
-        assert_eq!(first_leases.len(), 1);
-        assert_eq!(engine.commit_certified_turn(first), first_target);
-        assert!(engine.unpin(first_target));
-        let NativeInstanceLease::Home(anchor) = first_leases.pop().unwrap() else {
-            panic!("HOME fixture selected package custody");
-        };
-        let existing = BTreeMap::from([(binder("a"), anchor.clone())]);
-        let anchors = HashMap::from([((groups[0].owner().clone(), 11), anchor.clone())]);
-        let mut wrong_owner = groups[0].owner().clone();
-        wrong_owner.product_sha256 = [9; 32];
-        let wrong_groups = [CertifiedGroup::admit(wrong_owner, projected, vec![]).unwrap()];
-        assert!(matches!(
-            GroupInventory::new(&wrong_groups)
-                .unwrap()
-                .seal_with_inherited([binder("a")], &existing, &anchors),
-            Err(DemandError::InvalidInheritedInstance(_))
-        ));
-        let already_rooted = inventory
-            .seal_with_inherited([binder("a")], &existing, &anchors)
-            .unwrap();
-        assert_eq!(already_rooted.groups().len(), 0);
-        assert!(already_rooted.inherited_demands().is_empty());
-        let sibling_demand = inventory
-            .seal_with_inherited([binder("b")], &existing, &anchors)
-            .unwrap();
-        assert_eq!(sibling_demand.groups().len(), 0);
-        assert_eq!(sibling_demand.inherited_demands().len(), 1);
-        let group_misses = registry.misses();
-        assert!(sibling_demand.compile(&registry).unwrap().is_empty());
-        assert_eq!(registry.misses(), group_misses);
-        let pending_sibling = PendingGroupInventory::new(vec![pending_outline])
-            .unwrap()
-            .seal_with_inherited([binder("b")], &existing, &anchors)
-            .unwrap();
-        assert!(pending_sibling.new_group_indices().is_empty());
-        assert_eq!(pending_sibling.inherited_demands().len(), 1);
-        let mut bad_wire = testing::wire_program();
-        bad_wire.signatures.push(Signature {
-            arguments: vec![],
-            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-        });
-        bad_wire.globals.push(GlobalDecl {
-            identity: binder("b").binder,
-            rep: RuntimeRep::LiftedRef,
-            entry_signature: Some(SignatureId(1)),
-            required_evaluated: false,
-            required_generation: None,
-        });
-        let before_bad = engine.residency();
-        let bad_target = scoped_single_domain_target(
-            testing::prepare(bad_wire).unwrap(),
-            &registry,
-            vec![ImportOwner::Source {
-                version: ModuleVersion([1; 32]),
-                binder: binder("b").binder,
-            }],
-        );
-        let bad_result = engine.install_certified_turn(
-            bad_target,
-            &source_evidence,
-            pending_sibling.inherited_demands(),
-            &existing
-                .iter()
-                .map(|(source, lease)| {
-                    (
-                        ScopedSourceBinder {
-                            domain: SourceInstanceDomain::single(),
-                            source: source.clone(),
-                        },
-                        lease.clone(),
-                    )
-                })
-                .collect(),
-            &HashMap::new(),
-            &BindingTable::new(),
-            &HashMap::new(),
-        );
+        let targets = compile_source_publication_fixture();
+        let mut session = super::super::PersistentSession::new(None, 1024 * 1024);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = source.scope();
+        let (first, first_keys, _first_placement) =
+            install_runtime_fixture_in(&mut session, scope, targets, "first");
+        let first_lease = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .into_iter()
+            .find(|lease| lease.export().occurrence == "first")
+            .expect("actual producer must expose first native export");
         assert!(
-            matches!(
-                &bad_result,
-                Err(PreparedRuntimeError::Install(
-                    ExecutionError::BatchImportContract(evidence)
-                )) if evidence.owner == Some(ImportOwner::Source {
-                    version: ModuleVersion([1; 32]),
-                    binder: binder("b").binder,
-                })
-            ),
-            "unexpected result: {:?}",
-            bad_result.err().map(|error| error.to_string())
+            !session
+                .bindings()
+                .source_instances_in(session.scope_tree(), scope)
+                .iter()
+                .any(|lease| lease.export().occurrence == "second"),
+            "first target must not request its recursive sibling export"
         );
-        assert_eq!(engine.residency(), before_bad);
-        let mut second = engine
-            .install_certified_turn(
-                target("b", &registry),
-                &source_evidence,
-                pending_sibling.inherited_demands(),
-                &existing
-                    .iter()
-                    .map(|(source, lease)| {
-                        (
-                            ScopedSourceBinder {
-                                domain: SourceInstanceDomain::single(),
-                                source: source.clone(),
-                            },
-                            lease.clone(),
-                        )
-                    })
-                    .collect(),
-                &HashMap::new(),
-                &BindingTable::new(),
-                &HashMap::new(),
-            )
+        assert!(!first_keys.is_empty());
+        let (second, delta, _second_placement) =
+            install_runtime_fixture_in(&mut session, scope, targets, "second");
+        let sibling = session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .into_iter()
+            .find(|lease| lease.export().occurrence == "second")
+            .expect("actual producer must expose second native export");
+        assert_eq!(
+            sibling.binding_key(),
+            first_lease.binding_key(),
+            "genuine recursive group premise"
+        );
+        assert_eq!(sibling.instance(), first_lease.instance());
+        assert_ne!(sibling.value(), first_lease.value());
+        assert!(delta
+            .iter()
+            .any(|key| key.instance == sibling.instance() && key.value == sibling.value()));
+        assert!(session.prepared_mut().unwrap().unpin(first));
+        assert!(session.prepared_mut().unwrap().unpin(second));
+        session.retire_scope(scope);
+        session
+            .prepared_mut()
+            .unwrap()
+            .quiesce_and_collect_now()
             .unwrap();
-        assert!(second.groups.is_empty());
-        let second_target = second.target;
-        let mut second_leases = std::mem::take(&mut second.leases);
-        assert_eq!(second_leases.len(), 1);
-        let sibling = second_leases.pop().unwrap();
-        assert_eq!(sibling.instance(), anchor.instance());
-        assert_ne!(sibling.handle(), anchor.handle());
-        assert_eq!(engine.commit_certified_turn(second), second_target);
-        assert!(engine.unpin(second_target));
-        assert!(engine.release(anchor.handle()));
-        assert!(engine.release(sibling.handle()));
-        engine.quiesce_and_collect_now().unwrap();
-        assert_eq!(engine.residency().programs, 1);
-        assert!(engine.unpin(bootstrap));
+        assert_eq!(session.residency().unwrap().programs, 0);
+        assert_eq!(session.persistent_roots_count(), 0);
     }
 
     #[test]
