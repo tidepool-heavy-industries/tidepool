@@ -354,6 +354,17 @@ impl NativeInstanceAttachment {
             anchor: None,
         }
     }
+    pub(crate) fn from_anchor(
+        domain: SourceInstanceDomain,
+        lease: NativeInstanceLease,
+        anchor: NativeInstanceLease,
+    ) -> Self {
+        Self {
+            domain,
+            lease,
+            anchor: Some(anchor),
+        }
+    }
     pub(crate) fn inherited(
         demand: &InheritedSourceDemand,
         lease: SourceInstanceLease,

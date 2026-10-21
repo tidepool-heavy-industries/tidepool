@@ -900,6 +900,7 @@ mod tests {
     fn package_definitions_install_independent_instances_and_execute_through_batch_imports() {
         use super::super::{BatchImport, BatchProgram, PreparedCallOptions, PreparedResult};
         use crate::suspension::RealmId;
+        use std::collections::BTreeMap;
         use tidepool_repr::execution_schema::{
             GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep,
             SignatureId, TopBinding, UpdatePolicy, ValueId, ValueRef,
@@ -935,7 +936,24 @@ mod tests {
                 },
             },
         }));
-        let image = prepare_package(&package_code(package, 3), &registry);
+        let package = Arc::new(
+            super::super::DemandedPackageImage::prepare(
+                package_code(package, 3),
+                &[],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &registry,
+            )
+            .unwrap(),
+        );
+        let image = Arc::clone(package.image());
+        let mut tree = crate::scope::ScopeTree::new();
+        let scopes = [tree.mint_isolated(), tree.mint_isolated()];
+        let mut table = crate::binding_table::BindingTable::new();
+        let key = super::super::NativeArtifactBinding {
+            artifact: [1; 32],
+            selection: [2; 32],
+        };
         let mut consumer = testing::wire_program();
         consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         consumer.globals.push(GlobalDecl {
@@ -957,28 +975,151 @@ mod tests {
             nursery_bytes: 4096,
         })
         .unwrap();
-        let install = |machine: &mut PreparedMachine<'_>| {
+        let install = |machine: &mut PreparedMachine<'_>, domain| {
+            let batch = vec![
+                BatchProgram {
+                    image: target.clone(),
+                    imports: vec![BatchImport::Source {
+                        group: 1,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: image.clone(),
+                    imports: vec![],
+                },
+            ];
+            BatchProgram::validate_closed(&batch).unwrap();
             machine
-                .install_shared_batch(vec![
-                    BatchProgram {
-                        image: target.clone(),
-                        imports: vec![BatchImport::Source {
-                            group: 1,
-                            binding: ValueId(0),
-                        }],
-                    },
-                    BatchProgram {
-                        image: image.clone(),
-                        imports: vec![],
-                    },
-                ])
+                .install_shared_batch_with_leases(
+                    batch,
+                    vec![super::super::BatchLeaseRequest::for_package(
+                        1,
+                        Arc::clone(&package),
+                        key,
+                        domain,
+                        ValueId(0),
+                    )
+                    .unwrap()],
+                )
                 .unwrap()
         };
-        let first = install(&mut machine);
-        let second = install(&mut machine);
+        let domains = scopes.map(|scope| {
+            table
+                .native_domain_selection_in(&tree, scope)
+                .unwrap()
+                .current()
+        });
+        let first_receipt = install(&mut machine, domains[0]);
+        let second_receipt = install(&mut machine, domains[1]);
+        let left = first_receipt.leases[0].handle();
+        let right = second_receipt.leases[0].handle();
+        let anchor = first_receipt.leases[0].clone();
+        let first_admission = table
+            .register_source_instances_in_domains(
+                &tree,
+                scopes[0],
+                first_receipt.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        let second_admission = table
+            .register_source_instances_in_domains(
+                &tree,
+                scopes[1],
+                second_receipt.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        let first = first_receipt.programs;
+        let second = second_receipt.programs;
+        assert_eq!(
+            table
+                .native_domain_selection_in(&tree, scopes[0])
+                .unwrap()
+                .roots()
+                .len(),
+            1
+        );
+        assert!(
+            table
+                .source_domain_selection_in(&tree, scopes[0])
+                .unwrap()
+                .inherited()
+                .is_empty(),
+            "package custody grants no HOME selection"
+        );
+        let foreign_key = super::super::NativeArtifactBinding {
+            selection: [3; 32],
+            ..key
+        };
+        assert!(machine
+            .retain_native_sibling(
+                &anchor,
+                super::super::NativeExportRequest::for_package(
+                    Arc::clone(&package),
+                    foreign_key,
+                    domains[0],
+                    ValueId(1)
+                )
+                .unwrap()
+            )
+            .is_err());
+        let closed_with_live_import = vec![BatchProgram {
+            image: Arc::clone(&target),
+            imports: vec![BatchImport::Existing {
+                handle: left,
+                entry_signature: image
+                    .export_contract(ValueId(0))
+                    .unwrap()
+                    .entry_signature
+                    .cloned(),
+            }],
+        }];
+        assert!(
+            BatchProgram::validate_closed(&closed_with_live_import).is_err(),
+            "closed code cannot acquire a live root"
+        );
+        let sibling = machine
+            .retain_native_sibling(
+                &anchor,
+                super::super::NativeExportRequest::for_package(
+                    Arc::clone(&package),
+                    key,
+                    domains[0],
+                    ValueId(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(sibling.lease().instance(), anchor.instance());
+        let sibling_handle = sibling.lease().handle();
+        let sibling_admission = table
+            .register_source_instances_in_domains(&tree, scopes[0], vec![sibling], &machine)
+            .ok()
+            .unwrap();
+        let reused = table
+            .retained_native_sibling_attachment(domains[0], &anchor, ValueId(1))
+            .unwrap();
+        assert_eq!(reused.lease().handle(), sibling_handle);
+        let repeated = table
+            .register_source_instances_in_domains(&tree, scopes[0], vec![reused], &machine)
+            .ok()
+            .unwrap();
+        assert!(repeated.is_empty());
+        assert!(table
+            .rollback_source_admission(scopes[0], &repeated)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            machine.residency().programs,
+            4,
+            "sibling reuse must not reinstall the package image"
+        );
         assert_ne!(first[1], second[1]);
-        let left = machine.retain_top(first[1], ValueId(0)).unwrap();
-        let right = machine.retain_top(second[1], ValueId(0)).unwrap();
+
         assert_ne!(
             machine.handle_current_pointer(left),
             machine.handle_current_pointer(right),
@@ -1016,8 +1157,15 @@ mod tests {
         for root in target_roots {
             assert!(machine.release(root));
         }
-        assert!(machine.release(left));
-        assert!(machine.release(right));
+        for (scope, admission) in [
+            (scopes[0], &sibling_admission),
+            (scopes[0], &first_admission),
+            (scopes[1], &second_admission),
+        ] {
+            for lease in table.rollback_source_admission(scope, admission).unwrap() {
+                assert!(machine.release(lease.handle()));
+            }
+        }
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(machine.residency().programs, 0);
     }
