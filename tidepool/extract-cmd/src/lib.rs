@@ -593,6 +593,13 @@ impl ExtractCmd {
         CompilerEndpoint::bind(self)
     }
 
+    /// Bind the exact service selected by the enclosing owned-daemon launcher.
+    /// Missing ownership, stale identity and unavailable service refuse before
+    /// submission; this path cannot select an ambient endpoint or run direct.
+    pub fn bind_owned(&self) -> Result<CompilerEndpoint, SpawnError> {
+        CompilerEndpoint::bind_owned(self)
+    }
+
     /// Bind the macro's explicit `nix run <flake>#tidepool-extract` fallback.
     /// The returned endpoint reports the producer loaded by Nix itself.
     pub fn bind_nix_fallback(&self, flake_root: &Path) -> Result<CompilerEndpoint, SpawnError> {

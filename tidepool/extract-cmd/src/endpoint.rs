@@ -1414,7 +1414,7 @@ impl CompilerEndpoint {
     pub(crate) fn bind(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
         refuse_native_demand_reentry(&cmd.program)?;
         if TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()) {
-            let identity = bind_scoped_endpoint(cmd, |cancellation| {
+            let identity = bind_scoped_endpoint(cmd, None, |cancellation| {
                 Self::bind_unscoped_with_cancellation(cmd, cancellation)
             })?;
             return Ok(Self {
@@ -1423,6 +1423,29 @@ impl CompilerEndpoint {
             });
         }
         Self::bind_unscoped(cmd)
+    }
+
+    pub(crate) fn bind_owned(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
+        let required = std::env::var_os(crate::REQUIRED_DAEMON_ENDPOINT_ENV).ok_or_else(|| {
+            SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "native build action requires an explicitly owned compiler service",
+                ),
+            )
+        })?;
+        if TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()) {
+            let identity = bind_scoped_endpoint(cmd, Some(&required), |cancellation| {
+                Self::bind_unscoped_with_required(cmd, cancellation, Some(&required))
+            })?;
+            return Ok(Self {
+                identity,
+                transport: Transport::Scoped,
+            });
+        }
+        Self::bind_unscoped_with_required(cmd, None, Some(&required))
     }
 
     fn bind_unscoped(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
@@ -1434,14 +1457,19 @@ impl CompilerEndpoint {
         cancellation: Option<&CompilerTransactionCancellation>,
     ) -> Result<Self, SpawnError> {
         let required = std::env::var_os(crate::REQUIRED_DAEMON_ENDPOINT_ENV);
+        Self::bind_unscoped_with_required(cmd, cancellation, required.as_deref())
+    }
+
+    fn bind_unscoped_with_required(
+        cmd: &ExtractCmd,
+        cancellation: Option<&CompilerTransactionCancellation>,
+        required: Option<&OsStr>,
+    ) -> Result<Self, SpawnError> {
         if let Some(socket) = std::env::var_os(crate::DAEMON_SOCKET_ENV) {
             let socket = PathBuf::from(socket);
             if let Ok(binding) = daemon::preflight(&socket) {
                 let identity = binding.identity();
-                if required
-                    .as_ref()
-                    .is_some_and(|expected| expected != &OsString::from(identity.to_hex()))
-                {
+                if required.is_some_and(|expected| expected != OsStr::new(&identity.to_hex())) {
                     return Err(SpawnError::not_submitted(
                         &socket,
                         io::Error::other("required compiler daemon epoch or producer changed"),
@@ -2144,6 +2172,7 @@ fn refuse_native_demand_reentry(program: &OsStr) -> Result<(), SpawnError> {
 
 fn bind_scoped_endpoint(
     cmd: &ExtractCmd,
+    required_owned: Option<&OsStr>,
     bind: impl FnOnce(Option<&CompilerTransactionCancellation>) -> Result<CompilerEndpoint, SpawnError>,
 ) -> Result<CompilerIdentity, SpawnError> {
     refuse_native_demand_reentry(&cmd.program)?;
@@ -2155,9 +2184,17 @@ fn bind_scoped_endpoint(
             identity.clone(),
             program.to_owned(),
             matches!(&state.compiler, ScopedCompiler::AdmissionFailed(_)),
+            match &state.compiler {
+                ScopedCompiler::DaemonBound(_) | ScopedCompiler::AdmissionFailed(_) => true,
+                ScopedCompiler::Active { transaction, .. } => matches!(
+                    &transaction.transport,
+                    Some(TransactionTransport::Daemon { .. })
+                ),
+                ScopedCompiler::Unbound => false,
+            },
         ))
     });
-    if let Some((identity, program, failed)) = existing {
+    if let Some((identity, program, failed, daemon)) = existing {
         if failed {
             return Err(SpawnError::indeterminate(
                 &cmd.program,
@@ -2171,6 +2208,14 @@ fn bind_scoped_endpoint(
                     io::ErrorKind::InvalidInput,
                     "compiler transaction cannot switch compiler producers",
                 ),
+            ));
+        }
+        if required_owned
+            .is_some_and(|expected| !daemon || expected != OsStr::new(&identity.to_hex()))
+        {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::other("active compiler scope differs from the required owned service"),
             ));
         }
         return Ok(identity);
@@ -4917,7 +4962,7 @@ mod tests {
         }
 
         fn bind(&self, command: &ExtractCmd) -> Result<CompilerEndpoint, SpawnError> {
-            let identity = bind_scoped_endpoint(command, |_| {
+            let identity = bind_scoped_endpoint(command, None, |_| {
                 let binding = daemon::preflight(&self.socket).unwrap();
                 Ok(CompilerEndpoint {
                     identity: CompilerIdentity::daemon(
@@ -4953,6 +4998,96 @@ mod tests {
         fn drop(&mut self) {
             self.settle();
         }
+    }
+
+    #[test]
+    fn owned_binding_refuses_absent_stale_and_unavailable_service() {
+        struct Restore(Vec<(&'static str, Option<OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(
+            [
+                crate::DAEMON_SOCKET_ENV,
+                crate::REQUIRED_DAEMON_ENDPOINT_ENV,
+            ]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect(),
+        );
+        let fixture = DeferredDaemonFixture::new(
+            DaemonFixtureBehavior::Normal,
+            CompilerTransactionCancellation::new(),
+        );
+        let command = fixture.command();
+        std::env::remove_var(crate::REQUIRED_DAEMON_ENDPOINT_ENV);
+        std::env::set_var(crate::DAEMON_SOCKET_ENV, &fixture.socket);
+        assert!(command.bind_owned().unwrap_err().definitely_unsubmitted());
+        assert_eq!(fixture.counts.lock().unwrap().preflights, 0);
+
+        let identity = daemon::preflight(&fixture.socket).unwrap().identity();
+        std::env::set_var(crate::REQUIRED_DAEMON_ENDPOINT_ENV, "stale owned identity");
+        assert!(command.bind_owned().unwrap_err().definitely_unsubmitted());
+
+        std::env::set_var(crate::REQUIRED_DAEMON_ENDPOINT_ENV, identity.to_hex());
+        std::env::set_var(
+            crate::DAEMON_SOCKET_ENV,
+            fixture.socket.with_extension("absent"),
+        );
+        assert!(command.bind_owned().unwrap_err().definitely_unsubmitted());
+
+        std::env::set_var(crate::DAEMON_SOCKET_ENV, &fixture.socket);
+        let bound = command.bind_owned().unwrap();
+        assert_eq!(bound.identity(), &identity);
+        assert!(matches!(bound.transport, Transport::Daemon { .. }));
+        drop(bound);
+        let outcome = with_compiler_transaction_for_workload(
+            CompileWorkload::Foreground,
+            |_| {},
+            || {
+                let scoped = fixture.bind(&command).unwrap();
+                assert_eq!(scoped.identity(), &identity);
+                std::env::set_var(
+                    crate::REQUIRED_DAEMON_ENDPOINT_ENV,
+                    "another owned identity",
+                );
+                assert!(command.bind_owned().unwrap_err().definitely_unsubmitted());
+            },
+        );
+        assert_eq!(outcome.close, CompilerTransactionClose::NotStarted);
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!((counts.begins, counts.requests), (0, 0));
+        drop(counts);
+
+        std::env::remove_var(crate::DAEMON_SOCKET_ENV);
+        std::env::remove_var(crate::REQUIRED_DAEMON_ENDPOINT_ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let direct = direct_handshake_fixture(directory.path(), 5);
+        let mut command = fixture.command();
+        command.program = direct.program;
+        let outcome = with_compiler_transaction_for_workload(
+            CompileWorkload::Foreground,
+            |_| {},
+            || {
+                let scoped = command.bind().unwrap();
+                std::env::set_var(
+                    crate::REQUIRED_DAEMON_ENDPOINT_ENV,
+                    scoped.identity().to_hex(),
+                );
+                assert!(
+                    command.bind_owned().unwrap_err().definitely_unsubmitted(),
+                    "matching text cannot turn a direct scope into an owned service"
+                );
+            },
+        );
+        assert_eq!(outcome.close, CompilerTransactionClose::Clean);
     }
 
     #[test]

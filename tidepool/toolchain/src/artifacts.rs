@@ -5710,8 +5710,16 @@ fn compile_invocation_inner(
                 invocation_timing.retry("endpoint_selection");
             }
             let mut cmd = base_cmd.clone();
+            let portable = matches!(
+                &policy,
+                CompilationPolicy::BuildAction {
+                    export: BuildActionExport::PreparedFixture { .. },
+                    ..
+                }
+            );
             let endpoint = match &policy {
-                CompilationPolicy::BuildAction { .. } => cmd.bind_direct(),
+                CompilationPolicy::BuildAction { .. } if portable => cmd.bind_direct(),
+                CompilationPolicy::BuildAction { .. } => cmd.bind_owned(),
                 _ => cmd.bind(),
             }
             .map_err(|error| {
@@ -5730,13 +5738,6 @@ fn compile_invocation_inner(
             }
             let deployment = crate::toolchain::admit_bound_endpoint(&endpoint)
                 .map_err(CompileAttemptError::Deployment)?;
-            let portable = matches!(
-                &policy,
-                CompilationPolicy::BuildAction {
-                    export: BuildActionExport::PreparedFixture { .. },
-                    ..
-                }
-            );
             if !portable && deployment.package_source_association().is_none() {
                 return Err(CompileAttemptError::Deployment(
                     crate::toolchain::DeploymentAdmissionError::PackageSourceRequired.into(),
