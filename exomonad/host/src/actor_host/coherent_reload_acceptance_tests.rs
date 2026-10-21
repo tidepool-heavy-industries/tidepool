@@ -777,6 +777,21 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
 
 #[tokio::test(flavor = "multi_thread")]
 async fn staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c() {
+    frozen_source_reload_history(FrozenReloadControl::Publish).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_staged_reload_preserves_a_for_a_later_default_reload() {
+    frozen_source_reload_history(FrozenReloadControl::CancelBeforePublication).await;
+}
+
+#[derive(Clone, Copy)]
+enum FrozenReloadControl {
+    Publish,
+    CancelBeforePublication,
+}
+
+async fn frozen_source_reload_history(control: FrozenReloadControl) {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
@@ -843,6 +858,17 @@ async fn staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c(
             .unwrap();
             captured_gate.arm();
             let operation = round.operation("frozen-b");
+            let invocation = super::embedded_harness::embedded_invocation_context(
+                &round.host_identity(),
+                &operation,
+            )
+            .unwrap();
+            let installation_a = host
+                .context
+                .observer
+                .installation(host.context.actor.identity())
+                .await;
+            let instructions_a = round.request.instructions.clone();
             round.function("frozen-b", "apply_draft", serde_json::json!({}));
             host.while_operation_succeeds(&operation, captured_gate.entered.notified())
                 .await
@@ -855,15 +881,103 @@ async fn staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c(
             )
             .unwrap();
             std::fs::write(authored.join("prompts/agent.md"), "Unpublished draft C.\n").unwrap();
-            captured_gate.release();
-            let round = host
-                .while_operation_succeeds(
-                    &operation,
-                    next_hosted_script_round(&mut requests, &mut pending, &root),
-                )
-                .await
-                .unwrap();
-            let receipt = round.settled_output("frozen-b");
+            let (round, published_call) = match control {
+                FrozenReloadControl::Publish => {
+                    captured_gate.release();
+                    let round = host
+                        .while_operation_succeeds(
+                            &operation,
+                            next_hosted_script_round(&mut requests, &mut pending, &root),
+                        )
+                        .await
+                        .unwrap();
+                    (round, "frozen-b")
+                }
+                FrozenReloadControl::CancelBeforePublication => {
+                    installation_a
+                        .policy
+                        .retained_operation(invocation.clone())
+                        .expect("the actual held reload has its issued native owner");
+                    let mut cancellation = installation_a.policy.cancel_workbench_boxed(
+                        invocation,
+                        exomonad_actor::WorkbenchCancellationCause::ExplicitCancellation,
+                    );
+                    // ResidentInteractivePolicy delegates directly to the retained
+                    // owner: cancel_workbench admits cancellation synchronously before
+                    // its first await on settlement. Pending is not a cleanup receipt.
+                    let first = futures_util::poll!(&mut cancellation);
+                    assert!(
+                        first.is_pending(),
+                        "the held actual stage cannot already have settled: {first:?}"
+                    );
+                    captured_gate.release();
+                    let outcome = host
+                        .while_host_running(tokio::time::timeout(
+                            std::time::Duration::from_secs(180),
+                            cancellation,
+                        ))
+                        .await
+                        .unwrap()
+                        .expect("the real cancellation owner settles")
+                        .expect("the exact native operation accepts cancellation");
+                    eprintln!("STAGED_RELOAD_CANCELLATION {outcome:?}");
+                    assert!(
+                        matches!(
+                            outcome,
+                            exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
+                        ),
+                        "prepublication cancellation must retain its actual terminal: {outcome:?}"
+                    );
+                    assert_eq!(selected_root_generation(host).await, durable_a);
+                    let round = host
+                        .while_host_running(next_hosted_script_round(
+                            &mut requests,
+                            &mut pending,
+                            &root,
+                        ))
+                        .await
+                        .unwrap();
+                    eprintln!(
+                        "STAGED_RELOAD_CANCELLED_RECEIPT {}",
+                        round.settled_output("frozen-b")
+                    );
+                    assert_eq!(round.request.instructions, instructions_a);
+                    let round = authored_cell(
+                        host,
+                        &mut requests,
+                        &mut pending,
+                        &root,
+                        round,
+                        "a-after-cancel",
+                        "display (aOnly == (7 :: Int) && aClosure 1 == 2)",
+                    )
+                    .await;
+                    assert_eq!(selected_root_generation(host).await, durable_a);
+                    std::fs::write(
+                        authored.join("Project/Work.hs"),
+                        include_str!("fixtures/coherent_reload_work_b.hs"),
+                    )
+                    .unwrap();
+                    std::fs::write(
+                        authored.join("prompts/agent.md"),
+                        include_str!("fixtures/coherent_reload_prompt_b.md"),
+                    )
+                    .unwrap();
+                    let round = authored_reload(
+                        host,
+                        &mut requests,
+                        &mut pending,
+                        &root,
+                        round,
+                        "ordinary-after-cancel",
+                        "apply_draft",
+                        serde_json::json!({}),
+                    )
+                    .await;
+                    (round, "ordinary-after-cancel")
+                }
+            };
+            let receipt = round.settled_output(published_call);
             assert_reload_tool(&receipt, "ReloadRetirement");
             assert_reload_disposition(
                 &receipt,
