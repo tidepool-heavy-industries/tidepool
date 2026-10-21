@@ -2458,7 +2458,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   -- purpose wrappers cannot silently widen the retained dependency policy.
   unless (case operation of
     WorldCellSource {} -> closedWorldCellPurpose purpose
-    WorldObservationSource {} -> originalPurpose purpose == WorldObservationCompile) (liftIO (throwIO WorldCellUnsupported))
+    WorldObservationSource {} -> originalPurpose purpose == WorldObservationCompile) $ liftIO $ do
+      emitWorldAcquisitionRejection "world stage purpose" path "operation purpose is outside the admitted closed source route"
+      throwIO WorldCellUnsupported
   directory <- liftIO (canonicalizePath operationDirectory)
   target <- liftIO (canonicalizePath path)
   unless ((directory ++ [pathSeparator]) `isPrefixOf` target) (liftIO (throwIO WorldCellCorrupt))
@@ -2480,7 +2482,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldHeaderPolicy WorldAuthoredHeader path flags effective)
   parsedDemand <- either (\reason -> liftIO $ case operation of
-    WorldCellSource {} -> throwIO WorldCellUnsupported
+    WorldCellSource {} -> do
+      emitWorldAcquisitionRejection "world cell parsed demand" path (moduleDemandFailureDetail reason)
+      throwIO WorldCellUnsupported
     WorldObservationSource {} -> do
       emitWorldObservationSourceRejection effective path source reason
       throwIO (SourceRejection (boundedDiagnosticText 4096 (moduleDemandFailureDetail reason)))) pure $
@@ -8892,7 +8896,10 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
       unsupported = [ownerKey (ms_mod summary) | ModuleNode _ summary <- mgModSummaries' graph
         , worldHasSelectedPrimary facts (ownerKey (ms_mod summary))
         , not (worldHasSelectedSource facts (ownerKey (ms_mod summary)))]
-  unless (null unsupported) (liftIO (throwIO WorldCellUnsupported))
+  unless (null unsupported) $ liftIO $ do
+    emitWorldAcquisitionRejection "world source import" "<held Context association>"
+      ("selected primary owners lack admitted source associations (first 16): " ++ show (take 16 unsupported))
+    throwIO WorldCellUnsupported
   if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor Map.empty graph)) [] Map.empty Nothing) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs owner initial facts (Set.toAscList demanded))
