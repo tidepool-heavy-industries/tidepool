@@ -154,7 +154,6 @@ data CodecImportOwner
   = CodecSourceOwner String String (Maybe String) Word32 SymbolIdentity
   | CodecRetainedOwner SymbolIdentity Word64
   | CodecPackageOwner String String String SymbolIdentity
-  | CodecRetainedPackageOwner String String String SymbolIdentity Word64
   deriving (Eq,Show)
 
 data CertificateCodecFacts = CertificateCodecFacts
@@ -323,9 +322,4 @@ importOwner term = do
       fields <- closedMap ["kind","unit","module","interface_sha256","binder"] term
       CodecPackageOwner <$> field fields "unit" string <*> field fields "module" string
         <*> field fields "interface_sha256" digestString <*> field fields "binder" identity
-    "retained-package" -> do
-      fields <- closedMap ["kind","unit","module","interface_sha256","binder","generation"] term
-      CodecRetainedPackageOwner <$> field fields "unit" string <*> field fields "module" string
-        <*> field fields "interface_sha256" digestString <*> field fields "binder" identity
-        <*> field fields "generation" natural
     _ -> Left "another import owner observation category"
