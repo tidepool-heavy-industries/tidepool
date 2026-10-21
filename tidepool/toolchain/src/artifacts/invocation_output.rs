@@ -1086,6 +1086,49 @@ mod tests {
         };
         let first = completed("first");
         let second = completed("second");
+        for name in ["first", "second"] {
+            let target = &output.targets[name];
+            let selection = completed(name);
+            let globals = target.prepared.prepared().globals();
+            assert_eq!(
+                selection.target_imports().len(),
+                globals.len(),
+                "each completed target keeps exactly its own ordered slots"
+            );
+            for (global, selected) in globals.iter().zip(selection.target_imports()) {
+                match selected {
+                    crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                        binding,
+                        value,
+                    } => {
+                        assert_eq!(binding.exported_value(&global.identity), Some(*value));
+                    }
+                    crate::artifact_inventory::CompletedNativeTargetImport::Source {
+                        binding,
+                        value,
+                    } => {
+                        let row = selection
+                            .completion()
+                            .rows()
+                            .find(|row| row.binding() == *binding)
+                            .unwrap();
+                        assert!(row
+                            .product()
+                            .group()
+                            .exported_values()
+                            .any(|(identity, exported)| identity == &global.identity
+                                && exported == *value));
+                    }
+                    crate::artifact_inventory::CompletedNativeTargetImport::RetainedCapture {
+                        identity,
+                        generation,
+                    } => {
+                        assert_eq!(identity, &global.identity);
+                        assert_eq!(Some(*generation), global.required_generation);
+                    }
+                }
+            }
+        }
         drop(output);
         let package_bindings = |selection: &crate::artifact_inventory::CompletedNativeSelection| {
             let mut products = BTreeMap::<_, BTreeSet<_>>::new();
@@ -1131,13 +1174,6 @@ mod tests {
         );
         assert!(!first.target_imports().is_empty());
         assert!(!second.target_imports().is_empty());
-        assert!(
-            first
-                .target_imports()
-                .iter()
-                .all(|left| { second.target_imports().iter().all(|right| left != right) }),
-            "independent target slots retain their own exact Source/Package export values"
-        );
         let roots = first
             .target_imports()
             .iter()
