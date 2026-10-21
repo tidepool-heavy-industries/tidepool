@@ -3988,6 +3988,7 @@ pub fn plan_cell(
             operand: operand.as_ref().map(|operand| operand.request().clone()),
             output: output.clone(),
         };
+        let realization = request.realization.clone();
         let (mut command, bound) = world_command(endpoint.identity(), None)?;
         command
             .world_cell_plan(request)
@@ -4017,6 +4018,7 @@ pub fn plan_cell(
             recipe,
             operand,
             CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256(),
+            &realization,
             receipt,
         )
     })

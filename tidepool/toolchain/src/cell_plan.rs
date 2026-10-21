@@ -163,12 +163,18 @@ pub struct CompilerWorldCellPlan {
     operand: Option<Arc<crate::compiler_world::CompilerWorldCellOperand>>,
     producer_sha256: [u8; 32],
     items: Vec<ParsedCellPlanItem>,
+    expression_names: WorldExpressionNames,
     receipt: Arc<[u8]>,
     observations: Arc<[u8]>,
     digest: [u8; 32],
     allocation: Arc<()>,
     issued: AdmissionIssueGate,
 }
+
+/// Names observed fresh by the held compiler's actual lexical TYPE scope.
+/// This immutable projection reserves no generation or runtime value.
+#[derive(Debug)]
+struct WorldExpressionNames(std::collections::BTreeMap<usize, String>);
 
 /// One-shot issuance for a live parser plan. A plan validates its requested
 /// slots first, then claims this gate exactly once, so one plan authorises one
@@ -206,6 +212,11 @@ impl CompilerWorldCellPlan {
     }
     pub fn items(&self) -> &[ParsedCellPlanItem] {
         &self.items
+    }
+    /// Read the compiler-issued name; allocation and checked-value authority
+    /// remain with this plan's one-shot runtime reservation.
+    pub fn expression_observation_name(&self, ordinal: usize) -> Option<&str> {
+        self.expression_names.0.get(&ordinal).map(String::as_str)
     }
     pub fn receipt(&self) -> &[u8] {
         &self.receipt
@@ -313,6 +324,7 @@ fn issue_world_cell_admission(
     plan_digest: &[u8; 32],
     allocation: &Arc<()>,
     items: &[ParsedCellPlanItem],
+    expression_names: &WorldExpressionNames,
     subject: WorldCellAdmissionSubject,
     slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
     expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
@@ -328,7 +340,7 @@ fn issue_world_cell_admission(
     if admission_digest == [0; 32] {
         return Err(failure("issued world cell admission is empty"));
     }
-    validate_world_cell_reservations(items, &slots, &expected_bindings)?;
+    validate_world_cell_reservations(items, expression_names, &slots, &expected_bindings)?;
     Ok(WorldCellAdmissionToken {
         defining_scope: subject.scope,
         allocation: Arc::clone(allocation),
@@ -371,11 +383,12 @@ fn claim_and_issue_world_cell_admission(
     plan_digest: &[u8; 32],
     allocation: &Arc<()>,
     items: &[ParsedCellPlanItem],
+    expression_names: &WorldExpressionNames,
     subject: WorldCellAdmissionSubject,
     slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
     expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
 ) -> Result<WorldCellAdmissionToken, CompileError> {
-    validate_world_cell_reservations(items, &slots, &expected_bindings)?;
+    validate_world_cell_reservations(items, expression_names, &slots, &expected_bindings)?;
     issued.claim()?;
     issue_world_cell_admission(
         world_logical_id,
@@ -383,6 +396,7 @@ fn claim_and_issue_world_cell_admission(
         plan_digest,
         allocation,
         items,
+        expression_names,
         subject,
         slots,
         expected_bindings,
@@ -408,6 +422,7 @@ impl CompilerWorldCellPlan {
             self.digest(),
             &self.allocation,
             &self.items,
+            &self.expression_names,
             subject,
             slots,
             expected_bindings,
@@ -477,6 +492,7 @@ fn world_cell_admission_digest(
 
 fn validate_world_cell_reservations(
     items: &[ParsedCellPlanItem],
+    expression_names: &WorldExpressionNames,
     slots: &[crate::checked_cell::CheckedPlannedCellSlot],
     expected_bindings: &[Vec<(String, tidepool_repr::SessionVarId)>],
 ) -> Result<(), CompileError> {
@@ -504,7 +520,7 @@ fn validate_world_cell_reservations(
                     capture,
                     observation_name,
                 },
-            ) if !observation_name.is_empty() && !observation_name.contains('\0') => {
+            ) if expression_names.0.get(&item.index()) == Some(observation_name) => {
                 (*capture, vec![observation_name.as_str()])
             }
             _ => return Err(failure("world cell slot differs from parsed item kind")),
@@ -558,6 +574,7 @@ pub(crate) fn admit_world_plan(
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
     operand: Option<Arc<crate::compiler_world::CompilerWorldCellOperand>>,
     producer: [u8; 32],
+    realization: &str,
     receipt: Vec<u8>,
 ) -> Result<Arc<CompilerWorldCellPlan>, CompileError> {
     let facts = admit_world_parser_receipt(
@@ -567,12 +584,18 @@ pub(crate) fn admit_world_plan(
         operand.as_ref().map(|operand| operand.request().sha256),
         &receipt,
     )?;
+    if facts.realization != realization {
+        return Err(failure(
+            "world parser receipt belongs to another realization",
+        ));
+    }
     Ok(Arc::new(CompilerWorldCellPlan {
         world,
         recipe,
         operand,
         producer_sha256: producer,
         items: facts.items,
+        expression_names: facts.expression_names,
         observations: facts.observations,
         receipt: receipt.into(),
         digest: facts.digest,
@@ -583,6 +606,8 @@ pub(crate) fn admit_world_plan(
 
 struct WorldParserFacts {
     items: Vec<ParsedCellPlanItem>,
+    expression_names: WorldExpressionNames,
+    realization: String,
     observations: Arc<[u8]>,
     digest: [u8; 32],
     allocation: Arc<()>,
@@ -596,14 +621,14 @@ fn admit_world_parser_receipt(
     receipt: &[u8],
 ) -> Result<WorldParserFacts, CompileError> {
     let value = decode(&receipt)?;
-    let fields = crate::checked_cell::row(&value, 9)?;
+    let fields = crate::checked_cell::row(&value, 11)?;
     let hash = |value: &Value| -> Result<[u8; 32], CompileError> {
         match value {
             Value::Bytes(bytes) => bytes.as_slice().try_into().map_err(failure),
             _ => Err(failure("world parser hash")),
         }
     };
-    if text(&fields[0])? != "TPCELLPLAN5"
+    if text(&fields[0])? != "TPCELLPLAN6"
         || hash(&fields[1])? != *expected_world
         || hash(&fields[2])? != producer
         || hash(&fields[3])? != <[u8; 32]>::from(Sha256::digest(recipe.source.as_bytes()))
@@ -634,15 +659,63 @@ fn admit_world_parser_receipt(
         return Err(failure("world parser observations"));
     };
     let items = admit_parser_items(observations, &fields[7])?;
+    let realization = text(&fields[9])?.to_owned();
+    if realization.is_empty() || realization.len() > 65536 || realization.contains('\0') {
+        return Err(failure("world parser realization"));
+    }
+    let expression_names = admit_world_expression_names(&items, &fields[10])?;
     let mut digest = Sha256::new();
     digest.update(b"TidepoolWorldCellPlan1\0");
     digest.update(&receipt);
     Ok(WorldParserFacts {
         items,
+        expression_names,
+        realization,
         observations: observations.clone().into(),
         digest: digest.finalize().into(),
         allocation: Arc::new(()),
     })
+}
+
+fn admit_world_expression_names(
+    items: &[ParsedCellPlanItem],
+    value: &Value,
+) -> Result<WorldExpressionNames, CompileError> {
+    let mut expression_names = std::collections::BTreeMap::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut last_ordinal = None;
+    for value in list(value, items.len())? {
+        let row = crate::checked_cell::row(value, 2)?;
+        let ordinal = number(&row[0])?;
+        let name = text(&row[1])?;
+        if last_ordinal.is_some_and(|previous| ordinal <= previous)
+            || items
+                .get(ordinal)
+                .is_none_or(|item| item.kind() != ParsedCellPlanKind::Expression)
+            || !name.starts_with("observation")
+            || name.len() > 65536
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || names.contains(name)
+            || names.contains(&format!("{name}_unit"))
+        {
+            return Err(failure("world parser expression name differs"));
+        }
+        names.insert(format!("{name}_unit"));
+        names.insert(name.to_owned());
+        expression_names.insert(ordinal, name.to_owned());
+        last_ordinal = Some(ordinal);
+    }
+    if expression_names.len()
+        != items
+            .iter()
+            .filter(|item| item.kind() == ParsedCellPlanKind::Expression)
+            .count()
+    {
+        return Err(failure(
+            "world parser expression names do not cover its items",
+        ));
+    }
+    Ok(WorldExpressionNames(expression_names))
 }
 
 pub(crate) fn parse(
@@ -1028,6 +1101,7 @@ mod tests {
         let bindings = vec![("x".into(), tidepool_repr::SessionVarId::from_extract(91))];
         assert!(validate_world_cell_reservations(
             &[declaration, value],
+            &WorldExpressionNames(Default::default()),
             &[
                 Slot::Declaration { declaration: 1 },
                 Slot::Bind { value: 1 }
@@ -1040,6 +1114,7 @@ mod tests {
                 item(ParsedCellPlanKind::Prologue, ""),
                 item(ParsedCellPlanKind::Declaration, "")
             ],
+            &WorldExpressionNames(Default::default()),
             &[
                 Slot::Prologue { declaration: 1 },
                 Slot::Declaration { declaration: 1 }
@@ -1052,6 +1127,7 @@ mod tests {
                 item(ParsedCellPlanKind::Bind, "x"),
                 item(ParsedCellPlanKind::Expression, "")
             ],
+            &WorldExpressionNames(Default::default()),
             &[
                 Slot::Bind { value: 1 },
                 Slot::Expression {
@@ -1089,7 +1165,7 @@ mod tests {
         let hash = |bytes: &[u8]| Value::Bytes(Sha256::digest(bytes).to_vec());
         let fields = legacy.as_array().unwrap();
         let receipt = Value::Array(vec![
-            Value::Text("TPCELLPLAN5".into()),
+            Value::Text("TPCELLPLAN6".into()),
             Value::Bytes(world.to_vec()),
             Value::Bytes(producer.to_vec()),
             hash(recipe.source.as_bytes()),
@@ -1106,6 +1182,8 @@ mod tests {
             fields[6].clone(),
             fields[7].clone(),
             Value::Null,
+            Value::Text("held-world-realization".into()),
+            Value::Array(Vec::new()),
         ]);
         (recipe, world, producer, receipt)
     }
@@ -1132,6 +1210,93 @@ mod tests {
             &encoded(&receipt)
         )
         .is_err());
+        let mut legacy = receipt.clone();
+        let fields = legacy.as_array_mut().unwrap();
+        fields.truncate(9);
+        fields[0] = Value::Text("TPCELLPLAN5".into());
+        assert!(
+            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&legacy)).is_err()
+        );
+    }
+
+    #[test]
+    fn world_expression_names_cover_exact_items_and_bind_reserved_slots() {
+        let (recipe, world, producer, receipt) = world_plan_fixture();
+        let facts = admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt))
+            .unwrap();
+        let mut item = facts.items.into_iter().next().unwrap();
+        item.kind = ParsedCellPlanKind::Expression;
+        item.binding_form = None;
+        item.binders.clear();
+        let row = |ordinal: usize, name: &str| {
+            Value::Array(vec![(ordinal as u64).into(), Value::Text(name.into())])
+        };
+        let rows = |values| Value::Array(values);
+        let names = admit_world_expression_names(
+            std::slice::from_ref(&item),
+            &rows(vec![row(0, "observation0")]),
+        )
+        .unwrap();
+        use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+        let bindings = [vec![(
+            "observation0".into(),
+            tidepool_repr::SessionVarId::from_extract(91),
+        )]];
+        assert!(validate_world_cell_reservations(
+            std::slice::from_ref(&item),
+            &names,
+            &[Slot::Expression {
+                capture: 7,
+                observation_name: "observation0".into()
+            }],
+            &bindings
+        )
+        .is_ok());
+        assert!(validate_world_cell_reservations(
+            std::slice::from_ref(&item),
+            &names,
+            &[Slot::Expression {
+                capture: 7,
+                observation_name: "observation1".into()
+            }],
+            &bindings
+        )
+        .is_err());
+        for invalid in [
+            rows(vec![]),
+            rows(vec![row(1, "observation0")]),
+            rows(vec![row(0, "observation0"), row(0, "observation1")]),
+            rows(vec![row(0, "another")]),
+        ] {
+            assert!(admit_world_expression_names(std::slice::from_ref(&item), &invalid).is_err());
+        }
+        let mut second =
+            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt))
+                .unwrap()
+                .items
+                .into_iter()
+                .next()
+                .unwrap();
+        second.kind = ParsedCellPlanKind::Expression;
+        second.binding_form = None;
+        second.binders.clear();
+        second.index = 1;
+        let items = [item, second];
+        for (first, next) in [
+            ("observation0", "observation0"),
+            ("observation0", "observation0_unit"),
+            ("observation0_unit", "observation0"),
+        ] {
+            assert!(
+                admit_world_expression_names(&items, &rows(vec![row(0, first), row(1, next)]))
+                    .is_err()
+            );
+        }
+        assert!(admit_world_expression_names(
+            &items,
+            &rows(vec![row(0, "observation0"), row(1, "observation1")])
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1151,30 +1316,35 @@ mod tests {
         )];
         assert!(validate_world_cell_reservations(
             &admitted.items,
+            &admitted.expression_names,
             &[Slot::Bind { value: 7 }],
             &[binding.clone()]
         )
         .is_ok());
         assert!(validate_world_cell_reservations(
             &admitted.items,
+            &admitted.expression_names,
             &[Slot::Bind { value: 0 }],
             &[binding.clone()]
         )
         .is_err());
         assert!(validate_world_cell_reservations(
             &admitted.items,
+            &admitted.expression_names,
             &[Slot::Declaration { declaration: 7 }],
             &[binding.clone()]
         )
         .is_err());
         assert!(validate_world_cell_reservations(
             &admitted.items,
+            &admitted.expression_names,
             &[Slot::Bind { value: 7 }],
             &[vec![("other".into(), binding[0].1)]]
         )
         .is_err());
         assert!(validate_world_cell_reservations(
             &admitted.items,
+            &admitted.expression_names,
             &[Slot::Bind { value: 7 }],
             &[Vec::new()]
         )
@@ -1230,6 +1400,7 @@ mod tests {
             &admitted.digest,
             &admitted.allocation,
             &admitted.items,
+            &admitted.expression_names,
             subject([7; 16]),
             slots.to_vec(),
             bindings.to_vec(),
@@ -1278,6 +1449,7 @@ mod tests {
             &other.digest,
             &other.allocation,
             &other.items,
+            &other.expression_names,
             subject([7; 16]),
             slots.to_vec(),
             bindings.to_vec(),
@@ -1299,6 +1471,7 @@ mod tests {
             &admitted.digest,
             &admitted.allocation,
             &admitted.items,
+            &admitted.expression_names,
             subject([7; 16]),
             slots.to_vec(),
             bindings.to_vec(),
@@ -1341,6 +1514,7 @@ mod tests {
                 &admitted.digest,
                 &admitted.allocation,
                 &admitted.items,
+                &admitted.expression_names,
                 subject([7; 16]),
                 vec![Slot::Bind { value: 7 }],
                 bindings(),
@@ -1361,6 +1535,7 @@ mod tests {
             &admitted.digest,
             &admitted.allocation,
             &admitted.items,
+            &admitted.expression_names,
             subject([7; 16]),
             vec![Slot::Bind { value: 0 }],
             bindings(),
@@ -1378,6 +1553,7 @@ mod tests {
             &fresh.digest,
             &fresh.allocation,
             &fresh.items,
+            &fresh.expression_names,
             subject([7; 16]),
             vec![Slot::Bind { value: 7 }],
             bindings(),
