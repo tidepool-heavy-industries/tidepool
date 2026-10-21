@@ -2630,6 +2630,7 @@ impl CompilerSourceSupport {
         original_bindings: &crate::certified_products::OriginalBindingSelection,
         receipt: &crate::certified_products::CertifiedReceipt,
         products: &crate::certified_products::ParsedModuleProducts,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Arc<Self>, CompileError> {
         if !Arc::ptr_eq(stage.operation(), operation)
@@ -2692,6 +2693,60 @@ impl CompilerSourceSupport {
                 || product.interface.as_slice() != interface.interface_bytes()
             {
                 continue;
+            }
+            owners.push(owner);
+        }
+        // Prior checked outputs may be returned as TYPE metadata without an
+        // executable value demand. Keep their actual advanced-prefix bindings;
+        // current and future outputs cannot supply an anchor here.
+        for output in produced.before_segment().interfaces() {
+            crate::host_work::checkpoint()?;
+            let expected = output.interface();
+            charge(operation.charge(expected.unit().len() + expected.module().len()))?;
+            charge(operation.reserve::<ExactModuleIdentity>(1))?;
+            let owner = ExactModuleIdentity {
+                unit: expected.unit().to_owned(),
+                module: expected.module().to_owned(),
+            };
+            let Some(returned) = receipt
+                .finalization
+                .value_interfaces
+                .get(&(owner.unit.clone(), owner.module.clone()))
+            else {
+                continue;
+            };
+            let row = self.selected.get(&owner).ok_or_else(|| {
+                failure("World prior produced TYPE metadata lacks its selected owner")
+            })?;
+            let ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) =
+                &row.interface.1.payload
+            else {
+                return Err(failure(
+                    "World prior produced TYPE metadata changed its role",
+                ));
+            };
+            charge(operation.charge(
+                expected.interface_bytes().len()
+                    + expected.package_imports_bytes().len()
+                    + output.requirements().len(),
+            ))?;
+            if output.artifact_id() != row.interface.0.artifact
+                || interface.interface_bytes() != expected.interface_bytes()
+                || interface.package_imports_bytes() != expected.package_imports_bytes()
+                || row.interface.1.requirements.as_slice() != output.requirements()
+                || returned.interface.sha256 != row.interface.1.descriptor.interface_sha256
+                || returned.interface_requirements.len() != output.requirements().len()
+                || returned
+                    .interface_requirements
+                    .keys()
+                    .zip(output.requirements())
+                    .any(|((unit, module), required)| {
+                        unit != &required.unit || module != &required.module
+                    })
+            {
+                return Err(failure(
+                    "World prior produced TYPE metadata differs from its captured owner",
+                ));
             }
             owners.push(owner);
         }
