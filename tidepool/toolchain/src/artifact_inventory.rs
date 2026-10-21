@@ -300,23 +300,11 @@ impl PartialEq for ExactArtifactSelection {
 }
 impl Eq for ExactArtifactSelection {}
 
-/// Whole-module demand and a checked compiler entry cross the same admission
-/// owner. A raw ordinal or recovered selection cannot mint a checked entry.
+/// Physical or recovered graph admission; targets select exact issued slots.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum NativeArtifactDemand<'a> {
+pub(crate) enum NativeArtifactDemand {
     AllGroups,
-    /// Checked imports retain original byte custody and interface authority.
-    /// They have no executable target that could demand a native group.
     ScopeInterfaces,
-    /// A checked authored entry and its same compiled executable wrapper have
-    /// distinct native dependencies. Neither implies whole-carrier demand.
-    VerifiedTarget {
-        entry: &'a crate::checked_cell::CheckedTypedEntry,
-        imports: &'a [crate::certified_products::PendingImportOwner],
-    },
-    /// Existing target certification issued these imports against authenticated
-    /// original membership. Only new products receive whole-module demand.
-    CertifiedTargetImports(&'a [crate::certified_products::PendingImportOwner]),
 }
 
 #[cfg(test)]
@@ -806,7 +794,6 @@ impl ResolvedNativeTarget<'_> {
 
 pub(crate) struct ArtifactAdmission {
     pub(crate) artifacts: ArtifactView,
-    target_native_selection: Option<IssuedTargetNativeSelection>,
 }
 
 /// Ownership issued by the admission solver, before deriving a selected view.
@@ -814,7 +801,6 @@ struct IssuedArtifactCustody {
     lease: Arc<ViewLease>,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     supplied: BTreeMap<ArtifactId, SuppliedArtifactOutcome>,
-    target_native_selection: Option<IssuedTargetNativeSelection>,
     source_receipt: IssuedNativeSourceReceipt,
 }
 
@@ -827,57 +813,8 @@ impl IssuedArtifactCustody {
     fn into_view(self) -> ArtifactAdmission {
         ArtifactAdmission {
             artifacts: ArtifactView::from_custody(self.lease),
-            target_native_selection: self.target_native_selection,
         }
     }
-}
-
-impl ArtifactAdmission {
-    pub(crate) fn into_target(self) -> Result<AdmittedTargetArtifacts, CompileError> {
-        Ok(AdmittedTargetArtifacts {
-            artifacts: self.artifacts,
-            selection: self
-                .target_native_selection
-                .ok_or_else(|| failure("admission lacks exact target native demand"))?,
-        })
-    }
-}
-
-/// Target imports were issued by the existing target certifier; check exact
-/// original membership again before turning source references into graph roots.
-fn certified_target_source_groups(
-    entries: &[Arc<ArtifactEntry>],
-    imports: &[crate::certified_products::PendingImportOwner],
-) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
-    let mut groups = BTreeSet::new();
-    for import in imports {
-        let crate::certified_products::PendingImportOwner::Source {
-            owner,
-            original_ordinal,
-            binder,
-        } = import
-        else {
-            continue;
-        };
-        let mut originals = entries.iter().filter(|entry| {
-            matches!(&entry.payload, ArtifactPayload::Original(product)
-            if product.owner() == owner
-                && crate::certified_products::authenticates_original_native_entry(
-                    product, *original_ordinal, binder,
-                ))
-        });
-        let original = originals
-            .next()
-            .ok_or_else(|| failure("certified target native membership"))?;
-        if originals.next().is_some() {
-            return Err(failure("certified target native membership"));
-        }
-        groups.insert(NativeGroupKey {
-            artifact: original.descriptor.id,
-            original_ordinal: *original_ordinal,
-        });
-    }
-    Ok(groups)
 }
 
 /// An original offer carries its issuer's exact selected native rows independently
@@ -3773,7 +3710,7 @@ impl ArtifactInventory {
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-        demand: NativeArtifactDemand<'_>,
+        demand: NativeArtifactDemand,
     ) -> Result<ArtifactView, CompileError> {
         self.admit_shared_with_intent(
             parent,
@@ -3787,7 +3724,7 @@ impl ArtifactInventory {
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-        demand: NativeArtifactDemand<'_>,
+        demand: NativeArtifactDemand,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<ArtifactView, CompileError> {
         self.admit_shared_with_intent(
@@ -3802,7 +3739,7 @@ impl ArtifactInventory {
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-        demand: NativeArtifactDemand<'_>,
+        demand: NativeArtifactDemand,
         selection: Option<&crate::certified_products::CertifiedSourceSelection>,
     ) -> Result<ArtifactAdmission, CompileError> {
         self.admit_shared_with_intent(
@@ -4371,7 +4308,6 @@ impl ArtifactInventory {
                 selection,
                 classified: &classified,
             },
-            None,
         )?;
         native_availability::CheckedNativeAvailability::from_cohort_custody(custody, &originals)?
             .validate_current_cohort(validation)
@@ -4415,7 +4351,6 @@ impl ArtifactInventory {
                 selected: availability,
                 dependencies,
             },
-            None,
         )?;
         native_availability::CheckedNativeAvailability::from_complete_custody(custody, &originals)
     }
@@ -4446,20 +4381,9 @@ impl ArtifactInventory {
         &self,
         parent: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-        demand: NativeArtifactDemand<'_>,
+        demand: NativeArtifactDemand,
         intent: ArtifactRootIntent<'_>,
     ) -> Result<ArtifactAdmission, CompileError> {
-        let target_groups = match demand {
-            NativeArtifactDemand::VerifiedTarget { entry, imports } => {
-                let mut roots = certified_target_source_groups(&entries, imports)?;
-                roots.insert(entry.native_group_key());
-                Some(roots)
-            }
-            NativeArtifactDemand::CertifiedTargetImports(imports) => {
-                Some(certified_target_source_groups(&entries, imports)?)
-            }
-            _ => None,
-        };
         let groups = match demand {
             NativeArtifactDemand::ScopeInterfaces => BTreeSet::new(),
             NativeArtifactDemand::AllGroups => entries
@@ -4474,31 +4398,8 @@ impl ArtifactInventory {
                         })
                 })
                 .collect(),
-            NativeArtifactDemand::VerifiedTarget { entry, imports } => {
-                let mut groups = certified_target_source_groups(&entries, imports)?;
-                groups.insert(entry.native_group_key());
-                groups
-            }
-            NativeArtifactDemand::CertifiedTargetImports(imports) => {
-                let inherited = parent.artifact_ids().into_iter().collect::<BTreeSet<_>>();
-                let mut groups = entries
-                    .iter()
-                    .filter(|entry| !inherited.contains(&entry.descriptor.id))
-                    .flat_map(|entry| {
-                        entry
-                            .native_group_ordinals
-                            .iter()
-                            .map(move |ordinal| NativeGroupKey {
-                                artifact: entry.descriptor.id,
-                                original_ordinal: *ordinal,
-                            })
-                    })
-                    .collect::<BTreeSet<_>>();
-                groups.extend(certified_target_source_groups(&entries, imports)?);
-                groups
-            }
         };
-        self.admit_selected(parent, entries, groups, false, intent, target_groups)
+        self.admit_selected(parent, entries, groups, false, intent)
     }
     /// Persisted keys are checked against full certified bytes and exact closure.
     pub(crate) fn admit_recovery_selection(
@@ -4513,7 +4414,6 @@ impl ArtifactInventory {
             selected_native_groups.clone(),
             true,
             ArtifactRootIntent::SuppliedArtifacts,
-            None,
         )
         .map(|admission| admission.artifacts)
     }
@@ -4524,9 +4424,8 @@ impl ArtifactInventory {
         groups: BTreeSet<NativeGroupKey>,
         exact: bool,
         root_intent: ArtifactRootIntent<'_>,
-        target_groups: Option<BTreeSet<NativeGroupKey>>,
     ) -> Result<ArtifactAdmission, CompileError> {
-        self.issue_selected_custody(parent, entries, groups, exact, root_intent, target_groups)
+        self.issue_selected_custody(parent, entries, groups, exact, root_intent)
             .map(IssuedArtifactCustody::into_view)
     }
 
@@ -4537,7 +4436,6 @@ impl ArtifactInventory {
         groups: BTreeSet<NativeGroupKey>,
         exact: bool,
         root_intent: ArtifactRootIntent<'_>,
-        target_groups: Option<BTreeSet<NativeGroupKey>>,
     ) -> Result<IssuedArtifactCustody, CompileError> {
         if let Some(entry) = entries
             .iter()
@@ -4554,7 +4452,6 @@ impl ArtifactInventory {
         }
         if entries.is_empty()
             && groups.is_empty()
-            && target_groups.is_none()
             && matches!(root_intent, ArtifactRootIntent::SuppliedArtifacts)
         {
             return Ok(IssuedArtifactCustody {
@@ -4566,7 +4463,6 @@ impl ArtifactInventory {
                     .iter()
                     .map(|(id, entry)| (*id, Arc::clone(entry)))
                     .collect(),
-                target_native_selection: None,
                 source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
             });
         }
@@ -5170,26 +5066,7 @@ impl ArtifactInventory {
                 );
             }
         }
-        let source_receipt = IssuedNativeSourceReceipt::Solved(Arc::new(source_receipts.clone()));
-        let target_native_selection = target_groups
-            .map(|groups| -> Result<_, CompileError> {
-                Ok(IssuedTargetNativeSelection {
-                    sources: source_receipts,
-                    roots: groups
-                        .into_iter()
-                        .map(|group| {
-                            let InventoryNodeKey::Group(binding) =
-                                resolve_target(requested_target(group)?, selection)?
-                            else {
-                                unreachable!("group resolves to group")
-                            };
-                            Ok(binding)
-                        })
-                        .collect::<Result<Vec<_>, CompileError>>()?
-                        .into(),
-                })
-            })
-            .transpose()?;
+        let source_receipt = IssuedNativeSourceReceipt::Solved(Arc::new(source_receipts));
         let roots = match retained_roots {
             Some(roots) => roots,
             None => {
@@ -5289,7 +5166,6 @@ impl ArtifactInventory {
             lease,
             entries: selected,
             supplied,
-            target_native_selection,
             source_receipt,
         })
     }
@@ -5454,7 +5330,6 @@ impl ArtifactInventory {
             lease,
             entries: retained_entries,
             supplied: BTreeMap::new(),
-            target_native_selection: None,
             source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
         })
     }
@@ -13925,7 +13800,6 @@ mod tests {
                 }]),
                 false,
                 ArtifactRootIntent::SuppliedArtifacts,
-                None,
             )
             .unwrap();
         drop(base);

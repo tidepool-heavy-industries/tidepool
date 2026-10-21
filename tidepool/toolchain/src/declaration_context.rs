@@ -15220,7 +15220,7 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
     values: &[CertifiedValueInterface],
     baseline: Option<&ArtifactView>,
-    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
+    demand: crate::artifact_inventory::NativeArtifactDemand,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
     let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
