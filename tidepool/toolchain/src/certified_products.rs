@@ -6128,6 +6128,32 @@ impl OriginalBindingSelection {
         }
     }
 
+    /// Lend the contribution for this exact emitted stage's executable use.
+    /// The passive initial artifact view need not select its offer's Group nodes.
+    pub(crate) fn world_stage_group_support(
+        &self,
+        stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> Result<crate::declaration_context::ChosenNativeGroupSupport, crate::CompileError> {
+        let same_stage = match &self.execution {
+            OriginalBindingExecution::WorldStage(issued) => {
+                Arc::ptr_eq(issued.stage(), stage.stage())
+                    && Arc::ptr_eq(issued.initial_inputs(), stage.initial_inputs())
+                    && Arc::ptr_eq(issued.operation(), stage.operation())
+            }
+            _ => false,
+        };
+        if !same_stage {
+            return Err(crate::CompileError::CompilerEvidence(Box::new(
+                CertificationError::Mismatch(
+                    "Original contribution belongs to another World stage",
+                ),
+            )));
+        }
+        self.target_group(reference, operation)
+    }
+
     fn target_group(
         &self,
         reference: &ReceiptImportOwner,

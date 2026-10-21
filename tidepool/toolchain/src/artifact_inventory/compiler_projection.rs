@@ -2686,7 +2686,7 @@ impl CompilerSourceSupport {
         )?;
         let mut artifacts = projected
             .artifacts
-            .with_world_stage_initial_inputs(stage)?
+            .with_world_stage_initial_inputs(stage, original_bindings)?
             .retain_original_binding_metadata(original_bindings, operation)?;
         // A fresh native body can reuse an already selected TYPE interface.
         // Retain only matching returned owners as issuance candidates; the

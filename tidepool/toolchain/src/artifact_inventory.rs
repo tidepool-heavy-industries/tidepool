@@ -9061,6 +9061,7 @@ impl ArtifactView {
     pub(crate) fn with_world_stage_initial_inputs(
         &self,
         stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+        originals: &crate::certified_products::OriginalBindingSelection,
     ) -> Result<Self, CompileError> {
         let initial = stage.initial_inputs().artifacts();
         if !Arc::ptr_eq(&self.lease.inventory.0, &initial.lease.inventory.0) {
@@ -9071,7 +9072,62 @@ impl ArtifactView {
         let Some(selected) = stage.selection() else {
             return Ok(self.clone());
         };
-        let selected = initial.select_acquired_compiler_bindings(
+        let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
+        if !originals.belongs_to(
+            &stage.initial_inputs().shared_compiler_source_support(),
+            stage.operation(),
+        ) {
+            return Err(failure(
+                "World stage contributions have another acquisition",
+            ));
+        }
+        // The actual stage selected these uses from held offer contributions.
+        // Its passive compiler view owns carrier bindings independently of the
+        // offer's Group scopes, so reopen each exact selecting owner first.
+        let mut acquired = initial.inventory().empty_view();
+        let mut roots = BTreeSet::new();
+        for reference in originals
+            .metadata_references(stage.operation())
+            .map_err(evidence)?
+        {
+            crate::host_work::checkpoint()?;
+            stage
+                .operation()
+                .charge(1)
+                .map_err(|error| evidence(error.into()))?;
+            if originals
+                .executable(reference, stage.operation())
+                .map_err(evidence)?
+                .is_none()
+            {
+                continue;
+            }
+            let chosen =
+                originals.world_stage_group_support(stage, reference, stage.operation())?;
+            stage
+                .operation()
+                .reserve::<(NativeGroupBinding, [usize; 4])>(1)
+                .map_err(|error| evidence(error.into()))?;
+            if !roots.insert(chosen.binding()) {
+                continue;
+            }
+            let lease = chosen.contribution().offer().custody_lease();
+            if !Arc::ptr_eq(&initial.lease.inventory.0, &lease.inventory.0) {
+                return Err(failure(
+                    "World stage contribution belongs to another inventory",
+                ));
+            }
+            let custody = Self::from_custody(Arc::clone(lease));
+            let demanded = custody.select_acquired_compiler_bindings(
+                &BTreeMap::new(),
+                std::iter::once(chosen.binding()),
+                stage.operation(),
+            )?;
+            acquired = acquired.merge_validated_namespace(&demanded, BTreeMap::new())?;
+        }
+        // Require every certified stage row in those exact closures, then keep
+        // only this stage's selected set as executable roots.
+        let selected = acquired.select_acquired_compiler_bindings(
             &BTreeMap::new(),
             selected
                 .selected_groups()
