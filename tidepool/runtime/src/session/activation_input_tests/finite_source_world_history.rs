@@ -134,7 +134,7 @@ fn assert_unchanged_public_caf<'a>(
         "the SAME issued package binding must survive each B item"
     );
     assert_same_package_instance(previous, actual);
-    actual
+    *actual
 }
 
 #[test]
