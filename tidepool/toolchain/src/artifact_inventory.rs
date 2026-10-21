@@ -13,6 +13,8 @@ use crate::CompileError;
 
 #[cfg(test)]
 mod properties;
+#[cfg(test)]
+mod package_occurrence_linkage_tests;
 
 mod compiler_projection;
 mod native_availability;
