@@ -4596,17 +4596,12 @@ fn admit_native_target_products(
     // Shared original membership already authenticates every current group.
     // The per-item lookup needs only that immutable index; execution selection
     // is still admitted below from the checked entry and exact target imports.
-    let selected_membership = if segment_originals.is_some() {
-        &[][..]
-    } else {
-        certified.groups.as_ref()
-    };
     let imports =
         certified_products::certify_target_available_owners_from_membership_with_validation(
             prepared,
             accepted,
             &original_sources,
-            selected_membership,
+            &[],
             &certified.source_selection,
             package_catalog,
             validation,
@@ -6448,7 +6443,7 @@ fn compile_invocation_inner(
                         target.prepared.prepared(),
                         accepted,
                         &certified.recovery_products,
-                        &certified.groups,
+                        &[],
                         &certified.source_selection,
                         &package_catalog,
                         &mut validation,
