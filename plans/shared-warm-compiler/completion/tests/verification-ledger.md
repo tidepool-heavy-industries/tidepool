@@ -1,6 +1,6 @@
 # Joined compiler/runtime verification gates
 
-Source-disposition checkpoint: `6bd1275d4a45f78bb11dbdf17e926af4a75948c4`,
+Source-disposition checkpoint: `5d501a98b9f2f0fc2cd9795e6b3c1e4d5df1558c`,
 on `integration/compiler-query-warm-final`. The executed compiler/custody cohort
 below remains exact `b856a75d5c`; later source changes do not inherit its results.
 Integrated source is not executed acceptance. This ledger separates compiler/custody checks,
@@ -90,10 +90,51 @@ append another `--exact` or substitute an uncounted generic wrapper.
 | Answer settlement, expected 1: `//exomonad/actor:actor_world_status_test` | A real answer completes, publication intervenes, final validator refuses ScopeChanged | Held. Prior `51216eb9d6` failed during literal-query parsing before publication; no current settlement result follows. |
 | Notebook contract, expected 4: `//exomonad/actor:actor_notebook_contract_tests` | Parked A allows B control; malformed/unavailable reload releases invocation and preserves independent cells/bindings | Held. Prior `51216eb9d6` failed during initial source ownership; that old failure is not a current-source result. |
 | Public-module queries, expected 2: `//exomonad/actor:actor_compiler_world_queries_test` | Exact answer/pin, wrong-name refusal, source invalidation, hot counters, closed-source refusal | Canonical source `9c18cceebc` adds actual rowFit/typeOfExpression/typeSearch effects. Execution remains held; the `b856` cohort predates this change and does not execute these actor cases. |
-| Finite source → World, expected 1: `//tidepool/runtime:runtime_package_source_history_test` | Remove the observed actual producer output, preserve completed products, execute public B through A cutoff and retained callback | Finite-removal/retained-callable source is canonical as `5097c09cd7`; historical parent publication/recovery controls are canonical through `fb34ffe421`. No executed history receipt is recorded here. Request capture/mount remains a separate companion case. |
+| Finite source → World, expected 1: `//tidepool/runtime:runtime_package_source_history_test` | Remove the observed actual producer output, preserve completed products, execute public B through A cutoff and retained callback | Finite-removal/retained-callable source is canonical as `5097c09cd7`; historical parent publication/recovery controls are canonical through `fb34ffe421`. The latest executed frontier reaches public B publication but loses selected package-root domains; see the runtime frontier below. Request capture/mount remains a separate companion case. |
 | Default reload | Real staged B despite draft C; success/refusal; captured-A refusal; caller loss after typed publication leaves B callable | Held for integrated replay. Earlier startup failures before Reload and separate SourceSlot controls cannot establish this workflow. |
-| Uncertain END, receiving expected 1: `//tidepool/runtime:runtime_compiler_end_history_test` | Genuine prepare before physically withheld END acknowledgement; typed Unconfirmed, no execution/publication, exact daemon resumed | Source-ready `d9ba2b7c7c` is unexecuted. [History ledger](/srv/swarm/evidence/inanna/g2-history-tests-20261020/qualification-ledger.json) retains its selector and required cleanup evidence; source review does not prove settlement. |
+| Uncertain END, expected 1: `//tidepool/runtime:runtime_compiler_end_history_test` | Genuine prepare before physically withheld END acknowledgement; typed Unconfirmed, no execution/publication, exact daemon resumed | Passed at exact `e574be71b531a5be21d54838f7d03247a9aca86d`: selected/executed/passed 1, exit 0, Build `e2b8a836-7c4b-48d4-b88e-63f0084b56b9`. [Terminal receipt](/srv/swarm/evidence/inanna/g2-history-tests-20261020/end-e574be71b5-terminal.json) retains binary/compiler/deployment hashes and counted report. Actual successful compiler response, 2 physical requests, 0 replays, publication refused and public state unchanged. Process/compiler cleanup confirmed; diagnostics incomplete because directory-resource hashes are UNKNOWN. This qualifies the END behavior/physical-cleanup gate at its source, not the ordinary route or G2. |
 | Eviction | Actual cold owner eviction and recovery through the ordinary history | Held for measured resource/budget selection and source extension. Retained-cache configuration alone is not evidence of actual eviction. |
+
+## Current compiler milestone and open runtime frontier
+
+The [compiler checkpoint](/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/plan-b-current.json)
+records the following at exact `5d501a98b9f2f0fc2cd9795e6b3c1e4d5df1558c`.
+Its command manifests retain the exact selectors and logs. These results qualify
+compiler preparation/sealing and the named laws, not runtime or release.
+
+| Gate | Terminal result and scope |
+|---|---|
+| Production/cfg consumers | Passed, exit 0, Build `990a17fb-55c8-4b38-b7bf-96b69bd19f4e`; compilation executes no tests. |
+| Actual mixed World preparation | Executed/passed 1, exit 0, Build `94305e7c-4c05-489b-92dc-08beee161fb6`. [Command](/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/actual-producer-helper-mixed-36-command.json). Replaces earlier mixed-stage failures for this compiler history, not runtime installation. |
+| Carried TYPE/Name law | Executed/passed 1, exit 0, Build `8fd289ec-5654-4a8c-9245-e275189ed0fa`. [Command](/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/matched-carried-type-law-36-command.json). |
+| Prefix recipe/history | Executed/passed 1, Build `330ed355-ea59-4a09-986c-8abcf51573b6`. [Command](/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/matched-prefix-history-law-36-command.json). |
+| Support/replay refusal | Executed/passed 2, Build `aa3f2cde-4095-4ba1-93ed-29e5d8e33b7a`. [Command](/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/final-support-negatives-36-command.json). |
+| Publication/exact occurrence, predecessor `d870d7ef93` | Executed/passed 3, Build `c2f5f50b-62d8-4a9b-9b2e-d027e7e2a311`; same production source according to the checkpoint. [Command](/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/source-owner-fixtures-controls-35-command.json). Keep this exact test-source distinction. |
+| Matched package/HOME laws | Executed 2: selected-HOME edges passed 1; original-package projection failed 1. Its negative sentinel chooses an arbitrary broad package row rather than the issued defining owner. Fixture repair remains open; no passing refusal control or production defect is inferred. |
+| `fixtures-check` | Active at this checkpoint; no terminal pass recorded here. |
+
+The compiler checkpoint does not retain complete cleanup/artifact fields for
+every law; no stronger cleanup or frozen-resource claim is inferred from its
+passing counts.
+
+At exact `f0819562a7b7a63f3b68840f8cc7d0570ffb344d`, the
+[source-policy checkpoint](/srv/swarm/evidence/inanna/g2-common-native-installer-20261020/ordinary-source-policy-checkpoint.json)
+records two separately counted passes (1/1 each, exit 0): Ordinary startup,
+effect suspension/callback capture/resume to 42; and captured-A cutoff refusal
+with unchanged images/residency plus independent fresh-B execution. Both report
+process/compiler cleanup confirmed and diagnostics incomplete. These are scoped
+controls, not full launch or the finite → public World journey.
+
+The runtime finite frontier is still an executed failure. At
+`bc6b018052bf2185c8f00d8233cbb6d35843fe1a`, with diagnostic source
+`a5002d3a955116964bd4af71d4d49e41837c0934`, the
+[runtime handoff](/srv/swarm/evidence/inanna/g2-common-native-installer-20261020/overnight-runtime-handoff.json)
+records 1 failed history (exit 101, process/compiler cleanup confirmed): the first public
+B executes/displays 42 and publishes,
+exact package bindings/ordered children remain unchanged, but public selected
+package-root domains are empty. Transactional selection transfer remains under
+repair. Earlier target-membership and pre-installer failures are not the current
+frontier; success before this assertion does not turn the history into a pass.
 
 ## Remaining route disposition
 
@@ -105,14 +146,14 @@ prefix `ReceiptNativeInputDemand` supplies SOURCE/TYPE projection only. These
 source corrections supersede the old deletion/reconstruction tasks; they do not
 qualify the held ordinary histories.
 
-Physical current-product issuance/carry is implemented in reviewed Original
-source. Target consumers still lower/rematch imports, and Ordinary startup can
-reach installation without current source facts. The map separates confirmed
-handoffs, observed imported-target/TYPE failures and predicted runtime authority
-risks. Accepted Plan B requires ordered exact selectors, nominal metadata without
-execution permission, and actual source facts for each installation; scaffolding
-is not consumer cutover. New execution receipts must name the exact merged
-source and cannot inherit prior component passes.
+Physical current-product issuance, ordered exact target selection, typed-entry
+association and prior-stage support are integrated and exercised by the compiler
+checkpoint above. Nominal metadata still grants no executable permission.
+The common installer refuses unsealed Ordinary code before preparation; sealed
+Ordinary code restricts its plan and carries the installing transaction origin.
+Execution requires checked current source facts and retained-capture custody.
+Compiler passes and scoped runtime controls do not qualify public runtime
+selection transfer, the full finite journey or a frozen bundle.
 
 Finite preparation is intentional for the explicit unprepared developer/fixture
 installer and test surfaces. Ordinary actor checked cells require World.
