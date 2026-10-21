@@ -1645,10 +1645,11 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertIn("//bridge/haskell:facade_embedded_sources", unit["resources"])
         self.assertEqual(set(unit["resource_env"]), {
             "TIDEPOOL_CELL_TEST_EXTRACT", "TIDEPOOL_COMPILER_DEPLOYMENT",
-            "TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", "TIDEPOOL_EXTRACT_WORKER",
+            "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
+            "TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_WORKER",
             "TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
             "TIDEPOOL_HASKELL_ACTORS_DIR", "TIDEPOOL_M3_FIXTURE_DIR", "TIDEPOOL_PRELUDE_DIR",
-            "LD_LIBRARY_PATH", "TIDEPOOL_GHC",
+            "TIDEPOOL_GHC",
         })
         self.assertEqual(unit["env"], {
             "TIDEPOOL_KEEP_TEST_LOGS": "1",
