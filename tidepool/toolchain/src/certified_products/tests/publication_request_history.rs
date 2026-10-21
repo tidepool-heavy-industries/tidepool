@@ -351,6 +351,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     let observed: [std::cell::Cell<usize>; 5] = std::array::from_fn(|_| std::cell::Cell::new(0));
     let refusals: [std::cell::Cell<usize>; 7] = std::array::from_fn(|_| std::cell::Cell::new(0));
     let duplicate_refusals = std::cell::Cell::new(0usize);
+    let carried_reuses = std::cell::Cell::new(0usize);
     let result = runner.run(&(0..ORDINALS.len(), operations()), |(initial, history)| {
         callbacks.set(callbacks.get() + 1);
         let (root, helper, publication) = fixture_with_helper_version(initial, 1, true);
@@ -390,7 +391,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let mut demanded = BTreeSet::from([ORDINALS[initial]]);
         let mut context = original.as_ref().clone();
         let mut outputs = BTreeMap::new();
-        let mut output_producers = BTreeMap::new();
+        let mut output_producers: BTreeMap<u32, (
+            CertifiedSourceSelection, OriginalCompilerInputs,
+            BTreeSet<NativeGroupBinding>, ProductOrigin,
+        )> = BTreeMap::new();
         let mut cached_outputs = BTreeSet::new();
         let request_scratch = tempfile::tempdir().unwrap();
         // Every history reaches the causal interaction, even after shrinking:
@@ -398,6 +402,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let history = history
             .into_iter()
             .chain([
+                Operation::Demand((initial + 1) % ORDINALS.len()),
+                Operation::Demand((initial + 1) % ORDINALS.len()),
                 Operation::Demand((initial + 1) % ORDINALS.len()),
                 Operation::Compose,
                 Operation::Recover,
@@ -492,14 +498,39 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         crate::declaration_context::NativeTransportMode::Full);
                     prop_assert!(!completed.issued_artifacts().selected_native_groups().iter()
                         .any(|group| group.artifact == output.descriptor.id));
-                    let own = selection.produced_source_receipt(
+                    let produced = selection.produced_source_receipt(
                         &output.descriptor.owner, completed.issued_artifacts(),
-                    ).unwrap().unwrap();
-                    let expected_bindings = own.own_offer().issued_group_carriers().unwrap()
-                        .into_keys().collect::<BTreeSet<_>>();
+                    ).unwrap();
+                    let new_bindings = if let Some(own) = produced {
+                        Some(own.own_offer().issued_group_carriers().unwrap()
+                            .into_keys().collect::<BTreeSet<_>>())
+                    } else {
+                        prop_assert!(emitted_before && cached_outputs.contains(&ordinal));
+                        let (prior_selection, _, prior_bindings, _) = output_producers.get(&ordinal)
+                            .expect("carried Cached input must retain its actual earlier producer");
+                        let prior = prior_selection.target_original(product.owner()).unwrap().unwrap();
+                        prop_assert_eq!(prior.as_ref(), output.as_ref());
+                        let ArtifactPayload::Original(prior_product) = &prior.payload else { unreachable!() };
+                        prop_assert_eq!(prior_product.product_bytes(), product.product_bytes());
+                        prop_assert_eq!(prior_product.certification_bytes(), product.certification_bytes());
+                        prop_assert_eq!(prior_product.module_interface(), product.module_interface());
+                        let key = NativeGroupKey { artifact: output.descriptor.id, original_ordinal: 0 };
+                        prop_assert!(selection.current_product(key, &output).unwrap().is_none());
+                        let carried = output_permission.dependency_support(key, product.owner()).unwrap()
+                            .groups().collect::<BTreeSet<_>>();
+                        let prior_own = prior_bindings.iter().filter(|group|
+                            group.binding.artifact() == output.descriptor.id && group.original_ordinal == 0)
+                            .copied().collect::<BTreeSet<_>>();
+                        prop_assert_eq!(prior_own.len(), 1);
+                        prop_assert!(prior_own.is_subset(&carried));
+                        carried_reuses.set(carried_reuses.get() + 1);
+                        None
+                    };
                     let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed).unwrap();
                     context = context.extend_issued_compiler_support(&support).unwrap();
-                    output_producers.insert(ordinal, (selection, completed, expected_bindings));
+                    if let Some(bindings) = new_bindings {
+                        output_producers.insert(ordinal, (selection, completed, bindings, origin));
+                    }
                     prop_assert_eq!(&output.requirements, &vec![root.descriptor.owner.clone()]);
                     let output_lexical = ExactLexicalNode {
                         owner: output.descriptor.owner.clone(),
@@ -660,10 +691,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 // context preserves availability, not same-program Source identity.
                 let mut aggregate_targets = BTreeSet::new();
                 for (ordinal, (output, _, permitted_carriers)) in &outputs {
-                    let (selection, physical, expected_bindings) = &output_producers[ordinal];
+                    let (selection, physical, expected_bindings, origin) = &output_producers[ordinal];
                     let ArtifactPayload::Original(product) = &output.payload else { unreachable!() };
                     let mut observations = source_target_observations(&[(product, 0)]);
-                    if !cached_outputs.contains(ordinal) {
+                    if *origin == ProductOrigin::RetainedCore {
                         let ReceiptImportOwner::Source { module_version, .. } = &mut observations[0].owner
                             else { unreachable!() };
                         *module_version = None;
@@ -791,8 +822,13 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         "publication duplicate-row refusals={}",
         duplicate_refusals.get()
     );
+    eprintln!(
+        "publication carried producer reuses={}",
+        carried_reuses.get()
+    );
     result.unwrap();
     assert!(duplicate_refusals.get() >= configured_cases as usize);
+    assert!(carried_reuses.get() >= configured_cases as usize);
     assert!(refusals
         .iter()
         .all(|count| count.get() >= configured_cases as usize));
