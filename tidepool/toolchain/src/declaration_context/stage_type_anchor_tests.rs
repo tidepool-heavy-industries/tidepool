@@ -305,3 +305,112 @@ pub(super) fn assert_actual_prior_source_inputs(
     }
     eprintln!("actual World prior Source controls: stage {}, prior {exercised}, wrong version {exercised}, wrong binder {exercised}, absent ordinal {exercised}, carried provenance {exercised}", inputs.initial.stage().index());
 }
+
+/// A completed dormant body can publish future permission while its current
+/// stage still refuses execution of an available, unselected Original use.
+pub(super) fn assert_completed_current_stage_ceiling(
+    inputs: &DemandedWorldCompilerInputs,
+    originals: &crate::certified_products::CertifiedSegmentOriginals,
+) {
+    use crate::certified_products::{CertificationError, ReceiptImportOwner};
+
+    let mut exercised = 0;
+    if let Some(owner) = inputs.initial.stage().identity().original_owner() {
+        let selection = originals.source_selection();
+        let physical_inputs = originals.physical_inputs();
+        let physical = physical_inputs.issued_artifacts();
+        'current: for entry in originals.artifact_entries() {
+            if entry.descriptor.owner != *owner {
+                continue;
+            }
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                continue;
+            };
+            for &ordinal in &entry.native_group_ordinals {
+                let key = crate::artifact_inventory::NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: ordinal,
+                };
+                let Some(current) = selection.current_product(key, entry).unwrap() else {
+                    continue;
+                };
+                for import in current.nominal_imports().unwrap() {
+                    let reference = import.reference();
+                    if !matches!(reference, ReceiptImportOwner::OriginalBinding { .. })
+                        || current
+                            .available_original_group(reference, inputs.initial.operation())
+                            .unwrap()
+                            .is_none()
+                        || inputs
+                            .original_bindings
+                            .executable(reference, inputs.initial.operation())
+                            .unwrap()
+                            .is_some()
+                    {
+                        continue;
+                    }
+                    let receipt = selection
+                        .produced_source_receipt(owner, physical)
+                        .unwrap()
+                        .expect("actual current product has a completed physical issuer");
+                    let own = receipt.groups(key).collect::<BTreeSet<_>>();
+                    assert!(
+                        !own.is_empty(),
+                        "dormant current group is already physically available"
+                    );
+                    assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
+                    assert!(
+                        inputs
+                            .original_bindings
+                            .executable(reference, inputs.initial.operation())
+                            .unwrap()
+                            .is_none(),
+                        "actual stage does not select the available Original use"
+                    );
+                    let roots = physical.capture_graph_selection().roots;
+                    let native = physical.capture_graph_selection().native_groups;
+                    let decisions = inputs.support.recorded_input_decisions().clone();
+                    let refuse_shortcut =
+                        || {
+                            let error = current.completed_for_target(physical).err().expect(
+                                "physical completion cannot bypass the actual stage ceiling",
+                            );
+                            assert!(matches!(&error, CompileError::CompilerEvidence(error)
+                            if matches!(error.as_ref(), CertificationError::Mismatch(
+                                "current Original use exceeds actual stage demand"))),
+                            "completed target must refuse at the actual stage ceiling: {error:?}");
+                        };
+                    refuse_shortcut();
+                    let publication = selection
+                        .produced_authored_original_publication(
+                            physical_inputs.physical_cohort().unwrap(),
+                            owner,
+                        )
+                        .expect("dormant produced body can publish its existing future permission");
+                    assert!(Arc::ptr_eq(
+                        publication.produced_availability().unwrap(),
+                        &receipt
+                    ));
+                    let published = publication.native_closure().capture_graph_selection();
+                    for binding in &own {
+                        assert!(published.native_groups.contains(binding));
+                    }
+                    refuse_shortcut();
+                    assert_eq!(physical.capture_graph_selection().roots, roots);
+                    assert_eq!(physical.capture_graph_selection().native_groups, native);
+                    assert_eq!(inputs.support.recorded_input_decisions(), &decisions);
+                    assert_eq!(receipt.groups(key).collect::<BTreeSet<_>>(), own);
+                    assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
+                    assert!(inputs
+                        .original_bindings
+                        .executable(reference, inputs.initial.operation())
+                        .unwrap()
+                        .is_none());
+                    exercised += 1;
+                    break 'current;
+                }
+            }
+        }
+    }
+    eprintln!("actual World completed-stage ceiling: stage {}, refusal {exercised}, publication {exercised}, retry refusal {exercised}", inputs.initial.stage().index());
+}

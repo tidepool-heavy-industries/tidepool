@@ -11928,6 +11928,8 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             originals.source_selection(),
             &prior_source_observations,
         );
+        #[cfg(test)]
+        stage_type_anchor_tests::assert_completed_current_stage_ceiling(&inputs, &originals);
         Ok(WorldProgramSegment {
             package_products: package_products.into(),
             originals,
