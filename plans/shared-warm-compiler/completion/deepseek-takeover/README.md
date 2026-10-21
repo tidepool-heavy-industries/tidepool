@@ -12,6 +12,8 @@ authority, publication, cancellation or historical-dependency contracts.
 [Cause analysis and diagnostic decisions](06-cause-analysis.md) records what the
 staff review established, what remains a hypothesis, and the observation that
 distinguishes each plausible cause. Read it before treating a guard as the bug.
+[Code-quality work](07-code-quality.md) distinguishes required boundary repairs,
+small in-area cleanup and explicitly deferred architectural investigations.
 
 ## Outcome and architectural judgment
 
