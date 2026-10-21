@@ -7206,108 +7206,152 @@ mod checkpoint_scope_tests {
 
     #[test]
     fn certified_source_plan_ignores_unrelated_sibling_observation_changes() {
-        use super::super::prepared::tests::{
-            certified_source_group_modules, prepare_selected_groups_fixture,
-        };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        use super::super::prepared::tests::compile_source_publication_fixture;
+        let targets = compile_source_publication_fixture();
+        let compiled =
+            super::super::CompiledTurn::from_runtime_target(&targets.artifacts, "result").unwrap();
+        let code = compiled.code();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 828);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let observation = super::super::prepared::tests::evaluated_publication_fixture(
-            &mut session,
-            "observation",
-            922,
-        );
-        let id = observation.id;
-        session.bind_in(scope, observation).unwrap();
-        session.save_observation(id, &[]);
-        let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
-        let source = SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("D", "d1"),
-        };
-        let (target, evidence, inherited) =
-            prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
-        let admitted = session.public_visibility_snapshot_in(scope).unwrap();
-        let cache = session
-            .bindings()
-            .scope_witness(session.scope_tree(), scope)
-            .unwrap();
-        let sibling = session.mint_isolated_scope();
-        let sibling_observation = super::super::prepared::tests::evaluated_publication_fixture(
-            &mut session,
-            "sibling",
-            923,
-        );
-        let sibling_id = sibling_observation.id;
-        session.bind_in(sibling, sibling_observation).unwrap();
-        session.save_observation(sibling_id, &[]);
-        assert_ne!(
-            session
-                .bindings()
-                .scope_witness(session.scope_tree(), scope)
-                .unwrap(),
-            cache
-        );
-        assert_eq!(
-            session.public_visibility_snapshot_in(scope).unwrap(),
-            admitted
-        );
-        let (program, _, _) = session
-            .install_certified_turn_in(
-                scope,
-                &target.fixture_constructor_metadata(),
-                target,
-                &evidence,
-                &inherited,
-                &|_| None,
+        let plan = Arc::new(
+            super::super::prepared::NativeInstantiationPlan::prepare_code(
+                &code,
+                &session.certified_image_registry(),
             )
-            .unwrap()
-            .into_parts();
-        assert!(session.prepared_mut().unwrap().unpin(program));
+            .unwrap(),
+        );
+        let _placement = session.prepared_lexical_scope_lease(scope).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                targets.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |mut session, _| {
+                    let observation = super::super::prepared::tests::evaluated_publication_fixture(
+                        &mut session,
+                        "observation",
+                        922,
+                    );
+                    let id = observation.id;
+                    session.bind_in(scope, observation).unwrap();
+                    session.save_observation(id, &[]);
+                    let resolved = session
+                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
+                        .unwrap();
+                    let admitted = session.public_visibility_snapshot_in(scope).unwrap();
+                    let cache = session
+                        .bindings()
+                        .scope_witness(session.scope_tree(), scope)
+                        .unwrap();
+                    let sibling = session.mint_isolated_scope();
+                    let _sibling_placement = session.prepared_lexical_scope_lease(sibling).unwrap();
+                    let sibling_observation =
+                        super::super::prepared::tests::evaluated_publication_fixture(
+                            &mut session,
+                            "sibling",
+                            923,
+                        );
+                    let sibling_id = sibling_observation.id;
+                    session.bind_in(sibling, sibling_observation).unwrap();
+                    session.save_observation(sibling_id, &[]);
+                    assert_ne!(
+                        session
+                            .bindings()
+                            .scope_witness(session.scope_tree(), scope)
+                            .unwrap(),
+                        cache
+                    );
+                    assert_eq!(
+                        session.public_visibility_snapshot_in(scope).unwrap(),
+                        admitted
+                    );
+                    let (program, _, _) = session
+                        .install_native_turn_in(scope, &targets.artifacts.table, resolved)
+                        .unwrap()
+                        .into_parts();
+                    assert!(session.prepared_mut().unwrap().unpin(program));
+                },
+            )
+            .unwrap();
+        let outcome = settled.into_outcome();
+        assert!(matches!(
+            outcome.close,
+            crate::CompilerTransactionClose::NotStarted | crate::CompilerTransactionClose::Clean
+        ));
     }
 
     #[test]
     fn source_domain_metadata_change_refuses_prepared_install_atomically() {
-        use super::super::prepared::tests::{
-            certified_source_group_modules, prepare_selected_groups_fixture,
-        };
-        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        use super::super::prepared::tests::compile_source_publication_fixture;
+        let targets = compile_source_publication_fixture();
+        let compiled =
+            super::super::CompiledTurn::from_runtime_target(&targets.artifacts, "result").unwrap();
+        let code = compiled.code();
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 826);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
-        let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
-        let source = SourceBinder {
-            version: ModuleVersion([1; 32]),
-            binder: testing::identity("D", "d1"),
-        };
-        let (target, evidence, inherited) =
-            prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
-        let mut metadata = target.fixture_constructor_metadata();
-        let staged_only = super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
-        metadata.insert_checked(staged_only.clone()).unwrap();
-        let before = session.public_visibility_snapshot_in(scope).unwrap();
-        mint_fixture_origin(&mut session, scope, groups[0].owner().clone());
-        let after = session.public_visibility_snapshot_in(scope).unwrap();
-        assert_eq!(before.source_instances, after.source_instances);
-        assert_eq!(before.bindings, after.bindings);
-        assert_ne!(before.source_selection, after.source_selection);
+        let plan = Arc::new(
+            super::super::prepared::NativeInstantiationPlan::prepare_code(
+                &code,
+                &session.certified_image_registry(),
+            )
+            .unwrap(),
+        );
+        let _placement = session.prepared_lexical_scope_lease(scope).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                targets.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |mut session, _| {
+                    let resolved = session
+                        .resolve_native_turn_in(scope, &code, plan, &|_| None)
+                        .unwrap();
+                    let mut metadata = targets.artifacts.table.clone();
+                    let staged_only =
+                        super::constructor_admission_tests::constructor(991337, "StagedOnly", 0);
+                    metadata.insert_checked(staged_only.clone()).unwrap();
+                    let before = session.public_visibility_snapshot_in(scope).unwrap();
+                    let owner = code
+                        .certification()
+                        .unwrap()
+                        .native_selection
+                        .as_ref()
+                        .unwrap()
+                        .completion()
+                        .rows()
+                        .next()
+                        .expect("actual producer selects a HOME group")
+                        .product()
+                        .owner()
+                        .clone();
+                    mint_fixture_origin(&mut session, scope, owner);
+                    let after = session.public_visibility_snapshot_in(scope).unwrap();
+                    assert_eq!(before.source_instances, after.source_instances);
+                    assert_eq!(before.bindings, after.bindings);
+                    assert_ne!(before.source_selection, after.source_selection);
+                    assert!(matches!(
+                        session.install_native_turn_in(scope, &metadata, resolved),
+                        Err(PreparedRuntimeError::SourceScopeAdmission)
+                    ));
+                    assert!(session.residency().is_none());
+                    assert!(session.session_table().get(staged_only.id).is_none());
+                    assert_eq!(session.public_visibility_snapshot_in(scope).unwrap(), after);
+                },
+            )
+            .unwrap();
+        let outcome = settled.into_outcome();
         assert!(matches!(
-            session.install_certified_turn_in(
-                scope,
-                &metadata,
-                target,
-                &evidence,
-                &inherited,
-                &|_| None,
-            ),
-            Err(PreparedRuntimeError::SourceScopeAdmission)
+            outcome.close,
+            crate::CompilerTransactionClose::NotStarted | crate::CompilerTransactionClose::Clean
         ));
-        assert!(session.residency().is_none());
-        assert!(session.session_table().get(staged_only.id).is_none());
-        assert_eq!(session.public_visibility_snapshot_in(scope).unwrap(), after);
     }
 
     #[test]
