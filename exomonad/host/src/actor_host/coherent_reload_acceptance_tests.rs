@@ -1178,6 +1178,15 @@ async fn frozen_source_reload_history(control: FrozenReloadControl) {
                         serde_json::json!({}),
                     )
                     .await;
+                    // The retry has settled. Compare its published B with a
+                    // later editable C through the shared frozen-source oracle.
+                    std::fs::write(
+                        authored.join("Project/Work.hs"),
+                        include_str!("fixtures/coherent_reload_work_c.hs"),
+                    )
+                    .unwrap();
+                    std::fs::write(authored.join("prompts/agent.md"), "Unpublished draft C.\n")
+                        .unwrap();
                     (round, "ordinary-after-cancel")
                 }
             };

@@ -1586,7 +1586,14 @@ def facade_test_cases(binary):
         if tests:
             lines.extend(["    exact_tests = [", render_strings(tests, 8), "    ],",
                           f"    expected_count = {len(tests)},"])
-        if name in ("facade_introspection_service_test", "facade_reload_default_publication_test", "facade_reload_force_refusal_test"):
+        if name in (
+            "facade_introspection_service_test",
+            "facade_reload_default_publication_test",
+            "facade_reload_frozen_source_test",
+            "facade_reload_cancellation_test",
+            "facade_reload_caller_loss_test",
+            "facade_reload_force_refusal_test",
+        ):
             lines.append('    case_compiler_modes = {' + ", ".join(
                 json.dumps(test) + ': "owned-resident"' for test in tests
             ) + "},")
