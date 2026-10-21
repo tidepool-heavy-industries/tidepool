@@ -657,8 +657,8 @@ fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
                     origin.domain
                 );
                 assert_eq!(
-                    native.domain_for_owner(*caller, owner),
-                    home.domain_for_owner(*caller, owner)
+                    native.domain_for_owner(*caller, owner).unwrap(),
+                    home.domain_for_owner(*caller, owner).unwrap()
                 );
             }
             assert_eq!(
