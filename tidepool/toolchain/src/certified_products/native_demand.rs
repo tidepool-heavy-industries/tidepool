@@ -218,4 +218,50 @@ mod tests {
         trailing.push(0);
         assert!(NativeDemandPacket::decode(&trailing, &operation).is_err());
     }
+
+    #[test]
+    fn native_demand_progress_filters_exact_uses_without_collapsing_new_binders_or_pairs() {
+        let operation = InventoryOperation::new(Default::default());
+        let first = original("A");
+        let mut second = first.clone();
+        let Value::Array(row) = &mut second else {
+            unreachable!()
+        };
+        let Value::Array(binder) = &mut row[4] else {
+            unreachable!()
+        };
+        binder[3] = Value::Text("second".into());
+        let decoded = NativeDemandPacket::decode(
+            &packet(vec![first.clone(), second, original("B")]),
+            &operation,
+        )
+        .unwrap();
+        let known = &decoded.originals()[0];
+        let fresh = decoded
+            .without_known(|reference| reference == known, &operation)
+            .unwrap();
+        assert_eq!(fresh.originals(), &decoded.originals()[1..]);
+        assert!(decoded
+            .without_known(|_| true, &operation)
+            .unwrap()
+            .originals()
+            .is_empty());
+
+        let mut changed = first;
+        let Value::Array(row) = &mut changed else {
+            unreachable!()
+        };
+        let Value::Array(pair) = &mut row[3] else {
+            unreachable!()
+        };
+        pair[1] = Value::Bytes(vec![5; 32]);
+        let changed = NativeDemandPacket::decode(&packet(vec![changed]), &operation).unwrap();
+        assert_eq!(
+            changed
+                .without_known(|reference| reference == known, &operation)
+                .unwrap()
+                .originals(),
+            changed.originals()
+        );
+    }
 }
