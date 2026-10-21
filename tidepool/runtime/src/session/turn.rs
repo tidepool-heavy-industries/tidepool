@@ -1730,15 +1730,7 @@ impl<'a> CurrentNativeSources<'a> {
                     .map(|site| site.site),
             )
         };
-        let mut matching = self
-            .products
-            .groups()
-            .filter(|row| row.binding() == selected.binding() && row.matches_group(pending));
-        let row = matching.next();
-        if matching.next().is_some() {
-            return unknown();
-        }
-        match row.and_then(|row| row.physical_current()) {
+        match self.products.physical_current_for(selected) {
             Some(current) => self.source.for_current_group(current),
             None => unknown(),
         }

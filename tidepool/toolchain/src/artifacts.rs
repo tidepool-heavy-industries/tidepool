@@ -3677,6 +3677,21 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
+    /// Borrow physical membership only for this exact selected row and issuance.
+    pub fn physical_current_for(
+        &self,
+        selected: &crate::artifact_inventory::CompletedNativeSourceRow,
+    ) -> Option<PhysicalCurrentNativeGroup<'a>> {
+        let mut matching = self.rows.iter().filter(|row| {
+            row.binding() == selected.binding() && row.matches_group(selected.product())
+        });
+        let row = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        row.physical_current()
+    }
+
     pub(crate) fn issue(
         resolved: crate::artifact_inventory::ResolvedNativeSourceTarget<'a>,
         prepared: &'a PreparedProgram,
