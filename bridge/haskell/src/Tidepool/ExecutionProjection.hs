@@ -9,7 +9,7 @@ module Tidepool.ExecutionProjection
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedPackageTarget, projectPreparedPackageTarget
-  , packageTargetProgram, packageTargetConstructors, packageTargetGroups
+  , packageTargetProgram, packageTargetConstructors, packageTargetGroups, packageTargetHomeImports
   , ProjectedPackageGroup, projectPreparedPackageGroups
   , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
@@ -79,7 +79,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Data.Word (Word32, Word64, Word8)
+import Data.Word (Word, Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
 import GHC.Builtin.Types (doubleDataCon, intDataCon, intTy, promotedConsDataCon, promotedNilDataCon)
 import GHC.Core (AltCon(..))
@@ -948,12 +948,13 @@ data PreparedPackageTarget = PreparedPackageTarget
   { packageTargetProgram :: WireProgram
   , packageTargetConstructors :: [IssuedConstructor]
   , packageTargetGroups :: [ProjectedPackageGroup]
+  , packageTargetHomeImports :: Map.Map (Text, Text, Word) [SymbolIdentity]
   }
 
-projectPreparedPackageTarget :: [HostBindingRepresentation] -> ProjectionContext
+projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> ProjectionContext -> ProjectionContext
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget hostBindings context home components reach = do
+projectPreparedPackageTarget env hostBindings homeContext context home components reach = do
   let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
@@ -962,8 +963,36 @@ projectPreparedPackageTarget hostBindings context home components reach = do
         | prepared <- home, any reachable (pmBindings prepared)]
       reachable (binding, _) = any
         ((`elementOfUniqSet` reachedUniques reach) . varUnique) (topBinders binding)
+      homeUnitIds = hsc_all_home_unit_ids env
+      isHomeUnit modul = toUnitId (moduleUnit modul) `Set.member` homeUnitIds
+      homeModulePairs = Set.fromList
+        [ (Text.pack (unitString (moduleUnit (pmModule prepared)))
+          , Text.pack (moduleNameString (moduleName (pmModule prepared))))
+        | prepared <- home ]
+      originalIdentities = Set.fromList (Map.elems (projectionCurrentOriginals context))
+      isPackageImport global =
+        isNothing (globalRequiredGeneration global)
+          && globalIdentity global `Set.notMember` originalIdentities
+          && (symbolUnit (globalIdentity global), symbolModule (globalIdentity global))
+               `Set.notMember` homeModulePairs
+          && toUnitId (moduleUnit (symbolOwner (globalIdentity global))) `Set.notMember` homeUnitIds
   unless (all ((`Set.notMember` packageOwners) . pmModule) home)
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
+  homeRows <- forM home $ \prepared ->
+    forM (projectPreparedModuleGroupResultsFor
+          (OriginalHomeProduct isHomeUnit) homeContext prepared Nothing) $ \(ordinal, _, outcome) ->
+         case outcome of
+           Left failure -> Left failure
+           Right evidence ->
+             let group = projectedGroupWire evidence
+                 key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
+                       , Text.pack (moduleNameString (moduleName (pmModule prepared)))
+                       , fromIntegral ordinal )
+             in Right ( key
+                      , [ globalIdentity global
+                        | global <- projectedGlobals (projectedBody group)
+                        , isPackageImport global ] )
+  let homeImports = Map.fromList (concat homeRows)
   products <- projectPreparedPackageGroupsWithIdentities context components reach identities
   let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
       imported = Set.fromList exports
@@ -974,7 +1003,7 @@ projectPreparedPackageTarget hostBindings context home components reach = do
   candidate <- projectPreparedCandidateWithImports imported hostBindings
     checkedContext selected checkedIdentities
   (program, constructors) <- finalizePreparedCandidate candidate
-  pure (PreparedPackageTarget program constructors products)
+  pure (PreparedPackageTarget program constructors products homeImports)
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.

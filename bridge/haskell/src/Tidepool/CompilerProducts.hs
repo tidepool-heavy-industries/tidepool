@@ -74,7 +74,9 @@ import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, art
 import qualified Crypto.Hash.SHA256 as SHA256
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
-  , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256 )
+  , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
+  , PackageLinkIndex(..), RawOccurrence(..), RawLink(..)
+  , emptyPackageLinkIndex, canonicalizeOccurrences, resolveHomeRoots )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -94,7 +96,8 @@ import Tidepool.ExactScope
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
-  , prepareModuleProductEncodingFromGroups, encodeModuleProductInventory, encodePackageGroup )
+  , prepareModuleProductEncodingFromGroups, encodeModuleProductInventory, encodePackageGroup
+  , projectedGroupEncodingInput )
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
   , preparedModuleProductEncodings, preparedModuleProductOmissions, resolveTextPackageUnit
@@ -105,13 +108,13 @@ import Tidepool.ExecutionProjection
   , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity
-  , PreparedPackageTarget, packageTargetGroups, projectedPackageModule
+  , PreparedPackageTarget, packageTargetGroups, packageTargetHomeImports, projectedPackageModule
   , projectedPackageInterfaceSha256, projectedPackageDefiningVersion, projectedPackageEncoding )
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, plannedOriginalOwner, plannedInterfaceFingerprint )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram
-  , GlobalDecl(..), ProjectedGroup(..), PackageCodeOwner(..) )
+  , GlobalDecl(..), ProjectedGroup(..), ProjectedGroupBody(..), PackageCodeOwner(..) )
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..), SourceRecipeUnavailable(..), ExecutionSourceRecipe(..)
@@ -494,14 +497,15 @@ data PreparedProductContext = PreparedProductContext
 
 data PreparedPackageOutputs = PreparedPackageOutputs
   ![(FilePath,BS.ByteString)] !(Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes))
+  !PackageLinkIndex
 
 emptyPreparedPackageOutputs :: PreparedPackageOutputs
-emptyPreparedPackageOutputs = PreparedPackageOutputs [] Map.empty
+emptyPreparedPackageOutputs = PreparedPackageOutputs [] Map.empty emptyPackageLinkIndex
 
 -- The active stage supplies deployment provenance; the paired projection and
 -- its captured interfaces supply code and byte custody. The writer only copies
 -- these immutable inputs, never resolves another package path.
-retainPreparedPackageTargets :: NativeProductProvenance -> [PreparedPackageTarget]
+retainPreparedPackageTargets :: NativeProductProvenance -> [(String, PreparedPackageTarget)]
   -> Map.Map Module ArtifactBytes -> PreparedProductContext -> IO PreparedProductContext
 retainPreparedPackageTargets provenance targets captures context = do
   forM_ (preparedStageInputs context) $ \inputs -> withWorldStageBasis inputs $ \basis ->
@@ -511,26 +515,63 @@ retainPreparedPackageTargets provenance targets captures context = do
   do
     let producer = nativeProductProducer provenance
         profile = nativeProductProfile provenance
-        groups = concatMap packageTargetGroups targets
+        targetGroups = [ (name, group)
+                       | (name, target) <- targets
+                       , group <- packageTargetGroups target ]
     unless (BS.length producer == 32 && BS.length profile == 32)
       (fail "package product deployment commitments are malformed")
-    encodings <- forM groups $ \group -> do
+    encodings <- forM targetGroups $ \(name, group) -> do
       let owner = projectedPackageModule group
       body <- maybe (fail "package product lacks its captured defining interface") pure
         (Map.lookup owner captures)
       unless (artifactDigestBytes body == projectedPackageInterfaceSha256 group)
         (fail "package product differs from its captured defining interface")
-      let provenance = PackageCodeOwner
+      let provenance' = PackageCodeOwner
             (T.pack (unitString (moduleUnit owner))) (T.pack (moduleNameString (moduleName owner)))
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
-          bytes = encodePackageGroup provenance (projectedPackageEncoding group)
-      pure ("package-products" </> shaHex bytes ++ ".cbor",bytes)
+          bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
+      pure (name, group, bytes)
+    let rawTargetOwners = Map.fromListWith Map.union
+          [ (T.pack name, Map.singleton binder index)
+          | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
+          , binder <- projectedBinders
+              (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
+        rawOccurrences =
+          [ RawOccurrence
+              { rawEnvelopeSha256 = SHA256.hash bytes
+              , rawUnit = T.pack (unitString (moduleUnit (projectedPackageModule group)))
+              , rawModule = T.pack (moduleNameString (moduleName (projectedPackageModule group)))
+              , rawDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
+              , rawDefiningVersionSha256 = projectedPackageDefiningVersion group
+              , rawImports =
+                  [ case Map.lookup (globalIdentity global)
+                        (Map.findWithDefault Map.empty (T.pack name) rawTargetOwners) of
+                      Just child -> RawLinkLocal child
+                      Nothing -> RawLinkInherited
+                  | global <- projectedGlobals (projectedBody
+                      (projectedGroupEncodingInput (projectedPackageEncoding group))) ]
+              }
+          | (name, group, bytes) <- encodings ]
+        (occurrences, indexMap) = canonicalizeOccurrences rawOccurrences
+        targetHomeImports = Map.fromList
+          [ (T.pack name, packageTargetHomeImports paired)
+          | (name, paired) <- targets ]
+    targetOwners <- Map.traverseWithKey (\target owners ->
+      Map.traverseWithKey (\identity raw -> case Map.lookup raw indexMap of
+        Just canonical -> pure canonical
+        Nothing -> fail ("target " ++ T.unpack target
+          ++ " package import lacks canonical occurrence " ++ show raw
+          ++ ": " ++ show identity)) owners) rawTargetOwners
+    homeRoots <- either fail pure (resolveHomeRoots indexMap rawTargetOwners targetHomeImports)
     let interfaces = Map.fromList
           [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
             ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
           | (owner,body) <- Map.toAscList captures]
-        writes = Map.toAscList (Map.fromList encodings)
-    pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces}
+        writes = Map.toAscList (Map.fromList
+          [("package-products" </> shaHex bytes ++ ".cbor",bytes)
+          | (_,_,bytes) <- encodings])
+        links = PackageLinkIndex occurrences targetOwners homeRoots
+    pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
 
 withWorldStageInputs :: Maybe WorldStageInputs -> PreparedProductContext -> PreparedProductContext
 withWorldStageInputs inputs context = context {preparedStageInputs=inputs}
@@ -1194,7 +1235,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     let hscEnv = prHscEnv (pprPipelineResult prepared)
     timing <- readTimingEnabled
     issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
-    let PreparedPackageOutputs packageWrites packageInterfaces =
+    let PreparedPackageOutputs packageWrites packageInterfaces packageLinks =
           maybe emptyPreparedPackageOutputs preparedPackageOutputs issued
         capturedPackages = Map.map (\(path,body) -> (outDir </> path,body)) packageInterfaces
     forM_ packageWrites $ \(relative,bytes) -> do
@@ -1280,7 +1321,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
             Just (StagedOriginalProducts previous _ _ _ _) -> certifiedTargetContext previous
       certified <- encodeCertifiedOriginalProductsWithPrior outDir priorContext (Just originalInterfaces)
         [(path,SHA256.hash bytes) | (path,bytes) <- packageWrites, takeDirectory path == "package-products"]
-        capturedPackages (pprOriginalReferences prepared) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe selectedInterfaces finalized (pprAcceptedCandidates prepared)
+        capturedPackages packageLinks (pprOriginalReferences prepared) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe selectedInterfaces finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes

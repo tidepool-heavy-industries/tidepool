@@ -840,7 +840,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                       (moduleUnit (fatOriginalOwner (preparedComponentVersion component)))
                     homeComponents = filter isHome (closureComponentSelections recovered)
                     packageComponents = filter (not . isHome) (closureComponentSelections recovered)
-                paired <- project (projectPreparedPackageTarget hostBindings finalContext
+                paired <- project (projectPreparedPackageTarget hscEnv hostBindings (contextFor target) finalContext
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired
@@ -933,9 +933,14 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
       pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites)
-    finalResults <- Map.elems <$> readIORef finalProjections
-    let packageTargets = [(target,captures) | NativeFinal target captures _ <- finalResults]
-    captures <- foldM (\known (_,additions) -> foldM (\selected (owner,body) -> do
+    finalResults <- forM targets $ \target -> do
+      let entry = projectionEntry (contextFor target)
+      final <- readIORef finalProjections >>= maybe
+        (fail "closed recovery did not issue its final projection") pure . Map.lookup entry
+      pure (target, final)
+    let packageTargets = [(name, paired, additions)
+          | (name, NativeFinal paired additions _) <- finalResults]
+    captures <- foldM (\known (_,_,additions) -> foldM (\selected (owner,body) -> do
       forM_ (Map.lookup owner selected) $ \old -> unless (artifactSha256 old == artifactSha256 body)
         (fail "targets disagree on their actual package interface capture")
       pure (Map.insert owner body selected)) known (Map.toAscList additions)) Map.empty packageTargets
@@ -944,7 +949,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
       NativeOriginals -> do
         provenance <- preparedCompilationNativeProvenance completion
         products <- maybe (fail "native projection lacks its actual product context") pure productContext
-        Just <$> retainPreparedPackageTargets provenance (map fst packageTargets) captures products
+        Just <$> retainPreparedPackageTargets provenance
+          [(name, paired) | (name, paired, _) <- packageTargets] captures products
     pure (artifacts, completedContext)
 
 -- The pure preview boundary preserves only this chosen executable-demand

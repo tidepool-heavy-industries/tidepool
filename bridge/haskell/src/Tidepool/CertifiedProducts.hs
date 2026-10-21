@@ -7,7 +7,10 @@ module Tidepool.CertifiedProducts
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
   , encodeCertifiedItemProductsWithInputs
   , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
-  , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256 ) where
+  , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
+  , PackageLink(..), PackageOccurrence(..), PackageLinks(..), PackageLinkIndex(..)
+  , RawOccurrence(..), RawLink(..), canonicalizeOccurrences
+  , resolveHomeRoots, emptyPackageLinks, emptyPackageLinkIndex, linkForOccurrence, encodePackageLinks ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -20,6 +23,7 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.Bits (shiftR)
+import Data.Array (listArray, elems, (!))
 import Data.List (find, mapAccumL)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
@@ -27,7 +31,7 @@ import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
 import GHC.Unit.Module (Module, ModuleName, mkModule, mkModuleName, moduleUnit, moduleName)
 import GHC.Unit.Module.ModIface (ModIface, mi_decls, mi_exports, mi_module)
@@ -78,6 +82,202 @@ import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
 
 data CertifiedProductKind = OrdinaryProductFacts | SegmentOriginalFacts
+
+-- A receipt-scoped occurrence link. Local names an occurrence row by its
+-- producer-local id (position in `occurrences`); Inherited demands the exact
+-- already-issued binding carried by the inherited completions for that slot.
+data PackageLink
+  = PackageLinkLocal !Word32
+  | PackageLinkInherited
+  deriving (Eq, Ord, Show)
+
+-- One producer-issued package occurrence. Its identity is the row position,
+-- never its envelope SHA: two rows may share an envelope only under distinct
+-- ordered child histories, and their identity remains their distinct id.
+data PackageOccurrence = PackageOccurrence
+  { packageOccurrenceEnvelopeSha256 :: !BS.ByteString
+  , packageOccurrenceUnit :: !T.Text
+  , packageOccurrenceModule :: !T.Text
+  , packageOccurrenceDefiningInterfaceSha256 :: !BS.ByteString
+  , packageOccurrenceDefiningVersionSha256 :: !BS.ByteString
+  , packageOccurrenceImports :: [PackageLink]
+  } deriving (Eq, Show)
+
+-- The complete frozen linkage manifest. `target_roots` keys match the
+-- CertifiedReceipt.targets keys; `home_roots` keys name fresh HOME groups by
+-- `(unit, module, original ordinal)`, matching Rust's NativeGroupBinding.
+data PackageLinks = PackageLinks
+  { packageLinksOccurrences :: [PackageOccurrence]
+  , packageLinksTargetRoots :: Map.Map T.Text [PackageLink]
+  , packageLinksHomeRoots :: Map.Map (T.Text,T.Text,Word) [PackageLink]
+  } deriving (Eq, Show)
+
+emptyPackageLinks :: PackageLinks
+emptyPackageLinks = PackageLinks [] Map.empty Map.empty
+
+-- The producer-boundary value carried from CompilerProducts into
+-- certification: occurrence rows, one binder-to-occurrence map per target and
+-- the agreed per-HOME-group package links. A request-wide binder map would be a
+-- global symbol index with last-write-wins across targets, so the same
+-- SymbolIdentity may name distinct occurrence ids in different targets without
+-- colliding here.
+data PackageLinkIndex = PackageLinkIndex
+  { packageLinkIndexOccurrences :: [PackageOccurrence]
+  , packageLinkIndexTargetOwners :: Map.Map T.Text (Map.Map SymbolIdentity Word32)
+  , packageLinkIndexHomeRoots :: Map.Map (T.Text,T.Text,Word) [PackageLink]
+  } deriving (Eq, Show)
+
+emptyPackageLinkIndex :: PackageLinkIndex
+emptyPackageLinkIndex = PackageLinkIndex [] Map.empty Map.empty
+
+linkForOccurrence :: Map.Map SymbolIdentity Word32 -> SymbolIdentity -> PackageLink
+linkForOccurrence owners identity = case Map.lookup identity owners of
+  Just occurrence -> PackageLinkLocal occurrence
+  Nothing -> PackageLinkInherited
+
+-- Package slots only; source, retained and original-binding slots keep their
+-- existing owners and do not enter the linkage manifest.
+packageRootLinks :: Map.Map SymbolIdentity Word32 -> [GlobalWitness] -> [PackageLink]
+packageRootLinks owners witnesses =
+  [ linkForOccurrence owners identity
+  | (identity,_,_,_,owner) <- witnesses
+  , case owner of PackageOwner _ _ _ -> True; _ -> False ]
+
+encodePackageLinks :: PackageLinks -> Encoding
+encodePackageLinks links = array
+  [ encodeWord 1
+  , list encodeOccurrenceRow (zip [0 :: Word32 ..] (packageLinksOccurrences links))
+  , list encodeTargetRoots (Map.toAscList (packageLinksTargetRoots links))
+  , list encodeHomeRoots (Map.toAscList (packageLinksHomeRoots links))
+  ]
+  where
+    encodeLink (PackageLinkLocal occurrence) = array
+      [encodeString "local", encodeWord (fromIntegral occurrence)]
+    encodeLink PackageLinkInherited = array [encodeString "inherited"]
+    encodeOccurrenceRow (index, occurrence) = array
+      [ encodeWord (fromIntegral index)
+      , encodeBytes (packageOccurrenceEnvelopeSha256 occurrence)
+      , encodeString (packageOccurrenceUnit occurrence)
+      , encodeString (packageOccurrenceModule occurrence)
+      , encodeBytes (packageOccurrenceDefiningInterfaceSha256 occurrence)
+      , encodeBytes (packageOccurrenceDefiningVersionSha256 occurrence)
+      , list encodeLink (packageOccurrenceImports occurrence)
+      ]
+    encodeTargetRoots (target, roots) = array
+      [encodeString target, list encodeLink roots]
+    encodeHomeRoots ((unit, name, ordinal), roots) = array
+      [array [encodeString unit, encodeString name, encodeWord ordinal], list encodeLink roots]
+
+-- A producer-internal occurrence before cross-target canonicalization. Child
+-- references are raw emission indices within one retainPreparedPackageTargets
+-- result; canonicalizeOccurrences replaces them with deduplicated row ids.
+data RawOccurrence = RawOccurrence
+  { rawEnvelopeSha256 :: !BS.ByteString
+  , rawUnit :: !T.Text
+  , rawModule :: !T.Text
+  , rawDefiningInterfaceSha256 :: !BS.ByteString
+  , rawDefiningVersionSha256 :: !BS.ByteString
+  , rawImports :: [RawLink]
+  } deriving (Eq, Show)
+
+data RawLink
+  = RawLinkLocal !Int
+  | RawLinkInherited
+  deriving (Eq, Ord, Show)
+
+-- Exact occurrence canonicalization by finite partition refinement. Two raw
+-- nodes collapse iff their label (envelope plus defining owner facts) and
+-- their ordered child partitions agree recursively; distinct child histories
+-- stay distinct and repeated/cyclic references are preserved without a global
+-- symbol map or recursive digests. Canonical ids are assigned in first raw
+-- occurrence order and the returned rows are one deduplicated representative
+-- per class, in that same order.
+canonicalizeOccurrences :: [RawOccurrence] -> ([PackageOccurrence], Map.Map Int Word32)
+canonicalizeOccurrences raws
+  | null raws = ([], Map.empty)
+  | otherwise =
+      let initial = listArray bounds (normalize (map label raws))
+          final = fixPoint step initial
+          representatives = Map.elems (foldl' first Map.empty (zip (elems final) raws))
+          rows = map (materialize final) representatives
+          indexMap = Map.fromList
+            [ (index, fromIntegral (final ! index))
+            | index <- [0 .. n - 1] ]
+      in (rows, indexMap)
+  where
+    n = length raws
+    bounds = (0, n - 1)
+    label raw = ( rawEnvelopeSha256 raw, rawUnit raw, rawModule raw
+                , rawDefiningInterfaceSha256 raw, rawDefiningVersionSha256 raw )
+    step classes = listArray bounds
+      (normalize
+        [ (classes ! i, [ childRef classes link | link <- rawImports raw ])
+        | (i, raw) <- zip [0 .. n - 1] raws ])
+    childRef _ RawLinkInherited = (False, 0)
+    childRef classes (RawLinkLocal child) = (True, classes ! child)
+    first table (partition, raw) = Map.insertWith (\_ old -> old) partition raw table
+    materialize classes raw = PackageOccurrence
+      { packageOccurrenceEnvelopeSha256 = rawEnvelopeSha256 raw
+      , packageOccurrenceUnit = rawUnit raw
+      , packageOccurrenceModule = rawModule raw
+      , packageOccurrenceDefiningInterfaceSha256 = rawDefiningInterfaceSha256 raw
+      , packageOccurrenceDefiningVersionSha256 = rawDefiningVersionSha256 raw
+      , packageOccurrenceImports =
+          [ case link of
+              RawLinkLocal child -> PackageLinkLocal (fromIntegral (classes ! child))
+              RawLinkInherited -> PackageLinkInherited
+          | link <- rawImports raw ]
+      }
+    fixPoint f x = let next = f x in if next == x then x else fixPoint f next
+
+-- Stable class ids 0..k-1 assigned in first-appearance order.
+normalize :: Ord a => [a] -> [Int]
+normalize = reverse . snd . foldl' assign (Map.empty, [])
+  where
+    assign (table, out) x = case Map.lookup x table of
+      Just classId -> (table, classId : out)
+      Nothing -> let classId = Map.size table in (Map.insert x classId table, classId : out)
+
+-- Resolve each captured HOME-group package-import SymbolIdentity against the
+-- union of every target's raw occurrence map, then require every target that
+-- shares a HOME group to agree on the exact ordered link list. A symbol
+-- exported by several targets is Local only when its canonical occurrences
+-- collapse to one; distinct occurrences refuse rather than overwriting.
+-- Empty lists are retained, so every fresh HOME group keeps a home_roots entry.
+resolveHomeRoots
+  :: Map.Map Int Word32
+  -> Map.Map T.Text (Map.Map SymbolIdentity Int)
+  -> Map.Map T.Text (Map.Map (T.Text,T.Text,Word) [SymbolIdentity])
+  -> Either String (Map.Map (T.Text,T.Text,Word) [PackageLink])
+resolveHomeRoots indexMap targetOwners targetHomeImports =
+  foldM insertAgreeing Map.empty =<< traverse resolveRow rows
+  where
+    rows = [ (key, identities)
+           | (_, imports) <- Map.toAscList targetHomeImports
+           , (key, identities) <- Map.toAscList imports ]
+    unionOwners = Map.fromListWith (++)
+      [ (identity, [raw])
+      | owners <- Map.elems targetOwners
+      , (identity, raw) <- Map.toAscList owners ]
+    resolveRow (key, identities) = (key,) <$> traverse resolveOne identities
+    resolveOne identity = case Map.lookup identity unionOwners of
+      Nothing -> Right PackageLinkInherited
+      Just raws -> do
+        canonical <- traverse canonicalizeRaw raws
+        case Set.toAscList (Set.fromList canonical) of
+          [] -> Right PackageLinkInherited
+          [one] -> Right (PackageLinkLocal one)
+          multiple -> Left
+            ("HOME package import resolves to multiple occurrences across targets: "
+              ++ show identity ++ " -> " ++ show multiple)
+    canonicalizeRaw raw = case Map.lookup raw indexMap of
+      Just canonical -> Right canonical
+      Nothing -> Left ("HOME package import lacks canonical occurrence " ++ show raw)
+    insertAgreeing known (key, links) = case Map.lookup key known of
+      Nothing -> Right (Map.insert key links known)
+      Just prior | prior == links -> Right known
+      Just prior -> Left ("targets disagree on HOME group " ++ show key
+        ++ ": " ++ show prior ++ " /= " ++ show links)
 
 data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
@@ -252,7 +452,7 @@ encodeCertifiedOriginalProducts
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
 encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
-    encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty Map.empty kind retained emittedSeals reconciled env sourceRecipe
+    encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty emptyPackageLinkIndex Map.empty kind retained emittedSeals reconciled env sourceRecipe
       interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
 
 -- Prior facts come from this same issuer's completed stage. They add imported
@@ -260,6 +460,7 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
 encodeCertifiedOriginalProductsWithPrior
   :: FilePath -> Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts
   -> [(FilePath,BS.ByteString)] -> Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes)
+  -> PackageLinkIndex
   -> Map.Map SymbolIdentity WorldOriginalReference -> CertifiedProductKind
   -> Map.Map (String,String) CanonicalInterfaceProof
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
@@ -274,6 +475,7 @@ encodeCertifiedOriginalProductsWithPrior outDir = encodeCertifiedOriginalProduct
 encodeCertifiedOriginalProductsWithCapture
   :: Maybe FilePath -> Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts
   -> [(FilePath,BS.ByteString)] -> Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes)
+  -> PackageLinkIndex
   -> Map.Map SymbolIdentity WorldOriginalReference -> CertifiedProductKind
   -> Map.Map (String,String) CanonicalInterfaceProof
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
@@ -283,7 +485,7 @@ encodeCertifiedOriginalProductsWithCapture
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext, [(FilePath,BS.ByteString)]))
-encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolveGlobal, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -526,6 +728,14 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
+              targetOwners = packageLinkIndexTargetOwners packageLinks
+              targetRoots = Map.fromList
+                [ (T.pack target,
+                    packageRootLinks (Map.findWithDefault Map.empty (T.pack target) targetOwners) witnesses)
+                | (target, witnesses) <- targetRowsReady ]
+              homeRoots = packageLinkIndexHomeRoots packageLinks
+              encodedPackageLinks = encodePackageLinks
+                (PackageLinks (packageLinkIndexOccurrences packageLinks) targetRoots homeRoots)
               originalFields =
                 [list id encodedModules, list id encodedPackages
                 ,list (encodeWitness coordinateIndices) globalWitnesses
@@ -534,10 +744,10 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 ,list (\(path,seal) -> array [encodeString (T.pack path),encodeBytes seal]) packageProducts]
               payload = case kind of
                 OrdinaryProductFacts -> array (encodeString "ordinary" :
-                  list id encodedModules : list id encodedTargets : drop 1 originalFields)
-                SegmentOriginalFacts -> array (encodeString "segment-originals" : originalFields)
+                  list id encodedModules : list id encodedTargets : drop 1 originalFields ++ [encodedPackageLinks])
+                SegmentOriginalFacts -> array (encodeString "segment-originals" : originalFields ++ [encodedPackageLinks])
               certificateBytes = toStrictByteString $
-                array [encodeString "TPCERT",encodeWord 11,payload]
+                array [encodeString "TPCERT",encodeWord 12,payload]
               priorPackages = maybe Map.empty targetModulePackages prior
               currentPackages = Map.map Set.findMin packages
               packageConflicts = Map.intersectionWith (\(_,left) (_,right) -> left /= right) currentPackages priorPackages
@@ -558,6 +768,14 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
               else Right ()
             if or (Map.elems packageConflicts)
               then Left "prior native package owner changed its captured interface"
+              else Right ()
+            let freshHomeKeys = Set.fromList
+                  [ (productUnit product, productModule product, candidateGroupOrdinal group)
+                  | (product, group, _) <- moduleRows
+                  , productOrigin product == FreshProduct ]
+            if Map.keysSet homeRoots /= freshHomeKeys
+              then Left ("HOME group package links do not match certified fresh HOME groups: links="
+                  ++ show (Map.keysSet homeRoots) ++ " fresh=" ++ show freshHomeKeys)
               else Right ()
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
             Right (certificateBytes,versions,context,packageInterfaceWrites)
@@ -641,7 +859,7 @@ certifyItemProducts env context program = do
   pure $ do
     witnesses <- sequence globals
     additions <- catMaybes <$> sequence validated
-    let bytes = toStrictByteString $ array [encodeString "TPCERT",encodeWord 11,
+    let bytes = toStrictByteString $ array [encodeString "TPCERT",encodeWord 12,
           array [encodeString "segment-item",list encodeFullWitness witnesses,
             list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
               encodeString (T.pack path),encodeString seal]) additions,list id []]]

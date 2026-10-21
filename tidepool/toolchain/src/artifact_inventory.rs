@@ -13,6 +13,8 @@ use crate::CompileError;
 
 #[cfg(test)]
 mod properties;
+#[cfg(test)]
+mod package_occurrence_linkage_tests;
 
 mod compiler_projection;
 mod native_availability;
@@ -624,6 +626,8 @@ impl CertifiedTargetNativeInputs {
         prepared: &tidepool_repr::execution_schema::PreparedProgram,
         output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+        links: &crate::certified_products::PackageLinks,
+        target_name: Option<&str>,
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
@@ -634,7 +638,13 @@ impl CertifiedTargetNativeInputs {
         }
         let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(self.resolve_sources()?, prepared)?;
         let completed = compiler_projection::complete_native_selection(
-            &sources, output, packages, inherited.native_completions(), operation,
+            &sources,
+            output,
+            packages,
+            links,
+            target_name,
+            inherited.native_completions(),
+            operation,
         )?;
         self.completed = Some(completed);
         Ok(self)

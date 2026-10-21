@@ -50,6 +50,7 @@ pub(super) fn issued_original(
     accepted.dependency_witness_sha256 = sha(&worker);
     let packet = CertifiedReceipt {
         package_products: Vec::new(),
+        package_links: PackageLinks::empty(),
         source_recipe: WorkerExecutionSource::Ordinary,
         finalization: fixture_finalization_from_products(Some(root), &[accepted.clone()], &parsed),
         modules: vec![accepted],
