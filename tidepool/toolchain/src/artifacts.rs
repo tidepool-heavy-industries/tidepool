@@ -9234,7 +9234,7 @@ mod module_product_tests {
                         sources,
                         crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
                             if mixed {
-                                vec!["qualified StageInputG".into()]
+                                vec!["import qualified StageInputG".into()]
                             } else {
                                 Vec::new()
                             },
