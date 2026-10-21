@@ -15921,10 +15921,23 @@ pub(crate) mod tests {
             .native_offers()
             .iter()
             .any(|offer| offer.same_issuance(receipt.own_offer())));
-        assert!(issued
-            .issued_artifacts()
-            .selected_native_groups()
-            .is_empty());
+        let native_roots = |graph: crate::artifact_inventory::ArtifactGraphSelection| {
+            graph
+                .roots
+                .into_iter()
+                .filter(|root| {
+                    matches!(
+                        root,
+                        crate::artifact_inventory::ArtifactBindingNode::Group(_)
+                    )
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            native_roots(issued.issued_artifacts().capture_graph_selection()),
+            native_roots(source.artifacts().capture_graph_selection()),
+            "physical issuance preserves inherited demand without selecting new bodies",
+        );
         let carried_context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&published)
