@@ -1227,6 +1227,24 @@ pub(crate) struct ChosenNativeGroupSupport {
     contribution: Arc<crate::artifact_inventory::NativeOfferContribution>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum NativeGroupChoiceIdentity {
+    CompilerRole(ArtifactId),
+    OriginalPair {
+        interface: crate::artifact_inventory::ArtifactBinding,
+        original: crate::artifact_inventory::ArtifactBinding,
+    },
+}
+
+impl NativeGroupChoiceIdentity {
+    fn canonical(self) -> ArtifactId {
+        match self {
+            Self::CompilerRole(canonical) => canonical,
+            Self::OriginalPair { interface, .. } => interface.artifact,
+        }
+    }
+}
+
 impl ChosenNativeGroupSupport {
     pub(crate) fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
         self.binding
@@ -1392,22 +1410,24 @@ impl NativeTransportAvailability {
         &self,
         source: &crate::artifact_inventory::CompilerSourceSupport,
         key: NativeGroupKey,
-        canonical: ArtifactId,
+        choice: NativeGroupChoiceIdentity,
         owner: &tidepool_repr::execution_schema::CachedHomeOwner,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Option<ChosenNativeGroupSupport>, CompileError> {
         let budget = NativeDemandBudget(Some(operation));
         budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
         let identity = identity(&owner.unit, &owner.module);
+        let canonical = choice.canonical();
         if self.original_artifact_id() != key.artifact
             || self.canonical != canonical
             || self.original_owner() != owner
+            || matches!(choice, NativeGroupChoiceIdentity::OriginalPair { original, .. } if original.artifact != key.artifact)
         {
             return Err(compiler_evidence_failure(
                 crate::certified_products::CertificationError::InputDecision {
                     owner: identity,
                     reason:
-                        crate::artifact_inventory::InputDecisionRefusal::ArtifactIdentityMismatch,
+                        crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch,
                 },
             ));
         }
@@ -1416,6 +1436,17 @@ impl NativeTransportAvailability {
             budget.checkpoint()?;
             for binding in contribution.groups(key) {
                 budget.checkpoint()?;
+                if let NativeGroupChoiceIdentity::OriginalPair {
+                    interface,
+                    original,
+                } = choice
+                {
+                    if contribution.group_carrier_pair(binding, interface.artifact)?
+                        != (original, interface)
+                    {
+                        continue;
+                    }
+                }
                 if let std::collections::btree_map::Entry::Vacant(slot) = candidates.entry(binding)
                 {
                     budget.reserve::<(
@@ -1439,6 +1470,9 @@ impl NativeTransportAvailability {
             candidates.keys().copied().collect(),
         )
         .map_err(compiler_evidence_failure)?;
+        if selected.is_empty() && matches!(choice, NativeGroupChoiceIdentity::OriginalPair { .. }) {
+            return Ok(None);
+        }
         if !self.permits(key.original_ordinal) {
             return Ok(None);
         }
@@ -3059,7 +3093,7 @@ impl DemandNativeInputs {
                 .choose_group(
                     &self.cold.source_support,
                     key,
-                    role.interface(),
+                    NativeGroupChoiceIdentity::CompilerRole(role.interface()),
                     native_owner,
                     &operation,
                 )?

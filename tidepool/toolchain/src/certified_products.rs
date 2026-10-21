@@ -5398,6 +5398,66 @@ impl OriginalBindingSelection {
         self.authenticated.acquisition()
     }
 
+    /// Availability uses this acquisition's offers independently of stage demand.
+    pub(crate) fn available_group(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> Result<Option<crate::declaration_context::ChosenNativeGroupSupport>, crate::CompileError>
+    {
+        use crate::artifact_inventory::NativeGroupKey;
+        let evidence = |error| crate::CompileError::CompilerEvidence(Box::new(error));
+        self.metadata_references(operation)
+            .map(|_| ())
+            .map_err(evidence)?;
+        let (owner, ordinal) = self.metadata(reference).ok_or_else(|| {
+            evidence(CertificationError::Mismatch(
+                "Original availability lacks authenticated membership",
+            ))
+        })?;
+        let ReceiptImportOwner::OriginalBinding {
+            interface,
+            original,
+            ..
+        } = reference
+        else {
+            return Err(evidence(CertificationError::Mismatch(
+                "Original availability reference kind",
+            )));
+        };
+        let key = NativeGroupKey {
+            artifact: original.artifact,
+            original_ordinal: *ordinal,
+        };
+        let source = self.acquisition();
+        let Some(row) = source.native_availability().issued_row(original.artifact) else {
+            // An absent grant still cannot erase a recorded exact choice.
+            select_input_native_group_candidates(
+                source,
+                key,
+                interface.artifact,
+                owner,
+                &crate::declaration_join::ExactModuleIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                },
+                BTreeSet::new(),
+            )
+            .map_err(evidence)?;
+            return Ok(None);
+        };
+        row.choose_group(
+            source,
+            key,
+            crate::declaration_context::NativeGroupChoiceIdentity::OriginalPair {
+                interface: *interface,
+                original: *original,
+            },
+            owner,
+            operation,
+        )
+    }
+
     pub(crate) fn executable(
         &self,
         reference: &ReceiptImportOwner,
