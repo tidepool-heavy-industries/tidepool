@@ -416,7 +416,13 @@ impl<P> CompletedNativeOutputBundle<P> {
     }
 }
 
-pub(super) trait NativeOutputPurpose {}
+mod native_purpose {
+    pub trait Sealed {}
+    impl Sealed for super::NativeOutput {}
+    impl Sealed for super::OriginalOutput {}
+}
+
+pub(super) trait NativeOutputPurpose: native_purpose::Sealed {}
 impl NativeOutputPurpose for NativeOutput {}
 impl NativeOutputPurpose for OriginalOutput {}
 
