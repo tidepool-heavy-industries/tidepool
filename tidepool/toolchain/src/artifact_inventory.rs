@@ -8802,6 +8802,15 @@ impl ArtifactView {
                 );
             }
         }
+        self.retain_materializations_preserving_custody(retained)
+    }
+
+    /// Project file owners onto an already-issued receiving view without
+    /// replacing its payload acquisitions or compiler namespace.
+    fn retain_materializations_preserving_custody(
+        &self,
+        mut retained: Self,
+    ) -> Result<Self, CompileError> {
         {
             let lease = Arc::get_mut(&mut retained.lease).expect("new selection lease");
             lease.materialization_sources.clear();
@@ -9843,6 +9852,50 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialization_projection_preserves_receiving_payload_custody() {
+        let inventory = ArtifactInventory::default();
+        let base_entry = entry("Base", &[]);
+        let base_id = base_entry.descriptor.id;
+        let base = inventory
+            .admit(&inventory.empty_view(), vec![base_entry])
+            .unwrap();
+        let receiving_entry = entry("Receiving", &[]);
+        let receiving_id = receiving_entry.descriptor.id;
+        let receiving = inventory
+            .admit(&inventory.empty_view(), vec![receiving_entry])
+            .unwrap();
+        let payload = Arc::downgrade(&receiving.lease.payloads[&receiving_id]);
+        let expected = receiving.capture_graph_selection();
+
+        let retained = base
+            .retain_materializations_preserving_custody(receiving)
+            .unwrap();
+        drop(base);
+        assert!(
+            payload.upgrade().is_some(),
+            "the receiving acquisition must remain owned"
+        );
+        assert!(retained.lease.payloads.contains_key(&receiving_id));
+        assert!(!retained.lease.payloads.contains_key(&base_id));
+        assert_eq!(retained.capture_graph_selection(), expected);
+        assert_eq!(
+            retained.lease.acquired_owner_counts.iter()
+                .map(|(owner, count)| (owner.clone(), *count))
+                .collect::<BTreeMap<_, _>>(),
+            acquired_owner_oracle(&retained)
+        );
+
+        // A later exact retention must still borrow the issued payload after
+        // the original input owner has gone away.
+        let later = inventory.empty_view().retain_custody(&retained).unwrap();
+        drop(retained);
+        assert!(payload.upgrade().is_some());
+        assert_eq!(later.capture_graph_selection().bindings, expected.bindings);
+        assert!(later.lease.payloads.contains_key(&receiving_id));
+        assert!(!later.lease.payloads.contains_key(&base_id));
+    }
 
     fn acquired_owner_oracle(view: &ArtifactView) -> BTreeMap<ExactModuleIdentity, usize> {
         let mut counts = BTreeMap::new();
@@ -22384,8 +22437,9 @@ mod package_code {
                 },
                 required,
             );
-            let artifacts =
-                acquired.retain_projected_materializations(ArtifactView::from_custody(lease))?;
+            let artifacts = acquired.retain_materializations_preserving_custody(
+                ArtifactView::from_custody(lease),
+            )?;
             Ok(Arc::new(Self {
                 artifacts,
                 roots: roots.into(),
