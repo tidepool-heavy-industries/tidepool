@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -26,16 +26,18 @@ import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import SourceBootFixtureSupport (hasIntResultLiteral, withScratch, captureDiagnostics)
+import SourceBootFixtureSupport (hasIntResultLiteral, withScratch, captureDiagnostics
+  , withRootedCompilerEnvironment, withQuietStdout)
 import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, Permissions(..))
 import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
-  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory )
+  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory, writeCertifiedProductsKeepingWithOriginals )
 import Tidepool.CompilerRequest
 import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOriginalHomeModuleProducts)
 import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
+import Tidepool.ExecutionSchema (WireProgram(..), SymbolIdentity(..), Group(..), TopBinding(..))
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
@@ -450,8 +452,9 @@ withRequestFixture action = withScratch $ \work -> do
   forM_ ["BoundPreparedA.hs", "BoundPreparedB.hs", "BoundPreparedError.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   args <- requestFor work
-  withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
-    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> action scope request work
+  withRootedCompilerEnvironment work $ withQuietStdout $
+    withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
+      (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> action scope request work
 
 compileA :: BoundCompilerRequest -> FilePath -> IO PreparedCompilation
 compileA request work = compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
@@ -565,3 +568,75 @@ requirePhase expected action = do
     Left failure | Just actual <- fromException failure, actual == expected -> pure ()
     Left failure -> throwIO failure
     Right () -> fail ("compiler preparation accepted invalid phase: " ++ show expected)
+
+
+nativeOutputProvenanceChecks :: IO ()
+nativeOutputProvenanceChecks = withScratch $ \work -> do
+  requireObservationPackageEnvironment
+  copyFile "test-source-boot/fixtures/BoundPreparedA.hs" (work </> "BoundPreparedA.hs")
+  native <- requestFor work
+  portable <- case workerRequestFromArgv (workerArgv
+      [Input (work </> "BoundPreparedA.hs"),Include work,Target "__result",OutputDir work,PortableOutput]) of
+    Right (Just request) -> pure request
+    other -> fail ("invalid explicit portable fixture: " ++ show other)
+  withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
+    refused <- try ((withBoundCompilerRequest (const (pure ())) scope native >=> finishCompletion) $ \request ->
+      compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing (work </> "missing.hs"))
+      :: IO (Either NativeProductConfigurationUnavailable PreparedCompilation)
+    case refused of
+      Left NativeProductConfigurationUnavailable -> pure ()
+      Right _ -> fail "observation configuration issued a native compilation"
+    (withBoundCompilerRequest (const (pure ())) scope portable >=> finishCompletion) $ \request -> do
+      completion <- compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
+        (work </> "BoundPreparedA.hs")
+      let prepared = preparedCompilationResult completion
+      unless (hasIntResultLiteral 41 (prBinds (pprPipelineResult prepared)))
+        (fail "explicit portable compilation lost its actual source result")
+      interfaces <- newPreparedOriginalInterfaceArtifacts prepared work
+      output <- prepareArtifactsWithIntent interfaces work completion ["__result"] [] Map.empty []
+      case output of
+        PortableOutputs [artifact] -> unless (not (BS.null (paBytes artifact)))
+          (fail "explicit portable compilation emitted no code")
+        _ -> fail "explicit portable intent selected native products"
+
+-- Finite installers and World stages consume this same native output owner.
+-- A real list operation requires a separately prepared package implementation.
+nativePackageOutputChecks :: IO ()
+nativePackageOutputChecks = withScratch $ \work -> do
+  let source = work </> "NativePackageTarget.hs"
+  writeFile source (unlines
+    [ "module NativePackageTarget where", "import Data.List (reverse)"
+    , "{-# NOINLINE __result #-}", "__result :: [Int] -> [Int]", "__result = reverse" ])
+  args <- case workerRequestFromArgv (workerArgv [Input source,Include work,Target "__result",OutputDir work]) of
+    Right (Just request) -> pure request
+    other -> fail ("invalid native package fixture: " ++ show other)
+  withRootedCompilerEnvironment work $ withQuietStdout $
+    withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
+      (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
+        completion <- compilePreparedRequest request (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source
+        let prepared = preparedCompilationResult completion
+        interfaces <- newPreparedOriginalInterfaceArtifacts prepared work
+        output <- prepareArtifactsWithIntent interfaces work completion ["__result"] [] Map.empty []
+        case output of
+          PortableOutputs _ -> fail "native package fixture selected portable output"
+          NativeOutputs artifacts products -> do
+            unless (length artifacts == 1) (fail "native package fixture lost its target")
+            forM_ artifacts $ \artifact -> unless
+              (not (any ((== "reverse") . symbolOccurrence)
+                [identity | group <- programBindings (paProgram artifact)
+                  , TopBinding identity _ <- case group of NonRecursive top -> [top]; Recursive tops -> tops]))
+              (fail "native target retained the package reverse implementation")
+            void (writePreparedArtifacts work artifacts)
+            void (writeCertifiedProductsKeepingWithOriginals [work] interfaces work prepared (Just products)
+              [(paTarget artifact,paProgram artifact) | artifact <- artifacts])
+            paths <- listDirectory (work </> "package-products")
+            unless (not (null paths)) (fail "native writer emitted no package products")
+            certificate <- BS.readFile (work </> "certified-products.cbor")
+            forM_ paths $ \path -> do
+              bytes <- BS.readFile (work </> "package-products" </> path)
+              unless ("TPPACKAGEGROUP1" `BS.isInfixOf` bytes)
+                (fail "native writer emitted an invalid package envelope")
+              unless (TextEncoding.encodeUtf8 (Text.pack ("package-products/" ++ path)) `BS.isInfixOf` certificate)
+                (fail "native certificate omitted an emitted package product")
+            captured <- listDirectory (work </> "package-interfaces")
+            unless (not (null captured)) (fail "native writer omitted captured package interfaces")

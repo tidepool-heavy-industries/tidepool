@@ -7,7 +7,7 @@ module Tidepool.GhcPipeline
   , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules, pprCanonicalOriginalInputs, pprAcquiredCanonicalOriginals
   , CheckedPublicModuleResult, checkedPublicModuleIdentity, checkedPublicModuleEvidence
   , WorldModulePolicyFailure(..), WorldModulePolicy(..)
-  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprReuseContext
+  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprOriginalReferences, pprReuseContext
   , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, PreparedSourceRoute(..), preparedSourceRoute
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
@@ -15,6 +15,8 @@ module Tidepool.GhcPipeline
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilerProducerIdentity, captureCompilerProducerIdentity
+  , NativeProductProvenance, nativeProductProducer, nativeProductProfile
+  , NativeProductConfigurationUnavailable(..), scopedNativeProductProvenance
   , captureSupportedPackageProfile
   , runPipelineSessionSelectedWithProducer
   , CompilePurpose(..), CompilePurposeConflict(..), normalizeCompilePurpose, withSourceImportIntents
@@ -46,7 +48,7 @@ module Tidepool.GhcPipeline
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
-  , completedCompilerWorldCompletion, WorldCompilerCompletion, worldCompilerCompletionInputs, worldCompilerCompletionDependencies, worldCompilerCompletionPlannedDeclaration, requireWorldProductPredecessor
+  , completedCompilerWorldCompletion, completedCompilerWorldStage, CompiledWorldStage, withCompiledWorldStage, withCompiledWorldStageRecovery, withCompiledWorldInputs, withCompiledWorldNativeCoordinates, inheritCompiledWorldCanonicalRecovery, requireSameCompiledWorldStage, finishCompiledWorldStage, compiledWorldStageCompletion, WorldCompilerCompletion, worldCompilerCompletionInputs, worldCompilerCompletionDependencies, worldCompilerCompletionPlannedDeclaration, requireWorldProductPredecessor, requireWorldProductInputs
   , WorldCellInputs, worldCellRetainedGenerations, worldCellCompilerInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases, worldCellTypeInterfaces
   , WorldCellInputReference, encodeWorldCellInputReference, worldCellInputReferenceBinding, selectWorldCellExecutionInputReferences
   , PendingWorldDependencies
@@ -139,6 +141,7 @@ import GHC.Driver.Session
 import GHC.Utils.TmpFs (TempDir(..))
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
+import GHC.Core.FVs (exprFreeVars)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
@@ -180,7 +183,7 @@ import GHC.Tc.Utils.Monad (initTcWithGbl, initIfaceCheck, getGblEnv)
 import GHC.Tc.Gen.Splice (defaultRunMeta)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
-import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
+import GHC.Types.Unique.Set (UniqSet, nonDetEltsUniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.LanguageExtensions.Type qualified as LangExt
@@ -191,7 +194,7 @@ import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, mkTyVarOcc, occNameSpace, occNameString, isTcOcc, isSymOcc, mkVarOcc)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName)
+import GHC.Types.Var (isId, mkTyVar, mkTyVarBinder, setVarName)
 import GHC.Types.Var.Set (isEmptyVarSet)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
@@ -232,7 +235,7 @@ import Tidepool.FinalizedModuleArtifacts
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), CanonicalOriginalInputs, CanonicalOriginalInput, captureCanonicalOriginalInputs
   , lookupCanonicalOriginalInput, canonicalOriginalHome, canonicalOriginalProof
-  , canonicalOriginalPackages, canonicalOriginalVersion, AdmittedFinalizedOriginal
+  , canonicalOriginalPackages, canonicalOriginalVersion, OriginalVersion, originalVersionOwner, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalProof
   , materializeCanonicalOriginalView )
 import Tidepool.HomeProducts
@@ -276,7 +279,7 @@ import Tidepool.Timing
   , readMemoTraceEnabled, MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
   , emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, pmModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
-  , newPreparedCanonicalModuleTaskPreparer, PreparedBodyReuse(..), PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
+  , newPreparedCanonicalModuleTaskPreparer, PreparedBodyReuse(..), PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, inheritPreparedBodyOwner, preparedBodyHasOriginalVersion, evictPreparedBodyMatching)
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , OwnerInterfaceCache, newOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching)
@@ -317,11 +320,12 @@ import Tidepool.ExactScope
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, optionalInputByteLimit, originalImageCountLimit, commitWorldInputRetention
   , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs, worldSuccessorFacts, worldSuccessorChangedAliases, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
-  , worldInputsCompilerIdentity, worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
+  , worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
   , worldLexicalObservation, WorldObservationScaffold, worldObservationRequestTypes, worldObservationInputType
   , worldObservationFragment, worldObservationImports
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
+  , WorldOriginalReference, worldOriginalReferenceFor
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
@@ -456,6 +460,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , ownedPprFinalizedModules :: Map.Map ModuleName FinalizedModule
   , ownedPprPackageImports :: Map.Map ModuleName PackageImportEvidence
   , ownedPprCandidateAdmissions :: [AdmittedSourceCandidate]
+  , ownedPprOriginalReferences :: Map.Map SymbolIdentity WorldOriginalReference
   , ownedPprOriginalBindings :: Map.Map Name SymbolIdentity
   , ownedPprReuseContext :: ReuseContext
   , ownedPprCanonicalOriginalInputs :: Maybe CanonicalOriginalInputs
@@ -489,6 +494,9 @@ pprCandidateAdmissions = ownedPprCandidateAdmissions
 
 pprOriginalBindings :: PreparedPipelineResult -> Map.Map Name SymbolIdentity
 pprOriginalBindings = ownedPprOriginalBindings
+
+pprOriginalReferences :: PreparedPipelineResult -> Map.Map SymbolIdentity WorldOriginalReference
+pprOriginalReferences = ownedPprOriginalReferences
 
 pprReuseContext :: PreparedPipelineResult -> ReuseContext
 pprReuseContext = ownedPprReuseContext
@@ -542,7 +550,7 @@ worldSourceOriginalPackages (WorldSourceOriginal _ proof) = localFinalizedPackag
 acquireWorldSourceOriginal :: PreparedPipelineResult -> Module -> LocalFinalizedAdmission
   -> IO (Maybe WorldSourceOriginal)
 acquireWorldSourceOriginal prepared owner proof = case ownedPprDependencies prepared of
-  WorldScoped _ _ domain (Just (WorldPrivateCompletion _ (WorldCompletedDependencies policy versions))) _ -> do
+  WorldScoped _ _ domain (Just (WorldPrivateCompletion _ (WorldCompletedDependencies policy versions _))) _ -> do
     let WorldDependencyPolicy _ _ _ selectedDomain = policy
         (artifact,_,_) = localFinalizedInterface proof
         environment = prHscEnv (pprPipelineResult prepared)
@@ -1277,8 +1285,20 @@ runPipelineSelectedRetaining selection retained path includes = do
 -- The process owner supplies this configuration before any authored compiler
 -- effect runs. A resident compiler retains it across requests and recovery;
 -- candidates and mutable source code cannot replace their own authority.
-newtype CompilerProducerIdentity = CompilerProducerIdentity String
+newtype CompilerProducerIdentity = CompilerProducerIdentity BS.ByteString
   deriving (Eq, Show)
+
+data NativeProductProvenance = NativeProductProvenance !BS.ByteString !BS.ByteString
+
+nativeProductProducer :: NativeProductProvenance -> BS.ByteString
+nativeProductProducer (NativeProductProvenance producer _) = producer
+
+nativeProductProfile :: NativeProductProvenance -> BS.ByteString
+nativeProductProfile (NativeProductProvenance _ profile) = profile
+
+data NativeProductConfigurationUnavailable = NativeProductConfigurationUnavailable
+  deriving Show
+instance Exception NativeProductConfigurationUnavailable
 
 captureCompilerProducerIdentity :: IO (Maybe CompilerProducerIdentity)
 captureCompilerProducerIdentity = lookupEnv "TIDEPOOL_COMPILER_PRODUCER" >>= traverse decode
@@ -1286,13 +1306,11 @@ captureCompilerProducerIdentity = lookupEnv "TIDEPOOL_COMPILER_PRODUCER" >>= tra
     decode raw
       | length raw /= 64 || any (`notElem` ("0123456789abcdef" :: String)) raw
           || all (== '0') raw = fail "invalid compiler launch producer identity"
-      | otherwise = pure (CompilerProducerIdentity (concatMap byteHex
-          (BS.unpack (SHA256.hash (BS.pack (pairs raw))))))
+      | otherwise = pure (CompilerProducerIdentity (SHA256.hash (BS.pack (pairs raw))))
     pairs [] = []
     pairs (first:second:remaining) =
       fromIntegral (16 * digitToInt first + digitToInt second) : pairs remaining
     pairs _ = error "validated compiler producer has odd length"
-    byteHex byte = let rendered = showHex byte "" in replicate (2-length rendered) '0' ++ rendered
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -1400,7 +1418,7 @@ nativeBodyTier purpose
 
 compilerProducerFor :: PipelineVariant -> Maybe String
 compilerProducerFor variant = case pvCompilerProducer variant of
-  Just (CompilerProducerIdentity producer) -> Just producer
+  Just (CompilerProducerIdentity producer) -> Just (hexBytes producer)
   Nothing -> Nothing
 
 exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
@@ -1514,17 +1532,28 @@ type WorldModuleVersions = Map.Map Module (Map.Map MemoSelectionKey (Map.Map Mem
 -- Public-module metadata never issues this policy or completed dependency rows.
 data WorldDependencyPolicy = WorldDependencyPolicy BS.ByteString BS.ByteString BS.ByteString BS.ByteString
   deriving (Eq)
-data WorldCompletedDependencies = WorldCompletedDependencies WorldDependencyPolicy WorldModuleVersions
+newtype WorldCanonicalRecovery = WorldCanonicalRecovery (Map.Map OriginalVersion RecoveryContext)
+
+emptyWorldCanonicalRecovery :: WorldCanonicalRecovery
+emptyWorldCanonicalRecovery = WorldCanonicalRecovery Map.empty
+
+mergeWorldCanonicalRecovery :: WorldCanonicalRecovery -> WorldCanonicalRecovery -> WorldCanonicalRecovery
+mergeWorldCanonicalRecovery (WorldCanonicalRecovery additions) (WorldCanonicalRecovery previous) =
+  WorldCanonicalRecovery (Map.union additions previous)
+
+data WorldCompletedDependencies = WorldCompletedDependencies WorldDependencyPolicy WorldModuleVersions !WorldCanonicalRecovery
+
+data WorldDependencyAdditions = WorldDependencyAdditions !WorldModuleVersions !WorldCanonicalRecovery
 
 data WorldDependencyAttempt = WorldDependencyAttempt
   String IssuedWorldRealization WorldDependencyPolicy (Map.Map FilePath WorldHomeSource)
-  WorldModuleVersions ModIfaceCache (IORef GutsMemo) (IORef CompilerRecoveryCaches)
+  WorldModuleVersions !WorldCanonicalRecovery ModIfaceCache (IORef GutsMemo) (IORef CompilerRecoveryCaches)
   (IORef CompilerInterpreterState)
 
 -- No held world, mutable attempt, source tree or backing lease escapes in this
 -- pending result. The scope resolves the actual held owner again at commit.
 data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String IssuedWorldRealization WorldDependencyPolicy
-  (IORef (Maybe WorldModuleVersions))
+  !WorldCanonicalRecovery !CompilerRecoveryCaches (IORef (Maybe WorldDependencyAdditions))
 
 -- Immutable private versions remain paired with the actual pending completion
 -- that issued them. Borrowing is not publication or a second attempt owner.
@@ -1554,24 +1583,25 @@ beginHeldWorldDependencyAttempt universe
   policy <- worldDependencyPolicy universe facts
   WorldPreparedModules _ _ completed _ <- readIORef preparedRef
   committed <- case completed of
-    Nothing -> pure Map.empty
-    Just (WorldCompletedDependencies issued selected)
-      | issued == policy -> pure selected
+    Nothing -> pure (Map.empty,emptyWorldCanonicalRecovery)
+    Just (WorldCompletedDependencies issued selected recovery)
+      | issued == policy -> pure (selected,recovery)
       | otherwise -> throwIO WorldCellCorrupt
-  versions <- case private of
+  (versions,canonicalRecovery) <- case private of
     Nothing -> pure committed
-    Just (WorldPrivateCompletion _ (WorldCompletedDependencies issued selected))
-      | issued == policy -> pure (mergeWorldModuleVersions selected committed)
+    Just (WorldPrivateCompletion _ (WorldCompletedDependencies issued selected recovery))
+      | issued == policy -> pure (mergeWorldModuleVersions selected (fst committed),
+          mergeWorldCanonicalRecovery recovery (snd committed))
       | otherwise -> throwIO WorldCellCorrupt
   cache <- newIfaceCache
   memo <- newIORef Map.empty
   recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe) []
   recoveryRef <- newIORef recovery
-  pure (WorldDependencyAttempt (worldInputsIdentity facts) reference policy paths versions cache memo recoveryRef (universeInterpreter universe))
+  pure (WorldDependencyAttempt (worldInputsIdentity facts) reference policy paths versions canonicalRecovery cache memo recoveryRef (universeInterpreter universe))
 
 worldDependencyCycle :: WorldDependencyAttempt -> CompilerUniverse -> IORef InterpreterAttemptState -> CycleState
-worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions cache memo recoveryRef _) universe attempt =
-  TransactionCycle cache memo Nothing versions activate
+worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions canonicalRecovery cache memo recoveryRef _) universe attempt =
+  TransactionCycle cache memo Nothing versions canonicalRecovery activate
     (universeInterpreter universe) (universePackageFinder universe) attempt
   where
     activate selected = do
@@ -1581,11 +1611,11 @@ worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions cache memo recover
       pure recovery
 
 worldDependencyRecovery :: WorldDependencyAttempt -> IO CompilerRecoveryCaches
-worldDependencyRecovery (WorldDependencyAttempt _ _ _ _ _ _ _ recoveryRef _) = readIORef recoveryRef
+worldDependencyRecovery (WorldDependencyAttempt _ _ _ _ _ _ _ _ recoveryRef _) = readIORef recoveryRef
 
 stageHeldWorldDependencies :: CompilerExecutor -> WorldDependencyAttempt -> PipelineVariant -> HscEnv -> FilePath -> IO PendingWorldDependencies
 stageHeldWorldDependencies executor
-    (WorldDependencyAttempt identity reference policy paths previous _ memo recoveryRef interpreter) variant final path = do
+    (WorldDependencyAttempt identity reference policy paths previous canonicalRecovery _ memo recoveryRef interpreter) variant final path = do
   target <- targetModuleFor (hsc_mod_graph final) path
   recovery <- readIORef recoveryRef
   recoveryIdentity <- RequestUnique.newUnique
@@ -1621,8 +1651,8 @@ stageHeldWorldDependencies executor
             || completedModuleEpoch node /= epoch) previousVersion]
   evictCompilerRecovery recovery (== target)
   _ <- evaluate (Map.size additions)
-  pending <- newIORef (Just additions)
-  pure (PendingWorldDependencies executor identity reference policy pending)
+  pending <- newIORef (Just (WorldDependencyAdditions additions emptyWorldCanonicalRecovery))
+  pure (PendingWorldDependencies executor identity reference policy canonicalRecovery recovery pending)
 
 -- Borrowing a successful private stage does not consume its eventual
 -- publication. The admission owner already binds this continuation to one
@@ -1630,38 +1660,61 @@ stageHeldWorldDependencies executor
 borrowHeldWorldDependencies :: CompilerExecutor -> WorldInputFacts -> String
   -> Maybe WorldPrivateCompletion -> PendingWorldDependencies -> IO WorldPrivateCompletion
 borrowHeldWorldDependencies executor facts reference previous
-    completion@(PendingWorldDependencies issued identity realization policy pending) = do
+    completion@(PendingWorldDependencies issued identity realization policy _ _ pending) = do
   unless (sameCompilerExecutor executor issued && identity == worldInputsIdentity facts
       && worldRealizationText realization == reference) (throwIO WorldCellCorrupt)
   requireCompilerExecutorOpen executor
-  additions <- readIORef pending >>= maybe (throwIO CheckedPurposeMismatch) pure
-  retained <- case previous of
-    Nothing -> pure Map.empty
-    Just (WorldPrivateCompletion _ (WorldCompletedDependencies old selected))
-      | old == policy -> pure selected
+  WorldDependencyAdditions additions recovery <- readIORef pending >>= maybe (throwIO CheckedPurposeMismatch) pure
+  (retained,oldRecovery) <- case previous of
+    Nothing -> pure (Map.empty,emptyWorldCanonicalRecovery)
+    Just (WorldPrivateCompletion _ (WorldCompletedDependencies old selected known))
+      | old == policy -> pure (selected,known)
       | otherwise -> throwIO WorldCellCorrupt
-  pure (WorldPrivateCompletion completion (WorldCompletedDependencies policy (mergeWorldModuleVersions additions retained)))
+  pure (WorldPrivateCompletion completion (WorldCompletedDependencies policy
+    (mergeWorldModuleVersions additions retained) (mergeWorldCanonicalRecovery recovery oldRecovery)))
+
+-- Only actual demanded canonical versions retain body acceleration. The
+-- pending owner is still private; END commits these additions with source rows.
+sealWorldCanonicalRecovery :: PendingWorldDependencies -> [OriginalVersion] -> IO ()
+sealWorldCanonicalRecovery (PendingWorldDependencies _ _ _ _ _ recovery pending) versions = do
+  selected <- filterM (preparedBodyHasOriginalVersion (compilerPreparedBodies recovery)) versions
+  timing <- readTimingEnabled
+  emitCount timing "world.cell.canonical_recovery_roots" (fromIntegral (length selected))
+  identity <- RequestUnique.newUnique
+  let additions = WorldCanonicalRecovery (Map.fromList [(version,RecoveryContext identity recovery) | version <- selected])
+  actual <- readIORef pending >>= maybe (throwIO CheckedPurposeMismatch) pure
+  let WorldDependencyAdditions sources known = actual
+  writeIORef pending (Just (WorldDependencyAdditions sources (mergeWorldCanonicalRecovery additions known)))
+
+inheritWorldCanonicalRecovery :: WorldCanonicalRecovery -> CompilerRecoveryCaches -> OriginalVersion -> IO ()
+inheritWorldCanonicalRecovery (WorldCanonicalRecovery roots) current version =
+  forM_ (Map.lookup version roots) $ \source -> inheritPreparedBodyOwner
+    (compilerPreparedBodies current) (compilerPreparedBodies (recoveryContextCaches source)) (originalVersionOwner version)
+
+cycleCanonicalRecovery :: CycleState -> WorldCanonicalRecovery
+cycleCanonicalRecovery StandaloneCycle = emptyWorldCanonicalRecovery
+cycleCanonicalRecovery (TransactionCycle _ _ _ _ roots _ _ _ _) = roots
 
 mergeWorldModuleVersions :: WorldModuleVersions -> WorldModuleVersions -> WorldModuleVersions
 mergeWorldModuleVersions = Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
 
 commitHeldWorldDependencies :: PendingWorldDependencies -> HeldCompilerWorld -> IO ()
-commitHeldWorldDependencies (PendingWorldDependencies _ identity reference policy pending)
+commitHeldWorldDependencies (PendingWorldDependencies _ identity reference policy _ _ pending)
     (HeldCompilerWorld facts issued _ preparedRef) = do
   unless (identity == worldInputsIdentity facts && reference == issued) (throwIO WorldCellCorrupt)
   WorldPreparedModules table receipts previous demandScope <- readIORef preparedRef
-  versions <- case previous of
-    Nothing -> pure Map.empty
-    Just (WorldCompletedDependencies selected retained)
-      | selected == policy -> pure retained
+  (versions,oldRecovery) <- case previous of
+    Nothing -> pure (Map.empty,emptyWorldCanonicalRecovery)
+    Just (WorldCompletedDependencies selected retained recovery)
+      | selected == policy -> pure (retained,recovery)
       | otherwise -> throwIO WorldCellCorrupt
   -- Preflight has verified the exact scope, allowance, held owner and policy.
   -- Consume before changing retained state; an uncertain mutation cannot replay.
-  additions <- atomicModifyIORef' pending (\value -> (Nothing,value))
+  WorldDependencyAdditions additions recovery <- atomicModifyIORef' pending (\value -> (Nothing,value))
     >>= maybe (throwIO CheckedPurposeMismatch) pure
   let completed = WorldCompletedDependencies policy
-        (mergeWorldModuleVersions additions versions)
-  let WorldCompletedDependencies _ retained = completed
+        (mergeWorldModuleVersions additions versions) (mergeWorldCanonicalRecovery recovery oldRecovery)
+  let WorldCompletedDependencies _ retained _ = completed
   _ <- evaluate (Map.size retained)
   writeIORef preparedRef (WorldPreparedModules table receipts (Just completed) demandScope)
 
@@ -1917,7 +1970,7 @@ observeCompilerWorld timing universe event root reference world =
       emitCount timing "worlds.prepared_home_receipts" (fromIntegral (Map.size receipts))
       emitCount timing "worlds.completed_source_modules" $ case completed of
         Nothing -> 0
-        Just (WorldCompletedDependencies _ versions) -> fromIntegral (Map.size versions)
+        Just (WorldCompletedDependencies _ versions _) -> fromIntegral (Map.size versions)
 
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
 instance Exception WorldQueryFailure
@@ -2026,7 +2079,7 @@ runWorldPublicModule producer universe baseEnv timing
             identity <- liftIO newTimingRequestIdentity
             start <- monotonicTime
             resources <- beginResourceTiming timing
-            let cycle = TransactionCycle cache memo Nothing Map.empty
+            let cycle = TransactionCycle cache memo Nothing Map.empty emptyWorldCanonicalRecovery
                   (const (selectCompilerRecoveryCaches baseEnv (universeRecovery universe) []))
                   (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt
             CheckedPublicModuleResult target compiled evidence _ <- runCompileCycle
@@ -2411,8 +2464,12 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   unless ((directory ++ [pathSeparator]) `isPrefixOf` target) (liftIO (throwIO WorldCellCorrupt))
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
   let flags = heldWorldCellFlags baseEnv directory roots
-  setSession ((hscUpdateHPT (const emptyHomePackageTable) (hscUpdateFlags (const flags) borrowed))
-    {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]})
+      policy = retainedContext retained
+  -- Source compatibility runs before the target hook refines value demand.
+  -- It must see the same module-scoped plugin as every source issuer.
+  setSession (installRetainedUnfoldingsPlugin policy
+    ((hscUpdateHPT (const emptyHomePackageTable) (hscUpdateFlags (const flags) borrowed))
+      {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]}))
   variant <- liftIO (normalVariant purpose)
   recipe <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (pvGeneratedScaffold variant)
   capturedSource <- liftIO (captureGeneratedScaffoldSource recipe path >>= either (\reason -> do
@@ -2511,7 +2568,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   importsRef <- liftIO (newIORef Nothing)
   -- Demanded values have source-less owners. Dependencies retain their own
   -- module-local policy; the target hook installs the resolved value policy.
-  let policy = retainedContext retained
   let privateDependencies = case operation of
         WorldCellSource _ _ (WorldCellPrefix _ _ _ previous _ _ _ _) _ _ _ -> previous
         WorldObservationSource {} -> Nothing
@@ -2528,8 +2584,8 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               WorldObservationSource {} -> []
         , pvWorldOriginalBindings=Map.empty
         , pvWorldCompletedDependencies=case (privateDependencies,dependencies) of
-            (Just (WorldPrivateCompletion previous _),WorldDependencyAttempt _ _ policy _ versions _ _ _ _) ->
-              Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions))
+            (Just (WorldPrivateCompletion previous _),WorldDependencyAttempt _ _ policy _ versions canonicalRecovery _ _ _ _) ->
+              Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions canonicalRecovery))
             _ -> Nothing
         , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces)
         , pvTransformParsed = \target environment summary parsed -> do
@@ -2626,7 +2682,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
           (WorldCellInputs (worldResolvedGenerations resolved) (worldResolvedReferences resolved)
             (target,SHA256.hash source) imports sourceSelection roots
             selectedTypeBodies)
-          pending original))
+          pending original) Nothing)
     WorldObservationSource requireActive (WorldObservationStage _ query _ _ _ _ _ _ _) -> do
       checked <- runStage CheckedEnvironment
       unless (Map.member "__tidepool_inspection_row" (crInspectionProbes checked))
@@ -2864,12 +2920,12 @@ retainWorldCellOriginal prepared homes graph planned = do
         {ms_location=location, ms_parsed_mod=Nothing, ms_hspp_file=ml_hi_file location, ms_hspp_buf=Nothing}
     virtualize _ node = node
 
-advanceWorldCellPrefix :: CompilerExecutor -> WorldInputFacts -> WorldCellPrepareRequest -> Int -> CellSourcePlan -> CompilePurpose
-  -> PipelineSelection result -> CompletedCompilerResult result -> HscEnv -> WorldCellPrefix -> IO WorldCellPrefix
-advanceWorldCellPrefix executor facts question offset current _ selection completed environment
+advanceWorldCellPrefix :: CompilerExecutor -> WorldInputFacts -> WorldCellPrepareRequest -> Int -> CellSourcePlan
+  -> PreparedPipelineResult -> WorldCompilerCompletion -> WorldCellPrefix -> IO WorldCellPrefix
+advanceWorldCellPrefix executor facts question offset current result completion
     (WorldCellPrefix cursor homes graph dependencies inventories scope inherited _) = do
-  result <- maybe (throwIO WorldCellCorrupt) pure (worldPreparedResult selection (completedCompilerResult completed))
-  let captures = prProducedSessionInterfaces (pprPipelineResult result)
+  let environment = prHscEnv (pprPipelineResult result)
+      captures = prProducedSessionInterfaces (pprPipelineResult result)
       slotByGeneration = Map.fromList
         [(generation,(ordinal,slot)) | (ordinal,slot) <- worldCellPrepareSlots question
           , let generation = case slot of
@@ -2895,13 +2951,12 @@ advanceWorldCellPrefix executor facts question offset current _ selection comple
       pure (alias,WorldStagedValue ordinal symbol (stableVarId name) (worldCellPrepareDefiningScope question) generation
         artifact (hm_iface selected) capture selected)
   let homesWithValues = foldl' (\table (_,WorldStagedValue _ _ _ _ _ _ _ _ home) -> addToHpt table (moduleName (mi_module (hm_iface home))) home) homes additions
-  (nextHomes,nextGraph,nextInventories) <- case completedCompilerWorldCompletion completed >>= worldCompilerCompletionPlannedDeclaration of
+  (nextHomes,nextGraph,nextInventories) <- case worldCompilerCompletionPlannedDeclaration completion of
     Nothing -> pure (homesWithValues,graph,inventories)
     Just (planned,inventory) -> do
       (retained,extended) <- retainWorldCellOriginal result homesWithValues graph planned
       pure (retained,extended,inventories ++ [inventory])
   nextScope <- updateSegmentDemandScope environment [(alias,Just (WorldPriorBinding value)) | (alias,value) <- additions] scope
-  completion <- maybe (throwIO WorldCellCorrupt) pure (completedCompilerWorldCompletion completed)
   nextDependencies <- borrowHeldWorldDependencies executor facts (worldCellPrepareRealization question)
     dependencies (worldCompilerCompletionDependencies completion)
   pure (WorldCellPrefix (cursor+1) nextHomes nextGraph (Just nextDependencies) nextInventories nextScope inherited WorldStagePending)
@@ -3167,6 +3222,7 @@ data CycleState
   = StandaloneCycle
   | TransactionCycle ModIfaceCache (IORef GutsMemo) (Maybe (Either String CapturedCandidateManifest))
       (Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion)))
+      WorldCanonicalRecovery
       (Map.Map Module CompletedModuleVersion -> IO CompilerRecoveryCaches)
       (IORef CompilerInterpreterState) PackageFinderFacts (IORef InterpreterAttemptState)
 
@@ -4147,7 +4203,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     completionRecoveryRef <- liftIO (newIORef Nothing)
     packageFinder <- case cycleState of
       StandaloneCycle -> getSession >>= liftIO . newPackageFinderFacts
-      TransactionCycle _ _ _ _ _ _ facts _ -> pure facts
+      TransactionCycle _ _ _ _ _ _ _ facts _ -> pure facts
     forM_ (pvExactScope variant) $ \scope ->
       case compilerProducerFor variant of
         Nothing -> liftIO (throwIO CompilerProducerUnavailable)
@@ -4164,7 +4220,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     disabledPreparedOwnersRef <- liftIO (newIORef Set.empty)
     interpreterAttempt <- case cycleState of
       StandaloneCycle -> liftIO (newIORef InterpreterConfirmed)
-      TransactionCycle _ _ _ _ _ _ _ attempt -> pure attempt
+      TransactionCycle _ _ _ _ _ _ _ _ attempt -> pure attempt
     let markInterpreterMutation = writeIORef interpreterAttempt InterpreterMutationPending
     let reuseContext = ReuseContext requestIdentity (compilePurposeLabel (pvPurpose variant))
         reuseOwner summary = Just (ReuseModule (unitString (moduleUnit (ms_mod summary)))
@@ -4184,13 +4240,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         exactCycle = exactCompileCycle selection variant
         mCache = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle cache _ _ _ _ _ _ _ -> Just cache
+          TransactionCycle cache _ _ _ _ _ _ _ _ -> Just cache
         mMemoRef = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ memo _ _ _ _ _ _ -> Just memo
+          TransactionCycle _ memo _ _ _ _ _ _ _ -> Just memo
         capturedCandidates = case cycleState of
           StandaloneCycle -> Nothing
-          TransactionCycle _ _ captured _ _ _ _ _ -> captured
+          TransactionCycle _ _ captured _ _ _ _ _ _ -> captured
     when (exactCycle && case cycleState of StandaloneCycle -> True; _ -> False) $ do
       current <- getSession
       fresh <- liftIO (freshExactState current)
@@ -4237,6 +4293,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     productInterfacesRef <- liftIO (newIORef Map.empty)
     finalizedModulesRef <- liftIO (newIORef Map.empty)
     acquiredCanonicalOriginalsRef <- liftIO (newIORef Map.empty)
+    actualOriginalNamesRef <- liftIO (newIORef Map.empty)
+    actualOriginalReferencesRef <- liftIO (newIORef Map.empty)
     loadedModulesRef <- liftIO (newIORef Map.empty)
     targetEnvironmentRef <- liftIO (newIORef Nothing)
     targetTypedSegmentRef <- liftIO (newIORef Nothing)
@@ -4438,7 +4496,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             , ms_hsc_src summary == HsSrcFile])
     interpreterState <- case cycleState of
       StandaloneCycle -> liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
-      TransactionCycle _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
+      TransactionCycle _ _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
     selectedVersionsRef <- liftIO (newIORef Map.empty)
     executableObservationsRef <- liftIO $ if memoTrace
       then Just <$> newIORef Map.empty else pure Nothing
@@ -4460,7 +4518,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                    || (isJust incarnation && memoIncarnation validity == incarnation), MemoSelectionIncarnation)]
              , not valid]
     case cycleState of
-      TransactionCycle _ memo _ versions _ _ _ _ -> liftIO $ do
+      TransactionCycle _ memo _ versions _ _ _ _ _ -> liftIO $ do
         let select summary = do
               byIngress <- Map.lookup (ms_mod summary) versions
               let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
@@ -4645,6 +4703,22 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           | ms_hsc_src summary == HsSrcFile = canonicalOriginalInputs >>=
               (\inputs -> lookupCanonicalOriginalInput inputs (ms_mod summary))
           | otherwise = Nothing
+    let nativeReference owner = do
+          WorldSourceInputBasis _ facts _ _ _ <- pvWorldSources variant
+          worldOriginalReferenceFor facts owner
+        nativeCanonical summary = isJust (canonicalOriginalFor summary)
+          && isJust (nativeReference (ms_mod summary))
+        nativeOriginalInputs =
+          [(ms_mod summary,input,reference) | summary <- sourceOrder
+            , input <- maybe [] pure (canonicalOriginalFor summary)
+            , reference <- maybe [] pure (nativeReference (ms_mod summary))]
+        referenceForName name = case Set.toAscList (Set.fromList
+            [reference | (owner,input,reference) <- nativeOriginalInputs
+              , nameModule_maybe name == Just owner
+                || any (name `elem`) (map availNames (mi_exports (hm_iface (canonicalOriginalHome input))))]) of
+          [] -> pure Nothing
+          [reference] -> pure (Just reference)
+          _ -> throwIO (OriginalNativeNameConflict name)
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->
@@ -4748,7 +4822,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                  | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
                  | otherwise = case cycleState of
                      StandaloneCycle -> CacheDisabled
-                     TransactionCycle _ _ _ versions _ _ _ _ ->
+                     TransactionCycle _ _ _ versions _ _ _ _ _ ->
                        case Map.lookup (ms_mod summary) versions of
                          Nothing -> Absent
                          Just previous ->
@@ -4764,7 +4838,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         reuseEvent Interface ReuseHit Matched summary
     case cycleState of
       StandaloneCycle -> pure ()
-      TransactionCycle _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
+      TransactionCycle _ _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
         selectedVersions <- readIORef selectedVersionsRef
         recovery <- activateRecovery (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
         writeIORef completionRecoveryRef (Just recovery)
@@ -4798,7 +4872,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         emptyHomePackageTable (eltsHpt table)) current)
     case cycleState of
       StandaloneCycle -> pure ()
-      TransactionCycle cache _ _ _ _ _ _ _ -> do
+      TransactionCycle cache _ _ _ _ _ _ _ _ -> do
         selectedVersions <- liftIO (readIORef selectedVersionsRef)
         forM_ sourceOrder $ \summary -> forM_ (Map.lookup (ms_mod summary) validatedMemo) $ \entry -> do
           current <- getSession
@@ -4859,7 +4933,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (Map.lookup (ms_mod summary) observedExecutables)
             selection = case cycleState of
               StandaloneCycle -> observation MemoStandalone 0 Nothing [] 0
-              TransactionCycle _ _ _ versions _ _ _ _
+              TransactionCycle _ _ _ versions _ _ _ _ _
                 | ms_mod summary == targetOwner -> observation MemoTargetExcluded 0 Nothing [] 0
                 | otherwise -> case Map.lookup (ms_mod summary) versions of
                     Nothing -> observation MemoOwnerAbsent 0 Nothing [] 0
@@ -5079,6 +5153,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             , let identity = preparedRootIdentity identifier
             , identity `Set.member` nativeBinders])
         availableOriginalBindings env = do
+          actualNames <- readIORef actualOriginalNamesRef
           candidateBindings <- forM (Map.toAscList acceptedCandidates) $ \(name, admission) -> do
             home <- maybe (throwIO (CandidateOriginalHomeMissing name)) pure
               (lookupHpt (hsc_HPT env) name)
@@ -5102,7 +5177,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             forM_ (Map.toAscList bindings) $ \(name,identity) ->
               forM_ (Map.lookup name known) $ \previous -> unless (previous == identity)
                 (throwIO (OriginalNativeNameConflict name))
-            pure (Map.union known bindings)) (pvWorldOriginalBindings variant) (candidateBindings ++ nativeBindings)
+            pure (Map.union known bindings)) (pvWorldOriginalBindings variant) (actualNames : candidateBindings ++ nativeBindings)
         retainLoaded pending iface = do
           unless (mi_module iface == ms_mod (pendingSummary pending)) $
             throwIO LoadedFinalizationOwnerMismatch
@@ -5594,15 +5669,28 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 when captureProducts $ liftIO $
                   modifyIORef' productInterfacesRef (Map.insert name (hm_iface hmi))
                 pure (HydratedObservation modSum hmi candidate)
-              freezeSiblings observations = liftIO $ writeIORef preparedSiblingsRef (Map.unions
-                [ resolvePreparedSiblings (cg_binds (finalizedTidyGuts finalized))
-                | observation <- observations
-                , finalized <- case observation of
-                    LoadedObservation loaded -> [loadedFinalized loaded]
-                    CachedObservation summary entry ->
-                      [loadedFinalized (payloadLoaded summary (gmePayload entry))]
-                    HydratedObservation{} -> []
-                    CanonicalObservation{} -> [] ])
+              freezeSiblings observations = liftIO $ do
+                let finalized = [product | observation <- observations
+                      , product <- case observation of
+                          LoadedObservation loaded -> [loadedFinalized loaded]
+                          CachedObservation summary entry ->
+                            [loadedFinalized (payloadLoaded summary (gmePayload entry))]
+                          HydratedObservation{} -> []
+                          CanonicalObservation{} -> []]
+                    bindings = concatMap (cg_binds . finalizedTidyGuts) finalized
+                    rhs (NonRec _ value) = [value]
+                    rhs (Rec pairs) = map snd pairs
+                    identifiers = [identifier | binding <- bindings,value <- rhs binding
+                      , identifier <- nonDetEltsUniqSet (exprFreeVars value),isId identifier]
+                selected <- fmap catMaybes $ forM identifiers $ \identifier -> do
+                  reference <- referenceForName (idName identifier)
+                  pure ((\value -> (idName identifier,preparedRootIdentity identifier,value)) <$> reference)
+                let names = Map.fromList [(name,identity) | (name,identity,_) <- selected]
+                    references = Map.fromList [(identity,reference) | (_,identity,reference) <- selected]
+                writeIORef actualOriginalNamesRef names
+                writeIORef actualOriginalReferencesRef references
+                writeIORef preparedSiblingsRef (Map.unions (map resolvePreparedSiblings
+                  [cg_binds (finalizedTidyGuts product) | product <- finalized]))
               acquirePreparationEnvironment observations = do
                 freezeSiblings observations
                 env <- getSession
@@ -5698,6 +5786,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               cache <- maybe newPreparedBodyCache (pure . compilerPreparedBodies) canonicalRecovery
               Just <$> newPreparedCanonicalModuleTaskPreparer canonicalEnvironmentForTasks cache inputs
           let prepareCanonical summary input = do
+                forM_ (canonicalOriginalVersion input) $ \version -> forM_ canonicalRecovery $ \recovery ->
+                  liftIO (inheritWorldCanonicalRecovery (cycleCanonicalRecovery cycleState) recovery version)
                 prepare <- maybe (liftIO (throwIO WorldCellCorrupt)) pure canonicalPrepare
                 siblings <- liftIO (readIORef preparedSiblingsRef)
                 result <- liftIO (prepare siblings (ms_mod summary))
@@ -5754,7 +5844,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   let name = ms_mod_name (observationSummary observation)
                   case observation of
                     HydratedObservation{} -> pure Nothing
-                    CanonicalObservation summary input -> Just <$> prepareCanonical summary input
+                    CanonicalObservation summary input
+                      | nativeCanonical summary -> pure Nothing
+                      | otherwise -> Just <$> prepareCanonical summary input
                     CachedObservation summary entry -> case payloadProduct (gmePayload entry) of
                       Just product' | preparedReusable entry product' -> do
                         recordExecutableValidity summary True
@@ -5789,7 +5881,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     pure (Just output, prepared)
               pairs <- forM observations' $ \observation -> case observation of
                 HydratedObservation{} -> pure (Nothing, Nothing)
-                CanonicalObservation summary input -> loadedCanonical summary input >>= collectPrepared
+                CanonicalObservation summary input
+                  | nativeCanonical summary -> pure (Nothing,Nothing)
+                  | otherwise -> loadedCanonical summary input >>= collectPrepared
                 CachedObservation summary entry -> collectPrepared (payloadLoaded summary (gmePayload entry))
                 LoadedObservation loaded -> collectPrepared loaded
               pure (observations', [output | (Just output, _) <- pairs],
@@ -5880,7 +5974,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   if name `Set.notMember` reachableMods then pure Nothing
                     else case observation of
                       HydratedObservation{} -> pure Nothing
-                      CanonicalObservation canonicalSummary input -> Just <$> prepareCanonical canonicalSummary input
+                      CanonicalObservation canonicalSummary input
+                        | nativeCanonical canonicalSummary -> pure Nothing
+                        | otherwise -> Just <$> prepareCanonical canonicalSummary input
                       CachedObservation _ entry | name `Set.member` reusableOwners ->
                         case payloadProduct (gmePayload entry) of
                           Just product' -> pure (Just (name, Right (productPrepared product')))
@@ -5968,9 +6064,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       memoMissTrace modSum reason (Just entry)
                       compileReachable (payloadLoaded modSum (gmePayload entry))
                     LoadedObservation loaded -> compileReachable loaded
-                    CanonicalObservation summary input -> do
-                      loaded <- loadedCanonical summary input
-                      compileReachable loaded
+                    CanonicalObservation summary input
+                      | nativeCanonical summary -> recordExecutableValidity summary True >> pure []
+                      | otherwise -> do
+                          loaded <- loadedCanonical summary input
+                          compileReachable loaded
                     HydratedObservation _ _ _ -> do
                       recordExecutableValidity modSum True
                       pure []
@@ -6282,6 +6380,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , ownedPprFinalizedModules = finalizedModules
               , ownedPprPackageImports = packageRoots
               , ownedPprCandidateAdmissions = []
+              , ownedPprOriginalReferences = Map.empty
               , ownedPprOriginalBindings = Map.empty
               , ownedPprReuseContext = reuseContext
               , ownedPprCanonicalOriginalInputs = canonicalOriginalInputs
@@ -6293,6 +6392,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             when (not valid) $ liftIO $ ioError $ userError
               "accepted module candidate changed before artifact publication"
             originalBindings <- liftIO (availableOriginalBindings (ownedPrHscEnv result))
+            originalReferences <- liftIO (readIORef actualOriginalReferencesRef)
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
               variant dependencies exactCompilation)
             acquiredCanonicalOriginals <- liftIO (readIORef acquiredCanonicalOriginalsRef)
@@ -6304,6 +6404,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , ownedPprFinalizedModules = finalizedModules
               , ownedPprPackageImports = packageRoots
               , ownedPprCandidateAdmissions = Map.elems acceptedCandidates
+              , ownedPprOriginalReferences = originalReferences
               , ownedPprOriginalBindings = originalBindings
               , ownedPprReuseContext = reuseContext
               , ownedPprCanonicalOriginalInputs = canonicalOriginalInputs
@@ -7031,7 +7132,8 @@ data HeldWorldCellAdmission = HeldWorldCellAdmission (IORef CompilerPhase)
 data WorldCellPrefix = WorldCellPrefix !Int HomePackageTable ModuleGraph
   (Maybe WorldPrivateCompletion) [PlannedDeclarationInventory] (SegmentDemandScope WorldDemandBinding) [LocatedImport] WorldCellStageState
 
-data WorldCellStageState = WorldStagePending | WorldStageRendered HeldWorldCellStage | WorldStageRetry CellSourcePlan
+data WorldCellStageState = WorldStagePending | WorldStageRendered HeldWorldCellStage
+  | WorldStageCompiled HeldWorldCellStage PendingWorldDependencies | WorldStageRetry CellSourcePlan
 
 -- The admitted authored item and its reservation survive stage rendering and
 -- generated-instance retries. Generated source has separate compilation
@@ -7104,12 +7206,16 @@ data CompilerScope = CompilerScope
       -> IO (CompletedCompilerResult result)
   , ownedScopedCommitWorldDependencies :: HeldWorldCellAdmission -> PendingWorldDependencies -> IO ()
   , ownedScopedRunGhc :: forall result. Ghc result -> IO result
+  , ownedScopedNativeProductProvenance :: IO NativeProductProvenance
   , ownedScopedParserFlags :: DynFlags
   }
 
 -- Ordinary functions deliberately expose no record-update labels.
 scopedCompile :: CompilerScope -> ResidentCompiler
 scopedCompile = ownedScopedCompile
+
+scopedNativeProductProvenance :: CompilerScope -> IO NativeProductProvenance
+scopedNativeProductProvenance = ownedScopedNativeProductProvenance
 
 scopedCompileCompleted :: CompilerScope -> CompletedResidentCompiler
 scopedCompileCompleted = ownedScopedCompileCompleted
@@ -7237,16 +7343,19 @@ data WorldCompilerCompletion = WorldCompilerCompletion WorldCellInputs PendingWo
 -- A private next stage may consume only the immediately preceding actual
 -- completion borrowed by its admitted compiler cursor, not a same-World sibling.
 requireWorldProductPredecessor :: PreparedPipelineResult -> WorldCompilerCompletion -> IO ()
-requireWorldProductPredecessor prepared (WorldCompilerCompletion _ previous _) =
-  case ownedPprDependencies prepared of
-    WorldScoped _ _ _ (Just (WorldPrivateCompletion actual _)) _
-      | samePending actual previous -> pure ()
-    _ -> throwIO WorldCellCorrupt
-  where
-    samePending (PendingWorldDependencies executor world reference _ pending)
-        (PendingWorldDependencies issued selected realization _ expected) =
-      sameCompilerExecutor executor issued && world == selected && reference == realization
-        && pending == expected
+requireWorldProductPredecessor prepared previous = requireWorldProductInputs prepared (Just previous)
+
+requireWorldProductInputs :: PreparedPipelineResult -> Maybe WorldCompilerCompletion -> IO ()
+requireWorldProductInputs prepared previous = case (ownedPprDependencies prepared,previous) of
+  (WorldScoped _ _ _ Nothing _,Nothing) -> pure ()
+  (WorldScoped _ _ _ (Just (WorldPrivateCompletion actual _)) _,Just (WorldCompilerCompletion _ expected _))
+    | samePendingWorldDependencies actual expected -> pure ()
+  _ -> throwIO WorldCellCorrupt
+
+samePendingWorldDependencies :: PendingWorldDependencies -> PendingWorldDependencies -> Bool
+samePendingWorldDependencies (PendingWorldDependencies executor world reference _ _ _ pending)
+    (PendingWorldDependencies issued selected realization _ _ _ expected) =
+  sameCompilerExecutor executor issued && world == selected && reference == realization && pending == expected
 
 worldCompilerCompletionInputs :: WorldCompilerCompletion -> WorldCellInputs
 worldCompilerCompletionInputs (WorldCompilerCompletion inputs _ _) = inputs
@@ -7257,27 +7366,80 @@ worldCompilerCompletionDependencies (WorldCompilerCompletion _ pending _) = pend
 worldCompilerCompletionPlannedDeclaration :: WorldCompilerCompletion -> Maybe (PlannedDeclaration,PlannedDeclarationInventory)
 worldCompilerCompletionPlannedDeclaration (WorldCompilerCompletion _ _ original) = original
 
+-- A live compiled stage retains its actual result only until the paired writer
+-- seals it. The completed predecessor below retains metadata, never this handle.
+data CompiledWorldStage = CompiledWorldStage PreparedPipelineResult WorldCompilerCompletion WorldInputFacts
+  !WorldNativeCoordinates CompilerRecoveryCaches (IO ()) (IO ())
+
+data WorldNativeCoordinates = WorldNativeCoordinates !BS.ByteString !BS.ByteString !BS.ByteString !Word64
+
+withCompiledWorldStage :: CompiledWorldStage -> (PreparedPipelineResult -> WorldCompilerCompletion -> IO a) -> IO a
+withCompiledWorldStage (CompiledWorldStage prepared completion _ _ _ guard _) use = guard >> use prepared completion
+
+withCompiledWorldStageRecovery :: CompiledWorldStage
+  -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> IO a) -> IO a
+withCompiledWorldStageRecovery (CompiledWorldStage prepared completion _ _ recovery guard _) use = do
+  guard
+  let PendingWorldDependencies executor _ _ _ _ _ _ = worldCompilerCompletionDependencies completion
+  use prepared recovery executor
+
+withCompiledWorldInputs :: CompiledWorldStage -> (WorldInputFacts -> IO a) -> IO a
+withCompiledWorldInputs (CompiledWorldStage _ _ facts _ _ guard _) use = guard >> use facts
+
+withCompiledWorldNativeCoordinates :: CompiledWorldStage
+  -> (BS.ByteString -> BS.ByteString -> BS.ByteString -> Word64 -> IO a) -> IO a
+withCompiledWorldNativeCoordinates (CompiledWorldStage _ _ _ (WorldNativeCoordinates admission world inputs stage) _ guard _) use =
+  guard >> use admission world inputs stage
+
+inheritCompiledWorldCanonicalRecovery :: CompiledWorldStage -> OriginalVersion -> IO ()
+inheritCompiledWorldCanonicalRecovery (CompiledWorldStage _ completion _ _ recovery guard _) version = do
+  guard
+  let PendingWorldDependencies _ _ _ _ roots _ _ = worldCompilerCompletionDependencies completion
+  inheritWorldCanonicalRecovery roots recovery version
+
+requireSameCompiledWorldStage :: CompiledWorldStage -> CompiledWorldStage -> IO ()
+requireSameCompiledWorldStage first second = withCompiledWorldStage first $ \_ actual ->
+  withCompiledWorldStage second $ \_ expected ->
+    unless (samePendingWorldDependencies (worldCompilerCompletionDependencies actual)
+      (worldCompilerCompletionDependencies expected)) (throwIO WorldCellCorrupt)
+
+compiledWorldStageCompletion :: CompiledWorldStage -> WorldCompilerCompletion
+compiledWorldStageCompletion (CompiledWorldStage _ completion _ _ _ _ _) = completion
+
+finishCompiledWorldStage :: CompiledWorldStage -> [OriginalVersion] -> IO WorldCompilerCompletion
+finishCompiledWorldStage (CompiledWorldStage prepared completion _ _ recovery guard finish) versions = do
+  guard
+  let target = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
+  evictCompilerRecovery recovery (== target)
+  sealWorldCanonicalRecovery (worldCompilerCompletionDependencies completion) versions
+  finish
+  pure completion
+
 data CompletedCompilerResult result
   = CompletedOrdinaryCompilerResult result CompilerRecoveryCaches (IO ())
-  | CompletedWorldCompilerResult result CompilerRecoveryCaches (IO ()) WorldCompilerCompletion
+  | CompletedWorldCompilerResult result CompilerRecoveryCaches (IO ()) WorldCompilerCompletion (Maybe CompiledWorldStage)
 
 completedCompilerResult :: CompletedCompilerResult result -> result
 completedCompilerResult (CompletedOrdinaryCompilerResult result _ _) = result
-completedCompilerResult (CompletedWorldCompilerResult result _ _ _) = result
+completedCompilerResult (CompletedWorldCompilerResult result _ _ _ _) = result
 
 completedCompilerRecovery :: CompletedCompilerResult result -> CompilerRecoveryCaches
 completedCompilerRecovery (CompletedOrdinaryCompilerResult _ recovery _) = recovery
-completedCompilerRecovery (CompletedWorldCompilerResult _ recovery _ _) = recovery
+completedCompilerRecovery (CompletedWorldCompilerResult _ recovery _ _ _) = recovery
 
 completedCompilerWorldCompletion :: CompletedCompilerResult result -> Maybe WorldCompilerCompletion
 completedCompilerWorldCompletion (CompletedOrdinaryCompilerResult _ _ _) = Nothing
-completedCompilerWorldCompletion (CompletedWorldCompilerResult _ _ _ world) = Just world
+completedCompilerWorldCompletion (CompletedWorldCompilerResult _ _ _ world _) = Just world
+
+completedCompilerWorldStage :: CompletedCompilerResult result -> Maybe CompiledWorldStage
+completedCompilerWorldStage (CompletedOrdinaryCompilerResult _ _ _) = Nothing
+completedCompilerWorldStage (CompletedWorldCompilerResult _ _ _ _ stage) = stage
 
 -- This closure retains only the issuing thread and its existing phase cell.
 -- It does not keep the resident universe or a usable compiler capability alive.
 completedCompilerGuard :: CompletedCompilerResult result -> IO ()
 completedCompilerGuard (CompletedOrdinaryCompilerResult _ _ guard) = guard
-completedCompilerGuard (CompletedWorldCompilerResult _ _ guard _) = guard
+completedCompilerGuard (CompletedWorldCompilerResult _ _ guard _ _) = guard
 
 type CompletedResidentCompiler = forall result.
   PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
@@ -7539,14 +7701,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                   ("expected " ++ root ++ "; captured " ++ worldInputsIdentity facts)
                                 pure (ExactInputsRejected InvalidRoot)
                             | worldInputsProfile facts /= servicePackageProfile association
-                              || Just (CompilerProducerIdentity (hexBytes (worldInputsProducer facts))) /= producer -> do
+                              || Just (CompilerProducerIdentity (worldInputsProducer facts)) /= producer -> do
                                 when (worldInputsProfile facts /= servicePackageProfile association) $
                                   emitWorldAcquisitionRejection "package profile mismatch" manifest
                                     ("expected " ++ hexBytes (servicePackageProfile association)
                                       ++ "; captured " ++ hexBytes (worldInputsProfile facts))
-                                when (Just (CompilerProducerIdentity (hexBytes (worldInputsProducer facts))) /= producer) $
+                                when (Just (CompilerProducerIdentity (worldInputsProducer facts)) /= producer) $
                                   emitWorldAcquisitionRejection "compiler producer mismatch" manifest
-                                    ("expected " ++ maybe "<unset compiler producer>" (\(CompilerProducerIdentity value) -> value) producer
+                                    ("expected " ++ maybe "<unset compiler producer>" (\(CompilerProducerIdentity value) -> hexBytes value) producer
                                       ++ "; captured " ++ hexBytes (worldInputsProducer facts))
                                 pure (ExactInputsRejected AcquisitionRejected)
                             | otherwise -> case held <|> lookupCompilerWorld root (universeWorlds selected) of
@@ -7650,6 +7812,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                           case (state,drop cursor stages) of
                             (_,[]) -> pure Nothing
                             (WorldStageRendered stage,_) -> pure (Just stage)
+                            (WorldStageCompiled _ _,_) -> throwIO CheckedPurposeMismatch
                             (_,current:_) -> do
                               let count = length (cellPlanItems current)
                                   slots = take count (drop offset (worldCellPrepareSlots question))
@@ -7673,7 +7836,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                 compileWorldCell :: forall result. HeldWorldCellAdmission
                   -> PipelineSelection result -> Set.Set SymbolIdentity
                   -> IO (CompletedCompilerResult result)
-                compileWorldCell (HeldWorldCellAdmission issuingPhase expected question _ grant executor prefixRef operandRef)
+                compileWorldCell admission@(HeldWorldCellAdmission issuingPhase expected question _ grant executor prefixRef operandRef)
                     selection retained = runGuarded $ do
                   unless (issuingPhase == phase) (throwIO CheckedPurposeMismatch)
                   requireCompilerExecutorOpen executor
@@ -7703,13 +7866,47 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                 when (retry /= current) $
                                   writeIORef prefixRef (WorldCellPrefix cursor homes graph dependencies inventories scope inherited (WorldStageRetry retry))
                                 throwIO failure
-                            final <- reflectGhc getSession session
-                            advanced <- advanceWorldCellPrefix executor facts question offset current purpose selection result final prefix
-                            writeIORef prefixRef advanced
-                            pure result
+                            completion <- maybe (throwIO WorldCellCorrupt) pure (completedCompilerWorldCompletion result)
+                            writeIORef prefixRef (WorldCellPrefix cursor homes graph dependencies inventories scope inherited
+                              (WorldStageCompiled stage (worldCompilerCompletionDependencies completion)))
+                            prepared <- maybe (throwIO CheckedPurposeMismatch) pure
+                              (worldPreparedResult selection (completedCompilerResult result))
+                            let check = do
+                                  requireReady
+                                  requireCompilerExecutorOpen executor
+                                  WorldCellPrefix _ _ _ _ _ _ _ currentState <- readIORef prefixRef
+                                  case currentState of
+                                    WorldStageCompiled _ actual
+                                      | samePendingWorldDependencies actual (worldCompilerCompletionDependencies completion) -> pure ()
+                                    _ -> throwIO CheckedPurposeMismatch
+                            case result of
+                              CompletedWorldCompilerResult value recovery fence owner _ -> do
+                                let coordinates = WorldNativeCoordinates (worldCellPrepareAdmission question)
+                                      (worldInputsIdentityBytes facts) (worldInputsCompilerIdentityBytes facts)
+                                      (fromIntegral (heldWorldCellStageOffset stage))
+                                    compiled = CompiledWorldStage prepared completion facts coordinates recovery check
+                                      (completeWorldCellStage admission prepared completion)
+                                pure (CompletedWorldCompilerResult value recovery fence owner (Just compiled))
+                              _ -> throwIO WorldCellCorrupt
+                    _ -> throwIO WorldCellUnavailable
+                completeWorldCellStage (HeldWorldCellAdmission issuingPhase expected question _ _ executor prefixRef _) prepared completion = runGuarded $ do
+                  unless (issuingPhase == phase) (throwIO CheckedPurposeMismatch)
+                  requireCompilerExecutorOpen executor
+                  held <- readIORef heldWorld
+                  case (expected,held) of
+                    (HeldWorldQueryBinding identity reference,Just (HeldCompilerWorld facts issued _ _))
+                      | worldInputsIdentity facts == identity && issued == reference -> do
+                          prefix@(WorldCellPrefix _ _ _ _ _ _ _ state) <- readIORef prefixRef
+                          stage <- case state of
+                            WorldStageCompiled selected pending
+                              | samePendingWorldDependencies pending (worldCompilerCompletionDependencies completion) -> pure selected
+                            _ -> throwIO CheckedPurposeMismatch
+                          advanced <- advanceWorldCellPrefix executor facts question (heldWorldCellStageOffset stage)
+                            (heldWorldCellStagePlan stage) prepared completion prefix
+                          writeIORef prefixRef advanced
                     _ -> throwIO WorldCellUnavailable
                 commitWorldDependencies (HeldWorldCellAdmission issuingPhase expected question _ _ executor _ _)
-                    pending@(PendingWorldDependencies issuingExecutor _ _ _ _) = runGuarded $ do
+                    pending@(PendingWorldDependencies issuingExecutor _ _ _ _ _ _) = runGuarded $ do
                   unless (issuingPhase == phase && sameCompilerExecutor executor issuingExecutor)
                     (throwIO CheckedPurposeMismatch)
                   requireCompilerExecutorOpen executor
@@ -7791,8 +7988,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     else writeIORef availability ResidentPoisoned
                   completed <- captureCompletion (pure ())
                   finishCompletion (appendCleanupFailures completed failures)
+            let nativeProvenance = do
+                  requireReady
+                  case (producer,packageAssociation) of
+                    (Just (CompilerProducerIdentity compiler),Just association) ->
+                      pure (NativeProductProvenance compiler (servicePackageProfile association))
+                    _ -> throwIO NativeProductConfigurationUnavailable
             withCompletionRelease CompilerScopeRestore (pure ()) (const finish)
-              (const (captureCompletion (action (CompilerScope compile compileCompleted readScope ensureWorld readHeldWorld queryWorld planWorldCell validateWorldCell prepareWorldCellStage compileWorldCell commitWorldDependencies runOperation parserFlags)))))
+              (const (captureCompletion (action (CompilerScope compile compileCompleted readScope ensureWorld readHeldWorld queryWorld planWorldCell validateWorldCell prepareWorldCellStage compileWorldCell commitWorldDependencies runOperation nativeProvenance parserFlags)))))
               >>= finishCompletion
           acquire = do
             caller <- myThreadId
@@ -7911,7 +8114,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
   setSession (hscUpdateFlags flags attempt {hsc_targets=[]})
   result <- runCompileCycle selection
     (TransactionCycle cache memo candidates
-      (universeSourceVersions universe)
+      (universeSourceVersions universe) emptyWorldCanonicalRecovery
       activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
     policy incarnation timing requestIdentity sessionT0 resources variant path
   final <- getSession
