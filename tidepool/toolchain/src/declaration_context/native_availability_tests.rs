@@ -2869,9 +2869,6 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     {
         use crate::certified_products::{AcceptedGlobal, ReceiptImportOwner};
         use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep};
-        let membership = inputs
-            .available_original_sources(std::slice::from_ref(&native), &validation.inventory)
-            .unwrap();
         let crate::certified_products::PendingImportOwner::Source { binder, .. } =
             source_import(&native, 9001)
         else {
@@ -2890,7 +2887,7 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
                 required_evaluated: false,
                 required_generation: None,
             }];
-            let prepared = testing::prepare(wire).unwrap();
+            let prepared = Arc::new(testing::prepare(wire).unwrap());
             let version = match case {
                 "unversioned" => None,
                 "wrong-version" => Some(tidepool_repr::execution_schema::ModuleVersion([255; 32])),
@@ -2909,18 +2906,31 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
                     binder,
                 },
             }];
-            let result = crate::certified_products::certify_target_available_owners_from_membership_with_validation(&prepared, &accepted, &membership, &request.groups, &selection, &BTreeMap::new(), &mut PackageInterfaceValidation::default());
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let result = inputs.artifacts().inventory().select_native_target(
+                inputs.artifacts(),
+                &selection,
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            );
             if case == "exact" {
-                assert_eq!(result.unwrap(), vec![source_import(&native, 9001)]);
+                assert_eq!(result.unwrap().imports(), &[source_import(&native, 9001)]);
             } else {
                 let expected = match case {
                     "unversioned" => "unversioned source lacks compiler selection",
                     "wrong-version" => "source outside compiler selection",
-                    "wrong-binder" => "source binder/group closure",
+                    "wrong-binder" => "target Source exact native membership",
                     _ => unreachable!(),
                 };
                 assert!(
-                    matches!(result, Err(crate::certified_products::CertificationError::Mismatch(actual)) if actual == expected),
+                    matches!(result, Err(CompileError::CompilerEvidence(error))
+                        if matches!(error.as_ref(), crate::certified_products::CertificationError::Mismatch(actual) if *actual == expected)),
                     "{case} must refuse at its owning boundary"
                 );
             }
