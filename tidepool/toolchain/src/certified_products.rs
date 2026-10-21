@@ -20364,29 +20364,8 @@ pub(crate) mod tests {
             }
             for ordinal in [7, 9001] {
                 observed += 1;
-                let binder = testing::identity("BoundedHelper", &format!("entry_{ordinal}"));
-                let mut wire = testing::wire_program();
-                wire.globals = vec![GlobalDecl {
-                    identity: binder.clone(),
-                    rep: RuntimeRep::LiftedRef,
-                    entry_signature: None,
-                    required_evaluated: false,
-                    required_generation: None,
-                }];
-                let target = testing::prepare(wire).unwrap();
-                let accepted = vec![AcceptedGlobal {
-                    identity: binder.clone(),
-                    rep: RuntimeRep::LiftedRef,
-                    entry_signature: None,
-                    required_evaluated: false,
-                    owner: ReceiptImportOwner::Source {
-                        unit: product.owner().unit.clone(),
-                        module: product.owner().module.clone(),
-                        module_version: Some(product.owner().module_version.clone()),
-                        original_ordinal: ordinal,
-                        binder,
-                    },
-                }];
+                let accepted = source_target_observations(&[(&product, ordinal)]);
+                let target = prepared_target_fixture(&accepted);
                 let imported = certify_target_available_owners_from_membership_with_validation(
                     &target,
                     &accepted,
@@ -20409,19 +20388,22 @@ pub(crate) mod tests {
                         if refusal.owner == *product.owner() && refusal.original_ordinal == 9001)
                     );
                 }
-                let outcome = imported
-                    .map_err(|error| format!("certification: {error:?}"))
-                    .and_then(|imports| {
-                        inventory
-                            .admit_certified_with_demand(
-                                &view,
-                                vec![entry.clone()],
-                                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                                &selection,
-                            )
-                            .map(|selected| selected.selected_native_groups())
-                            .map_err(|error| format!("admission: {error:?}"))
-                    });
+                let observed_target =
+                    AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory)
+                        .unwrap();
+                let outcome = inventory
+                    .select_native_target(
+                        request.compiler_inputs().artifacts(),
+                        &selection,
+                        observed_target,
+                        None,
+                        None,
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    )
+                    .map(|selected| selected.artifacts().selected_native_groups())
+                    .map_err(|error| format!("selection: {error:?}"));
                 let expected = mode == "full" || (mode == "issued" && ordinal == 7);
                 if expected {
                     let mut exact = view.selected_native_groups();
@@ -20741,29 +20723,8 @@ pub(crate) mod tests {
                     .unwrap();
                 for ordinal in [7, 9001] {
                     observed += 1;
-                    let binder = testing::identity("HandoffHelper", &format!("entry_{ordinal}"));
-                    let mut wire = testing::wire_program();
-                    wire.globals = vec![GlobalDecl {
-                        identity: binder.clone(),
-                        rep: RuntimeRep::LiftedRef,
-                        entry_signature: None,
-                        required_evaluated: false,
-                        required_generation: None,
-                    }];
-                    let target = testing::prepare(wire).unwrap();
-                    let accepted = vec![AcceptedGlobal {
-                        identity: binder.clone(),
-                        rep: RuntimeRep::LiftedRef,
-                        entry_signature: None,
-                        required_evaluated: false,
-                        owner: ReceiptImportOwner::Source {
-                            unit: product.owner().unit.clone(),
-                            module: product.owner().module.clone(),
-                            module_version: Some(product.owner().module_version.clone()),
-                            original_ordinal: ordinal,
-                            binder,
-                        },
-                    }];
+                    let accepted = source_target_observations(&[(&product, ordinal)]);
+                    let target = prepared_target_fixture(&accepted);
                     let imported = certify_target_available_owners_from_membership_with_validation(
                         &target,
                         &accepted,
@@ -20790,19 +20751,29 @@ pub(crate) mod tests {
                         unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected typed refusal actual={imported:?}"));
                     }
                     if allowed {
-                        let Ok(imports) = imported else {
+                        let Ok(_) = imported else {
                             unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={imported:?}"));
                             continue;
                         };
+                        let observed_target = AuthenticatedTargetImports::issue(
+                            &target,
+                            &accepted,
+                            &validation.inventory,
+                        )
+                        .unwrap();
                         let admitted = next
                             .compiler_inputs()
                             .artifacts()
                             .inventory()
-                            .admit_certified_with_demand(
+                            .select_native_target(
                                 next.compiler_inputs().artifacts(),
-                                vec![entry.clone()],
-                                NativeArtifactDemand::CertifiedTargetImports(&imports),
                                 &next_selection,
+                                observed_target,
+                                None,
+                                None,
+                                &[],
+                                &BTreeMap::new(),
+                                &mut validation,
                             )
                             .unwrap();
                         let mut groups =
@@ -20811,7 +20782,7 @@ pub(crate) mod tests {
                             artifact: entry.descriptor.id,
                             original_ordinal: ordinal,
                         });
-                        assert_eq!(admitted.selected_native_groups(), groups);
+                        assert_eq!(admitted.artifacts().selected_native_groups(), groups);
                     }
                 }
             }
@@ -21637,20 +21608,6 @@ pub(crate) mod tests {
         .unwrap();
         let inventory = output.inventory();
         let before = output.capture_graph_selection();
-        let imports = [PendingImportOwner::Source {
-            owner: product.owner().clone(),
-            original_ordinal: 5,
-            binder: testing::identity("NeedsAmbiguousDependency", "entry_5"),
-        }];
-        let selected_error = inventory
-            .admit_certified_with_demand(
-                &output,
-                vec![entry.clone()],
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                &selection,
-            )
-            .err()
-            .expect("two exact scopes have no dependency choice");
         let bound_error = inventory
             .bind_segment(
                 &output,
@@ -21660,11 +21617,9 @@ pub(crate) mod tests {
             )
             .err()
             .expect("product completion must consume the same unresolved input choice");
-        for error in [selected_error, bound_error] {
-            assert!(
-                matches!(error, crate::CompileError::ArtifactInventory(error) if error.failure == ArtifactInventoryFailure::BindingAmbiguity { artifact: helper.descriptor.id })
-            );
-        }
+        assert!(
+            matches!(bound_error, crate::CompileError::ArtifactInventory(error) if error.failure == ArtifactInventoryFailure::BindingAmbiguity { artifact: helper.descriptor.id })
+        );
         assert_eq!(output.capture_graph_selection(), before);
     }
 
@@ -22164,7 +22119,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn current_cohort_dependencies_keep_required_owners_in_both_planners() {
+    fn current_cohort_dependencies_keep_required_owners_in_completed_target() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, CanonicalProducerIdentity,
             NativeArtifactDemand,
@@ -22264,11 +22219,6 @@ pub(crate) mod tests {
                 .iter()
                 .find(|entry| entry.descriptor.owner.module == "CohortParent")
                 .unwrap();
-            let imports = [PendingImportOwner::Source {
-                owner: parent.owner().clone(),
-                original_ordinal: 5,
-                binder: testing::identity("CohortParent", "entry_5"),
-            }];
             let inventory = output.inventory();
             let bound = inventory
                 .bind_segment(
@@ -22276,14 +22226,6 @@ pub(crate) mod tests {
                     vec![],
                     &selection,
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                )
-                .unwrap();
-            let selected = inventory
-                .admit_certified_with_demand(
-                    &output,
-                    entries.clone(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                    &selection,
                 )
                 .unwrap();
             let observations = source_target_observations(&[(parent, 5)]);
@@ -22305,7 +22247,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .artifacts()
                 .clone();
-            for view in [selected, bound] {
+            for view in [bound] {
                 let graph = view.capture_graph_selection();
                 assert_eq!(
                     graph.native_groups.len(),
@@ -22613,13 +22555,6 @@ pub(crate) mod tests {
                     .collect::<BTreeSet<_>>();
                 assert_eq!(expected.len(), 1);
                 let expected = *expected.first().unwrap();
-                let mut binder = testing::identity("CurrentDependent", "entry_5");
-                binder.unit = current.owner().unit.clone();
-                let imports = [PendingImportOwner::Source {
-                    owner: current.owner().clone(),
-                    original_ordinal: 5,
-                    binder,
-                }];
                 let inventory = output.inventory();
                 let bound = inventory
                     .bind_segment(
@@ -22627,14 +22562,6 @@ pub(crate) mod tests {
                         vec![],
                         &selection,
                         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                    )
-                    .unwrap();
-                let selected = inventory
-                    .admit_certified_with_demand(
-                        &output,
-                        vec![current_entry.clone()],
-                        NativeArtifactDemand::CertifiedTargetImports(&imports),
-                        &selection,
                     )
                     .unwrap();
                 let observations = source_target_observations(&[(current, 5)]);
@@ -22659,7 +22586,7 @@ pub(crate) mod tests {
                     .unwrap()
                     .artifacts()
                     .clone();
-                for view in [selected, bound] {
+                for view in [bound] {
                     let graph = view.capture_graph_selection();
                     let parents = graph
                         .native_groups
@@ -22849,9 +22776,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ordinary_target_selects_old_full_carrier_transitively_without_new_native() {
-        use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, NativeArtifactDemand, NativeGroupKey,
-        };
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeGroupKey};
         let dependency = full_native_fixture("Dependency", vec![(9, vec![]), (12, vec![])], 7);
         let dependency_import = PendingImportOwner::Source {
             owner: dependency.owner().clone(),
@@ -22883,31 +22808,10 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             assert!(baseline.selected_native_groups().is_empty());
-            let mut wire = testing::wire_program();
-            let binder = testing::identity("Original", "entry_8");
-            wire.globals = vec![GlobalDecl {
-                identity: binder.clone(),
-                rep: RuntimeRep::LiftedRef,
-                entry_signature: None,
-                required_evaluated: false,
-                required_generation: None,
-            }];
-            let target = testing::prepare(wire).unwrap();
-            let accepted = vec![AcceptedGlobal {
-                identity: binder.clone(),
-                rep: RuntimeRep::LiftedRef,
-                entry_signature: None,
-                required_evaluated: false,
-                owner: ReceiptImportOwner::Source {
-                    unit: original.owner().unit.clone(),
-                    module: original.owner().module.clone(),
-                    module_version: Some(original.owner().module_version.clone()),
-                    original_ordinal: 8,
-                    binder,
-                },
-            }];
+            let accepted = source_target_observations(&[(&original, 8)]);
+            let target = prepared_target_fixture(&accepted);
             assert!(certify_target_owners(&target, &accepted, &[], &BTreeMap::new()).is_err());
-            let imports = certify_target_available_owners_with_validation(
+            certify_target_available_owners_with_validation(
                 &target,
                 &accepted,
                 &products,
@@ -22921,13 +22825,32 @@ pub(crate) mod tests {
                 &mut validation,
             )
             .unwrap();
-            let selected = inventory
-                .admit_shared_with_demand(
-                    &baseline,
-                    entries.clone(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                )
+            let selection = CertifiedSourceSelection::from_projected_originals(
+                &products,
+                &validation.inventory,
+            )
+            .unwrap();
+            let completed = inventory
+                .bind_segment(&baseline, entries.clone(), &selection, &mut validation)
                 .unwrap();
+            let before = inventory.metrics().issued_scope_nodes;
+            let observed =
+                AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory)
+                    .unwrap();
+            let selected = inventory
+                .select_native_target(
+                    completed.physical_inputs().issued_artifacts(),
+                    completed.source_selection(),
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .unwrap()
+                .artifacts()
+                .clone();
             let selected_keys = BTreeSet::from([
                 NativeGroupKey {
                     artifact: entries[0].descriptor.id,
@@ -22949,13 +22872,24 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(groups.len(), 2);
             certify_target_owners(&target, &accepted, &groups, &BTreeMap::new()).unwrap();
+            let observed =
+                AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory)
+                    .unwrap();
             let repeated = inventory
-                .admit_shared_with_demand(
-                    &selected,
-                    entries.clone(),
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                .select_native_target(
+                    completed.physical_inputs().issued_artifacts(),
+                    completed.source_selection(),
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
                 )
-                .unwrap();
+                .unwrap()
+                .artifacts()
+                .clone();
+            assert_eq!(inventory.metrics().issued_scope_nodes, before);
             assert_eq!(repeated.selected_native_groups(), selected_keys);
             crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
                 &repeated,
@@ -23002,13 +22936,24 @@ pub(crate) mod tests {
                     &BTreeSet::new(),
                 )
                 .unwrap();
-            assert!(partial_inventory
-                .admit_shared_with_demand(
+            let missing_selection = CertifiedSourceSelection::from_projected_originals(
+                std::slice::from_ref(&original),
+                &validation.inventory,
+            )
+            .unwrap();
+            assert!(matches!(
+                partial_inventory.bind_segment(
                     &partial,
                     missing,
-                    NativeArtifactDemand::CertifiedTargetImports(&imports)
-                )
-                .is_err());
+                    &missing_selection,
+                    &mut validation,
+                ),
+                Err(crate::CompileError::ArtifactInventory(error))
+                    if matches!(error.failure,
+                        crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
+                            dependency: crate::artifact_inventory::ArtifactDependency::NativeGroup { dependent_ordinal: 8, required_ordinal: 9 }, ..
+                        })
+            ));
         }
     }
 
@@ -23077,7 +23022,10 @@ pub(crate) mod tests {
                 .remove(0)
                 .product;
             assert_eq!(authored.module_interface().unwrap().requirements().len(), 2);
-            let products = [authored.clone(), schema.clone(), fresh.clone()];
+            let mut products = vec![authored.clone(), schema.clone(), fresh.clone()];
+            if later_group == 197 {
+                products.push(scientific.clone());
+            }
             let mut entries = products
                 .iter()
                 .map(|product| Arc::new(ArtifactEntry::original([1; 32], product.clone()).unwrap()))
@@ -23093,38 +23041,81 @@ pub(crate) mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
-            let imports = [PendingImportOwner::Source {
-                owner: authored.owner().clone(),
-                original_ordinal: 7,
-                binder: testing::identity("Authored", "entry_7"),
-            }];
-            let early = inventory
-                .admit_shared_with_demand(
-                    &available,
-                    entries,
-                    NativeArtifactDemand::CertifiedTargetImports(&imports),
-                )
-                .unwrap();
-            let before = early.selected_native_groups();
             let selection = CertifiedSourceSelection::from_projected_originals(
                 &products,
                 &InventoryOperation::new(Default::default()),
             )
             .unwrap();
-            assert!(selection.selected_original_closure(&early).is_err());
-            assert!(selection
-                .selected_authored_original_closure(&early, "fixture", "Absent")
-                .is_err());
-            let result =
-                selection.selected_authored_original_closure(&early, "fixture", "Authored");
-            assert_eq!(early.selected_native_groups(), before);
+            let mut validation = PackageInterfaceValidation::default();
+            let completed =
+                inventory.bind_segment(&available, entries, &selection, &mut validation);
             if later_group == 202 {
                 assert!(
-                    result.is_err(),
-                    "the complete authored body still requires its later dependency"
+                    matches!(
+                        completed,
+                        Err(crate::CompileError::ArtifactInventory(error))
+                            if matches!(error.failure,
+                                crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
+                                    dependency: crate::artifact_inventory::ArtifactDependency::NativeGroup { dependent_ordinal: 202, required_ordinal: 26 }, ..
+                                })
+                    ),
+                    "whole physical completion requires the later Scientific body"
                 );
+                assert!(available.selected_native_groups().is_empty());
                 continue;
             }
+            let completed = completed.unwrap();
+            let before_issuance = inventory.metrics().issued_scope_nodes;
+            let observations = source_target_observations(&[(&authored, 7)]);
+            let prepared = prepared_target_fixture(&observations);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                    .unwrap();
+            let early = inventory
+                .select_native_target(
+                    completed.physical_inputs().issued_artifacts(),
+                    completed.source_selection(),
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .unwrap();
+            let early = early.artifacts();
+            assert_eq!(inventory.metrics().issued_scope_nodes, before_issuance);
+            let before = early.selected_native_groups();
+            assert_eq!(
+                before,
+                BTreeSet::from([
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                            [1; 32], &authored
+                        ),
+                        original_ordinal: 7,
+                    },
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                            [1; 32], &schema
+                        ),
+                        original_ordinal: 195,
+                    },
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                            [1; 32], &fresh
+                        ),
+                        original_ordinal: 5,
+                    },
+                ]),
+            );
+            let selection = completed.source_selection();
+            selection.selected_original_closure(early).unwrap();
+            assert!(selection
+                .selected_authored_original_closure(early, "fixture", "Absent")
+                .is_err());
+            let result = selection.selected_authored_original_closure(early, "fixture", "Authored");
+            assert_eq!(early.selected_native_groups(), before);
             let closure = result.unwrap();
             assert_eq!(closure.products(), &[authored.clone()]);
             let selected = closure.native_closure.selected_native_groups();
@@ -23145,6 +23136,7 @@ pub(crate) mod tests {
             assert_eq!(ordinals("Authored"), BTreeSet::from([7, 11]));
             assert_eq!(ordinals("Schema"), BTreeSet::from([195, 197]));
             assert_eq!(ordinals("FreshDependency"), BTreeSet::from([5]));
+            assert!(ordinals("Scientific").is_empty());
             assert!(closure
                 .native_closure
                 .entries()
@@ -23213,11 +23205,21 @@ pub(crate) mod tests {
                 if reverse {
                     products.reverse();
                 }
-                CertifiedSourceSelection::from_projected_originals(
+                let selection = CertifiedSourceSelection::from_projected_originals(
                     &products,
                     &InventoryOperation::new(Default::default()),
                 )
-                .unwrap()
+                .unwrap();
+                let entries = products
+                    .into_iter()
+                    .map(|product| Arc::new(ArtifactEntry::original([1; 32], product).unwrap()))
+                    .collect();
+                inventory.bind_segment(
+                    &inventory.empty_view(),
+                    entries,
+                    &selection,
+                    &mut PackageInterfaceValidation::default(),
+                )
             };
 
             // The finite domain is small enough to cover every history. Share
@@ -23228,15 +23230,18 @@ pub(crate) mod tests {
                         histories += 1;
                         let initial = issue(offered_mask, reverse);
                         for mask in [offered_mask, offered_mask & !retired_mask, 3] {
-                            let selection = issue(mask, reverse);
-                            let result = selection.selected_authored_original_closure(
-                                &available,
-                                "fixture",
-                                "AuthoredTypes",
-                            );
+                            let completed = issue(mask, reverse);
                             let expected = required_mask & !mask == 0;
-                            assert_eq!(result.is_ok(), expected);
-                            if let Ok(closure) = result {
+                            assert_eq!(completed.is_ok(), expected);
+                            if let Ok(completed) = completed {
+                                let closure = completed
+                                    .source_selection()
+                                    .selected_authored_original_closure(
+                                        completed.physical_inputs().issued_artifacts(),
+                                        "fixture",
+                                        "AuthoredTypes",
+                                    )
+                                    .unwrap();
                                 assert_eq!(closure.products(), &[authored.clone()]);
                                 let groups = closure.native_closure.selected_native_groups();
                                 assert_eq!(groups.len(), 1);
@@ -23244,13 +23249,16 @@ pub(crate) mod tests {
                             }
                             assert!(available.selected_native_groups().is_empty());
                             assert_eq!(
-                                initial
-                                    .selected_authored_original_closure(
-                                        &available,
-                                        "fixture",
-                                        "AuthoredTypes",
-                                    )
-                                    .is_ok(),
+                                initial.as_ref().is_ok_and(|completed| {
+                                    completed
+                                        .source_selection()
+                                        .selected_authored_original_closure(
+                                            completed.physical_inputs().issued_artifacts(),
+                                            "fixture",
+                                            "AuthoredTypes",
+                                        )
+                                        .is_ok()
+                                }),
                                 required_mask & !offered_mask == 0,
                             );
                         }
@@ -23282,24 +23290,16 @@ pub(crate) mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let imports = vec![PendingImportOwner::Source {
-            owner: scaffold.owner().clone(),
-            original_ordinal: 3,
-            binder: testing::identity("Scaffold", "entry_3"),
-        }];
         let early = inventory
-            .admit_shared_with_demand(
+            .admit_recovery_selection(
                 &available,
                 entries.clone(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                &BTreeSet::from([crate::artifact_inventory::NativeGroupKey {
+                    artifact: native.descriptor.id,
+                    original_ordinal: 3,
+                }]),
             )
             .unwrap();
-        crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
-            &early,
-            None,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
         let selection = CertifiedSourceSelection::from_projected_originals(
             std::slice::from_ref(&scaffold),
             &InventoryOperation::new(Default::default()),
@@ -23307,11 +23307,25 @@ pub(crate) mod tests {
         .unwrap();
         assert!(
             selection.selected_original_closure(&early).is_err(),
-            "a legitimate early target must not authorize an unavailable whole original"
+            "partial recovered graph custody cannot authorize an unavailable whole original"
         );
         assert!(
-            inventory.admit_shared(&available, entries).is_err(),
-            "whole native admission still requires the delayed value carrier"
+            matches!(
+                inventory.bind_segment(
+                    &available,
+                    entries,
+                    &selection,
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(crate::CompileError::ArtifactInventory(error))
+                    if matches!(error.failure,
+                        crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
+                            dependency: crate::artifact_inventory::ArtifactDependency::NativeBinding {
+                                dependent_ordinal: 11, generation: 4, ..
+                            }, ..
+                        })
+            ),
+            "whole physical completion still requires the delayed value carrier"
         );
 
         let probe_name = crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE;
@@ -23362,7 +23376,7 @@ pub(crate) mod tests {
             let available = inventory
                 .admit_shared_with_demand(
                     &inventory.empty_view(),
-                    entries,
+                    entries.clone(),
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
@@ -23371,8 +23385,16 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
-            let result = selection
-                .selected_original_closure_excluding_module(&available, "fixture", probe_name);
+            let completed = inventory
+                .bind_segment(&available, entries, &selection, &mut validation)
+                .unwrap();
+            let result = completed
+                .source_selection()
+                .selected_original_closure_excluding_module(
+                    completed.physical_inputs().issued_artifacts(),
+                    "fixture",
+                    probe_name,
+                );
             if allowed {
                 let selected = result.unwrap();
                 assert_eq!(selected.products(), &[product]);

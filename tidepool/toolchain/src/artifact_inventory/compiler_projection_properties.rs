@@ -345,34 +345,14 @@ impl Catalog {
                 original_ordinal: group.2,
             })
             .collect::<Vec<_>>();
-        let imports = roots
-            .iter()
-            .map(|group| {
-                let ArtifactPayload::Original(product) = &self.original(group.0, group.1).payload
-                else {
-                    unreachable!("fixture original")
-                };
-                PendingImportOwner::Source {
-                    owner: product.owner().clone(),
-                    original_ordinal: group.2,
-                    binder: binder(group.0, group.2),
-                }
-            })
-            .collect::<Vec<_>>();
         let inventory = ArtifactInventory::default();
-        let available = inventory
-            .admit_shared_with_demand(
-                &inventory.empty_view(),
-                view.entries(),
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
+        let expected = self
+            .closure(roots.iter().copied())
+            .into_iter()
+            .map(|group| self.key(group))
+            .collect();
         let target = inventory
-            .admit_shared_with_demand(
-                &available,
-                view.entries(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-            )
+            .admit_recovery_selection(&inventory.empty_view(), view.entries(), &expected)
             .unwrap();
         assert_eq!(
             target.selected_native_groups(),
@@ -1355,20 +1335,16 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             vec![Arc::clone(catalog.original(module, version))],
                         )
                     } else {
-                        let ArtifactPayload::Original(product) =
-                            &catalog.original(module, version).payload
-                        else {
-                            unreachable!()
-                        };
-                        let imports = [PendingImportOwner::Source {
-                            owner: product.owner().clone(),
-                            original_ordinal: ordinal,
-                            binder: binder(module, ordinal),
-                        }];
-                        available.inventory().admit_shared_with_demand(
+                        let keys = selected[domain]
+                            .iter()
+                            .copied()
+                            .chain(wanted.iter().copied())
+                            .map(|group| catalog.key(group))
+                            .collect();
+                        available.inventory().admit_recovery_selection(
                             available,
                             available.entries(),
-                            NativeArtifactDemand::CertifiedTargetImports(&imports),
+                            &keys,
                         )
                     };
                     if expected_refusal {
@@ -1386,7 +1362,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                                 .iter()
                                 .map(|group| catalog.key(*group))
                                 .collect(),
-                            "target admission must match both missing and extra oracle groups"
+                            "recovered graph must match both missing and extra oracle groups"
                         );
                         segments[domain] = Some(next);
                     }
