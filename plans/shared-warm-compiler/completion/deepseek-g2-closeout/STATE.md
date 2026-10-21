@@ -79,11 +79,14 @@ This is artifact analysis, not an executed compiler acceptance test.
 
 ## Resources and worker transitions
 
-Latest observation before dispatch: about **102 GiB free** on `/srv/build`,
-against the 100 GiB reserve. Host available RAM was about 108 GiB and
-`build.slice` held about 23.4 GiB. These are observations, not reservations.
-Plenty of inference capacity does not admit concurrent cold build expansion.
-R resources is inventorying safe retirement before any cold expansion.
+Latest resource transition: a clean, already-pushed historical checkout
+`tidepool-llm-family-effects-20261018` had no WIP, checkout daemon, open output
+files, or CWD references. Supported scoped retirement of its 42 GiB disposable
+output restored `/srv/build` from 99 GiB to **138 GiB available** while retaining
+source, Git metadata, pushed history and evidence. Receipt:
+`/srv/swarm/evidence/inanna/g2-closeout-deepseek-20261021/resources/retire-llm-family-effects-receipt.md`.
+Subsequent focused cold lanes began only after this reclaim and remain subject
+to measured aggregate admission.
 
 S maintains one row per dispatched role, including children. Add rows when real
 assignments are made; do not prefill fictitious agent IDs or active status.
@@ -91,8 +94,8 @@ assignments are made; do not prefill fictitious agent IDs or active status.
 | Role | Owner/session | Checkout, base, tip | State | Next dependency/action | Evidence / review |
 |---|---|---|---|---|---|
 | S | `/root` | Campaign checkout above; `0cfb964739` | investigating | Review candidates, admit builds, consolidate and qualify | This pack; prerequisite merge published to `github` |
-| P | `/root/deepseek_p` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p-20261021`; `g2-deepseek/p-20261021`; base `0cfb964739` | assigned | Trace producer/consumer join and freeze contract | Assignment in worker message |
-| P1 | `/root/deepseek_p` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p1-20261021`; `g2-deepseek/p1-20261021`; base `0cfb964739` | checkout provisioned; dispatch pending contract freeze | P dispatch after concrete contract commit | P package plan |
+| P | app-server thread `01a1603f-72ec-7941-98b0-ec9ed0805e8c` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p-20261021`; `g2-deepseek/p-20261021`; base `0cfb964739`; contract tip `e632cc8b3b` | changes-requested | Reconcile same-envelope/different-child-history occurrence coordinate | S review finding; contract supplement in `CONTRACTS.md` §1a |
+| P1 | app-server thread `01a16048-2994-7681-b182-11804aec169a` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p1-20261021`; `g2-deepseek/p1-20261021`; base `0cfb964739` | investigating | Read-only producer/recovery trace; paused before code until contract correction | P package plan |
 | P2 | `/root/deepseek_p` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p2-20261021`; `g2-deepseek/p2-20261021`; base `0cfb964739` | checkout provisioned; dispatch pending contract freeze | P dispatch after concrete contract commit | P package plan |
 | P3 | `/root/deepseek_p` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p3-20261021`; `g2-deepseek/p3-20261021`; base `0cfb964739` | checkout provisioned; dispatch pending contract freeze | P dispatch after concrete contract commit | P package plan |
 | W | `/root/deepseek_w_impl` | `/srv/swarm/checkouts/tidepool-deepseek-g2-w-20261021`; `g2-deepseek/w-20261021`; base `0cfb964739` | assigned | Trace custody-owner reuse classification | W witness plan; replacement after failed dispatch delivery |
