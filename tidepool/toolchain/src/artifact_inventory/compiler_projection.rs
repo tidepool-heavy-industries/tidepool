@@ -2606,9 +2606,16 @@ impl CompilerSourceSupport {
         issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
         prefix_groups: &crate::declaration_context::DemandCertifiedGroups,
         stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+        original_bindings: &crate::certified_products::OriginalBindingSelection,
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Arc<Self>, CompileError> {
-        if !Arc::ptr_eq(stage.operation(), operation) || !prefix_groups.groups().is_empty() {
+        if !Arc::ptr_eq(stage.operation(), operation)
+            || !original_bindings.belongs_to(
+                &stage.initial_inputs().shared_compiler_source_support(),
+                operation,
+            )
+            || !prefix_groups.groups().is_empty()
+        {
             return Err(failure(
                 "World prefix projection cannot issue native group demand",
             ));
@@ -2620,7 +2627,10 @@ impl CompilerSourceSupport {
             prefix_groups,
             operation,
         )?;
-        let artifacts = projected.artifacts.with_world_stage_initial_inputs(stage)?;
+        let artifacts = projected
+            .artifacts
+            .with_world_stage_initial_inputs(stage)?
+            .retain_original_binding_metadata(original_bindings, operation)?;
         let mut support = projected.as_ref().clone();
         support.artifacts = artifacts;
         Ok(Arc::new(support))

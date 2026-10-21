@@ -10416,12 +10416,26 @@ impl WorldProgramContinuation {
             },
             validation,
         )?;
+        let metadata = receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+            .map(|global| &global.owner);
+        let original_bindings =
+            crate::certified_products::OriginalBindingSelection::from_world_stage(
+                Arc::clone(&initial),
+                metadata,
+            )
+            .map_err(compiler_evidence_failure)?;
         let support = self.inputs.source_support.project_world_stage_inputs(
             &demand.demand,
             &demand.native_selection.availability,
             &demand.permission_delta,
             &prefix_groups,
             &initial,
+            &original_bindings,
             &operation,
         )?;
         let groups = match initial.selection() {
@@ -10442,19 +10456,6 @@ impl WorldProgramContinuation {
                 })
             }
         };
-        let metadata = receipt
-            .modules
-            .iter()
-            .flat_map(|module| &module.groups)
-            .flat_map(|group| &group.globals)
-            .chain(receipt.targets.values().flatten())
-            .map(|global| &global.owner);
-        let original_bindings =
-            crate::certified_products::OriginalBindingSelection::from_world_stage(
-                Arc::clone(&initial),
-                metadata,
-            )
-            .map_err(compiler_evidence_failure)?;
         let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
             decoded.program,
             &decoded.binding.stage,
