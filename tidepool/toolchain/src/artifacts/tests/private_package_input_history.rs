@@ -231,16 +231,36 @@ fn issue_original_with_extra_group(
     .unwrap()
 }
 
+fn select_original_groups(
+    certified: &CertifiedProducts,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<crate::declaration_context::CertifiedArtifactGroupBindings, CompileError> {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(&PRODUCER).sha256();
+    let view = crate::declaration_context::certified_product_artifact_view_with_validation(
+        producer,
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        &certified.value_interfaces,
+        None,
+        NativeArtifactDemand::AllGroups,
+        validation,
+    )?;
+    crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+        &view,
+        &certified.groups,
+        None,
+        validation,
+    )
+}
+
 fn selected_package_closure(
     current: &BTreeMap<(String, String), PackageInterfaceWitness>,
     certified: &CertifiedProducts,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<(String, String), PackageInterfaceWitness>, CompileError> {
-    package_availability_with_validation(current, certified, validation)?.select(
-        &certified.groups,
-        &[],
-        &validation.inventory,
-    )
+    let catalog = package_availability_with_validation(current, certified, validation)?;
+    let groups = select_original_groups(certified, validation)?;
+    catalog.select(groups.groups(), &[], &validation.inventory)
 }
 
 #[test]
@@ -273,7 +293,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert_eq!(issued.recovery_products.len(), 1);
     assert_eq!(issued.groups.len(), 1);
     assert!(matches!(issued.groups[0].imports(),
-        [PendingImportOwner::Package { unit, module, binder, interface_digest }]
+        [ReceiptImportOwner::Package { unit, module, binder, interface_digest }]
         if unit == PACKAGE_UNIT && module == PACKAGE_MODULE
             && binder == &literal() && *interface_digest == witness.sha256));
 
@@ -708,13 +728,14 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     )
     .unwrap();
     assert!(all_groups.contains_key(&arbitrary_owner));
-    let subset_groups = subset
-        .groups
+    let selected_validation = &mut PackageInterfaceValidation::default();
+    let selected_groups = select_original_groups(&subset, selected_validation).unwrap();
+    let subset_groups = selected_groups
+        .groups()
         .iter()
         .filter(|group| group.group().original_ordinal() == ORDINAL)
         .cloned()
         .collect::<Vec<_>>();
-    let selected_validation = &mut PackageInterfaceValidation::default();
     let selected =
         package_availability_with_validation(&BTreeMap::new(), &subset, selected_validation)
             .unwrap()
