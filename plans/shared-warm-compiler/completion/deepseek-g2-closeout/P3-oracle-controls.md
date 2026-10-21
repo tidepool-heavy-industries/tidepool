@@ -131,3 +131,37 @@ not hypothetical cases.
 held-terminal resolution (`resolve_held_package_binding`: one exact binding,
 zero/multiple refusal) is in P2's uncommitted tree, so the Inherited
 zero/one/many oracle is queued behind it.
+
+## Execution at joined tips P1 `f4d268bafb` + P2 `83ac54b3aa` + contract `f2026b45b4`
+
+The occurrence cohort (`toolchain_package_occurrence_linkage_tests`, 5 cases,
+owned-resident) runs against the version-12 joined tree:
+
+- `transitive_import_prefers_exact_child_over_competing_sibling` PASS.
+- `repeated_slots_share_immutable_bytes_without_losing_multiplicity` PASS.
+- `multi_ordinal_home_keeps_per_ordinal_package_roots` PASS: the
+  ordinal-qualified `(unit,module,original_ordinal)` HOME roots resolve, and
+  P1's claim that fresh HOME roots may use the first target's occurrence map
+  holds for the two-ordinal HOME case.
+- `reversed_targets_keep_exact_ordered_package_slots` and
+  `duplicate_envelope_histories_remain_distinct_bindings` FAIL with the first
+  exact product defect below.
+
+### First exact product defect
+
+`CompilerEvidence(Receipt("duplicate package occurrence row"))`. P1's
+per-target occurrence emission keeps one row per `(target, group)`, so a
+symbol that two targets share with the same encoded body and the same ordered
+child history (`actualSort` under `Int`/`String`, or `Data.Text.pack` under
+two projections) is emitted twice. The contract requires one row per distinct
+(envelope, ordered child history); byte-identical rows are a producer-defect
+refusal. P1 must deduplicate byte-identical occurrences and share the single
+row across both targets' `target_roots`, after which the reversed-targets
+oracle passes with the shared slot resolving to one body.
+
+The producer's per-target binder map is now correctly target-scoped, so the
+remaining failure is not the request-wide-map collapse; it is the missing
+byte-identical-row deduplication. The reversed-targets oracle asserts distinct
+body bytes per target once a fixture reproduces the constructor/type
+renumbering (`peer-review-package-byte-comparison.json`); simple `sort`/`pack`
+fixtures do not, and instead reach the duplicate-row refusal first.

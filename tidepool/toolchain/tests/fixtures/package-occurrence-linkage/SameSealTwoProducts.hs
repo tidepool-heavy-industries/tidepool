@@ -1,19 +1,19 @@
 -- P3 oracle fixture 1: two targets import the same package symbol while
 -- reaching different subsets of one defining module.
 --
--- `onlySort` reaches GHC.Internal.Data.OldList.sort alone;
--- `sortThenUnlines` reaches sort and unlines. Both targets import the same
--- package symbol (sort) under one defining-interface seal, but the retained
--- bodies of GHC.Internal.Data.OldList differ. A (seal, symbol) selector cannot
+-- `onlyPack` reaches Data.Text.Internal.pack alone; `packThenUnpack` reaches
+-- pack and unpack. Both targets import the same package symbol (pack) under
+-- one defining-interface seal, but the retained bodies of the shared worker
+-- differ (constructor/type renumbering). A (seal, symbol) selector cannot
 -- tell the two bodies apart; an exact occurrence link can.
 module SameSealTwoProducts where
 
-import Data.List (sort, unlines)
+import Data.Text (Text, pack, unpack)
 
-{-# NOINLINE onlySort #-}
-onlySort :: [Int] -> [Int]
-onlySort = sort
+{-# NOINLINE onlyPack #-}
+onlyPack :: String -> Text
+onlyPack = pack
 
-{-# NOINLINE sortThenUnlines #-}
-sortThenUnlines :: [String] -> String
-sortThenUnlines = unlines . sort
+{-# NOINLINE packThenUnpack #-}
+packThenUnpack :: String -> String
+packThenUnpack = unpack . pack

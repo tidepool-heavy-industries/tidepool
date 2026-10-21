@@ -110,32 +110,39 @@ fn reversed_targets_keep_exact_ordered_package_slots() {
         include_str!("../../tests/fixtures/package-occurrence-linkage/SameSealTwoProducts.hs");
     let mut expected: Option<(Vec<PackageSlotRecord>, Vec<PackageSlotRecord>)> = None;
     for targets in [
-        ["onlySort", "sortThenUnlines"],
-        ["sortThenUnlines", "onlySort"],
+        ["onlyPack", "packThenUnpack"],
+        ["packThenUnpack", "onlyPack"],
     ] {
         let output = compile_fixture(source, &targets);
-        let only_sort = completed_selection(&output, "onlySort");
-        let sort_then_unlines = completed_selection(&output, "sortThenUnlines");
+        let only_pack = completed_selection(&output, "onlyPack");
+        let pack_then_unpack = completed_selection(&output, "packThenUnpack");
 
         // Both targets retain actual package code resolved through the export
         // contract (not merely a digest match). Ordering a target first or
         // second must not change its own ordered slots, resolved body, or
         // child history: the producer's paired occurrence, not a request-wide
         // binder map, decides which occurrence each slot resolves to.
-        let only_sort_slots = package_slot_records(&output, &only_sort, "onlySort");
-        let sort_then_unlines_slots =
-            package_slot_records(&output, &sort_then_unlines, "sortThenUnlines");
+        let only_pack_slots = package_slot_records(&output, &only_pack, "onlyPack");
+        let pack_then_unpack_slots =
+            package_slot_records(&output, &pack_then_unpack, "packThenUnpack");
         assert!(
-            !only_sort_slots.is_empty() && !sort_then_unlines_slots.is_empty(),
+            !only_pack_slots.is_empty() && !pack_then_unpack_slots.is_empty(),
             "both targets must select actual package code"
         );
-        let order = (only_sort_slots.clone(), sort_then_unlines_slots.clone());
+        let order = (only_pack_slots.clone(), pack_then_unpack_slots.clone());
         if let Some(previous) = &expected {
             assert_eq!(
                 previous, &order,
                 "reversing target order changed a target's exact package slots, body, or child history"
             );
         } else {
+            // The shared `pack` symbol resolves to two different bodies under
+            // two different projections; an exact occurrence link keeps them
+            // apart where a request-wide symbol map would collapse them.
+            assert_ne!(
+                only_pack_slots, pack_then_unpack_slots,
+                "the shared pack slot must keep distinct body bytes per target projection"
+            );
             expected = Some(order);
         }
         drop(output);
@@ -246,13 +253,28 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
 
     // Each original ordinal keeps exactly its own package slot. The shared
     // `sort` body must be reached only by `byList`; `byText` reaches `pack`.
+    // Fresh HOME package roots live on the source rows, not the target slots.
     let selection = completed_selection(&output, "result");
-    let slots = package_slot_records(&output, &selection, "result");
-    let has_sort = slots.iter().any(|s| s.identity.ends_with(":actualSort"));
-    let has_pack = slots.iter().any(|s| s.identity.contains(":pack"));
+    let mut home_package_owners = std::collections::BTreeSet::new();
+    for row in selection.completion().rows() {
+        for import in row.imports() {
+            if let crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } =
+                import
+            {
+                let owner = binding.product().code().owner();
+                home_package_owners.insert(format!("{}:{}", owner.unit, owner.module));
+            }
+        }
+    }
+    let has_sort = home_package_owners
+        .iter()
+        .any(|owner| owner.contains("OldList"));
+    let has_pack = home_package_owners
+        .iter()
+        .any(|owner| owner.contains("Data.Text"));
     assert!(
         has_sort && has_pack,
-        "both HOME ordinals select their own package roots, found {slots:?}"
+        "both HOME ordinals select their own package roots, found {home_package_owners:?}"
     );
     drop(output);
 }
