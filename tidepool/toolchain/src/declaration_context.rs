@@ -757,25 +757,21 @@ impl OriginalCompilerInputs {
             "products.segment_native_availability",
             "initial_admission",
         );
-        let value_count = entries
-            .iter()
-            .filter(|entry| {
-                entry.descriptor.kind == crate::artifact_inventory::ArtifactKind::ValueInterface
-            })
-            .count();
-        validation
-            .inventory
-            .reserve::<(ArtifactId, crate::artifact_inventory::ArtifactFactsHandle)>(value_count)
-            .map_err(|error| compiler_evidence_failure(error.into()))?;
-        let captures = PhysicalValueCaptures {
-            facts: entries
-                .iter()
-                .filter(|entry| {
-                    entry.descriptor.kind == crate::artifact_inventory::ArtifactKind::ValueInterface
-                })
-                .map(|entry| (entry.descriptor.id, entry.fact_owner().clone()))
-                .collect(),
+        let mut captures = PhysicalValueCaptures {
+            facts: BTreeMap::new(),
         };
+        for entry in &entries {
+            if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
+                continue;
+            }
+            validation
+                .inventory
+                .reserve::<(ArtifactId, crate::artifact_inventory::ArtifactFactsHandle)>(1)
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            captures
+                .facts
+                .insert(entry.descriptor.id, entry.fact_owner().clone());
+        }
         let physical = baseline.inventory().admit_certified_with_demand(
             baseline,
             entries,
