@@ -8170,231 +8170,241 @@ where
         }
     }
 
-    async fn stabilize_program(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        ancestry: &crate::CallAncestry,
+    fn stabilize_program<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
+        ancestry: &'a crate::CallAncestry,
         mut outcome: ResidentOutcome,
         mut prepared_installation: Option<PreparedInteractivePublication>,
-    ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
-        loop {
-            match self
-                .environment
-                .boundary_runner()
-                .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
-                .await?
-            {
-                ResidentActorBoundary::Completed => {
-                    if let Some(typed_exit) = self.typed_exit.take() {
-                        let TypedExitPublication::Published(result) = typed_exit.publication else {
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                "typed actor completed without publishing its exit".into(),
-                            ));
-                        };
-                        let retained = kernel.retained_exit();
-                        match retained
-                            .claim_before_shutdown(|| retained.retain_result(result).is_ok())
-                        {
-                            Ok(true) => {}
-                            Ok(false) => {
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, ResidentActorWorkbenchError>>
+    {
+        let future = async move {
+            loop {
+                match self
+                    .environment
+                    .boundary_runner()
+                    .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+                    .await?
+                {
+                    ResidentActorBoundary::Completed => {
+                        if let Some(typed_exit) = self.typed_exit.take() {
+                            let TypedExitPublication::Published(result) = typed_exit.publication
+                            else {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "typed exit already settled".into(),
+                                    "typed actor completed without publishing its exit".into(),
                                 ));
-                            }
-                            Err(terminal) => {
-                                return Ok(KernelStep::Stop {
-                                    output: (),
-                                    terminal,
-                                });
+                            };
+                            let retained = kernel.retained_exit();
+                            match retained
+                                .claim_before_shutdown(|| retained.retain_result(result).is_ok())
+                            {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                        "typed exit already settled".into(),
+                                    ));
+                                }
+                                Err(terminal) => {
+                                    return Ok(KernelStep::Stop {
+                                        output: (),
+                                        terminal,
+                                    });
+                                }
                             }
                         }
-                    }
-                    if let Some(committed) = &mut self.committed {
-                        committed.input = None;
-                    }
-                    self.set_standing(context.actor, ResidentStanding::Terminal);
-                    return Ok(KernelStep::Stop {
-                        output: (),
-                        terminal: completed_terminal(),
-                    });
-                }
-                ResidentActorBoundary::Receive(receiver) => {
-                    if let Some(checkpoint) = self.pending_checkpoint.take() {
-                        if checkpoint.site != receiver.site {
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                "checkpoint and receiver sites differ".into(),
-                            ));
+                        if let Some(committed) = &mut self.committed {
+                            committed.input = None;
                         }
-                        self.committed = Some(CommittedActorState {
-                            checkpoint,
-                            input: None,
+                        self.set_standing(context.actor, ResidentStanding::Terminal);
+                        return Ok(KernelStep::Stop {
+                            output: (),
+                            terminal: completed_terminal(),
                         });
                     }
-                    if let Some(committed) = &mut self.committed {
-                        committed.input = None;
-                    }
-                    self.input_origin = ActorInputOrigin::ActorStartup;
-                    if let Some(outstanding) = &self.outstanding_interactive {
-                        // The receive loop is advancing to its next native
-                        // message while a typed request presented earlier is
-                        // still unsettled (no reply, no cancellation
-                        // acknowledgement). `outstanding_interactive` is
-                        // tracked independently of `standing` precisely so
-                        // this is not a silent loss: workbench selection
-                        // keeps serving that request's
-                        // `respond`/`sessionReply`/`sessionInput` bindings
-                        // until it settles, whatever `standing` reads.
-                        tracing::info!(
-                            actor = ?context.actor,
-                            request = ?outstanding.request,
-                            "resident actor receive loop advanced with an interactive request still outstanding"
-                        );
-                    }
-                    if let Some(prepared) = prepared_installation.take() {
-                        self.settle_interactive_publication(kernel, context, prepared)
-                            .await?;
-                    }
-                    self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
-                    return Ok(KernelStep::Continue(()));
-                }
-                ResidentActorBoundary::Checkpoint {
-                    continuation,
-                    site,
-                    value,
-                } => {
-                    if self.pending_checkpoint.is_some() {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "actor staged two states before installing its receiver".into(),
-                        ));
-                    }
-                    self.pending_checkpoint = Some(StateCheckpoint {
-                        site,
-                        value: Arc::new(value),
-                    });
-                    outcome = self
-                        .environment
-                        .runner
-                        .resume_unit(context.clone(), continuation)
-                        .await?;
-                }
-                ResidentActorBoundary::ToolAwait(awaiting) => {
-                    if let Some(prepared) = prepared_installation.take() {
-                        self.settle_interactive_publication(kernel, context, prepared)
-                            .await?;
-                    }
-                    if !self.policy_installed {
-                        let actor = kernel
-                            .resolve(context.actor)
-                            .await
-                            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
-                            .ok_or_else(|| {
-                                ResidentActorWorkbenchError::ActorProtocol(
-                                    "local actor was absent from its routing directory".into(),
-                                )
-                            })?;
-                        let local_policy = crate::resident_tools::install_local_resident_tools(
-                            actor.clone(),
-                            &awaiting,
-                        )?;
-                        let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(local_policy);
-
-                        let (checkpoint, checkpoint_attachment) = self
-                            .admitted_checkpoint
-                            .take()
-                            .map_or((None, None), |(lease, attachment)| {
-                                (Some(lease), attachment)
+                    ResidentActorBoundary::Receive(receiver) => {
+                        if let Some(checkpoint) = self.pending_checkpoint.take() {
+                            if checkpoint.site != receiver.site {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "checkpoint and receiver sites differ".into(),
+                                ));
+                            }
+                            self.committed = Some(CommittedActorState {
+                                checkpoint,
+                                input: None,
                             });
-                        let checkpoint_attachment = checkpoint_attachment;
-                        let installation = LocalResidentInstallation {
-                            prepared_tools: None,
-                            prepared_prompts: None,
-                            toolset_acquisition: None,
-                            actor,
-                            label: self.descriptor.display_label().into_owned(),
-                            policy,
-                            initial_user_message: awaiting.initial_user_message.clone(),
-                            fresh_context_seed: self.fresh_context_seed.clone(),
-                            spawn_admission: self.spawn_admission.clone(),
-                            launch_worktrees: self.launch_worktrees.clone(),
-                            worktree_custody: self.worktree_custody.clone(),
-                            capabilities: self.descriptor.capabilities().clone(),
-                            reasoning: self.descriptor.reasoning(),
-                            model: self.descriptor.model().cloned(),
-                            instructions: self.descriptor.instructions().map(str::to_owned),
-                            creator: self.descriptor.creator(),
-                            checkpoint_boundary: self.descriptor.checkpoint_boundary().cloned(),
-                            checkpoint,
-                            checkpoint_attachment,
-                            supervisor_parent: self.descriptor.supervisor_parent(),
-                            context_parent: self.descriptor.context_parent(),
-                            runtime_observation: self.runtime_observation.clone(),
-                        };
-                        self.commit_interactive_installation(kernel, context, installation)
+                        }
+                        if let Some(committed) = &mut self.committed {
+                            committed.input = None;
+                        }
+                        self.input_origin = ActorInputOrigin::ActorStartup;
+                        if let Some(outstanding) = &self.outstanding_interactive {
+                            // The receive loop is advancing to its next native
+                            // message while a typed request presented earlier is
+                            // still unsettled (no reply, no cancellation
+                            // acknowledgement). `outstanding_interactive` is
+                            // tracked independently of `standing` precisely so
+                            // this is not a silent loss: workbench selection
+                            // keeps serving that request's
+                            // `respond`/`sessionReply`/`sessionInput` bindings
+                            // until it settles, whatever `standing` reads.
+                            tracing::info!(
+                                actor = ?context.actor,
+                                request = ?outstanding.request,
+                                "resident actor receive loop advanced with an interactive request still outstanding"
+                            );
+                        }
+                        if let Some(prepared) = prepared_installation.take() {
+                            self.settle_interactive_publication(kernel, context, prepared)
+                                .await?;
+                        }
+                        self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
+                        return Ok(KernelStep::Continue(()));
+                    }
+                    ResidentActorBoundary::Checkpoint {
+                        continuation,
+                        site,
+                        value,
+                    } => {
+                        if self.pending_checkpoint.is_some() {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "actor staged two states before installing its receiver".into(),
+                            ));
+                        }
+                        self.pending_checkpoint = Some(StateCheckpoint {
+                            site,
+                            value: Arc::new(value),
+                        });
+                        outcome = self
+                            .environment
+                            .runner
+                            .resume_unit(context.clone(), continuation)
                             .await?;
                     }
-                    self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
-                    return Ok(KernelStep::Continue(()));
-                }
-                ResidentActorBoundary::AgentSession(session) => {
-                    if let InteractivePark::Cancelled(request) = self
-                        .park_interactive(kernel, context, session, prepared_installation.take())
-                        .await?
-                    {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "request {request:?} was cancelled outside a mailbox handler"
-                        )));
+                    ResidentActorBoundary::ToolAwait(awaiting) => {
+                        if let Some(prepared) = prepared_installation.take() {
+                            self.settle_interactive_publication(kernel, context, prepared)
+                                .await?;
+                        }
+                        if !self.policy_installed {
+                            let actor = kernel
+                                .resolve(context.actor)
+                                .await
+                                .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                                .ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "local actor was absent from its routing directory".into(),
+                                    )
+                                })?;
+                            let local_policy = crate::resident_tools::install_local_resident_tools(
+                                actor.clone(),
+                                &awaiting,
+                            )?;
+                            let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(local_policy);
+
+                            let (checkpoint, checkpoint_attachment) = self
+                                .admitted_checkpoint
+                                .take()
+                                .map_or((None, None), |(lease, attachment)| {
+                                    (Some(lease), attachment)
+                                });
+                            let checkpoint_attachment = checkpoint_attachment;
+                            let installation = LocalResidentInstallation {
+                                prepared_tools: None,
+                                prepared_prompts: None,
+                                toolset_acquisition: None,
+                                actor,
+                                label: self.descriptor.display_label().into_owned(),
+                                policy,
+                                initial_user_message: awaiting.initial_user_message.clone(),
+                                fresh_context_seed: self.fresh_context_seed.clone(),
+                                spawn_admission: self.spawn_admission.clone(),
+                                launch_worktrees: self.launch_worktrees.clone(),
+                                worktree_custody: self.worktree_custody.clone(),
+                                capabilities: self.descriptor.capabilities().clone(),
+                                reasoning: self.descriptor.reasoning(),
+                                model: self.descriptor.model().cloned(),
+                                instructions: self.descriptor.instructions().map(str::to_owned),
+                                creator: self.descriptor.creator(),
+                                checkpoint_boundary: self.descriptor.checkpoint_boundary().cloned(),
+                                checkpoint,
+                                checkpoint_attachment,
+                                supervisor_parent: self.descriptor.supervisor_parent(),
+                                context_parent: self.descriptor.context_parent(),
+                                runtime_observation: self.runtime_observation.clone(),
+                            };
+                            self.commit_interactive_installation(kernel, context, installation)
+                                .await?;
+                        }
+                        self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
+                        return Ok(KernelStep::Continue(()));
                     }
-                    return Ok(KernelStep::Continue(()));
-                }
-                ResidentActorBoundary::AgentAttachment(attachment) => {
-                    if self.policy_installed {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "actor installed its Codex application more than once".into(),
-                        ));
+                    ResidentActorBoundary::AgentSession(session) => {
+                        if let InteractivePark::Cancelled(request) = self
+                            .park_interactive(
+                                kernel,
+                                context,
+                                session,
+                                prepared_installation.take(),
+                            )
+                            .await?
+                        {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "request {request:?} was cancelled outside a mailbox handler"
+                            )));
+                        }
+                        return Ok(KernelStep::Continue(()));
                     }
-                    if prepared_installation.is_some() {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "actor prepared its Codex application more than once".into(),
-                        ));
+                    ResidentActorBoundary::AgentAttachment(attachment) => {
+                        if self.policy_installed {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "actor installed its Codex application more than once".into(),
+                            ));
+                        }
+                        if prepared_installation.is_some() {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "actor prepared its Codex application more than once".into(),
+                            ));
+                        }
+                        let owner = self.ready_public_owner(context).await?;
+                        let bootstrap = self
+                            .environment
+                            .runner
+                            .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
+                            .await?;
+                        let installation = self
+                            .prepare_interactive_policy(
+                                kernel,
+                                context,
+                                attachment.initial_user_message,
+                            )
+                            .await?;
+                        prepared_installation = Some(PreparedInteractivePublication {
+                            owner,
+                            bootstrap,
+                            installation,
+                        });
+                        outcome = self
+                            .environment
+                            .runner
+                            .resume_unit(context.clone(), attachment.continuation)
+                            .await?;
                     }
-                    let owner = self.ready_public_owner(context).await?;
-                    let bootstrap = self
-                        .environment
-                        .runner
-                        .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
-                        .await?;
-                    let installation = self
-                        .prepare_interactive_policy(
-                            kernel,
-                            context,
-                            attachment.initial_user_message,
-                        )
-                        .await?;
-                    prepared_installation = Some(PreparedInteractivePublication {
-                        owner,
-                        bootstrap,
-                        installation,
-                    });
-                    outcome = self
-                        .environment
-                        .runner
-                        .resume_unit(context.clone(), attachment.continuation)
-                        .await?;
-                }
-                boundary => {
-                    outcome = self
-                        .resolve_effect(
-                            kernel,
-                            context,
-                            self.actor_effect_owner(context.actor)?,
-                            ancestry,
-                            boundary,
-                        )
-                        .await?;
+                    boundary => {
+                        outcome = self
+                            .resolve_effect(
+                                kernel,
+                                context,
+                                self.actor_effect_owner(context.actor)?,
+                                ancestry,
+                                boundary,
+                            )
+                            .await?;
+                    }
                 }
             }
-        }
+        };
+        Box::pin(future)
     }
 
     async fn park_interactive(
@@ -9643,13 +9653,13 @@ where
                 .await?;
             None
         };
-        Box::pin(self.stabilize_program(
+        self.stabilize_program(
             kernel,
             context,
             &crate::CallAncestry::begin(context.actor),
             outcome,
             prepared,
-        ))
+        )
         .await
     }
 
