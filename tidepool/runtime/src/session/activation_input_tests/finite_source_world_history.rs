@@ -414,20 +414,35 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
     // The finite run has already sealed its acquired immutable products. Remove
     // its actual disposable compiler output, independently of the session root.
     assert!(producer_output.join("turn.cbor").try_exists().unwrap());
-    let retained_record = artifact_root.join("finite-producer-transaction.json");
+    let retained_diagnostics = artifact_root.join("finite-producer-diagnostics");
+    std::fs::create_dir(&retained_diagnostics).unwrap();
+    let retained_record = retained_diagnostics.join("transaction.json");
     assert!(!producer_record["files"].as_array().unwrap().is_empty());
     std::fs::write(
         &retained_record,
         serde_json::to_vec_pretty(&producer_record).unwrap(),
     )
     .unwrap();
-    let consumed_sources = producer_output.join("consumed-sources.json");
+    for name in [
+        "compiler-request.bin",
+        "compiler-cwd.bin",
+        "compiler.stderr",
+        "consumed-sources.json",
+    ] {
+        let source = producer_output.join(name);
+        if source.try_exists().unwrap() {
+            std::fs::copy(source, retained_diagnostics.join(name)).unwrap();
+        }
+    }
+    let consumed_sources = producer_output.join("consumed-sources");
     if consumed_sources.try_exists().unwrap() {
-        std::fs::copy(
-            &consumed_sources,
-            artifact_root.join("finite-producer-consumed-sources.json"),
-        )
-        .unwrap();
+        let retained_sources = retained_diagnostics.join("consumed-sources");
+        std::fs::create_dir(&retained_sources).unwrap();
+        for entry in std::fs::read_dir(consumed_sources).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            std::fs::copy(entry.path(), retained_sources.join(entry.file_name())).unwrap();
+        }
     }
     std::fs::remove_dir_all(&producer_output).unwrap();
     assert!(!producer_output.try_exists().unwrap());
