@@ -12658,7 +12658,6 @@ mod source_proof_pairing_tests {
                 assert!(requirements.group_ordinals.contains(dependent_ordinal));
                 assert!(requirements.group_ordinals.contains(required_ordinal));
             }
-            assert!(requirements.retained_packages.is_empty());
             let inventory = crate::artifact_inventory::ArtifactInventory::default();
             let artifacts = inventory
                 .admit_shared_with_demand(

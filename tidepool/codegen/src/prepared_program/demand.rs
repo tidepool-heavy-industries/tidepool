@@ -2483,7 +2483,6 @@ mod selection_tests {
             .native_domain_selection_in(&tree, ScopeId::ROOT)
             .unwrap();
         assert_eq!(selected.roots().len(), 2);
-
         assert_eq!(
             selected
                 .roots()
