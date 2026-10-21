@@ -18,9 +18,11 @@ use tidepool_codegen::binding_table::{
     BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
+#[cfg(test)]
+use tidepool_codegen::prepared_program::SourceInstanceLease;
 use tidepool_codegen::prepared_program::{
     ImageRegistry, InheritedSourceDemand, NativeInstanceLease, PendingGroupInventory, ProgramId,
-    ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
+    ResidencyCounts, SourceBinder, SourceGroupOutline,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};

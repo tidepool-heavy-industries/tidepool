@@ -79,7 +79,7 @@ impl ClosedInstantiationPlan {
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
         let resolved = output
             .native_source_products()
-            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         let selection = resolved
             .completed_selection()
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?
@@ -394,10 +394,12 @@ impl PreparedEngine {
                     origin.for_closed_entry_sites(program.product.definitions().sites());
                 facts.native_product = Some(match &program.product {
                     ClosedProduct::Home(row) => NativeProductProof::ClosedHome {
-                        selection: Arc::clone(&plan.selection),
-                        binding: row.binding(),
+                        _selection: Arc::clone(&plan.selection),
+                        _binding: row.binding(),
                     },
-                    ClosedProduct::Package(binding) => NativeProductProof::Package(binding.clone()),
+                    ClosedProduct::Package(binding) => NativeProductProof::Package {
+                        _binding: binding.clone(),
+                    },
                 });
                 facts
             })
@@ -405,9 +407,9 @@ impl PreparedEngine {
         let mut target = ProgramFacts::from_image(&plan.target, Some(plan.target_entry));
         target.native_sources =
             origin.for_closed_entry_sites(&plan.target.definition_facts().sites);
-        target.native_product = Some(NativeProductProof::ClosedTarget(Arc::clone(
-            &plan.selection,
-        )));
+        target.native_product = Some(NativeProductProof::ClosedTarget {
+            _selection: Arc::clone(&plan.selection),
+        });
         facts.push(target);
         let direct = facts
             .iter()
@@ -456,8 +458,8 @@ impl PreparedEngine {
                             index,
                             Arc::clone(image),
                             NativeArtifactBinding {
-                                artifact: binding.artifact().0,
-                                selection: binding.selection().0,
+                                artifact: binding.artifact.0,
+                                selection: binding.selection.0,
                             },
                             domain,
                             value,

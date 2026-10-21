@@ -40,10 +40,10 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, CertifiedGroupCode, ConstructorIdentity,
-    ConstructorReply, DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue,
-    JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature,
-    SiteDelivery, SiteRow, SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, ConstructorIdentity, ConstructorReply,
+    DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError,
+    MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow,
+    SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
 };
 use tidepool_repr::type_graph::{
     DataView, DeclarationForm as GraphDeclarationForm, GraphLimits, TypeCursor, TypeEdge,
@@ -712,13 +712,19 @@ impl From<LinkError> for PreparedRuntimeError {
 /// machine has taken its code: the declared entry and, per top-level binding,
 /// the identity and entry signature an importer links against.
 enum NativeProductProof {
-    Source(tidepool_toolchain::artifacts::OwnedNativeSourceProduct),
-    ClosedHome {
-        selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
-        binding: tidepool_toolchain::artifact_inventory::NativeGroupBinding,
+    Source {
+        _product: tidepool_toolchain::artifacts::OwnedNativeSourceProduct,
     },
-    Package(tidepool_toolchain::artifact_inventory::PackageCodeBinding),
-    ClosedTarget(Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>),
+    ClosedHome {
+        _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+        _binding: tidepool_toolchain::artifact_inventory::NativeGroupBinding,
+    },
+    Package {
+        _binding: tidepool_toolchain::artifact_inventory::PackageCodeBinding,
+    },
+    ClosedTarget {
+        _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+    },
 }
 
 struct ProgramFacts {
@@ -4888,7 +4894,10 @@ impl PreparedEngine {
                     facts.native_sources = selected
                         .sources
                         .select(facts.sites.iter().map(|site| site.site));
-                    facts.native_product = selected.proof.clone().map(NativeProductProof::Source);
+                    facts.native_product = selected
+                        .proof
+                        .clone()
+                        .map(|product| NativeProductProof::Source { _product: product });
                     facts
                 })
                 .collect();

@@ -16,10 +16,12 @@ use ciborium::value::Value as CborValue;
 #[cfg(test)]
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
+#[cfg(test)]
+use tidepool_toolchain::artifacts::SelectedModuleCandidateOffer;
 use tidepool_toolchain::artifacts::{
     compiler_scratch_directory, decode_turn_nominal_heads as decode_nominal_heads,
     decode_turn_yield_sites as decode_asks, AppliedModuleCandidateOffer, CompilerDiagnosticCapture,
-    ModuleCandidateOffer, SelectedModuleCandidateOffer,
+    ModuleCandidateOffer,
 };
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 #[cfg(test)]
