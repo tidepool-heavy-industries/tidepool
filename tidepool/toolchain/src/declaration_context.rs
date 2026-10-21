@@ -3573,7 +3573,10 @@ impl RequestCompilerInputs {
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
         let inputs = Arc::new(Self {
             source_support: Arc::new(support),
-            metadata: self.metadata.clone(),
+            metadata: CompilerArtifactMetadata {
+                entries: self.metadata.entries.clone(),
+                retained: Arc::clone(&self.metadata.retained),
+            },
             native_selection: self.native_selection.clone(),
             original_sources: Arc::clone(&self.original_sources),
             world_primary_context: Some(Arc::clone(&context)),
