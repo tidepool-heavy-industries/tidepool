@@ -2282,6 +2282,18 @@ impl PartialEq for ArtifactEntry {
 }
 impl Eq for ArtifactEntry {}
 
+/// Requirements borrow the issuing witness; nominal references never enter Source adjacency.
+#[derive(Clone, Copy)]
+enum NativeRequirementRef<'a> {
+    SourceOrRetained {
+        owner: &'a ExactModuleIdentity,
+        dependency: &'a ArtifactDependency,
+    },
+    Original {
+        reference: &'a crate::certified_products::ReceiptImportOwner,
+    },
+}
+
 pub(crate) fn index_native_requirements(
     requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
 ) -> Result<BTreeMap<u32, Vec<(ExactModuleIdentity, ArtifactDependency)>>, CompileError> {
@@ -2446,6 +2458,36 @@ impl ArtifactEntry {
         self.native_requirements
             .get(&ordinal)
             .map_or(&[], Vec::as_slice)
+    }
+
+    fn native_requirement_refs_for(
+        &self,
+        ordinal: u32,
+    ) -> Result<impl Iterator<Item = NativeRequirementRef<'_>>, CompileError> {
+        let nominal = match &self.payload {
+            ArtifactPayload::Original(product) => {
+                crate::certified_products::original_native_group_imports(product, ordinal)
+                    .ok_or_else(|| {
+                        failure("native requirement lacks its authenticated original group")
+                    })?
+            }
+            _ => &[],
+        };
+        Ok(self
+            .native_requirements_for(ordinal)
+            .iter()
+            .map(|(owner, dependency)| NativeRequirementRef::SourceOrRetained { owner, dependency })
+            .chain(
+                nominal
+                    .iter()
+                    .filter(|reference| {
+                        matches!(
+                            reference,
+                            crate::certified_products::ReceiptImportOwner::OriginalBinding { .. }
+                        )
+                    })
+                    .map(|reference| NativeRequirementRef::Original { reference }),
+            ))
     }
 
     #[cfg(test)]
@@ -7900,9 +7942,10 @@ impl ArtifactView {
     /// independently issued artifacts can provide the same dependency bytes.
     fn native_payload_custody_nodes(
         &self,
+        state: &InventoryState,
         owned: &imbl::OrdSet<InventoryNodeKey>,
         initial: &BTreeSet<InventoryNodeKey>,
-    ) -> BTreeSet<InventoryNodeKey> {
+    ) -> Result<BTreeSet<InventoryNodeKey>, CompileError> {
         let mut native_owners = BTreeMap::<NativeOwnerKey, Vec<InventoryNodeKey>>::new();
         for node in owned {
             let InventoryNodeKey::Artifact(binding) = node else {
@@ -7925,6 +7968,58 @@ impl ArtifactView {
             if !visited.insert(node.artifact()) {
                 continue;
             }
+            let entry = &self.lease.payloads[&node.artifact()];
+            for ordinal in &entry.native_group_ordinals {
+                for requirement in entry.native_requirement_refs_for(*ordinal)? {
+                    let NativeRequirementRef::Original { reference } = requirement else {
+                        continue;
+                    };
+                    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                        interface,
+                        original,
+                        ..
+                    } = reference
+                    else {
+                        unreachable!("nominal Original requirement");
+                    };
+                    for binding in [*interface, *original] {
+                        if !owned.contains(&InventoryNodeKey::Artifact(binding)) {
+                            return Err(failure(
+                                "nominal Original metadata lacks its exact acquired binding",
+                            ));
+                        }
+                    }
+                    let canonical = self
+                        .lease
+                        .payloads
+                        .get(&interface.artifact)
+                        .ok_or_else(|| failure("nominal Original canonical payload missing"))?;
+                    let code = self
+                        .lease
+                        .payloads
+                        .get(&original.artifact)
+                        .ok_or_else(|| failure("nominal Original code payload missing"))?;
+                    crate::certified_products::original_reference_payload_member(
+                        reference, canonical, code, None,
+                    )
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+                    let mut carriers = state
+                        .outgoing(InventoryNodeKey::Artifact(*original))
+                        .filter(|(_, edge)| **edge == ArtifactDependency::Interface);
+                    if carriers.next().map(|(node, _)| node)
+                        != Some(InventoryNodeKey::Artifact(*interface))
+                        || carriers.next().is_some()
+                    {
+                        return Err(failure("nominal Original exact canonical pair changed"));
+                    }
+                    for binding in [*interface, *original] {
+                        let required_node = InventoryNodeKey::Artifact(binding);
+                        if retained.insert(required_node) {
+                            pending.push(required_node);
+                        }
+                    }
+                }
+            }
             for required in self.lease.payloads[&node.artifact()].native_owners.values() {
                 for &required_node in native_owners.get(required).into_iter().flatten() {
                     if retained.insert(required_node) {
@@ -7933,7 +8028,7 @@ impl ArtifactView {
                 }
             }
         }
-        retained
+        Ok(retained)
     }
 
     pub(crate) fn select_publication_roots(
@@ -7964,7 +8059,7 @@ impl ArtifactView {
         let initial = admitted_closure(&state, selected.iter().copied())
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let retained = self.native_payload_custody_nodes(owned, &initial);
+        let retained = self.native_payload_custody_nodes(&state, owned, &initial)?;
         let mut custody = retained.difference(&initial).copied().collect::<Vec<_>>();
         custody.extend(self.roots().iter().copied().filter(|node| matches!(node,
             InventoryNodeKey::Group(group) if group.binding.artifact() != original && ids.contains(&group.binding.artifact()))));
@@ -8285,7 +8380,7 @@ impl ArtifactView {
         let initial = admitted_closure(&state, selected.iter().chain(carriers.iter()).copied())
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let retained = self.native_payload_custody_nodes(owned, &initial);
+        let retained = self.native_payload_custody_nodes(&state, owned, &initial)?;
         let mut custody_roots = carriers
             .into_iter()
             .filter(|node| !selected_nodes.contains(node))
@@ -9524,7 +9619,7 @@ impl ArtifactView {
                 custody.insert(node);
             }
         }
-        let custody = initial.native_payload_custody_nodes(owned, &custody);
+        let custody = initial.native_payload_custody_nodes(&state, owned, &custody)?;
         drop(state);
         let retained = initial.lease.inventory.retain(
             Vec::new(),

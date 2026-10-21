@@ -5331,12 +5331,77 @@ fn authenticate_original_binding_membership(
     if primary.interface() != interface || primary.original() != Some(original) {
         return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
     }
-    let crate::artifact_inventory::ArtifactPayload::Original(product) = &primary.entry().payload
+    let interface_entry = source
+        .artifacts()
+        .observed_payload(&interface.artifact)
+        .ok_or_else(|| refuse(InputDecisionRefusal::ArtifactIdentityMismatch))?;
+    let reference = ReceiptImportOwner::OriginalBinding {
+        unit: owner.unit.clone(),
+        module: owner.module.clone(),
+        interface,
+        original,
+        binder: binder.clone(),
+    };
+    original_reference_payload_member(
+        &reference,
+        interface_entry,
+        primary.entry(),
+        Some(operation),
+    )
+    .map(|(owner, ordinal)| (owner.clone(), ordinal))
+}
+
+/// Authenticate nominal pair/symbol membership against its held exact payloads.
+/// Binding scope custody is checked by the inventory owner; this grants no execution.
+pub(crate) fn original_reference_payload_member<'a>(
+    reference: &ReceiptImportOwner,
+    interface_entry: &crate::artifact_inventory::ArtifactEntry,
+    original_entry: &'a crate::artifact_inventory::ArtifactEntry,
+    operation: Option<&InventoryOperation>,
+) -> CertResult<(&'a CachedHomeOwner, u32)> {
+    let ReceiptImportOwner::OriginalBinding {
+        unit,
+        module,
+        interface,
+        original,
+        binder,
+    } = reference
+    else {
+        return Err(CertificationError::Mismatch(
+            "nominal Original reference kind",
+        ));
+    };
+    let owner = crate::declaration_join::ExactModuleIdentity {
+        unit: unit.clone(),
+        module: module.clone(),
+    };
+    let refuse = |reason| CertificationError::InputDecision {
+        owner: owner.clone(),
+        reason,
+    };
+    let crate::artifact_inventory::ArtifactPayload::Original(product) = &original_entry.payload
     else {
         return Err(refuse(InputDecisionRefusal::NativeOwnerMismatch));
     };
-    operation.charge(product.owner().unit.len())?;
-    operation.charge(product.owner().module.len())?;
+    if product.owner().unit != *unit
+        || product.owner().module != *module
+        || binder.unit != *unit
+        || binder.module != *module
+        || original_entry.descriptor.id != original.artifact
+        || interface_entry.descriptor.id != interface.artifact
+    {
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
+    }
+    let crate::artifact_inventory::ArtifactPayload::Canonical(canonical) = &interface_entry.payload
+    else {
+        return Err(refuse(InputDecisionRefusal::NativeOwnerMismatch));
+    };
+    if product.module_interface() != Some(canonical) {
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
+    }
+    if let Some(operation) = operation {
+        operation.charge(product.owner().unit.len() + product.owner().module.len())?;
+    }
     let witness = product
         .original_native()
         .filter(|witness| witness.matches_original(product))
@@ -5348,7 +5413,9 @@ fn authenticate_original_binding_membership(
     let mut ordinal = None;
     for group in witness.groups.iter() {
         crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
-        operation.charge(group.group.binders().len())?;
+        if let Some(operation) = operation {
+            operation.charge(group.group.binders().len())?;
+        }
         if group.group.binders().contains(binder) {
             if ordinal.replace(group.group.original_ordinal()).is_some() {
                 return Err(CertificationError::OriginalMembership(Box::new(
@@ -5366,7 +5433,7 @@ fn authenticate_original_binding_membership(
             symbol: binder.clone(),
         }))
     })?;
-    Ok((product.owner().clone(), ordinal))
+    Ok((product.owner(), ordinal))
 }
 
 fn resolve_receipt_owner_with_validation(
