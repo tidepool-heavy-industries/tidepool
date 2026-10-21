@@ -5417,10 +5417,11 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .public_visibility_snapshot_in(producer_scope)
         .unwrap();
     assert_ne!(installed.source_instances, before.source_instances);
-    assert!(installed
-        .source_instances
-        .iter()
-        .any(|key| key.binder.binder.module == private_declaration));
+    assert!(installed.source_instances.iter().any(|key| resident
+        .state
+        .bindings()
+        .native_instance(key)
+        .is_some_and(|lease| lease.export().module == private_declaration)));
     let (submission, activation) = fixture.deliver(&mut resident, reservation_hole, 1);
     let site = parked_site(&mut resident, &activation);
     let realm = resident.parked_realm(&activation).unwrap();
