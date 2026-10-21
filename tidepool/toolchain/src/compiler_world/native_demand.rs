@@ -271,9 +271,33 @@ impl<'a> WorldNativeDemandResolver<'a> {
         }
         let groups =
             groups.ok_or_else(|| source_failure("native demand lost its fresh selected uses"))?;
-        let reply =
-            native_demand::encode_reply(groups.package_obligations(), &self.validation.inventory)
-                .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let mut reply_groups = BTreeMap::new();
+        for batch in &batches {
+            self.validation
+                .inventory
+                .reserve::<(
+                    &crate::certified_products::ReceiptImportOwner,
+                    Arc<DemandCertifiedGroups>,
+                )>(batch.original_uses().len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            for reference in batch.original_uses() {
+                let projected = batch.restrict_uses(std::slice::from_ref(reference))?;
+                reply_groups.insert(reference, Arc::clone(projected.shared_groups()));
+            }
+        }
+        self.validation
+            .inventory
+            .reserve::<native_demand::NativeDemandUseReply<'_>>(reply_groups.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let replies = reply_groups
+            .iter()
+            .map(|(reference, groups)| native_demand::NativeDemandUseReply {
+                original: reference,
+                obligations: groups.package_obligations(),
+            })
+            .collect::<Vec<_>>();
+        let reply = native_demand::encode_reply(&replies, &self.validation.inventory)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
         let selected_groups = match prior {
             Some(prior) => Arc::new(prior.selected_groups.merge(&groups)?),
             None => groups,

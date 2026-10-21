@@ -3195,6 +3195,12 @@ pub(crate) struct ResolvedNativeDemand {
 }
 
 impl ResolvedNativeDemand {
+    pub(crate) fn original_uses(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::certified_products::ReceiptImportOwner> {
+        self.groups.original_use_roots.keys()
+    }
+
     pub(crate) fn restrict_uses(
         &self,
         references: &[crate::certified_products::ReceiptImportOwner],
