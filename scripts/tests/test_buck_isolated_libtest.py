@@ -1230,11 +1230,15 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--setenv=EXOMONAD_NIX_OFFLINE=1', command)
         self.assertNotIn('--setenv=EXOMONAD_NIX_OFFLINE=0', command)
 
-    def test_structured_logging_crosses_delegation_explicitly(self):
+    def test_actor_layout_diagnostics_cross_delegation_explicitly(self):
         command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
-            environment={'TIDEPOOL_LOG': 'trace',
+            environment={'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS': '1',
+                         'TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC': '1',
+                         'TIDEPOOL_FINALIZED_OWNER_TRACE': 'main:Tidepool.Aeson.Scientific',
                          'UNDECLARED_TRACE': '1'})
-        self.assertIn('--setenv=TIDEPOOL_LOG=trace', command)
+        self.assertIn('--setenv=TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS=1', command)
+        self.assertIn('--setenv=TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC=1', command)
+        self.assertIn('--setenv=TIDEPOOL_FINALIZED_OWNER_TRACE=main:Tidepool.Aeson.Scientific', command)
         self.assertFalse(any('UNDECLARED_TRACE' in word for word in command))
 
     def test_success_retains_physical_timing_and_outcome_before_scratch_deletion(self):

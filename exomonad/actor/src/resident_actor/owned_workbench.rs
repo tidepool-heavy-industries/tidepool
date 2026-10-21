@@ -793,15 +793,16 @@ where
             + 'static,
     {
         #[cfg(test)]
-        tracing::trace!(
-            target: "exomonad_actor::async_layout",
-            output = std::any::type_name::<T>(),
-            output_bytes = std::mem::size_of::<T>(),
-            run_bytes = std::mem::size_of_val(&run),
-            apply_bytes = std::mem::size_of_val(&apply),
-            owned_bytes = std::mem::size_of::<OwnedExecution<H, O>>(),
-            "actor async step layout"
-        );
+        if std::env::var_os("TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "actor async step layout output={} output_bytes={} run_bytes={} apply_bytes={} owned_bytes={}",
+                std::any::type_name::<T>(),
+                std::mem::size_of::<T>(),
+                std::mem::size_of_val(&run),
+                std::mem::size_of_val(&apply),
+                std::mem::size_of::<OwnedExecution<H, O>>(),
+            );
+        }
         OwnedWorkbenchTask::new(Box::pin(Self::run_owned_step(owned, run, apply)))
     }
 
@@ -1116,12 +1117,9 @@ where
                         .as_ref()
                         .expect("owned execution retains its original control")
                         .publication_decision();
-                    let observation = owned
-                        .workbench
-                        .as_ref()
+                    let observation = owned.workbench.as_ref()
                         .expect("original source-authorized workbench precedes admission")
-                        .capture_observation_scaffold(&context)
-                        .await?;
+                        .capture_observation_scaffold(&context).await?;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "private_begin_started", "workbench phase");
                     let private = Arc::new(
                         runner
@@ -2447,8 +2445,7 @@ where
                             dependencies.retire_input_for_publication().await?;
                         }
                         runner.publish_private_execution(context, private).await
-                    }
-                    .await;
+                    }.await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })

@@ -1,20 +1,20 @@
 //! Recognized `tidepool-*` machine-readable stderr prefixes.
 //!
-//! The process boundary and compiler worker write these lines to stderr for
-//! opt-in tracing, timing and structural module accounting. They are
-//! measurements for the daemon's detailed log, never source diagnostics, so
-//! every consumer that renders or logs worker stderr filters them with this
-//! SAME list — the daemon's own transaction log (`tidepool-extract-cmd`) and
-//! the human-facing diagnostic renderer (`tidepool-toolchain`). This module is
+//! The process boundary and compiler worker (`bridge/haskell/src/Tidepool/Timing.hs` and
+//! `GhcPipeline.hs`) writes these lines to stderr under `TIDEPOOL_TIMING=1`
+//! and during structural module accounting. They are measurements for the
+//! daemon's detailed log, never source diagnostics, so every consumer that
+//! renders or logs worker stderr filters them with this SAME list — the
+//! daemon's own transaction log (`tidepool-extract-cmd`) and the
+//! human-facing diagnostic renderer (`tidepool-toolchain`). This module is
 //! the one place the list is spelled; extend it here, not by copying it.
 
 /// Every `tidepool-*` stderr prefix the compiler worker is known to emit for
 /// machine-readable measurement/accounting lines (as opposed to a GHC source
 /// diagnostic). A worker line starting with one of these, after leading
 /// whitespace is trimmed, is machine-readable and never a source diagnostic.
-pub const MACHINE_STDERR_PREFIXES: [&str; 29] = [
+pub const MACHINE_STDERR_PREFIXES: [&str; 28] = [
     "tidepool-build-products ",
-    "tidepool-log ",
     "tidepool-timing ",
     "tidepool-timing-detail ",
     "tidepool-timing-module ",

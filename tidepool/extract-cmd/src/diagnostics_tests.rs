@@ -48,11 +48,9 @@ fn prefix_scanner_does_not_admit_rendered_source_errors() {
 #[test]
 fn machine_stderr_prefixes_match_the_emitters() {
     let timing = include_str!("../../../bridge/haskell/src/Tidepool/Timing.hs");
-    let logging = include_str!("../../../bridge/haskell/src/Tidepool/Logging.hs");
     let ghc_pipeline = include_str!("../../../bridge/haskell/src/Tidepool/GhcPipeline.hs");
 
     let mut emitted = emitted_prefixes(timing);
-    emitted.extend(emitted_prefixes(logging));
     emitted.extend(emitted_prefixes(ghc_pipeline));
     emitted.extend(emitted_prefixes(include_str!("daemon.rs")));
 
@@ -64,7 +62,7 @@ fn machine_stderr_prefixes_match_the_emitters() {
     assert_eq!(
         declared, emitted,
         "MACHINE_STDERR_PREFIXES has drifted from the tidepool-* literals \
-         emitted by Timing.hs/Logging.hs/GhcPipeline.hs/daemon.rs"
+         emitted by Timing.hs/GhcPipeline.hs/daemon.rs"
     );
 }
 
@@ -101,9 +99,6 @@ fn meta_execution_lines_are_measurements_only_at_the_prefix_boundary() {
             "Original.hs:1: error: tidepool-checked-reused-source is not in scope",
             false,
         ),
-        ("tidepool-log {\"schema\":1,\"level\":\"trace\"}", true),
-        ("  tidepool-log {\"schema\":1}", true),
-        ("tidepool-log-error: sink failed", false),
     ] {
         assert_eq!(is_machine_stderr_line(line), machine);
     }

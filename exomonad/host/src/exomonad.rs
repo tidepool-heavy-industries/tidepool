@@ -1851,9 +1851,6 @@ fn compiler_daemon_launch(
             .environment()
             .map(|(key, value)| (key.into(), value.into())),
     );
-    environment
-        .entry("TIDEPOOL_LOG".into())
-        .or_insert_with(|| profile.default_log_level().into());
     let unset_environment = deployment_environment_unsets(&environment);
     Ok(TmuxLaunch {
         window_name: "Compiler".into(),
@@ -3045,7 +3042,6 @@ const FORWARDED_ENV_NAMES: &[&str] = &[
     "SSH_AUTH_SOCK",
     "RUST_LOG",
     "EXOMONAD_TRACE",
-    "TIDEPOOL_LOG",
     "TIDEPOOL_TIMING",
     "TIDEPOOL_TIMING_SUMMARY",
     "TIDEPOOL_TEST_TRACE_PROFILE",
@@ -5040,23 +5036,6 @@ mod tests {
         assert_eq!(launch.environment["TIDEPOOL_TEST_TRACE_PROFILE"], "full");
         assert_eq!(launch.environment["TIDEPOOL_TIMING"], "1");
         assert_eq!(launch.environment["TIDEPOOL_TIMING_SUMMARY"], "1");
-        assert_eq!(launch.environment["TIDEPOOL_LOG"], "trace");
-        let explicit = std::collections::BTreeMap::from([
-            ("TIDEPOOL_TEST_TRACE_PROFILE".into(), "full".into()),
-            ("TIDEPOOL_TIMING".into(), "0".into()),
-            ("TIDEPOOL_LOG".into(), "debug".into()),
-        ]);
-        let explicit_launch = compiler_daemon_launch(
-            Path::new("/tmp/workspace"),
-            Path::new("/tmp/compiler.sock"),
-            "/tmp/compiler".into(),
-            "run",
-            Path::new("/tmp/compiler.log"),
-            &CompilerConfig::default(),
-            &explicit,
-        )
-        .unwrap();
-        assert_eq!(explicit_launch.environment["TIDEPOOL_LOG"], "debug");
         let invalid = std::collections::BTreeMap::from([(
             "TIDEPOOL_TEST_TRACE_PROFILE".into(),
             "unknown".into(),

@@ -252,8 +252,6 @@ import Tidepool.CheckedPrefixImports
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
-import Tidepool.Logging
-  ( LogLevel(LogTrace), LogValue(..), logTrace, loggerEnabled, readLogger )
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
@@ -2829,12 +2827,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         WorldCellSource _ _ (WorldCellPrefix _ _ _ _ values _ _ _) _ _ _ -> values
         WorldObservationSource {} -> []
         WorldCellNameSource {} -> []
-  logger <- liftIO (readLogger "tidepool.compiler.world")
-  let worldStage = "world.cell.stage"
-      traceStageIO stage details = logTrace logger worldStage
-        (("stage", LogText stage) : ("target", LogText path) : details)
-      traceStage stage details = liftIO (traceStageIO stage details)
-  traceStage "acquired" [("directory", LogText operationDirectory)]
   -- Dependency completions use one closed compiler route. Caller-composed
   -- purpose wrappers cannot silently widen the retained dependency policy.
   unless (case operation of
@@ -2842,14 +2834,10 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldObservationSource {} -> originalPurpose purpose == WorldObservationCompile
     WorldCellNameSource {} -> originalPurpose purpose == WorldObservationCompile) $ liftIO $ do
       emitWorldAcquisitionRejection "world stage purpose" path "operation purpose is outside the admitted closed source route"
-      traceStageIO "purpose-refused" []
       throwIO WorldCellUnsupported
   directory <- liftIO (canonicalizePath operationDirectory)
   target <- liftIO (canonicalizePath path)
-  unless ((directory ++ [pathSeparator]) `isPrefixOf` target) (liftIO $ do
-    traceStageIO "directory-containment-refused"
-      [("resolved_target", LogText target),("directory", LogText directory)]
-    throwIO WorldCellCorrupt)
+  unless ((directory ++ [pathSeparator]) `isPrefixOf` target) (liftIO (throwIO WorldCellCorrupt))
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
   let flags = heldWorldCellFlags baseEnv directory roots
       policy = retainedContext retained
@@ -2862,7 +2850,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   recipe <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (pvGeneratedScaffold variant)
   capturedSource <- liftIO (captureGeneratedScaffoldSource recipe path >>= either (\reason -> do
     emitWorldAcquisitionRejection "world stage source recipe" path reason
-    traceStageIO "source-recipe-refused" [("detail", LogText reason)]
     throwIO WorldCellCorrupt) pure)
   let source = capturedGeneratedScaffoldBytes capturedSource
       sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
@@ -2871,8 +2858,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   parsedDemand <- either (\reason -> liftIO $ case operation of
     WorldCellSource {} -> do
       emitWorldAcquisitionRejection "world cell parsed demand" path (moduleDemandFailureDetail reason)
-      traceStageIO "parsed-demand-refused"
-        [("detail", LogText (moduleDemandFailureDetail reason))]
       throwIO WorldCellUnsupported
     WorldObservationSource {} -> do
       emitWorldObservationSourceRejection effective path source reason
@@ -2907,8 +2892,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             value <- readWorldCellOperandWithOwner (universeOriginalInputs universe) operandEnvironment facts descriptor sha
               `catch` \(WorldInputsFailure cause detail) -> do
                 emitWorldAcquisitionRejection "world cell operand" descriptor detail
-                traceStageIO "operand-refused"
-                  [("descriptor", LogText descriptor),("detail", LogText detail)]
                 throwIO (case cause of
                   WorldInputsUnavailable -> WorldCellUnavailable
                   WorldInputsCorrupt -> WorldCellCorrupt)
@@ -2927,40 +2910,30 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) withOperand facts)
   (current,verifiedDeclaration) <- either (\reason -> liftIO $ do
     emitWorldAcquisitionRejection "world declaration type input" path reason
-    traceStageIO "declaration-inputs-refused" [("detail", LogText reason)]
     throwIO WorldCellCorrupt) pure declarationInputs
-  traceStage "declaration-inputs-propagated" []
   let importFailure :: WorldInputsFailure -> IO value
       importFailure (WorldInputsFailure cause detail) = do
         emitWorldAcquisitionRejection "world carried import" path detail
-        traceStageIO "import-refused" [("detail", LogText detail)]
         throwIO (case cause of
           WorldInputsUnavailable -> WorldCellUnavailable
           WorldInputsCorrupt -> WorldCellCorrupt)
   pendingImports <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts verifiedDeclaration
     (sourceImportIntents purpose) parsedDemand `catch` importFailure)
-  traceStage "import-basis-issued" []
   prefixImports <- liftIO $ case operation of
     WorldCellSource _ _ prefix _ _ _ -> worldCellPrefixLexicalOwners current prefix
     WorldObservationSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
     WorldCellNameSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
   setSession current
   importBasis@(WorldImportBasis _ lexicalImports) <- qualifyWorldImportSources pendingImports
-  traceStage "import-sources-qualified" []
   liftIO (emitCount timing "world.cell.qualified_source_owners" (toInteger (sum
     [length rows | WorldQualifiedSourceLexicalImports (WorldQualifiedSourceImports _ _ rows) <- lexicalImports])))
   qualified <- getSession
   imported <- liftIO (hydrateWorldImportBasis importBasis qualified `catch` importFailure)
   setSession imported
-  traceStage "import-basis-hydrated" []
   resolvedRef <- liftIO (newIORef Nothing)
   nativeRef <- liftIO (newIORef Nothing)
-  let requireNative = readIORef nativeRef >>= maybe (do
-        traceStageIO "native-inputs-missing" []
-        throwIO WorldCellCorrupt) pure
-      requireResolved = readIORef resolvedRef >>= maybe (do
-        traceStageIO "resolved-inputs-missing" []
-        throwIO WorldCellCorrupt) pure
+  let requireNative = readIORef nativeRef >>= maybe (throwIO WorldCellCorrupt) pure
+      requireResolved = readIORef resolvedRef >>= maybe (throwIO WorldCellCorrupt) pure
       resolveInputs environment sourceOwners = do
         existing <- readIORef resolvedRef
         case (operation,existing) of
@@ -3121,9 +3094,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         final <- getSession
         pending <- liftIO (stageHeldWorldDependencies executor dependencies withAliases final path)
         recovery <- liftIO (worldDependencyRecovery dependencies)
-        selected <- liftIO (readIORef importsRef >>= maybe (do
-          traceStageIO "dependency-imports-missing" []
-          throwIO WorldCellCorrupt) pure)
+        selected <- liftIO (readIORef importsRef >>= maybe (throwIO WorldCellCorrupt) pure)
         let WorldSourceSelection sourceSelection _ _ _ _ = selected
         forM_ sourceSelection $ \value -> do
           unchanged <- liftIO (revalidateSourceSelectedOriginals value)
@@ -3131,13 +3102,10 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         pure (pending,recovery,selected)
   case operation of
     WorldCellSource _ _ _ _ selection _ -> do
-      traceStage "compiler-stage-started" []
       result <- runStage selection
-      traceStage "compiler-stage-completed" []
       final <- getSession
       resolved <- liftIO requireResolved
       (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes _ _) <- completeDependencies
-      traceStage "dependencies-completed" []
       selectedTypeBodies <- liftIO $ do
         let entries = worldResolvedTypes resolved ++ sourceTypes ++ worldImportEntries importBasis ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
               ++ maybe [] (Map.elems . worldCellOperandTypes) operand
@@ -3147,7 +3115,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
           maybe False (\(actual,body) -> actual == artifact && artifactSha256 body == artifactSha256 (worldTypeEntryInterfaceBody entry))
             (Map.lookup (exactUnit artifact,exactModule artifact) selected)) entries) (throwIO WorldCellCorrupt)
         pure (Map.elems selected)
-      traceStage "selected-type-bodies-validated" []
       original <- liftIO $ traverse (\planned -> do
         inventory <- certifyPlannedDeclaration planned final >>= either fail pure
         pure (planned,inventory)) (worldPlannedDeclaration purpose)
@@ -6703,10 +6670,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             (zip (map (ms_mod_name . observationSummary) observations) moduleFacts))
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           finalizedModules <- liftIO (readIORef finalizedModulesRef)
-          logger <- liftIO (readLogger "tidepool.compiler.finalized")
-          when (loggerEnabled logger LogTrace) $ forM_ (Map.elems finalizedModules) $ \finalized -> liftIO $ do
-            let owner = mi_module (hm_iface (finalizedHomeModInfo finalized))
+          traceOwner <- liftIO (lookupEnv "TIDEPOOL_FINALIZED_OWNER_TRACE")
+          forM_ traceOwner $ \requested -> liftIO $ do
             let key owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+                matches owner = let (unit,name) = key owner in requested == unit ++ ":" ++ name
                 summaries graph owner = [summary | ModuleNode _ summary <- mgModSummaries' graph
                   , ms_mod summary == owner]
                 selectedSources = [owner | WorldSourceSelection selected _ _ _ _ <- maybe [] pure worldSources
@@ -6720,26 +6687,30 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 sourcePaths graph owner = take 2
                   [take 256 source | summary <- summaries graph owner
                     , source <- maybe [] pure (ml_hs_file (ms_location summary))]
-                (unit,name) = key owner
-                nodes = [node | node <- dependencyModules dependencies
-                  , dependencyModuleUnit node == unit,dependencyModuleName node == name]
-                paths = map dependencyModuleSource nodes
-                consumed = [source | source <- dependencySources dependencies
-                  , dependencySourcePath source `elem` paths]
-            logTrace logger "finalized.owner"
-              [ ("owner", LogText (unit ++ ":" ++ name))
-              , ("fresh_graph", LogInteger (fromIntegral (length (summaries freshGraph owner))))
-              , ("source_capture_graph", LogInteger (fromIntegral (length (summaries sourceCaptureGraph owner))))
-              , ("fresh_paths", LogText (show (sourcePaths freshGraph owner)))
-              , ("selected_world_source", LogBool (key owner `elem` selectedSources))
-              , ("canonical_admission", LogBool (Map.member (key owner) selectedCanonicalInterfaces))
-              , ("validated_memo", LogBool (Map.member owner validatedMemo))
-              , ("observations", LogText (show (take 2 (observed owner))))
-              , ("native_prepared", LogBool (any ((== owner) . pmModule) preparedModules))
-              , ("dependency_nodes", LogInteger (fromIntegral (length nodes)))
-              , ("dependency_paths", LogText (show (map (take 256) (take 2 paths))))
-              , ("consumed_sources", LogInteger (fromIntegral (length consumed)))
-              ]
+                selected = [mi_module (hm_iface (finalizedHomeModInfo finalized))
+                  | finalized <- Map.elems finalizedModules
+                  , matches (mi_module (hm_iface (finalizedHomeModInfo finalized)))]
+            hPutStrLn stderr ("e6-finalized-role-request owner=" ++ show (take 256 requested)
+              ++ " finalized_matches=" ++ show (length selected))
+            forM_ (take 1 selected) $ \owner -> do
+              let (unit,name) = key owner
+                  nodes = [node | node <- dependencyModules dependencies
+                    , dependencyModuleUnit node == unit,dependencyModuleName node == name]
+                  paths = map dependencyModuleSource nodes
+                  consumed = [source | source <- dependencySources dependencies
+                    , dependencySourcePath source `elem` paths]
+              hPutStrLn stderr ("e6-finalized-role owner=" ++ show (unit,name)
+                ++ " fresh_graph=" ++ show (length (summaries freshGraph owner))
+                ++ " source_capture_graph=" ++ show (length (summaries sourceCaptureGraph owner))
+                ++ " fresh_paths=" ++ show (sourcePaths freshGraph owner)
+                ++ " selected_world_source=" ++ show (key owner `elem` selectedSources)
+                ++ " canonical_admission=" ++ show (Map.member (key owner) selectedCanonicalInterfaces)
+                ++ " validated_memo=" ++ show (Map.member owner validatedMemo)
+                ++ " observations=" ++ show (take 2 (observed owner))
+                ++ " native_prepared=" ++ show (any ((== owner) . pmModule) preparedModules)
+                ++ " dependency_nodes=" ++ show (length nodes)
+                ++ " dependency_paths=" ++ show (map (take 256) (take 2 paths))
+                ++ " consumed_sources=" ++ show (length consumed))
           let packageRoots = Map.union
                 (Map.fromList [(ms_mod_name (observationSummary observation), moduleFactPackageImports facts)
                   | (observation, facts) <- zip observations moduleFacts])

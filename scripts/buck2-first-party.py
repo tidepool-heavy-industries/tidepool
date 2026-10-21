@@ -314,7 +314,6 @@ def render_strings(values, indent=4):
 LIBRARY_TEST_FIXTURES = {
     ("tidepool-extract-cmd", "tidepool_extract_cmd"): {
         "bridge/haskell/src/Tidepool/ExtractRequest.hs",
-        "bridge/haskell/src/Tidepool/Logging.hs",
         "bridge/haskell/src/Tidepool/Timing.hs",
         "bridge/haskell/src/Tidepool/GhcPipeline.hs",
     },
@@ -528,7 +527,6 @@ EXTERNAL_SOURCE_LABELS = {
     "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs": "//tidepool/runtime:activation_input_resident_request_fixture",
     "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs": "//tidepool/runtime:activation_input_resident_shadow_fixture",
     "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
-    "bridge/haskell/src/Tidepool/Logging.hs": "//bridge/haskell:logging_source",
     "bridge/haskell/src/Tidepool/Timing.hs": "//bridge/haskell:timing_source",
     "bridge/haskell/src/Tidepool/WorkerServer.hs": "//bridge/haskell:worker_server_source",
     "bridge/haskell/src/Tidepool/GhcPipeline.hs": "//bridge/haskell:ghc_pipeline_source",

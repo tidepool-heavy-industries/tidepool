@@ -118,8 +118,9 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         .map_err(FrontendError::Io)?;
     let worker = prepare_worker()?;
     let mut command = worker.command()?;
-    profile.apply_logging_environment(&mut command);
-    command.args(request.worker_argv());
+    command
+        .envs(profile.environment())
+        .args(request.worker_argv());
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
@@ -278,7 +279,7 @@ fn owned_timing_command(
     profile: crate::CompilerTraceProfile,
 ) -> Command {
     let mut command = crate::process::command(program);
-    profile.apply_logging_environment(&mut command);
+    command.envs(profile.environment());
     command
 }
 
@@ -2081,11 +2082,10 @@ fn main() {{
     if let Some(path) = std::env::var_os("TIDEPOOL_TEST_WORKER_LAUNCHES") {{
         use std::io::Write;
         let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
-        writeln!(out, "{{}}|{{}}|{{}}|{{}}",
+        writeln!(out, "{{}}|{{}}|{{}}",
             std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").unwrap_or_default(),
             std::env::var("TIDEPOOL_TIMING").unwrap_or_default(),
-            std::env::var("TIDEPOOL_TIMING_SUMMARY").unwrap_or_default(),
-            std::env::var("TIDEPOOL_LOG").unwrap_or_default()).unwrap();
+            std::env::var("TIDEPOOL_TIMING_SUMMARY").unwrap_or_default()).unwrap();
     }}
     if args == ["{probe}"] {{
         print!("{flag}");
@@ -2137,7 +2137,6 @@ fn main() {{
             "TIDEPOOL_TEST_TRACE_PROFILE",
             "TIDEPOOL_TIMING",
             "TIDEPOOL_TIMING_SUMMARY",
-            "TIDEPOOL_LOG",
         ];
         let _restore = Restore(
             names
@@ -2155,13 +2154,11 @@ fn main() {{
         std::env::set_var("TIDEPOOL_GHC_LIBDIR", dir.path());
         std::env::set_var("TIDEPOOL_BUILD_PRODUCTS_DIR", dir.path().join("products"));
         std::env::set_var("TIDEPOOL_TEST_WORKER_LAUNCHES", &launches);
-        for (profile, timing, log, expected) in [
-            (None, None, None, "minimal|0|1|off"),
-            (Some("minimal"), Some("1"), None, "minimal|0|1|off"),
-            (Some("full"), Some("0"), None, "full|1|1|trace"),
-            (None, Some("1"), None, "full|1|1|trace"),
-            (Some("minimal"), None, Some("trace"), "minimal|0|1|trace"),
-            (Some("full"), None, Some("debug"), "full|1|1|debug"),
+        for (profile, timing, expected) in [
+            (None, None, "minimal|0|1"),
+            (Some("minimal"), Some("1"), "minimal|0|1"),
+            (Some("full"), Some("0"), "full|1|1"),
+            (None, Some("1"), "full|1|1"),
         ] {
             match profile {
                 Some(value) => std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", value),
@@ -2170,10 +2167,6 @@ fn main() {{
             match timing {
                 Some(value) => std::env::set_var("TIDEPOOL_TIMING", value),
                 None => std::env::remove_var("TIDEPOOL_TIMING"),
-            }
-            match log {
-                Some(value) => std::env::set_var("TIDEPOOL_LOG", value),
-                None => std::env::remove_var("TIDEPOOL_LOG"),
             }
             std::env::set_var("TIDEPOOL_TIMING_SUMMARY", "0");
             assert_eq!(run(vec![source.clone().into_os_string()]).unwrap(), 0);

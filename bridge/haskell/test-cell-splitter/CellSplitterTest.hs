@@ -6,7 +6,6 @@ import CellProgramStateTest (cellProgramStateChecks)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
-import LoggingTest (runLoggingTests)
 import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
 import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks)
 import DemandScopeTest (demandScopeChecks)
@@ -52,7 +51,6 @@ tests = testGroup "cell-splitter"
   , testCase "harnessSourceChecks" harnessSourceChecks
   , testCase "inspectionRunnerChecks" inspectionRunnerChecks
   , testCase "runWorkerDiagnosticsTests" runWorkerDiagnosticsTests
-  , testCase "structuredLogging" runLoggingTests
   , testCase "orderedInferenceSegments" orderedInferenceSegments
   , testCase "compilerDefaultRecipeChecks" compilerDefaultRecipeChecks
   , testCase "programOriginalImportsCompilation" programOriginalImportsCompilation
