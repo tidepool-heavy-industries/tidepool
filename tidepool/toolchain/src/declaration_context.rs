@@ -11750,6 +11750,97 @@ pub(crate) struct WorldStageSourceAdmission {
     pub(crate) aliases: Vec<PathBuf>,
 }
 
+/// Owner-level controls borrow receipts from the existing checked physical
+/// issuer. They do not manufacture a completed product or a World admission.
+#[cfg(test)]
+pub(crate) fn assert_completed_nominal_program_support(
+    physical: &OriginalCompilerInputs,
+    selection: &crate::certified_products::CertifiedSourceSelection,
+    receiving: &RequestCompilerInputs,
+    owner: &ExactModuleIdentity,
+    offered: Option<u32>,
+    blocked: u32,
+) {
+    let cohort = physical.physical_cohort().unwrap();
+    let operation = &cohort.captures.operation;
+    let expected = selection
+        .produced_source_receipt(owner, physical.issued_artifacts())
+        .unwrap()
+        .expect("the existing physical issuer owns a completed receipt");
+    let original = expected
+        .row()
+        .target_original(expected.row().original_owner())
+        .unwrap();
+    assert!(
+        original.native_group_ordinals.contains(&blocked),
+        "unoffered body is physically present"
+    );
+    let key = NativeGroupKey {
+        artifact: original.descriptor.id,
+        original_ordinal: blocked,
+    };
+    let before = receiving.artifacts().capture_graph_selection();
+    let roles = receiving.projection().clone();
+    assert!(receiving
+        .source_support
+        .implementation_entry(owner)
+        .is_none());
+    let output =
+        IssuedOriginalOutput::issue(selection.clone(), physical.issued_artifacts().clone())
+            .unwrap();
+    let fragment =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical).unwrap();
+    let support = ProgramSourceSupport::append_fragment(
+        None,
+        &fragment,
+        [(owner.clone(), Vec::new())],
+        &output,
+    )
+    .unwrap();
+    let inputs = ProductCompilerInputs::from_exact(receiving).with_program_support(Some(&support));
+    let carried = inputs.prior_nominal_source_product(owner).unwrap().unwrap();
+    assert!(
+        Arc::ptr_eq(carried, &expected),
+        "nominal borrowing retains this live physical issuer"
+    );
+    assert!(
+        carried.choose_own_group(key, operation).unwrap().is_none(),
+        "completed does not imply an own offer"
+    );
+    if let Some(ordinal) = offered {
+        let key = NativeGroupKey {
+            original_ordinal: ordinal,
+            ..key
+        };
+        let chosen = carried.choose_own_group(key, operation).unwrap().unwrap();
+        assert_eq!(expected.groups(key).collect::<Vec<_>>(), [chosen.binding()]);
+        assert!(chosen
+            .contribution()
+            .offer()
+            .same_issuance(expected.own_offer()));
+    } else {
+        assert!(
+            original.native_group_ordinals.iter().all(|ordinal| carried
+                .groups(NativeGroupKey {
+                    original_ordinal: *ordinal,
+                    ..key
+                })
+                .next()
+                .is_none()),
+            "Empty is the actual complete offered ordinal census"
+        );
+    }
+    assert!(
+        ProductCompilerInputs::from_exact(receiving)
+            .prior_nominal_source_product(owner)
+            .unwrap()
+            .is_none(),
+        "absent predecessor evidence differs from a completed unoffered body"
+    );
+    assert_eq!(receiving.projection(), &roles);
+    assert_eq!(receiving.artifacts().capture_graph_selection(), before);
+}
+
 #[cfg(test)]
 pub(crate) fn assert_world_repeated_source_refusals(
     program: &crate::compiler_world::CheckedWorldCellProgram,

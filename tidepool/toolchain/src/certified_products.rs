@@ -18692,6 +18692,14 @@ pub(crate) mod tests {
             publication.produced_availability().unwrap(),
             &receipt
         ));
+        crate::declaration_context::assert_completed_nominal_program_support(
+            &issued,
+            &fresh_selection,
+            request.compiler_inputs(),
+            &produced_owner,
+            Some(2),
+            3,
+        );
         for ordinal in [2, 4, 5] {
             let key = NativeGroupKey {
                 artifact: fresh_id,
@@ -18897,6 +18905,14 @@ pub(crate) mod tests {
             .unwrap()
             .group(17)
             .is_some());
+        crate::declaration_context::assert_completed_nominal_program_support(
+            &empty_output,
+            &empty_selection,
+            request.compiler_inputs(),
+            &empty_owner,
+            None,
+            17,
+        );
         let empty_support = CompilerSourceSupport::close_complete_output(&empty_output)
             .unwrap()
             .certify_original_closure(&empty_publication)
