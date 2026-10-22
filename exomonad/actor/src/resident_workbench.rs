@@ -5379,12 +5379,10 @@ impl HostInputRetirement {
         O: OutputSink + Sync + 'static,
     {
         let (private_lease, write) = match private {
-            Some(private) => (
-                Some(Arc::new(Mutex::new(session.retain_private_host_binding(
-                    private,
-                    input.binder.clone(),
-                    write,
-                )))),
+            Some(_) => (
+                Some(Arc::new(Mutex::new(
+                    session.retain_private_host_binding(write),
+                ))),
                 None,
             ),
             None => (None, Some(write)),
@@ -11313,28 +11311,31 @@ where
                 "checked cell preparation requires its admitted context and source revision".into(),
             ));
         }
-        let preparation: Option<Arc<tidepool_runtime::session::PrivatePreparationSnapshot>> =
-            match purpose.execution() {
-                Some(execution) => Some(
-                    self.access
-                        .with_compiler_machine(context.clone(), {
-                            let execution = execution.admission.clone();
-                            move |session, _, _, _| {
-                                session
-                                    .prepare_private_execution_snapshot(execution)
-                                    .map_err(|error| {
-                                        ResidentActorWorkbenchError::Resident(
-                                            ResidentError::Session(error),
-                                        )
-                                    })
-                            }
-                        })
-                        .await?,
-                ),
-                // Internal HostCarrier preparation deliberately uses its narrow
-                // current-or-pinned precursor path and never owns authored progress.
-                None => None,
-            };
+        let (preparation, cell_operand, leased_input) = match purpose.execution() {
+            Some(execution) => {
+                let execution = execution.admission.clone();
+                let (preparation, leased_input) = self
+                    .access
+                    .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                        let prepare = |write| session.prepare_private_execution(execution, write);
+                        let preparation = match leased_input.as_ref() {
+                            Some(input) => input.with_write(prepare),
+                            None => prepare(None),
+                        }
+                        .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+                        Ok((preparation.into_parts(), leased_input))
+                    })
+                    .await?;
+                (Some(preparation.0), preparation.1, leased_input)
+            }
+            // Internal carriers never acquire authored input or program ownership.
+            None if leased_input.is_none() => (None, None, None),
+            None => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "a cell input requires its private execution owner".into(),
+                ))
+            }
+        };
         let world = match &preparation {
             Some(preparation) => preparation.world().clone(),
             None => {
@@ -11349,40 +11350,6 @@ where
             &purpose,
             leased_input.as_ref().map(|guard| guard.mounted_input()),
         )?;
-        let (cell_operand, leased_input) = if let Some(input) = leased_input {
-            let execution = purpose
-                .execution()
-                .ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "a cell input requires its private execution owner".into(),
-                    )
-                })?
-                .admission
-                .clone();
-            let operand_preparation = preparation
-                .as_ref()
-                .expect("authored input has a snapshot")
-                .clone();
-            self.access
-                .with_compiler_machine(context.clone(), move |session, _, _, _| {
-                    let operand = input.with_write(|write| {
-                        let write = write.ok_or_else(|| {
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "the mounted cell input lost its pending write".into(),
-                            )
-                        })?;
-                        session
-                            .world_cell_operand_for_input(execution, &operand_preparation, write)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                            })
-                    })?;
-                    Ok((Some(operand), Some(input)))
-                })
-                .await?
-        } else {
-            (None, None)
-        };
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
         let parser_recipe = specification.clone();
         let parser_source = context.source_dependency().clone();
@@ -19950,11 +19917,11 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution() {
-        with_test_compiler_owner(|preparation_client| cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner(preparation_client.clone(), )).await
+    async fn cancelled_unaccepted_host_write_retires_original_without_publication() {
+        with_test_compiler_owner(|preparation_client| cancelled_unaccepted_host_write_retires_original_without_publication_with_compiler_owner(preparation_client.clone(), )).await
     }
 
-    async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner(
+    async fn cancelled_unaccepted_host_write_retires_original_without_publication_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
     ) {
         let (machines, public, source, _root) = actor_registry_fixture();
@@ -19975,14 +19942,14 @@ pub(crate) mod request_tests {
             .unwrap();
         let before_interface =
             tidepool_toolchain::artifacts::host_binding_interface_request_count();
-        let mut pending = workbench
+        let pending = workbench
             .bind_command_job(private.clone(), "cancelled job".into())
             .await
             .unwrap();
         assert_eq!(
             tidepool_toolchain::artifacts::host_binding_interface_request_count(),
             before_interface + 1,
-            "cancellation and foreign-owner acceptance cover a freshly issued interface"
+            "cancellation covers a freshly issued interface"
         );
         let name = pending.name().to_owned();
         // Checked mounting establishes the machine incarnation. Compare
@@ -19996,29 +19963,13 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
-        let wrong = workbench
-            .access
-            .with_machine(public.clone(), |session, context, _| {
-                session
-                    .begin_private_execution(context.placement.lexical_scope)
-                    .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))
-            })
-            .await
-            .unwrap();
         assert!(
             pending
                 .mounted
-                .as_mut()
-                .unwrap()
-                .private_lease
                 .as_ref()
                 .unwrap()
-                .lock()
-                .write_mut()
-                .unwrap()
-                .accept(&wrong)
-                .is_err(),
-            "a mount cannot transfer to a different private owner"
+                .with_write(|write| write.is_some()),
+            "unaccepted effect custody remains with the exact execution-owned lease"
         );
 
         execution.decision.request_cancellation();
@@ -20064,7 +20015,6 @@ pub(crate) mod request_tests {
                 assert!(session
                     .current_binding_in(context.placement.lexical_scope, &name)
                     .is_none());
-                session.retire_scope(wrong.private_scope());
                 Ok(())
             })
             .await
@@ -20985,6 +20935,116 @@ pub(crate) mod request_tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn private_input_retirement_refusal_retains_original_cleanup_owner() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client.clone(), 17).await;
+            let (frontend, context) = fixture.private().await;
+            let mut input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let lease = input.private_lease.as_ref().unwrap().clone();
+            let original_retirement = input.retire_private.take().unwrap();
+            let access = frontend.access.sharing();
+            let mut invalid_context = context.clone();
+            invalid_context.placement.lexical_scope = tidepool_codegen::scope::ScopeId(u64::MAX);
+            let failed_lease = lease.clone();
+            input.retire_private = Some(Box::new(move || {
+                let access = access.sharing();
+                let context = invalid_context.clone();
+                let lease = failed_lease.clone();
+                Box::pin(async move {
+                    access
+                        .with_machine(context, move |session, _, _| {
+                            session
+                                .retire_private_host_binding_lease(&mut lease.lock())
+                                .map_err(ResidentActorWorkbenchError::Resident)
+                        })
+                        .await
+                })
+            }));
+            assert!(input.retire_for_publication().await.is_err());
+            assert!(
+                lease.lock().write().is_some(),
+                "checkout refusal retains the exact receipt"
+            );
+            assert!(Arc::ptr_eq(input.private_lease.as_ref().unwrap(), &lease));
+            input.retire_private = Some(original_retirement);
+            input
+                .retire_for_publication()
+                .await
+                .expect("the original owner can retry exact cleanup");
+            assert!(
+                lease.lock().write().is_none(),
+                "only confirmed cleanup releases the receipt"
+            );
+            drop(lease);
+            drop(input);
+            fixture.assert_public_unchanged().await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn dropped_private_input_retains_refused_cleanup_until_scope_retirement() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client.clone(), 18).await;
+            let (frontend, context) = fixture.private().await;
+            let execution = frontend
+                .private_execution
+                .as_ref()
+                .unwrap()
+                .admission
+                .clone();
+            let baseline = frontend
+                .access
+                .with_machine(context.clone(), |session, _, _| {
+                    Ok(session.outstanding_custody())
+                })
+                .await
+                .unwrap();
+            let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let binding = input.mounted_input().binder.name.clone();
+            let target = execution.retained_lexical_scope();
+            let _fence = target.source_admission().fence().unwrap();
+            drop(input);
+            let checked_execution = execution.clone();
+            frontend
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert_eq!(
+                        session.outstanding_custody(),
+                        baseline + 1,
+                        "refused cleanup remains an owned row after the actor guard drops"
+                    );
+                    assert!(session
+                        .current_binding_in(checked_execution.private_scope(), &binding)
+                        .is_some());
+                    assert!(
+                        matches!(session.freeze_private_execution(&checked_execution),
+                    Err(tidepool_runtime::session::SessionError::WorldCellPublicationIncomplete)),
+                        "unconfirmed cleanup keeps publication fenced"
+                    );
+                    assert_eq!(
+                        session.outstanding_custody(),
+                        baseline + 1,
+                        "another drain cannot discard the refused original"
+                    );
+                    session.retire_scope(checked_execution.private_scope());
+                    assert_eq!(
+                        session.outstanding_custody(),
+                        baseline,
+                        "actual scope retirement settles its original cleanup obligation"
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            fixture.assert_public_unchanged().await;
+        })
+        .await;
+    }
+
     enum WorldInputPlanBoundary {
         Actual,
         ForeignWorld(Arc<tidepool_toolchain::compiler_world::CompilerWorld>),
@@ -21020,15 +21080,22 @@ pub(crate) mod request_tests {
                 tidepool_runtime::CompilerTransactionClose::NotStarted
             }
         };
-        let preparation = frontend
+        let ((preparation, operand), input) = frontend
             .access
-            .with_machine(context.clone(), {
-                let execution = execution.admission.clone();
-                move |session, _, _| {
-                    session
-                        .prepare_private_execution_snapshot(execution)
-                        .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))
-                }
+            .with_machine(context.clone(), move |session, _, _| {
+                let preparation = input
+                    .with_write(|write| {
+                        session.prepare_private_execution(execution.admission.clone(), write)
+                    })
+                    .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+                let (snapshot, operand) = preparation.into_parts();
+                Ok((
+                    (
+                        snapshot,
+                        operand.expect("actual input selected during readiness"),
+                    ),
+                    input,
+                ))
             })
             .await
             .unwrap();
@@ -21039,25 +21106,6 @@ pub(crate) mod request_tests {
             WorldInputPlanBoundary::ForeignWorld(foreign) => world = foreign,
             WorldInputPlanBoundary::ForeignOriginal(foreign) => dependency = foreign,
         }
-        let (operand, input) = frontend
-            .access
-            .with_compiler_machine(context.clone(), move |session, _, _, _| {
-                let operand_preparation = preparation.clone();
-                let operand = input.with_write(|write| {
-                    session
-                        .world_cell_operand_for_input(
-                            execution.admission.clone(),
-                            &operand_preparation,
-                            write.unwrap(),
-                        )
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
-                })?;
-                Ok((operand, input))
-            })
-            .await
-            .unwrap();
         let closes = crate::RetainedActorExit::new();
         let scope = crate::capabilities::WorkbenchServices::new()
             .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(closes.clone()))

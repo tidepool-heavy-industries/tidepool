@@ -658,6 +658,7 @@ impl CertifiedPrivateValueWrite {
 /// Dropping it does not accept publication; the caller retains the mount's
 /// ordinary abandonment guard until accepting this receipt.
 pub struct PendingHostValueWrite {
+    binder: super::BoundBinder,
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     scope: ScopeId,
@@ -684,6 +685,7 @@ impl PreparedActivationMountWrite {
         after: Arc<super::inspection::InspectionWorldAssociation>,
     ) -> PendingHostValueWrite {
         PendingHostValueWrite {
+            binder: self.binder.clone(),
             owner: self.owner,
             owner_epoch: self.owner_epoch,
             scope: self.execution.private_scope(),
@@ -775,6 +777,52 @@ impl std::fmt::Debug for PendingHostValueWrite {
 }
 
 impl PendingHostValueWrite {
+    pub(super) fn private_mount_owner(
+        &self,
+    ) -> Option<(&Arc<PrivateExecutionAdmission>, &super::BoundBinder)> {
+        self.private_mount
+            .as_ref()
+            .map(|mount| (&mount.execution, &self.binder))
+    }
+
+    pub(super) fn accept_original_mount(&mut self) -> Result<(), SessionError> {
+        let execution = self
+            .private_mount
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .execution
+            .clone();
+        self.accept(&execution)
+    }
+
+    /// Actual scope retirement releases binding ownership even while a compiled
+    /// consumer still leases its root. It does not require the source to reopen.
+    pub(super) fn settle_retired_scope(
+        &self,
+        session: &PersistentSession,
+        execution: &PrivateExecutionAdmission,
+    ) -> Result<(), SessionError> {
+        let mount = self
+            .private_mount
+            .as_ref()
+            .filter(|mount| std::ptr::eq(mount.execution.as_ref(), execution))
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if !Arc::ptr_eq(&self.owner, session.admission_owner())
+            || !Arc::ptr_eq(&self.owner, &execution.owner)
+            || self.owner_epoch != self.owner.epoch()
+            || self.owner_epoch != execution.owner_epoch
+            || self.scope != execution.private_scope()
+            || session.scope_tree().is_live(self.scope)
+            || session
+                .bindings()
+                .get(self.id)
+                .is_some_and(|entry| entry.scope != self.scope || !self.write.matches(entry))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        execution.settle_pending_host(self.id, mount.kind)
+    }
+
     pub(super) fn prepare_activation_mount(
         session: &PersistentSession,
         execution: Arc<PrivateExecutionAdmission>,
@@ -906,6 +954,7 @@ impl PendingHostValueWrite {
             })
             .ok_or(SessionError::StaleStagedDeclaration)?;
         Ok(Self {
+            binder: binder.clone(),
             owner: session.admission_owner().clone(),
             owner_epoch: session.admission_owner().epoch(),
             scope,

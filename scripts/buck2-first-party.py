@@ -1977,6 +1977,10 @@ tidepool_buildscript_run(
                     ("actor_world_status_test", [
                         "resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication",
                     ]),
+                    ("actor_private_host_custody_test", [
+                        "resident_workbench::request_tests::private_input_retirement_refusal_retains_original_cleanup_owner",
+                        "resident_workbench::request_tests::dropped_private_input_retains_refused_cleanup_until_scope_retirement",
+                    ]),
                     ("actor_world_cell_input_test", [
                         "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",
                         "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners",

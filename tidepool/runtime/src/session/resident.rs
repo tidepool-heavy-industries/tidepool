@@ -2348,6 +2348,42 @@ impl BindingLease {
     }
 }
 
+/// Exact private mount custody. Refused acceptance and retirement keep the
+/// original write available; abandonment transfers it to this session's queue.
+#[must_use]
+pub struct PrivateHostBindingLease {
+    retained: Option<AbandonedPrivateHostBinding>,
+    cleanup: CustodyLease,
+}
+
+struct AbandonedPrivateHostBinding {
+    write: super::PendingHostValueWrite,
+}
+
+impl PrivateHostBindingLease {
+    pub fn write(&self) -> Option<&super::PendingHostValueWrite> {
+        self.retained.as_ref().map(|retained| &retained.write)
+    }
+
+    pub fn accept(&mut self) -> Result<(), SessionError> {
+        let retained = self
+            .retained
+            .as_mut()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        retained.write.accept_original_mount()?;
+        self.retained.take();
+        Ok(())
+    }
+}
+
+impl Drop for PrivateHostBindingLease {
+    fn drop(&mut self) {
+        if let Some(retained) = self.retained.take() {
+            self.cleanup.private_host_bindings.lock().push(retained);
+        }
+    }
+}
+
 /// One installed startup program awaiting its actor's durable application
 /// boundary. The capsule owns its original install pin and cannot be cloned.
 #[must_use]
@@ -2508,6 +2544,7 @@ struct CustodyCleanup {
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     external_leases: AtomicUsize,
     startup_entries: Mutex<Vec<AbandonedStartupEntry>>,
+    private_host_bindings: Mutex<Vec<AbandonedPrivateHostBinding>>,
 }
 
 impl CustodyCleanup {
@@ -4618,8 +4655,7 @@ where
         execution: Arc<super::PrivateExecutionAdmission>,
     ) -> Result<Arc<super::PrivatePreparationSnapshot>, SessionError> {
         self.settle_dropped_custody();
-        self.state
-            .prepare_private_execution_snapshot(execution)
+        self.state.prepare_private_execution_snapshot(execution)
     }
 
     /// Capture readiness and its optional exact hidden input in one checkout.
@@ -4671,10 +4707,8 @@ where
     pub fn private_publication_diagnostic(
         &self,
         execution: &super::PrivateExecutionAdmission,
-    ) -> Result<
-        tidepool_toolchain::compiler_world::PrivatePublicationDiagnostic,
-        SessionError,
-    > {
+    ) -> Result<tidepool_toolchain::compiler_world::PrivatePublicationDiagnostic, SessionError>
+    {
         self.state.private_publication_diagnostic(execution)
     }
 
@@ -4773,11 +4807,9 @@ where
             })
             .collect();
         drop(completed);
-        let result = self.state.freeze_execution_intent_locked(
-            admission,
-            writes,
-            snapshot.source_instances,
-        );
+        let result =
+            self.state
+                .freeze_execution_intent_locked(admission, writes, snapshot.source_instances);
         if result.is_ok() {
             if let Some(transition) = transition {
                 transition.commit();
@@ -6448,8 +6480,7 @@ where
             let write = prepared_write.committed(handle.raw().0, after);
             // This exact owner exists before acceptance or any later refusal.
             // Drop transfers unresolved cleanup to the resident queue.
-            let mut lease =
-                self.retain_private_host_binding(execution.clone(), binder.clone(), write);
+            let mut lease = self.retain_private_host_binding(write);
             lease
                 .accept()
                 .map_err(|source| ResidentError::ActivationMountCommitted {
@@ -6856,32 +6887,31 @@ where
             .original_source
             .with_open_target(&target, || {
                 let hidden_classification = self.hidden_host_bindings.get(&id);
-                let stale_reason = if hidden
-                    && hidden_classification != Some(&HiddenHostBinding::PrivateInput)
-                {
-                    Some("hidden classification")
-                } else if !hidden && hidden_classification.is_some() {
-                    Some("visible classification")
-                } else if !write.matches_private_mount(&self.state, execution) {
-                    Some("private mount identity")
-                } else if !self
-                    .state
-                    .source_lease_in(scope)
-                    .is_ok_and(|live| Arc::ptr_eq(&live, &target))
-                {
-                    Some("source lease")
-                } else if self
-                    .state
-                    .lib()
-                    .tips
-                    .get(&scope)
-                    .and_then(|tip| tip.inspection_world.as_ref())
-                    .is_none_or(|live| !Arc::ptr_eq(live, &before))
-                {
-                    Some("inspection world")
-                } else {
-                    None
-                };
+                let stale_reason =
+                    if hidden && hidden_classification != Some(&HiddenHostBinding::PrivateInput) {
+                        Some("hidden classification")
+                    } else if !hidden && hidden_classification.is_some() {
+                        Some("visible classification")
+                    } else if !write.matches_private_mount(&self.state, execution) {
+                        Some("private mount identity")
+                    } else if !self
+                        .state
+                        .source_lease_in(scope)
+                        .is_ok_and(|live| Arc::ptr_eq(&live, &target))
+                    {
+                        Some("source lease")
+                    } else if self
+                        .state
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.as_ref())
+                        .is_none_or(|live| !Arc::ptr_eq(live, &before))
+                    {
+                        Some("inspection world")
+                    } else {
+                        None
+                    };
                 if let Some(reason) = stale_reason {
                     tracing::debug!(
                         target: "tidepool::session::private_host_mount",
@@ -7217,6 +7247,36 @@ where
             self.state.advance_compiler_input_revision();
             self.advance_public_visibility(scope);
         }
+    }
+
+    /// Transfer a newly mounted private input into the resident cleanup owner.
+    pub fn retain_private_host_binding(
+        &self,
+        write: super::PendingHostValueWrite,
+    ) -> PrivateHostBindingLease {
+        PrivateHostBindingLease {
+            retained: Some(AbandonedPrivateHostBinding { write }),
+            cleanup: CustodyLease::new(self.custody_cleanup.clone()),
+        }
+    }
+
+    /// Commit cleanup while borrowing the original owner through refusal.
+    pub fn retire_private_host_binding_lease(
+        &mut self,
+        lease: &mut PrivateHostBindingLease,
+    ) -> Result<(), ResidentError> {
+        if !Arc::ptr_eq(&lease.cleanup.0, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
+        if let Some(retained) = lease.retained.as_ref() {
+            let (execution, binder) = retained
+                .write
+                .private_mount_owner()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            self.retire_private_host_binding_owner(execution, binder, &retained.write)?;
+            lease.retained.take();
+        }
+        Ok(())
     }
 
     /// Retire the exact never-visible input issued to this execution. Its
@@ -9813,11 +9873,19 @@ where
         let mut private_host_count = 0;
         let mut unresolved = Vec::new();
         for retained in private_hosts {
-            match self.retire_private_host_binding_owner(
-                &retained.execution,
-                &retained.binder,
-                &retained.write,
-            ) {
+            let retirement = match retained.write.private_mount_owner() {
+                Some((execution, binder))
+                    if self.state.scope_tree().is_live(execution.private_scope()) =>
+                {
+                    self.retire_private_host_binding_owner(execution, binder, &retained.write)
+                }
+                Some((execution, _)) => retained
+                    .write
+                    .settle_retired_scope(&self.state, execution)
+                    .map_err(ResidentError::Session),
+                None => Err(SessionError::StaleStagedDeclaration.into()),
+            };
+            match retirement {
                 Ok(()) => private_host_count += 1,
                 Err(_) => unresolved.push(retained),
             }
