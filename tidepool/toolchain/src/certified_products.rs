@@ -5667,12 +5667,9 @@ impl CertifiedSourceSelection {
                 unit: key.unit.clone(),
                 module: key.module.clone(),
             };
-            let product =
-                inputs
-                    .prior_nominal_source_product(&owner)?
-                    .ok_or(CertificationError::Mismatch(
-                        "prior HOME lacks its exact program issuer",
-                    ))?;
+            let product = inputs.prior_nominal_source_product(&owner)?.ok_or(
+                CertificationError::Mismatch("prior HOME lacks its exact program issuer"),
+            )?;
             if products
                 .iter()
                 .any(|existing| Arc::ptr_eq(existing, product))
@@ -8707,6 +8704,7 @@ fn normalize_receipt_metadata(
     sources: &SourceGroupMap,
     selection: &CertifiedSourceSelection,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    metadata: &mut HomeSourceMetadata,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<ReceiptImportOwner> {
     match import {
@@ -8726,6 +8724,7 @@ fn normalize_receipt_metadata(
                 sources,
                 selection,
             )?;
+            metadata.record(owner, original_ordinal, &binder, &validation.inventory)?;
             Ok(ReceiptImportOwner::Source {
                 unit,
                 module,
@@ -10773,63 +10772,162 @@ pub(crate) fn candidate_execution_source_digest_with_validation(
     Ok(witness.execution_source_sha256)
 }
 
+/// Exact nominal members already authenticated by receipt normalization or an
+/// admitted group. This certificate-only index cannot select executable groups.
+#[derive(Default)]
+struct HomeSourceMetadata {
+    members: BTreeMap<HomeSourceMemberKey, CachedHomeOwner>,
+}
+
+type HomeSourceMemberKey = (String, String, ModuleVersion, u32, SymbolIdentity);
+
+impl HomeSourceMetadata {
+    fn record(
+        &mut self,
+        owner: &CachedHomeOwner,
+        ordinal: u32,
+        binder: &SymbolIdentity,
+        operation: &InventoryOperation,
+    ) -> CertResult<()> {
+        operation.reserve::<(HomeSourceMemberKey, CachedHomeOwner)>(1)?;
+        for text in [
+            owner.unit.as_str(),
+            owner.module.as_str(),
+            owner.unit.as_str(),
+            owner.module.as_str(),
+            binder.unit.as_str(),
+            binder.module.as_str(),
+            binder.namespace.as_str(),
+            binder.occurrence.as_str(),
+            binder.record_parent.as_deref().unwrap_or_default(),
+        ] {
+            operation.charge(text.len())?;
+        }
+        let key = (
+            owner.unit.clone(),
+            owner.module.clone(),
+            owner.module_version.clone(),
+            ordinal,
+            binder.clone(),
+        );
+        match self.members.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(owner.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() != owner => {
+                return Err(CertificationError::Mismatch(
+                    "ambiguous home source metadata",
+                ));
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+        Ok(())
+    }
+
+    fn owner(
+        &self,
+        unit: &str,
+        module: &str,
+        version: Option<&ModuleVersion>,
+        ordinal: u32,
+        binder: &SymbolIdentity,
+        operation: &InventoryOperation,
+    ) -> CertResult<&CachedHomeOwner> {
+        let version = version.ok_or(CertificationError::Mismatch(
+            "home source metadata lacks normalized version",
+        ))?;
+        operation.reserve::<HomeSourceMemberKey>(1)?;
+        for text in [
+            unit,
+            module,
+            binder.unit.as_str(),
+            binder.module.as_str(),
+            binder.namespace.as_str(),
+            binder.occurrence.as_str(),
+            binder.record_parent.as_deref().unwrap_or_default(),
+        ] {
+            operation.charge(text.len())?;
+        }
+        self.members
+            .get(&(
+                unit.to_owned(),
+                module.to_owned(),
+                version.clone(),
+                ordinal,
+                binder.clone(),
+            ))
+            .ok_or_else(|| {
+                tracing::warn!(
+                    phase = "home_source_certification",
+                    unit,
+                    module,
+                    ?version,
+                    ordinal,
+                    ?binder,
+                    "normalized source member lacks its authenticated metadata"
+                );
+                CertificationError::Mismatch("home source metadata owner")
+            })
+    }
+}
+
 fn nominal_pending_groups(
     groups: &[PendingCertifiedGroup],
-) -> (Vec<Arc<AuthenticatedOriginalGroup>>, SourceGroupMap) {
-    let mut sources = SourceGroupMap::new();
+    operation: &InventoryOperation,
+) -> CertResult<(Vec<Arc<AuthenticatedOriginalGroup>>, HomeSourceMetadata)> {
+    let mut sources = HomeSourceMetadata::default();
     let groups = groups
         .iter()
         .map(|group| {
             let imports = group
                 .imports()
                 .iter()
-                .map(|import| match import {
-                    PendingImportOwner::Source {
-                        owner,
-                        original_ordinal,
-                        binder,
-                    } => {
-                        sources.insert(
-                            (owner.clone(), *original_ordinal, binder.clone()),
-                            (owner.clone(), group.origin()),
-                        );
-                        ReceiptImportOwner::Source {
-                            unit: owner.unit.clone(),
-                            module: owner.module.clone(),
-                            module_version: Some(owner.module_version.clone()),
-                            original_ordinal: *original_ordinal,
-                            binder: binder.clone(),
+                .map(|import| {
+                    Ok(match import {
+                        PendingImportOwner::Source {
+                            owner,
+                            original_ordinal,
+                            binder,
+                        } => {
+                            sources.record(owner, *original_ordinal, binder, operation)?;
+                            ReceiptImportOwner::Source {
+                                unit: owner.unit.clone(),
+                                module: owner.module.clone(),
+                                module_version: Some(owner.module_version.clone()),
+                                original_ordinal: *original_ordinal,
+                                binder: binder.clone(),
+                            }
                         }
-                    }
-                    PendingImportOwner::Retained {
-                        identity,
-                        generation,
-                    } => ReceiptImportOwner::Retained {
-                        identity: identity.clone(),
-                        generation: *generation,
-                    },
-                    PendingImportOwner::Package {
-                        unit,
-                        module,
-                        binder,
-                        interface_digest,
-                    } => ReceiptImportOwner::Package {
-                        unit: unit.clone(),
-                        module: module.clone(),
-                        binder: binder.clone(),
-                        interface_digest: *interface_digest,
-                    },
+                        PendingImportOwner::Retained {
+                            identity,
+                            generation,
+                        } => ReceiptImportOwner::Retained {
+                            identity: identity.clone(),
+                            generation: *generation,
+                        },
+                        PendingImportOwner::Package {
+                            unit,
+                            module,
+                            binder,
+                            interface_digest,
+                        } => ReceiptImportOwner::Package {
+                            unit: unit.clone(),
+                            module: module.clone(),
+                            binder: binder.clone(),
+                            interface_digest: *interface_digest,
+                        },
+                    })
                 })
-                .collect();
-            Arc::new(AuthenticatedOriginalGroup {
+                .collect::<CertResult<_>>()?;
+            Ok(Arc::new(AuthenticatedOriginalGroup {
                 origin: group.origin,
                 owner: group.owner.clone(),
                 group: Arc::clone(&group.group),
                 imports,
-            })
+            }))
         })
-        .collect();
-    (groups, sources)
+        .collect::<CertResult<_>>()?;
+    Ok((groups, sources))
 }
 
 /// Seal original Rust-admitted ownership, without selecting new owners from
@@ -10857,7 +10955,8 @@ pub fn encode_home_certification_with_module(
     interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
     module_certificate_sha256: [u8; 32],
 ) -> CertResult<Vec<u8>> {
-    let (groups, sources) = nominal_pending_groups(groups);
+    let mut validation = PackageInterfaceValidation::default();
+    let (groups, sources) = nominal_pending_groups(groups, &validation.inventory)?;
     let witness = issue_home_certification_with_validation(
         owner,
         &groups,
@@ -10866,7 +10965,7 @@ pub fn encode_home_certification_with_module(
         interface_requirements,
         None,
         Some(module_certificate_sha256),
-        &mut PackageInterfaceValidation::default(),
+        &mut validation,
     )?;
     encode_home_witness(&witness)
 }
@@ -10878,7 +10977,7 @@ fn encode_home_certification_with_validation(
     interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<u8>> {
-    let (groups, sources) = nominal_pending_groups(groups);
+    let (groups, sources) = nominal_pending_groups(groups, &validation.inventory)?;
     let witness = issue_home_certification_with_validation(
         owner,
         &groups,
@@ -10895,7 +10994,7 @@ fn encode_home_certification_with_validation(
 fn issue_home_certification_with_validation(
     owner: &CachedHomeOwner,
     groups: &[Arc<AuthenticatedOriginalGroup>],
-    sources: &SourceGroupMap,
+    sources: &HomeSourceMetadata,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     interface_requirements: &BTreeMap<(String, String), [u8; 32]>,
     execution_source_sha256: Option<[u8; 32]>,
@@ -10934,17 +11033,14 @@ fn issue_home_certification_with_validation(
                     original_ordinal,
                     binder,
                 } => {
-                    let owner = sources
-                        .iter()
-                        .find_map(|((owner, ordinal, candidate), _)| {
-                            (owner.unit == *unit
-                                && owner.module == *module
-                                && module_version.as_ref() == Some(&owner.module_version)
-                                && ordinal == original_ordinal
-                                && candidate == binder)
-                                .then_some(owner)
-                        })
-                        .ok_or(CertificationError::Mismatch("home source metadata owner"))?;
+                    let owner = sources.owner(
+                        unit,
+                        module,
+                        module_version.as_ref(),
+                        *original_ordinal,
+                        binder,
+                        &validation.inventory,
+                    )?;
                     let key = (unit.clone(), module.clone());
                     if witness
                         .sources
@@ -14376,6 +14472,7 @@ pub(crate) fn certify_products_with_validation(
     }
     source_selection.promote(&promotion_versions)?;
     source_groups.promote(&promotion_owners, &sharing)?;
+    let mut source_metadata = HomeSourceMetadata::default();
     let groups: Vec<Arc<AuthenticatedOriginalGroup>> = groups
         .into_iter()
         .map(|(origin, owner, group, imports)| {
@@ -14387,6 +14484,7 @@ pub(crate) fn certify_products_with_validation(
                         &source_groups,
                         &source_selection,
                         &receipt.packages,
+                        &mut source_metadata,
                         validation,
                     )
                 })
@@ -14675,7 +14773,7 @@ pub(crate) fn certify_products_with_validation(
                 let witness = issue_home_certification_with_validation(
                     &owner,
                     &original,
-                    &source_groups,
+                    &source_metadata,
                     &receipt.packages,
                     &accepted.interface_requirements,
                     execution_source.map(|graph| graph.digest()),
@@ -14872,7 +14970,9 @@ pub(crate) mod tests {
                 original.interface_bytes(),
                 original.product_bytes(),
                 original.package_imports_bytes(),
-                &nominal_pending_groups(groups).0,
+                &nominal_pending_groups(groups, &InventoryOperation::new(Default::default()))
+                    .unwrap()
+                    .0,
                 original.module_interface().unwrap(),
                 original.execution_source(),
                 &native.interface_requirements,
@@ -26707,7 +26807,10 @@ pub(crate) mod tests {
         // An available but undemanded duplicate cannot compete with a solved row.
         candidates.push(candidates[1].clone());
         let issued = IssuedGroupCandidates::bind(
-            nominal_pending_groups(&candidates).0.into(),
+            nominal_pending_groups(&candidates, &InventoryOperation::new(Default::default()))
+                .unwrap()
+                .0
+                .into(),
             &[original.clone(), other.clone()],
         )
         .unwrap();
@@ -27121,7 +27224,10 @@ pub(crate) mod tests {
             )
             .unwrap();
         let issued = IssuedGroupCandidates::bind(
-            nominal_pending_groups(&candidates).0.into(),
+            nominal_pending_groups(&candidates, &InventoryOperation::new(Default::default()))
+                .unwrap()
+                .0
+                .into(),
             &[original.clone()],
         )
         .unwrap();
