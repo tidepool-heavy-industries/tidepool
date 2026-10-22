@@ -130,3 +130,43 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
     assert_eq!(session.persistent_roots_count(), 0);
     assert_eq!(session.residency().unwrap().programs, 0);
 }
+
+#[test]
+fn refused_install_retains_primary_and_uncertain_abort_separately() {
+    use super::super::prepared::{PreparedFailureKind, PreparedFailureStage};
+    use std::error::Error;
+    use tidepool_codegen::prepared_program::ExecutionError;
+
+    let refused = PreparedRuntimeError::SourceScopeAdmission.after_install_abort(Ok(()));
+    assert!(matches!(
+        refused,
+        PreparedRuntimeError::SourceScopeAdmission
+    ));
+    assert_eq!(refused.stage(), PreparedFailureStage::Install);
+    assert_eq!(refused.kind(), PreparedFailureKind::Rejected);
+
+    let uncertain = PreparedRuntimeError::SourceScopeAdmission
+        .after_install_abort(Err(PreparedRuntimeError::Run(ExecutionError::NotQuiescent)));
+    assert_eq!(uncertain.stage(), PreparedFailureStage::Install);
+    assert_eq!(uncertain.kind(), PreparedFailureKind::Integrity);
+    let source = uncertain
+        .source()
+        .unwrap()
+        .downcast_ref::<PreparedRuntimeError>()
+        .unwrap();
+    assert!(matches!(source, PreparedRuntimeError::SourceScopeAdmission));
+    match uncertain {
+        PreparedRuntimeError::InstallCleanup { primary, cleanup } => {
+            assert!(matches!(
+                *primary,
+                PreparedRuntimeError::SourceScopeAdmission
+            ));
+            assert!(matches!(
+                *cleanup,
+                PreparedRuntimeError::Run(ExecutionError::NotQuiescent)
+            ));
+            assert_eq!(cleanup.stage(), PreparedFailureStage::Run);
+        }
+        other => panic!("missing cleanup uncertainty: {other:?}"),
+    }
+}

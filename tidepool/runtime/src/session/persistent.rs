@@ -1040,13 +1040,9 @@ impl PersistentSession {
             Ok(prepared) => prepared,
             Err(primary) => {
                 let tokens = std::mem::take(&mut staged.leases);
-                if let Err(cleanup) = engine.abort_certified_turn(staged, tokens) {
-                    return Err(PreparedRuntimeError::InstallCleanup {
-                        primary: Box::new(primary),
-                        cleanup: Box::new(cleanup),
-                    });
-                }
-                return Err(primary);
+                return Err(
+                    primary.after_install_abort(engine.abort_certified_turn(staged, tokens))
+                );
             }
         };
         let tokens = std::mem::take(&mut staged.leases);
@@ -1085,13 +1081,8 @@ impl PersistentSession {
                     .as_mut()
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
-                if let Err(cleanup) = engine.abort_certified_turn(staged, tokens) {
-                    return Err(PreparedRuntimeError::InstallCleanup {
-                        primary: Box::new(PreparedRuntimeError::SourceScopeAdmission),
-                        cleanup: Box::new(cleanup),
-                    });
-                }
-                Err(PreparedRuntimeError::SourceScopeAdmission)
+                Err(PreparedRuntimeError::SourceScopeAdmission
+                    .after_install_abort(engine.abort_certified_turn(staged, tokens)))
             }
         }
     }

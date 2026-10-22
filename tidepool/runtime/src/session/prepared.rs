@@ -551,6 +551,16 @@ impl From<DemandError> for PreparedRuntimeError {
 }
 
 impl PreparedRuntimeError {
+    pub(in crate::session) fn after_install_abort(self, cleanup: Result<(), Self>) -> Self {
+        match cleanup {
+            Ok(()) => self,
+            Err(cleanup) => Self::InstallCleanup {
+                primary: Box::new(self),
+                cleanup: Box::new(cleanup),
+            },
+        }
+    }
+
     #[must_use]
     pub fn stage(&self) -> PreparedFailureStage {
         match self {
