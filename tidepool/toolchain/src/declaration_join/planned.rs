@@ -837,6 +837,7 @@ fn certify_admitted_planned_declaration(
             producer_identity,
         )
         .sha256();
+    let source_scope = admission.original_output_source_scope(output.compiler_inputs())?;
     let baseline = admission.context();
     if baseline.toolchain_identity_sha256() != [0; 32]
         && baseline.toolchain_identity_sha256() != toolchain_identity_sha256
@@ -868,6 +869,13 @@ fn certify_admitted_planned_declaration(
         unit: candidates[0].unit.clone(),
         module: module_name,
     };
+    let source_roots = source_admission
+        .source_lexical_imports(&original_owner)
+        .ok_or_else(|| contract("planned declaration lacks its checked source links"))?
+        .into_iter()
+        .filter(|owner| source_scope.admits(owner))
+        .collect::<Vec<_>>();
+    let source_scope = source_scope.project_roots(&source_roots)?;
     let products = originals.products();
     let selected = products
         .iter()
@@ -913,7 +921,7 @@ fn certify_admitted_planned_declaration(
     let ValidatedAuthoredClosure {
         interfaces,
         original_imports,
-        mut source_lexical_imports,
+        source_lexical_imports: _,
         ..
     } = ValidatedAuthoredClosure::admit(
         originals,
@@ -927,26 +935,6 @@ fn certify_admitted_planned_declaration(
         includes,
         &mut validation,
     )?;
-    let mut published_lexical = BTreeMap::new();
-    for node in source_lexical_imports.iter().chain(
-        artifact_context
-            .published_source_original_selections()?
-            .iter()
-            .flat_map(|selection| selection.context().lexical_graph()),
-    ) {
-        if published_lexical
-            .insert(node.owner.clone(), node.imports.clone())
-            .is_some_and(|previous| previous != node.imports)
-        {
-            return Err(contract(
-                "published original lexical closure conflicts with authored source",
-            ));
-        }
-    }
-    source_lexical_imports = published_lexical
-        .into_iter()
-        .map(|(owner, imports)| ExactLexicalNode { owner, imports })
-        .collect();
     inventory.validate(&original_owner, &interfaces)?;
     let compiler_support =
         crate::declaration_context::certified_artifact_view(&originals, artifact_context.as_ref())?;
@@ -960,7 +948,8 @@ fn certify_admitted_planned_declaration(
         source_sha256,
         toolchain_identity_sha256,
         original_imports,
-        source_lexical_imports,
+        source_scope,
+        source_roots,
     })
 }
 

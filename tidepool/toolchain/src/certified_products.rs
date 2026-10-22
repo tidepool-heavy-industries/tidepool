@@ -16102,7 +16102,7 @@ pub(crate) mod tests {
             ArtifactEntry, CompilerInputProjection, CompilerInputRole,
         };
 
-        let source = "module Fresh where";
+        let source = "module Driver where";
         let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
         let packages = BTreeMap::new();
         let interfaces = certify_target_package_interfaces(&target, &packages).unwrap();
@@ -16118,8 +16118,14 @@ pub(crate) mod tests {
             b"admitted-producer",
         )
         .sha256();
-        let interface =
-            fixture_module_interface(producer, &owner.unit, &owner.module, BTreeMap::new());
+        let interface = fixture_source_module_interface(
+            producer,
+            &owner.unit,
+            &owner.module,
+            sha(source.as_bytes()),
+            BTreeMap::new(),
+            None,
+        );
         let entry = Arc::new(ArtifactEntry::canonical(interface.clone()));
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
         assert_eq!(
@@ -16149,10 +16155,24 @@ pub(crate) mod tests {
             &mut validation,
         )
         .unwrap();
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_path = source_directory.path().join("Driver.hs");
+        std::fs::write(&source_path, source).unwrap();
+        let mut source_evidence = evidence(source);
+        source_evidence.modules[0].unit = owner.unit.clone();
+        source_evidence.modules[0].module = owner.module.clone();
+        let source_evidence_bytes = serde_json::to_vec(&source_evidence).unwrap();
+        let source_admission = crate::artifacts::admit_compiler_source(
+            &validation.inventory,
+            &source_evidence_bytes,
+            &source_path,
+            source,
+        )
+        .unwrap();
         let proof = crate::compile_input::seal(
             b"admitted-producer",
             &[],
-            &evidence(source),
+            &source_admission,
             &crate::compile_input::ValidatedInputPackages::fixture(packages.clone()),
             source,
             "root",
@@ -16173,6 +16193,37 @@ pub(crate) mod tests {
                 .compiler_input_projection(),
             &projection,
         );
+        let admitted_context = proof.issued_original_execution();
+        let source_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+        };
+        assert!(admitted_context.source_scope().admits(&source_owner));
+        let dependency_context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
+            producer,
+            admitted_context.compiler_source_support().clone(),
+            admitted_context.lexical_graph().to_vec(),
+            source_owner.clone(),
+            &[],
+        ).unwrap();
+        assert_eq!(
+            dependency_context.lexical_graph(),
+            admitted_context.lexical_graph()
+        );
+        assert_eq!(
+            dependency_context.compiler_input_roles(),
+            admitted_context.compiler_input_roles()
+        );
+        assert!(!dependency_context.source_scope().admits(&source_owner));
+        assert_ne!(
+            dependency_context.semantic_sha256(),
+            admitted_context.semantic_sha256()
+        );
+        assert!(!dependency_context
+            .extend_interface_context(&admitted_context)
+            .unwrap()
+            .source_scope()
+            .admits(&source_owner));
         assert!(proof.matches_bundle(
             &target,
             &groups,
@@ -19663,9 +19714,9 @@ pub(crate) mod tests {
             let mut continuation = stage.compiler_inputs().as_ref().clone();
             let owner = native.descriptor.owner.clone();
             let context = Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_issued_output(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
                     producer.sha256(),
-                    stage.output(),
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(stage.compiler_inputs()).unwrap(),
                     vec![crate::declaration_join::ExactLexicalNode {
                         owner: owner.clone(),
                         imports: vec![],
@@ -24057,9 +24108,12 @@ pub(crate) mod tests {
                 imports: vec![],
             }];
             let context = if let Some(output) = &full_output {
-                let context = ExactDeclarationContext::from_issued_output(
+                let context = ExactDeclarationContext::from_authenticated_execution_support(
                     producer.sha256(),
-                    output,
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                        output.compiler_inputs(),
+                    )
+                    .unwrap(),
                     lexical,
                     owner,
                     &[],

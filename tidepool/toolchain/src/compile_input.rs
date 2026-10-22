@@ -691,36 +691,11 @@ fn input_identity(
     ))
 }
 
-fn original_source_lexical(
-    evidence: &DependencyEvidence,
-    artifacts: &crate::artifact_inventory::ArtifactView,
-) -> Result<Vec<crate::declaration_join::ExactLexicalNode>, CompileError> {
-    let imports =
-        crate::declaration_context::consumed_source_home_imports(evidence, &BTreeMap::new())?;
-    // Presence does not select an owner. These roots were actually compiled
-    // under this original input proof and retain its exact source adjacency.
-    let roots = artifacts
-        .descriptors()
-        .into_iter()
-        .map(|descriptor| descriptor.owner)
-        .filter(|owner| imports.contains_key(owner))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    Ok(crate::declaration_join::source_lexical_surface(
-        &roots,
-        &imports,
-        &[],
-        &artifacts.retained_source_implementations(),
-    )?
-    .lexical)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn seal(
     producer: &[u8],
     include: &[PathBuf],
-    evidence: &DependencyEvidence,
+    admission: &crate::artifacts::SourceEvidenceAdmission<'_>,
     packages: &ValidatedInputPackages,
     source: &str,
     target: &str,
@@ -733,6 +708,12 @@ pub(crate) fn seal(
     output: &crate::declaration_context::IssuedOriginalOutput,
     native_sites: crate::checked_cell::SelectedNativeSites,
 ) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
+    let evidence = admission.completed();
+    if admission.exact().is_some() {
+        return Err(CompileError::ExtractFailed(
+            "ordinary compile input received exact source admission".into(),
+        ));
+    }
     // Original completed source output can retain compile-time execution.
     // Mutable resident Val/Lib interfaces belong to their exact context owner.
     if target_owners
@@ -749,8 +730,7 @@ pub(crate) fn seal(
     {
         return Ok(None);
     }
-    let completed =
-        crate::cache::CompletedSourceEvidence::from_normalized(evidence.clone(), source);
+    let completed = evidence.validate_expected_source(source);
     if producer.is_empty() || completed.is_err() || !package_interfaces.matches_target(prepared) {
         return Err(CompileError::ExtractFailed(
             "compile input identity lacks validated input or output ownership".into(),
@@ -776,7 +756,6 @@ pub(crate) fn seal(
             "original input lacks one authenticated generated target owner".into(),
         ));
     };
-    let lexical = original_source_lexical(evidence, output.artifacts())?;
     let required_instance_owners = evidence
         .modules
         .iter()
@@ -791,7 +770,7 @@ pub(crate) fn seal(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                 .sha256(),
             output,
-            lexical,
+            admission,
             original_target.clone(),
             &required_instance_owners,
         )?,

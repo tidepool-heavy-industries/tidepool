@@ -184,10 +184,209 @@ struct DeclarationContextOwner {
     display_issuances: std::sync::atomic::AtomicUsize,
 }
 
+/// Source permission issued by admitted source, publication and value owners.
+/// The original compiler/instance adjacency is retained independently.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SourceLexicalScope {
+    snapshot: crate::exact_context::ExactLexicalSnapshot,
+}
+
+impl SourceLexicalScope {
+    pub(crate) fn admits(&self, owner: &ExactModuleIdentity) -> bool {
+        self.snapshot.get(owner).is_some()
+    }
+
+    pub(crate) fn imports(&self, owner: &ExactModuleIdentity) -> Option<&[ExactModuleIdentity]> {
+        self.snapshot.get(owner).map(|node| node.imports.as_slice())
+    }
+
+    pub(crate) fn rows(&self) -> &[ExactLexicalNode] {
+        &self.snapshot
+    }
+
+    fn append_admitted(
+        &self,
+        rows: impl IntoIterator<Item = ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            snapshot: self.snapshot.append_issued(rows)?,
+        })
+    }
+
+    pub(crate) fn project_roots(
+        &self,
+        roots: &[ExactModuleIdentity],
+    ) -> Result<Self, CompileError> {
+        let mut pending = roots.to_vec();
+        let mut seen = BTreeSet::new();
+        let mut rows = Vec::new();
+        while let Some(owner) = pending.pop() {
+            if !seen.insert(owner.clone()) {
+                continue;
+            }
+            let node = self
+                .snapshot
+                .get(&owner)
+                .ok_or_else(|| failure("source projection lacks its admitted owner"))?;
+            pending.extend(node.imports.iter().cloned());
+            rows.push(node.clone());
+        }
+        Ok(Self {
+            snapshot: self.snapshot.replace(rows)?,
+        })
+    }
+
+    fn restrict(&self, rows: &[ExactLexicalNode]) -> Result<Self, CompileError> {
+        let mut selected = Vec::new();
+        for node in rows {
+            if let Some(issued) = self.snapshot.get(&node.owner) {
+                // Selection may narrow an issued surface; the caller's broad
+                // compiler adjacency cannot replace its source edges.
+                selected.push(issued.clone());
+            }
+        }
+        Ok(Self {
+            snapshot: self.snapshot.replace(selected)?,
+        })
+    }
+
+    fn preserve_support(
+        &self,
+        previous: &crate::artifact_inventory::CompilerSourceSupport,
+        current: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<(), CompileError> {
+        if self.rows().is_empty() {
+            return Ok(());
+        }
+        let previous = previous.selected_interfaces()?;
+        let current = current.selected_interfaces()?;
+        for node in self.rows() {
+            if previous.get(&node.owner).map(|entry| entry.descriptor.id)
+                != current.get(&node.owner).map(|entry| entry.descriptor.id)
+            {
+                return Err(failure(
+                    "source scope canonical owner changed during projection",
+                ));
+            }
+        }
+        self.validate_selected(|owner| {
+            current
+                .get(owner)
+                .is_some_and(|entry| canonical_source_interface(entry).is_some())
+        })
+    }
+
+    fn validate_support(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<(), CompileError> {
+        if self.rows().is_empty() {
+            return Ok(());
+        }
+        let selected = support.selected_interfaces()?;
+        self.validate_selected(|owner| {
+            selected
+                .get(owner)
+                .is_some_and(|entry| canonical_source_interface(entry).is_some())
+        })
+    }
+
+    fn validate_selected(
+        &self,
+        selected: impl Fn(&ExactModuleIdentity) -> bool,
+    ) -> Result<(), CompileError> {
+        for node in self.rows() {
+            if !selected(&node.owner) {
+                return Err(failure(
+                    "source scope owner lacks its exact selected interface",
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            for owner in &node.imports {
+                if !seen.insert(owner) || !self.admits(owner) || !selected(owner) {
+                    return Err(failure(
+                        "source scope edge leaves its selected source graph",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_ordinary_observation(
+        &self,
+        evidence: &crate::cache::CompletedSourceEvidence,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<(), CompileError> {
+        let modules = evidence
+            .modules
+            .iter()
+            .filter(|row| !row.boot)
+            .map(|row| (identity(&row.unit, &row.module), row))
+            .collect::<BTreeMap<_, _>>();
+        let sources = evidence
+            .sources
+            .iter()
+            .map(|row| (&row.path, &row.sha256))
+            .collect::<BTreeMap<_, _>>();
+        let selected = support.selected_interfaces()?;
+        for node in self.rows() {
+            let module = modules
+                .get(&node.owner)
+                .ok_or_else(|| failure("ordinary source scope lacks its completed module"))?;
+            let canonical = selected
+                .get(&node.owner)
+                .and_then(|entry| canonical_source_interface(entry))
+                .ok_or_else(|| failure("ordinary source scope lacks its canonical output"))?;
+            if sources.get(&module.source).copied() != Some(&hex(&canonical.source_sha256())) {
+                return Err(failure(
+                    "ordinary source scope differs from its completed source bytes",
+                ));
+            }
+            let imports = canonical
+                .source_imports()
+                .ok_or_else(|| failure("ordinary source scope has another canonical origin"))?;
+            let homes = imports
+                .iter()
+                .filter_map(|edge| {
+                    edge.home_unit
+                        .as_ref()
+                        .map(|unit| identity(unit, &edge.module))
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let expected = crate::declaration_join::shared_source_edges(&homes, |owner| {
+                support
+                    .implementation_entry(owner)
+                    .map(|entry| entry.descriptor.kind)
+            })?;
+            if expected != node.imports {
+                return Err(failure(
+                    "ordinary source scope differs from its canonical source imports",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn restore(
+        snapshot: &crate::exact_context::ExactLexicalSnapshot,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<Self, CompileError> {
+        let scope = Self {
+            snapshot: snapshot.clone(),
+        };
+        scope.validate_support(support)?;
+        Ok(scope)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DeclarationContextFacts {
     producer: [u8; 32],
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
+    source_scope: SourceLexicalScope,
     lexical: crate::exact_context::ExactLexicalSnapshot,
     template_imports: Option<Arc<TemplateImportEvidence>>,
     original_instance_environment: OriginalInstanceEnvironment,
@@ -282,9 +481,8 @@ impl PreparedValueSourceSupport {
     ) -> Result<Self, CompileError> {
         let imports = compose_lexical_nodes(
             context
-                .owner
-                .facts
-                .lexical
+                .source_scope()
+                .rows()
                 .iter()
                 .chain(support)
                 .filter(|node| !node.owner.module.starts_with("Tidepool.Session.")),
@@ -4560,6 +4758,12 @@ impl RequestCompilerInputs {
             availability: delta.support.native_availability().clone(),
             advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
         };
+        primary
+            .source_scope()
+            .preserve_support(primary.compiler_source_support(), &delta.support)?;
+        projection_context
+            .source_scope()
+            .validate_support(&delta.support)?;
         let mut facts = projection_context.owner.facts.clone();
         facts.compiler_support = delta.support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
@@ -5879,6 +6083,7 @@ impl RecoveredArtifactInventory {
                 self.authenticate_graph_selection(selection, roles)?,
             )?;
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support,
 
             producer: self.producer,
@@ -5945,6 +6150,7 @@ impl RecoveredArtifactInventory {
                 authenticated,
             )?;
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support,
             producer: self.producer,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -5972,7 +6178,11 @@ impl RecoveredArtifactInventory {
             .facts
             .compiler_support
             .restore_snapshot_evidence(snapshot, &acquired_packages, validation)?;
-        context = context.rebuild(|facts| facts.compiler_support = updated);
+        let scope = SourceLexicalScope::restore(&snapshot.source_scope, &updated)?;
+        context = context.rebuild(|facts| {
+            facts.compiler_support = updated;
+            facts.source_scope = scope;
+        });
         context = context.finish()?;
         context.bind_snapshot_baseline(acquired)?;
         Ok(context)
@@ -6026,6 +6236,7 @@ impl RecoveredArtifactInventory {
         >,
     ) -> Result<Self, RecoveryInventoryError> {
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
 
             producer: [0; 32],
@@ -6358,6 +6569,7 @@ impl RecoveredArtifactInventory {
                 self.authenticate_unbound_selection(ids, groups, roles)?,
             )?;
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support,
 
             producer: self.producer,
@@ -7650,6 +7862,9 @@ impl ProgramSourceSupportState {
         for descriptor in support.descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
         }
+        context
+            .source_scope()
+            .preserve_support(context.compiler_source_support(), admission.compiler())?;
         context = context.rebuild(|facts| facts.compiler_support = admission.compiler().clone());
         let context = Arc::new(context.finish()?);
         crate::timing::record_stage(
@@ -7663,7 +7878,8 @@ impl ProgramSourceSupportState {
             return Ok(context);
         }
         let mut inherited = context
-            .lexical_graph()
+            .source_scope()
+            .rows()
             .iter()
             .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
             .map(|node| (node.owner.clone(), node.imports.clone()))
@@ -7733,6 +7949,16 @@ impl ProgramSourceSupportState {
                 source_selected_support.insert(Arc::new(owner.clone()));
             }
         }
+        let scope = context
+            .source_scope()
+            .append_admitted(program_source_lexical.iter().cloned())?;
+        scope.validate_support(context.compiler_source_support())?;
+        let context = Arc::new(
+            (*context)
+                .clone()
+                .rebuild(|facts| facts.source_scope = scope)
+                .finish()?,
+        );
         self.program_source_lexical = program_source_lexical;
         self.program_support = Some(program_support);
         self.source_selected_support = source_selected_support;
@@ -9757,6 +9983,51 @@ impl<'a> ExactProductAdmission<'a> {
         self.original_execution_context(&OriginalCompilerInputs::from_issued_support(&support))
     }
 
+    pub(crate) fn original_output_source_scope(
+        &self,
+        inputs: &OriginalCompilerInputs,
+    ) -> Result<SourceLexicalScope, CompileError> {
+        let support = crate::artifact_inventory::CompilerSourceSupport::from_original_output(
+            self.facts.compiler.compiler_source_support(),
+            self.facts.context.compiler_source_support(),
+            inputs,
+        )?;
+        self.bind_output_source_scope(&support)
+    }
+
+    fn bind_output_source_scope(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<SourceLexicalScope, CompileError> {
+        let inherited = self.context().as_ref();
+        let admission = SourceAdmissionBundle::issue(
+            SourceAdmissionBoundary::OriginalExecution,
+            Arc::new((*support).clone()),
+            self.source.compiler_dependencies().clone(),
+            std::iter::once(self.source),
+            self.source
+                .source_lexical_claims()
+                .filter_map(|(owner, _)| {
+                    support
+                        .implementation_entry(owner)
+                        .map(|entry| (owner, entry))
+                }),
+            |owner| {
+                inherited
+                    .compiler_source_support()
+                    .implementation_entry(owner)
+            },
+            |owner| {
+                self.facts
+                    .context
+                    .compiler_source_support()
+                    .implementation_entry(owner)
+            },
+            None,
+        )?;
+        inherited.source_scope_from_admission(&admission, support)
+    }
+
     /// Retain the complete original compiler selection before publication.
     /// The output issuer owns every exact native role, including cached support.
     pub(crate) fn original_execution_context(
@@ -9786,26 +10057,7 @@ impl<'a> ExactProductAdmission<'a> {
                 ));
             }
         }
-        // Shared source visibility omits mounted values; authenticate that
-        // projection before using the receipt's complete instance adjacency.
-        if !self.source.selected_originals.is_empty() {
-            crate::declaration_join::source_lexical_surface(
-                &self
-                    .source
-                    .selected_originals
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                &imports,
-                &inherited
-                    .lexical_graph()
-                    .iter()
-                    .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                &artifacts.retained_source_implementations(),
-            )?;
-        }
+        let source_scope = self.bind_output_source_scope(&support)?;
         let exact_roots = self
             .source
             .exact_imports
@@ -9947,6 +10199,9 @@ impl<'a> ExactProductAdmission<'a> {
             self.source.generated_source_owner(),
             &required.into_iter().collect::<Vec<_>>(),
         )?;
+        let context = context
+            .rebuild(|facts| facts.source_scope = source_scope)
+            .finish()?;
         Ok(Arc::new(context))
     }
 }
@@ -11693,32 +11948,31 @@ impl WorldProgramSegment {
         let lexical = crate::declaration_join::keyed_source_lexical_closure(
             &roots,
             |owner| {
-                admission.lexical_imports(owner).or_else(|| {
-                    context
-                        .owner
-                        .facts
-                        .lexical
-                        .get(owner)
-                        .map(|node| node.imports.clone())
-                })
+                admission
+                    .lexical_imports(owner)
+                    .or_else(|| context.source_scope().imports(owner).map(<[_]>::to_vec))
             },
             &kind,
         )?
         .lexical;
         let mut facts = context.owner.facts.clone();
         facts.lexical = facts.lexical.append_issued(lexical.iter().cloned())?;
+        facts.source_scope = facts
+            .source_scope
+            .append_admitted(lexical.iter().cloned())?;
         if !executable {
             let edges = admission
                 .lexical_imports(&generated)
-                .ok_or_else(|| failure("authored stage lacks admitted lexical imports"))?;
-            facts.lexical = facts.lexical.append_issued([ExactLexicalNode {
+                .ok_or_else(|| failure("authored stage lacks admitted source import evidence"))?;
+            let node = ExactLexicalNode {
                 owner: generated,
                 imports: edges
-                    .iter()
-                    .filter(|owner| facts.lexical.get(owner).is_some())
-                    .cloned()
+                    .into_iter()
+                    .filter(|owner| facts.source_scope.admits(owner))
                     .collect(),
-            }])?;
+            };
+            facts.lexical = facts.lexical.append_issued([node.clone()])?;
+            facts.source_scope = facts.source_scope.append_admitted([node])?;
         }
         facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         let projected = Arc::new(ExactDeclarationContext::from_facts(facts));
@@ -13171,6 +13425,7 @@ impl ExactDeclarationContext {
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
         Self::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
 
             producer: [0; 32],
@@ -13232,6 +13487,8 @@ impl ExactDeclarationContext {
         joins: &[Arc<AcceptedJoin>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        let prior_scope = self.source_scope().clone();
+        let prior_support = self.compiler_source_support().clone();
         let retained_publications = self.published_source_original_selections()?;
         let lexical = if retained_publications.is_empty() {
             lexical
@@ -13260,13 +13517,31 @@ impl ExactDeclarationContext {
             let updated = self.owner.facts.compiler_support.merge(&incoming)?;
             self = self.rebuild(|facts| facts.compiler_support = updated);
         }
+        let mut source_scope = prior_scope.restrict(&lexical)?;
+        source_scope.preserve_support(&prior_support, self.compiler_source_support())?;
+        for certificate in authored {
+            let incoming = certificate.source_scope().restrict(&lexical)?;
+            incoming.preserve_support(
+                certificate.compiler_source_support(),
+                self.compiler_source_support(),
+            )?;
+            source_scope = source_scope.append_admitted(incoming.rows().iter().cloned())?;
+        }
+        for join in joins {
+            let incoming = join.context().source_scope().restrict(&lexical)?;
+            incoming.preserve_support(
+                join.context().compiler_source_support(),
+                self.compiler_source_support(),
+            )?;
+            source_scope = source_scope.append_admitted(incoming.rows().iter().cloned())?;
+        }
+        source_scope.validate_support(self.compiler_source_support())?;
         {
             let updated = self.owner.facts.lexical.replace(lexical)?;
-            self = self.rebuild(|facts| facts.lexical = updated);
-        }
-        {
             self = self.rebuild(|facts| {
-                facts.original_instance_environment = OriginalInstanceEnvironment::Unknown
+                facts.lexical = updated;
+                facts.source_scope = source_scope;
+                facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
             });
         }
         self.finish()
@@ -13369,6 +13644,8 @@ impl ExactDeclarationContext {
                 .iter()
                 .cloned(),
         )?;
+        self.source_scope()
+            .preserve_support(self.compiler_source_support(), &updated)?;
         self = self.rebuild(|facts| facts.compiler_support = updated);
         self.finish()
     }
@@ -13436,25 +13713,147 @@ impl ExactDeclarationContext {
         context.finish()
     }
 
-    /// Retain already authenticated original code owners and their original
-    /// lexical graph. Only the original compiler output proof issues this.
+    /// Preserve inherited proof and admit only product-bound source claims.
+    fn source_scope_from_admission(
+        &self,
+        admission: &SourceAdmissionBundle,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<SourceLexicalScope, CompileError> {
+        self.source_scope()
+            .preserve_support(self.compiler_source_support(), support)?;
+        let roots = admission.lexical_roots().cloned().collect::<Vec<_>>();
+        let delta = crate::declaration_join::keyed_source_lexical_closure(
+            &roots,
+            |owner| {
+                admission
+                    .lexical_imports(owner)
+                    .or_else(|| self.source_scope().imports(owner).map(<[_]>::to_vec))
+            },
+            |owner| {
+                support
+                    .implementation_entry(owner)
+                    .map(|entry| entry.descriptor.kind)
+            },
+        )?
+        .lexical;
+        let scope = self.source_scope().append_admitted(delta)?;
+        scope.validate_support(support)?;
+        Ok(scope)
+    }
+
+    pub(crate) fn authored_output_source_scope(
+        &self,
+        authored: &crate::declaration_join::NativeAuthoredDeclarationAdmission,
+        output: &IssuedOriginalOutput,
+        exact: Option<&ExactSourceAdmission>,
+        evidence: &crate::cache::CompletedSourceEvidence,
+    ) -> Result<(SourceLexicalScope, Vec<ExactModuleIdentity>), CompileError> {
+        let fresh = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            output.compiler_inputs(),
+        )?;
+        let entry = fresh
+            .implementation_entry(authored.owner())
+            .ok_or_else(|| failure("authored source scope lacks its issued output"))?;
+        if !matches!(&entry.payload, ArtifactPayload::Original(product)
+            if product.source_sha256() == Some(authored.source_sha256())
+                && product.module_interface().map(|interface| interface.origin())
+                    == Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: authored.generation() }))
+        {
+            return Err(failure(
+                "authored source scope differs from its reserved output",
+            ));
+        }
+        let support = self.compiler_source_support().merge(&fresh)?;
+        if let Some(exact) = exact {
+            let admission = SourceAdmissionBundle::issue(
+                SourceAdmissionBoundary::AuthoredDeclaration,
+                Arc::new(support.clone()),
+                exact.compiler_dependencies().clone(),
+                std::iter::once(exact),
+                exact.source_lexical_claims().filter_map(|(owner, _)| {
+                    fresh
+                        .implementation_entry(owner)
+                        .map(|entry| (owner, entry))
+                }),
+                |owner| self.compiler_source_support().implementation_entry(owner),
+                |owner| self.compiler_source_support().implementation_entry(owner),
+                None,
+            )?;
+            let scope = self.source_scope_from_admission(&admission, &support)?;
+            let roots = exact
+                .source_lexical_imports(authored.owner())
+                .ok_or_else(|| failure("authored source lacks its checked source links"))?
+                .into_iter()
+                .filter(|owner| scope.admits(owner))
+                .collect::<Vec<_>>();
+            Ok((scope.project_roots(&roots)?, roots))
+        } else {
+            let imports = consumed_source_home_imports(evidence, &BTreeMap::new())?;
+            let roots = imports
+                .get(authored.owner())
+                .ok_or_else(|| failure("authored source scope lacks its completed source root"))?;
+            let surface = crate::declaration_join::source_lexical_surface(
+                roots,
+                &imports,
+                self.source_scope().rows(),
+                &support.artifacts().retained_source_implementations(),
+            )?;
+            let scope = self.source_scope().append_admitted(surface.lexical)?;
+            scope.validate_support(&support)?;
+            let scope = scope.project_roots(&surface.roots)?;
+            scope.validate_ordinary_observation(evidence, &support)?;
+            Ok((scope, surface.roots))
+        }
+    }
+
+    /// Ordinary source output retains its authenticated source surface.
     pub(crate) fn from_issued_output(
         producer: [u8; 32],
         output: &IssuedOriginalOutput,
-        lexical: Vec<ExactLexicalNode>,
+        admission: &crate::artifacts::SourceEvidenceAdmission<'_>,
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
+        if admission.exact().is_some() {
+            return Err(failure(
+                "exact source scope requires its checked source admission",
+            ));
+        }
+        let evidence = admission.completed();
+        let targets = evidence
+            .modules
+            .iter()
+            .filter(|row| !row.boot && row.source == Path::new(crate::cache::GENERATED_SOURCE))
+            .map(|row| identity(&row.unit, &row.module))
+            .collect::<Vec<_>>();
+        if targets.as_slice() != [target.clone()] {
+            return Err(failure(
+                "ordinary source scope lacks its unique completed target",
+            ));
+        }
         let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
             output.compiler_inputs(),
         )?;
-        Self::from_authenticated_execution_support(
+        let imports = consumed_source_home_imports(evidence, &BTreeMap::new())?;
+        let lexical = crate::declaration_join::source_lexical_surface(
+            std::slice::from_ref(&target),
+            &imports,
+            &[],
+            &output.artifacts().retained_source_implementations(),
+        )?
+        .lexical;
+        let scope = SourceLexicalScope::default().append_admitted(lexical.iter().cloned())?;
+        scope.validate_support(&support)?;
+        scope.validate_ordinary_observation(evidence, &support)?;
+        let mut context = Self::from_authenticated_execution_support(
             producer,
             support,
             lexical,
             target,
             required_instance_owners,
-        )
+        )?;
+        context = context.rebuild(|facts| facts.source_scope = scope);
+        context.finish()
     }
 
     #[cfg(test)]
@@ -13476,7 +13875,7 @@ impl ExactDeclarationContext {
         )
     }
 
-    fn from_authenticated_execution_support(
+    pub(crate) fn from_authenticated_execution_support(
         producer: [u8; 32],
         support: crate::artifact_inventory::CompilerSourceSupport,
         lexical: Vec<ExactLexicalNode>,
@@ -13617,6 +14016,7 @@ impl ExactDeclarationContext {
             ));
         }
         Ok(Self::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support: selected.type_interfaces_for_owners(vec![owner])?,
             producer,
             lexical: Default::default(),
@@ -13703,6 +14103,7 @@ impl ExactDeclarationContext {
             }
         }
         Ok(Self::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support: selected.type_interfaces_for_owners(owners.into_iter().collect())?,
             producer,
             lexical: Default::default(),
@@ -14168,6 +14569,7 @@ impl ExactDeclarationContext {
                 .recorded_roles()
                 .clone(),
             lexical: self.owner.facts.lexical.clone(),
+            source_scope: self.source_scope().snapshot.clone(),
             input_decisions: self
                 .owner
                 .facts
@@ -14198,6 +14600,7 @@ impl ExactDeclarationContext {
         let snapshot = baseline.snapshot();
         if self.owner.facts.producer != snapshot.producer
             || self.owner.facts.lexical != snapshot.lexical
+            || self.source_scope().snapshot != snapshot.source_scope
         {
             return Err(failure(
                 "restored compiler context differs from exact snapshot",
@@ -14215,12 +14618,18 @@ impl ExactDeclarationContext {
         let mut facts = self.owner.facts.clone();
         facts.compiler_support = facts.compiler_support.bind_snapshot_baseline(snapshot)?;
         facts.lexical = snapshot.lexical.clone();
+        facts.source_scope =
+            SourceLexicalScope::restore(&snapshot.source_scope, &facts.compiler_support)?;
         *self = Self::from_facts(facts);
         Ok(())
     }
 
+    pub(crate) fn source_scope(&self) -> &SourceLexicalScope {
+        &self.owner.facts.source_scope
+    }
+
     fn source_lexical_node(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
-        self.owner.facts.lexical.get(owner)
+        self.source_scope().snapshot.get(owner)
     }
 
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
@@ -14335,7 +14744,14 @@ impl ExactDeclarationContext {
                 .facts
                 .compiler_support
                 .merge(value.compiler_source_support())?;
-            self = self.rebuild(|facts| facts.compiler_support = support);
+            let scope = self
+                .source_scope()
+                .append_admitted(value.source_lexical().iter().cloned())?;
+            scope.validate_support(&support)?;
+            self = self.rebuild(|facts| {
+                facts.compiler_support = support;
+                facts.source_scope = scope;
+            });
             if let Some(retained) = value.template_imports() {
                 // The checked value already carries its template compiler
                 // support, including exact native availability and custody.
@@ -14540,9 +14956,9 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "12"
+                    "14"
                 } else {
-                    "13"
+                    "15"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -14567,6 +14983,7 @@ impl ExactDeclarationContext {
                             )
                         })
                         .collect::<Vec<_>>(),
+                    self.owner.facts.source_scope.rows(),
                     metadata.descriptors(),
                     metadata.dependencies().iter().collect::<Vec<_>>(),
                     &metadata.selected_native_groups,
@@ -14733,9 +15150,9 @@ impl ExactDeclarationContext {
                     self.owner.facts.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "12"
+                    "14"
                 } else {
-                    "13"
+                    "15"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -14746,6 +15163,7 @@ impl ExactDeclarationContext {
                         .native_availability()
                         .semantic_observations()
                         .expect("issued native permission observation"),
+                    self.owner.facts.source_scope.rows(),
                     metadata.descriptors(),
                     metadata.dependencies().iter().collect::<Vec<_>>(),
                     &metadata.selected_native_groups,
@@ -15029,6 +15447,8 @@ impl ExactDeclarationContext {
     }
 
     fn normalize(&self) -> Result<(), CompileError> {
+        self.source_scope()
+            .validate_support(self.compiler_source_support())?;
         let metadata = self.compiler_metadata_snapshot()?;
         self.validate_published_source_originals()?;
         if let Some(retained) = &self.owner.facts.template_imports {
@@ -16824,7 +17244,7 @@ fn sha256(bytes: &[u8]) -> String {
 /// Compose selections by exact owner and unordered import set. Duplicate
 /// edges inside an individual input remain malformed, and differing sets
 /// for one owner never acquire authority by union.
-fn compose_lexical_nodes<'a>(
+pub(crate) fn compose_lexical_nodes<'a>(
     nodes: impl IntoIterator<Item = &'a ExactLexicalNode>,
 ) -> Result<Vec<ExactLexicalNode>, CompileError> {
     let mut selected: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>> = BTreeMap::new();
@@ -19654,6 +20074,7 @@ mod tests {
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support: issue_fixture_compiler_support(compiler_projection, view).unwrap(),
 
             producer: producer_sha256,
@@ -28500,6 +28921,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     .unwrap()
             };
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
             compiler_support: support,
             producer: [7; 32],
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -29316,6 +29738,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let compiler_projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
+                source_scope: SourceLexicalScope::default(),
                 compiler_support: recover_fixture_compiler_support(
                     compiler_projection,
                     inventory
@@ -32650,6 +33073,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .unwrap();
         let incoming = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
+                source_scope: SourceLexicalScope::default(),
                 producer,
                 compiler_support: issue_fixture_compiler_support(projection, view).unwrap(),
                 lexical: Default::default(),
@@ -34290,6 +34714,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 CompilerInputProjection::from_issued_entries(&entries).unwrap();
             Arc::new(ExactDeclarationContext::from_facts(
                 DeclarationContextFacts {
+                    source_scope: SourceLexicalScope::default(),
                     compiler_support: recover_fixture_compiler_support(
                         compiler_projection,
                         inventory

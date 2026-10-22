@@ -173,8 +173,8 @@ pub struct CertifiedAuthoredDeclaration {
     /// SHA-256 of the bound compiler producer identity used for these bytes.
     toolchain_identity_sha256: [u8; 32],
     original_imports: Vec<ExactInterfaceOwner>,
-    /// Reachable inherited lexical rows used by this exact source admission.
-    source_lexical_imports: Vec<ExactLexicalNode>,
+    source_scope: crate::declaration_context::SourceLexicalScope,
+    source_roots: Vec<ExactModuleIdentity>,
 }
 
 /// Reserved declaration source checked by its actual authored admission owner.
@@ -562,38 +562,21 @@ impl CertifiedAuthoredDeclaration {
         &self,
         inherited: &[ExactLexicalNode],
     ) -> Result<OriginalSourceLexicalSurface, CompileError> {
-        let original = ExactModuleIdentity {
-            unit: self.product.owner().unit.clone(),
-            module: self.product.owner().module.clone(),
-        };
-        let imports = self
-            .original_home_imports()
-            .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
-            .collect();
-        let implementations = self
-            .compiler_support
-            .artifacts()
-            .retained_source_implementations();
-        let mut inherited_by_owner = std::collections::BTreeMap::new();
-        for node in inherited.iter().chain(&self.source_lexical_imports) {
-            if inherited_by_owner
-                .insert(node.owner.clone(), node.imports.clone())
-                .is_some_and(|previous| previous != node.imports)
-            {
-                return Err(contract(
-                    "inherited source lexical authority has conflicting import edges",
-                ));
-            }
-        }
-        let inherited = inherited_by_owner
-            .into_iter()
-            .map(|(owner, imports)| ExactLexicalNode { owner, imports })
-            .collect::<Vec<_>>();
-        original_source_lexical_surface(&original, &imports, &inherited, &implementations)
+        let lexical = crate::declaration_context::compose_lexical_nodes(
+            inherited.iter().chain(self.source_scope.rows()),
+        )?;
+        Ok(OriginalSourceLexicalSurface {
+            roots: self.source_roots.clone(),
+            lexical,
+        })
+    }
+
+    pub(crate) fn source_scope(&self) -> &crate::declaration_context::SourceLexicalScope {
+        &self.source_scope
     }
 
     pub(crate) fn source_lexical_imports(&self) -> &[ExactLexicalNode] {
-        &self.source_lexical_imports
+        self.source_scope.rows()
     }
     pub fn product(&self) -> &CertifiedRecoveryProduct {
         &self.product
@@ -772,6 +755,26 @@ fn certify_authored_declaration_inner(
             &producer_identity,
         )
         .sha256();
+    let empty_context;
+    let scope_context = match context.as_deref() {
+        Some(context) => context,
+        None => {
+            empty_context = ExactDeclarationContext::new(&[], &[], Vec::new())?;
+            &empty_context
+        }
+    };
+    let (source_scope, source_roots) = scope_context.authored_output_source_scope(
+        &authored,
+        compiled
+            .issued_output
+            .as_ref()
+            .ok_or_else(|| contract("authored certification has no issued output owner"))?,
+        compiled.exact_source_admission.as_ref(),
+        compiled
+            .completed_source_evidence
+            .as_ref()
+            .ok_or_else(|| contract("authored certification has no completed source proof"))?,
+    )?;
     let evidence = compiled
         .module_inventory
         .ok_or_else(|| contract("authored certification has no final dependency graph"))?;
@@ -857,7 +860,7 @@ fn certify_authored_declaration_inner(
         directory,
         artifacts,
         original_imports,
-        source_lexical_imports,
+        source_lexical_imports: _,
     } = planned::ValidatedAuthoredClosure::admit(
         &originals,
         &selected_owner,
@@ -925,7 +928,8 @@ fn certify_authored_declaration_inner(
         source_sha256,
         toolchain_identity_sha256,
         original_imports,
-        source_lexical_imports,
+        source_scope,
+        source_roots,
     })
 }
 

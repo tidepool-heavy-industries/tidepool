@@ -4414,7 +4414,9 @@ fn seal_turn_outputs_with_validation(
                 crate::compile_input::seal(
                     &offer.producer,
                     &offer.include,
-                    valid,
+                    source_admission
+                        .as_ref()
+                        .expect("ordinary input source admission"),
                     &input_packages,
                     source,
                     target,

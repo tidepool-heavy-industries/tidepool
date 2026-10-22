@@ -536,9 +536,12 @@ impl ExactDeclarationContext {
             .facts
             .compiler_support
             .select_publication_graph(root, roots, &owners)?;
+        let source_scope = self.source_scope().restrict(&lexical)?;
+        source_scope.preserve_support(self.compiler_source_support(), &compiler_support)?;
         Self::from_facts(DeclarationContextFacts {
             producer: self.owner.facts.producer,
             compiler_support,
+            source_scope,
             lexical: self.owner.facts.lexical.replace(lexical)?,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             // Checked values retain their own template custody in the caller's
@@ -554,6 +557,9 @@ impl ExactDeclarationContext {
         input_identity: &str,
         root: &ExactModuleIdentity,
     ) -> Result<Arc<PublishedSourceOriginalSelection>, CompileError> {
+        if !self.source_scope().admits(root) {
+            return Err(failure("published root lacks an admitted source scope"));
+        }
         let target = self.original_instance_target()?;
         if !self
             .owner
@@ -635,7 +641,18 @@ impl ExactDeclarationContext {
             .facts
             .compiler_support
             .merge(&incoming.owner.facts.compiler_support)?;
-        self = self.rebuild(|facts| facts.compiler_support = updated);
+        let source_scope = self
+            .source_scope()
+            .append_admitted(incoming.source_scope().rows().iter().cloned())?;
+        self.source_scope()
+            .preserve_support(self.compiler_source_support(), &updated)?;
+        incoming
+            .source_scope()
+            .preserve_support(incoming.compiler_source_support(), &updated)?;
+        self = self.rebuild(|facts| {
+            facts.compiler_support = updated;
+            facts.source_scope = source_scope;
+        });
         {
             let updated = self.owner.facts.lexical.replace(lexical)?;
             self = self.rebuild(|facts| facts.lexical = updated);
