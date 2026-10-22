@@ -391,6 +391,8 @@ enum BoundPackageSelectionState {
         imports: AuthenticatedTargetImports,
         links: Arc<PackageLinks>,
         selection: PackageSelection,
+        original_demand:
+            Option<Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>>,
     },
     HomeOrFixture {
         links: Arc<PackageLinks>,
@@ -412,76 +414,6 @@ impl BoundPackageSelection {
                 target,
                 imports,
                 links,
-            },
-        })
-    }
-
-    pub(crate) fn item(
-        links: &PackageLinks,
-        selection: &PackageSelection,
-        program: BoundPackageProgram,
-        accepted: &[AcceptedGlobal],
-        operation: &InventoryOperation,
-    ) -> CertResult<Self> {
-        if selection.stage_id() != links.stage_id()
-            || selection.program_sha256() != program.sha256()
-        {
-            return Err(CertificationError::Receipt(
-                "item package selection references another stage or program",
-            ));
-        }
-        let stage_target_roots =
-            links
-                .target_roots(&selection.target)
-                .ok_or(CertificationError::Receipt(
-                    "item package target is absent from its stage manifest",
-                ))?;
-        if stage_target_roots != selection.target_roots {
-            return Err(CertificationError::Receipt(
-                "item package target roots differ from its stage manifest",
-            ));
-        }
-        let stage_home_roots = links
-            .home_roots()
-            .iter()
-            .filter(|(key, _)| key.target == selection.target)
-            .collect::<BTreeMap<_, _>>();
-        if stage_home_roots.len() != selection.home_roots.len()
-            || selection.home_roots.iter().any(|(key, roots)| {
-                stage_home_roots
-                    .get(key)
-                    .is_none_or(|stage_roots| *stage_roots != roots)
-            })
-        {
-            return Err(CertificationError::Receipt(
-                "item package HOME roots differ from its stage manifest",
-            ));
-        }
-        let stage_original_roots = links
-            .original_use_roots
-            .iter()
-            .filter(|(key, _)| key.target == selection.target)
-            .collect::<BTreeMap<_, _>>();
-        if stage_original_roots.len() != selection.original_use_roots.len()
-            || selection.original_use_roots.iter().any(|(key, roots)| {
-                stage_original_roots
-                    .get(key)
-                    .is_none_or(|stage| *stage != roots)
-            })
-        {
-            return Err(CertificationError::Receipt(
-                "item Original package uses differ from its stage manifest",
-            ));
-        }
-        Ok(Self {
-            mode: BoundPackageSelectionState::Item {
-                imports: AuthenticatedTargetImports::issue(
-                    program.prepared(),
-                    accepted,
-                    operation,
-                )?,
-                links: Arc::new(links.clone()),
-                selection: selection.clone(),
             },
         })
     }
@@ -576,6 +508,50 @@ impl BoundPackageSelection {
             mode: BoundPackageSelectionState::HomeOrFixture { links },
         }
     }
+}
+
+fn check_item_package_selection(
+    links: &PackageLinks,
+    selection: &PackageSelection,
+    program_sha256: &[u8; 32],
+) -> CertResult<()> {
+    if selection.stage_id() != links.stage_id() || selection.program_sha256() != program_sha256 {
+        return Err(CertificationError::Receipt(
+            "item package selection references another stage or program",
+        ));
+    }
+    let stage_target_roots =
+        links
+            .target_roots(&selection.target)
+            .ok_or(CertificationError::Receipt(
+                "item package target is absent from its stage manifest",
+            ))?;
+    if stage_target_roots != selection.target_roots {
+        return Err(CertificationError::Receipt(
+            "item package target roots differ from its stage manifest",
+        ));
+    }
+    if !links
+        .home_roots()
+        .iter()
+        .filter(|(key, _)| key.target == selection.target)
+        .eq(selection.home_roots.iter())
+    {
+        return Err(CertificationError::Receipt(
+            "item package HOME roots differ from its stage manifest",
+        ));
+    }
+    if !links
+        .original_use_roots
+        .iter()
+        .filter(|(key, _)| key.target == selection.target)
+        .eq(selection.original_use_roots.iter())
+    {
+        return Err(CertificationError::Receipt(
+            "item Original package uses differ from its stage manifest",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1435,23 +1411,23 @@ impl CertifiedSegmentOriginals {
         CertifiedProducts,
         Vec<AcceptedGlobal>,
         BTreeMap<(String, String), PackageInterfaceWitness>,
-        PackageSelection,
+        BoundPackageSelection,
     )> {
         if !Arc::ptr_eq(self.operation(), &validation.inventory) {
             return Err(CertificationError::Mismatch(
                 "segment inventory accounting owner",
             ));
         }
-        if item.selection.stage_id() != self.receipt.package_links.stage_id() {
-            return Err(CertificationError::Mismatch(
-                "item package selection references another stage manifest",
-            ));
-        }
-        if item.selection.program_sha256() != program.sha256() {
-            return Err(CertificationError::Mismatch(
-                "item package selection references another prepared program",
-            ));
-        }
+        check_item_package_selection(
+            &self.receipt.package_links,
+            &item.selection,
+            program.sha256(),
+        )?;
+        let imports = AuthenticatedTargetImports::issue(
+            program.prepared(),
+            &item.globals,
+            &validation.inventory,
+        )?;
         let prepared = program.prepared().as_ref();
         check_package_link_range(
             &item.selection.target_roots,
@@ -1598,7 +1574,31 @@ impl CertifiedSegmentOriginals {
             retained_core_products: self.products.retained_core_products.clone(),
             source_selection,
         };
-        Ok((products, item.globals, additions, item.selection))
+        // This owner has authenticated both the stage manifest and its input
+        // selection. Bind them once; downstream package completion cannot
+        // substitute an arbitrary source selection or another emitted stage.
+        let original_demand = match self
+            .products
+            .source_selection
+            .original_bindings
+            .as_ref()
+            .map(|bindings| &bindings.execution)
+        {
+            Some(OriginalBindingExecution::WorldStage(stage)) => Some(Arc::clone(stage)),
+            Some(
+                OriginalBindingExecution::MetadataOnly | OriginalBindingExecution::Acquired(_),
+            )
+            | None => None,
+        };
+        let package_selection = BoundPackageSelection {
+            mode: BoundPackageSelectionState::Item {
+                imports,
+                links: Arc::new(self.receipt.package_links.clone()),
+                selection: item.selection,
+                original_demand,
+            },
+        };
+        Ok((products, item.globals, additions, package_selection))
     }
 }
 
@@ -35549,7 +35549,6 @@ None,
             original_use_roots: Arc::new(BTreeMap::new()),
             products: Arc::from([]),
         };
-        let operation = InventoryOperation::new(Default::default());
         let artifact = crate::prepared_artifact::PreparedArtifact::parse(
             tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program()),
             tidepool_repr::execution_schema::DecodeLimits::default(),
@@ -35564,64 +35563,46 @@ None,
             home_roots: BTreeMap::from([(home_key, vec![PackageLink::Local { occurrence: 1 }])]),
             original_use_roots: BTreeMap::new(),
         };
-        assert!(BoundPackageSelection::item(
-            &stage,
-            &selection,
-            program_binding.clone(),
-            &[],
-            &operation
-        )
-        .is_ok());
+        assert!(
+            check_item_package_selection(&stage, &selection, program_binding.clone().sha256(),)
+                .is_ok()
+        );
         let mut wrong_program = selection.clone();
         wrong_program.program_sha256 = [2; 32];
-        assert!(BoundPackageSelection::item(
+        assert!(check_item_package_selection(
             &stage,
             &wrong_program,
-            program_binding.clone(),
-            &[],
-            &operation
+            program_binding.clone().sha256(),
         )
         .is_err());
         let mut crossed_stage = selection.clone();
         crossed_stage.stage_id = [3; 32];
-        assert!(BoundPackageSelection::item(
+        assert!(check_item_package_selection(
             &stage,
             &crossed_stage,
-            program_binding.clone(),
-            &[],
-            &operation
+            program_binding.clone().sha256(),
         )
         .is_err());
         let mut crossed_target = selection.clone();
         crossed_target.target = "other".into();
-        assert!(BoundPackageSelection::item(
-            &stage,
-            &crossed_target,
-            program_binding,
-            &[],
-            &operation
-        )
-        .is_err());
+        assert!(
+            check_item_package_selection(&stage, &crossed_target, program_binding.sha256(),)
+                .is_err()
+        );
         let mut crossed_roots = selection.clone();
         crossed_roots.target_roots = vec![PackageLink::Local { occurrence: 1 }];
         let crossed_program = artifact.bind_package_program();
-        assert!(BoundPackageSelection::item(
-            &stage,
-            &crossed_roots,
-            crossed_program,
-            &[],
-            &operation
-        )
-        .is_err());
+        assert!(
+            check_item_package_selection(&stage, &crossed_roots, crossed_program.sha256(),)
+                .is_err()
+        );
         let mut crossed_home = selection;
         crossed_home.home_roots.values_mut().next().unwrap()[0] =
             PackageLink::Local { occurrence: 0 };
-        assert!(BoundPackageSelection::item(
+        assert!(check_item_package_selection(
             &stage,
             &crossed_home,
-            artifact.bind_package_program(),
-            &[],
-            &operation,
+            artifact.bind_package_program().sha256(),
         )
         .is_err());
     }

@@ -173,21 +173,25 @@ impl CheckedOriginalPackageAssociations {
 impl BoundPackageSelection {
     pub(crate) fn checked_original_packages(
         &self,
-        source: &CertifiedSourceSelection,
         operation: &InventoryOperation,
     ) -> Result<CheckedOriginalPackageAssociations, crate::CompileError> {
-        let (target, roots, occurrences) = match &self.mode {
+        let (target, roots, occurrences, original_demand) = match &self.mode {
             BoundPackageSelectionState::Ordinary { target, links, .. } => (
                 target.as_str(),
                 links.original_use_roots.as_ref(),
                 links.occurrences.as_ref(),
+                None,
             ),
             BoundPackageSelectionState::Item {
-                selection, links, ..
+                selection,
+                links,
+                original_demand,
+                ..
             } => (
                 selection.target.as_str(),
                 &selection.original_use_roots,
                 links.occurrences.as_ref(),
+                original_demand.as_ref(),
             ),
             BoundPackageSelectionState::HomeOrFixture { .. } => {
                 return Ok(CheckedOriginalPackageAssociations {
@@ -203,15 +207,9 @@ impl BoundPackageSelection {
         let mut use_roots = BTreeSet::new();
         for (key, links) in roots.iter().filter(|(key, _)| key.target == target) {
             crate::host_work::checkpoint()?;
-            let binding = source
-                .original_bindings
-                .as_ref()
-                .ok_or_else(|| failure("Original package association lacks its demand owner"))?;
-            let OriginalBindingExecution::WorldStage(stage) = &binding.execution else {
-                return Err(failure(
-                    "Original package association lacks its World stage",
-                ));
-            };
+            let stage = original_demand.ok_or_else(|| {
+                failure("Original package association lacks its issued World stage")
+            })?;
             if !std::ptr::eq(stage.operation().as_ref(), operation) {
                 return Err(failure(
                     "Original package association belongs to another operation",
@@ -370,18 +368,20 @@ pub(crate) fn assert_actual_world_original_package_refusals(
         )
         .unwrap();
         let bind = |observed: &SegmentItemReceipt| {
-            BoundPackageSelection::item(
+            check_item_package_selection(
                 &receipt.package_links,
                 &observed.selection,
-                artifact.bind_package_program(),
-                &observed.globals,
-                operation,
+                artifact.bind_package_program().sha256(),
             )
         };
-        let selection =
-            bind(&actual).expect("actual worker package selection reaches its production issuer");
+        bind(&actual).expect("actual worker package selection matches its actual stage");
+        let selection = products
+            .completed_native_selection()
+            .unwrap()
+            .package_selection()
+            .clone();
         let checked_packages = selection
-            .checked_original_packages(products.source_selection(), operation)
+            .checked_original_packages(operation)
             .expect("actual target Original package associations join its retained demand");
         assert!(!checked_packages.use_roots().is_empty());
         package_uses += actual.selection.original_use_roots.len();
@@ -424,7 +424,7 @@ pub(crate) fn assert_actual_world_original_package_refusals(
         controls += 1;
         let foreign_operation = InventoryOperation::new(Default::default());
         assert!(selection
-            .checked_original_packages(products.source_selection(), &foreign_operation)
+            .checked_original_packages(&foreign_operation)
             .is_err());
         controls += 1;
         if let Some((key, links)) = actual
@@ -447,9 +447,7 @@ pub(crate) fn assert_actual_world_original_package_refusals(
                 .unwrap()
                 .remove(0);
             assert!(
-                incomplete
-                    .checked_original_packages(products.source_selection(), operation)
-                    .is_err(),
+                incomplete.checked_original_packages(operation).is_err(),
                 "missing package identity refuses against retained exact obligations"
             );
             controls += 1;
@@ -468,13 +466,11 @@ pub(crate) fn assert_actual_world_original_package_refusals(
             };
             item_selection.original_use_roots = original_roots;
             assert!(
-                crossed
-                    .checked_original_packages(products.source_selection(), operation)
-                    .is_err(),
+                crossed.checked_original_packages(operation).is_err(),
                 "crossed Original use cannot borrow same symbol obligations"
             );
             controls += 1;
-            let mut stale = bind(&actual).unwrap();
+            let mut stale = selection.clone();
             let BoundPackageSelectionState::Item {
                 links: manifest, ..
             } = &mut stale.mode
@@ -487,19 +483,15 @@ pub(crate) fn assert_actual_world_original_package_refusals(
             altered.occurrences = occurrences.into();
             *manifest = Arc::new(altered);
             assert!(
-                stale
-                    .checked_original_packages(products.source_selection(), operation)
-                    .is_err(),
+                stale.checked_original_packages(operation).is_err(),
                 "stale occurrence seal refuses before graph issuance"
             );
             controls += 1;
         }
+        assert!(bind(&actual).is_ok());
         assert!(
-            bind(&actual)
-                .unwrap()
-                .checked_original_packages(products.source_selection(), operation)
-                .is_ok(),
-            "refusals preserve actual immutable receipt and demand owners"
+            selection.checked_original_packages(operation).is_ok(),
+            "refusals preserve the actual immutable owners"
         );
     }
     assert!(

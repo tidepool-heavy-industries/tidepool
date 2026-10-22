@@ -885,6 +885,8 @@ pub struct CompletedNativeSelection {
     source_associations: BTreeMap<NativeGroupBinding, SelectedNativeSourceAssociation>,
     completion: Arc<IssuedNativeSelectionCompletion>,
     target_imports: Arc<[CompletedNativeTargetImport]>,
+    #[cfg(test)]
+    package_selection: crate::certified_products::BoundPackageSelection,
 }
 #[derive(Debug)]
 pub(crate) enum SelectedNativeSourceAssociation {
@@ -893,6 +895,10 @@ pub(crate) enum SelectedNativeSourceAssociation {
 }
 
 impl CompletedNativeSelection {
+    #[cfg(test)]
+    pub(crate) fn package_selection(&self) -> &crate::certified_products::BoundPackageSelection {
+        &self.package_selection
+    }
     pub(crate) fn source_target(&self) -> &Arc<tidepool_repr::execution_schema::PreparedProgram> {
         &self.source_target
     }
@@ -1032,7 +1038,6 @@ fn append_native_completion_rows(
 /// and unused captured package products do not become executable roots.
 pub(crate) fn complete_native_selection(
     sources: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
-    source_selection: &crate::certified_products::CertifiedSourceSelection,
     output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
     products: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
     selection: crate::certified_products::BoundPackageSelection,
@@ -1170,7 +1175,7 @@ pub(crate) fn complete_native_selection(
     );
     let mut source_associations = BTreeMap::new();
     let original_packages: crate::certified_products::CheckedOriginalPackageAssociations =
-        selection.checked_original_packages(source_selection, operation)?;
+        selection.checked_original_packages(operation)?;
     let selected_groups = sources
         .groups()
         .map(|row| row.binding())
@@ -1633,6 +1638,8 @@ pub(crate) fn complete_native_selection(
         .acquired_artifacts()
         .retain_custody(packages.artifacts())?;
     Ok(Arc::new(CompletedNativeSelection {
+        #[cfg(test)]
+        package_selection: selection,
         source_target,
         source_associations,
         completion: IssuedNativeSelectionCompletion::issue_parts(

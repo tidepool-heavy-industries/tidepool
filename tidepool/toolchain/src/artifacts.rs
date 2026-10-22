@@ -990,14 +990,7 @@ pub fn prepare_world_cell_program(
                     &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
                     segment.package_products(),
-                    crate::certified_products::BoundPackageSelection::item(
-                        segment.originals.package_links(),
-                        &item_selection,
-                        package_program.clone(),
-                        &globals,
-                        &validation.inventory,
-                    )
-                    .map_err(compiler_evidence_failure)?,
+                    item_selection,
                     segment
                         .product_admission()
                         .compiler_inputs()
@@ -4339,16 +4332,7 @@ fn seal_turn_outputs_with_validation(
         .map(|inputs| inputs.compiler_source_support())
         .unwrap_or(&no_inherited_inputs);
     let package_selection = match (segment_originals, item_selection.as_ref()) {
-        (Some(originals), Some(selection)) => {
-            crate::certified_products::BoundPackageSelection::item(
-                originals.package_links(),
-                selection,
-                program.clone(),
-                accepted,
-                &validation.inventory,
-            )
-            .map_err(compiler_evidence_failure)?
-        }
+        (Some(_), Some(selection)) => selection.clone(),
         (None, None) => physical_native_output.ordinary_package_selection(target, program)?,
         _ => {
             return Err(CompileError::ExtractFailed(
@@ -4688,7 +4672,6 @@ fn admit_native_target_products(
                 packages,
                 package_selection,
                 inherited,
-                &certified.source_selection,
                 &validation.inventory,
             )?,
         certified_groups: Arc::clone(selected_groups.groups()),
@@ -6503,7 +6486,6 @@ fn compile_invocation_inner(
                         &package_products,
                         package_selection,
                         &inherited_completion_support,
-                        &certified.source_selection,
                         &validation.inventory,
                     )?;
                 artifacts.artifact_view = artifacts
