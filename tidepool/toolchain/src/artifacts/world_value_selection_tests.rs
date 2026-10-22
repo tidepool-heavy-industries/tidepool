@@ -326,21 +326,20 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         |_, _, _| {},
     )
     .expect("the cached HOME owner comes from the production compiler");
-    let issued_rows = compiled_home.targets["cachedTextLength"]
-        .completed_native_selection()
-        .expect("the initial compiler target owns a native completion")
-        .completion()
-        .rows()
-        .filter(|row| {
-            row.product()
-                .group()
-                .binders()
-                .iter()
-                .any(|binder| binder.occurrence == "cachedTextLength")
+    let issued_groups = compiled_home
+        .certified_groups
+        .iter()
+        .filter(|group| {
+            group.owner().module == "CachedPackageWorldHome"
+                && group
+                    .group()
+                    .binders()
+                    .iter()
+                    .any(|binder| binder.occurrence == "cachedTextLength")
         })
         .collect::<Vec<_>>();
-    let [issued] = issued_rows.as_slice() else {
-        panic!("the initial target must issue one cachedTextLength HOME group");
+    let [issued] = issued_groups.as_slice() else {
+        panic!("the original module must issue one cachedTextLength group");
     };
     let owner = crate::declaration_join::ExactModuleIdentity {
         unit: "main".into(),
@@ -369,7 +368,7 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         .unwrap(),
     );
     let ((_endpoint, _world, _source, prepared), admission) = settle(|| {
-        let (endpoint, world, source) = open_empty_world_with_primary(Some(primary))?;
+        let (endpoint, world, source) = open_empty_world_with_primary(Some(Arc::clone(&primary)))?;
         let template = include_str!("../../tests/fixtures/world-native/PackageCellTemplate.hs")
             .replace(
                 "{{CELL_IMPORTS}}",
@@ -401,10 +400,22 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     let row = selection
         .completion()
         .rows()
-        .find(|row| row.binding() == issued.binding())
-        .expect("the World target preserves the initial HOME group's exact binding");
+        .find(|row| {
+            row.product().owner() == issued.owner()
+                && row.binding().original_ordinal == issued.group().original_ordinal()
+        })
+        .expect("the World target selects the original module's actual cachedTextLength group");
+    let offered = primary
+        .compiler_source_support()
+        .native_availability()
+        .issued_row(row.binding().binding.artifact())
+        .expect("the selected group belongs to the actual Original input");
     assert!(
-        row.product().same_issuance(issued.product()),
+        offered.exact_group_support(row.binding()).is_some(),
+        "the World completion must retain the input's exact group issuer"
+    );
+    assert!(
+        row.product().same_issuance(issued),
         "the World target preserves the original group's issuing product"
     );
     let packages = row
