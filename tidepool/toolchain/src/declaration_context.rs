@@ -11849,14 +11849,18 @@ pub(crate) fn assert_completed_nominal_program_support(
     // issues no lexical source claim.
     let support = ProgramSourceSupport {
         compiler_support: fragment,
-        imports: Arc::new(imbl::OrdMap::from([(
-            owner.clone(),
-            ProgramSourceSupportRow {
-                imports: Vec::new(),
-                physical_product: Some(Arc::clone(&expected)),
-                admission: None,
-            },
-        )])),
+        imports: Arc::new(
+            [(
+                owner.clone(),
+                ProgramSourceSupportRow {
+                    imports: Vec::new(),
+                    physical_product: Some(Arc::clone(&expected)),
+                    admission: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ),
     };
     let inputs = ProductCompilerInputs::from_exact(receiving).with_program_support(Some(&support));
     let carried = inputs.prior_nominal_source_product(owner).unwrap().unwrap();
@@ -29522,10 +29526,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     }
                     assert_eq!(support.artifacts().artifact_ids(), view.artifact_ids());
                     assert_eq!(
-                        support
-                            .compiler_support
-                            .artifacts()
-                            .selected_native_groups(),
+                        support.artifacts().selected_native_groups(),
                         view.selected_native_groups()
                     );
                     // Repeated extension/reopening cannot convert a type carrier to native authority.
@@ -33747,6 +33748,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap(),
             expected_availability
         );
+        let validation = PackageInterfaceValidation::default();
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            request.compiler_inputs(),
+            &validation.inventory,
+        )
+        .unwrap();
         let published = request
             .admit_program_support_with_selection(
                 context.clone(),

@@ -11612,7 +11612,6 @@ mod tests {
             )
             .unwrap();
         let physical = fixed.captured_stage().issued_artifacts();
-        let selection = fixed.source_selection();
         assert_eq!(physical.selected_native_groups().len(), 3);
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let (prepared, accepted) = source_target_data(&[(&native, 7)]);

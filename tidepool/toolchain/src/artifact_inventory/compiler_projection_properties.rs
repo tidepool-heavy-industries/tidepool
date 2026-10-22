@@ -664,22 +664,23 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
-                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                &validation.inventory,
             )
             .unwrap();
         let issued = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             entries,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            &mut validation,
         )
         .unwrap();
         let output = issued;
-        let empty = CompilerSourceSupport::close_complete_output(&output)
+        let empty = CompilerSourceSupport::close_complete_output(output.compiler_inputs())
             .unwrap()
             .close_request(
                 None,

@@ -2271,11 +2271,11 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
         .unwrap()
         .unwrap();
     let a_offer = IssuedNativeOffer::issue(a_id, &full, Some(proof)).unwrap();
-    let support = a_offer
+    let dependency_groups = a_offer
         .dependency_group_carriers(&BTreeSet::from([b_id]))
         .unwrap();
     assert_eq!(
-        support
+        dependency_groups
             .keys()
             .map(|group| (group.binding.artifact(), group.original_ordinal))
             .collect::<BTreeSet<_>>(),
@@ -2355,7 +2355,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     assert!(typed.selected_native_groups().is_empty());
     selected_projection.validate(&typed).unwrap();
     let group = |artifact, ordinal| {
-        *support
+        *dependency_groups
             .keys()
             .find(|group| group.binding.artifact() == artifact && group.original_ordinal == ordinal)
             .unwrap()
