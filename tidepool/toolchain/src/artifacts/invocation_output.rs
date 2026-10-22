@@ -1494,10 +1494,18 @@ mod tests {
             empty.native_offer_observations().unwrap(),
             "acquisition custody creates no body availability"
         );
-        assert_eq!(
-            later.artifacts().capture_graph_selection(),
-            empty.artifacts().capture_graph_selection(),
-            "package payload custody does not create compiler roles or artifact graph roots"
+        let captured = later.artifacts().capture_graph_selection();
+        assert!(
+            captured.namespace.is_empty(),
+            "acquired custody grants no compiler namespace roles"
+        );
+        assert!(
+            captured.roots.is_empty(),
+            "acquired custody grants no source or executable roots"
+        );
+        assert!(
+            !captured.custody_roots.is_empty(),
+            "the dependent target retains actual HOME carrier custody"
         );
         assert!(later
             .acquired_native_closures()
@@ -1513,6 +1521,7 @@ mod tests {
             repeated.native_fact_owner(),
             later.native_fact_owner()
         ));
+        drop(repeated);
         let package_ids = first_packages
             .keys()
             .chain(second_packages.keys())
