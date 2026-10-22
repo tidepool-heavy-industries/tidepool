@@ -12,20 +12,21 @@ use crate::recovery_artifacts::{CertifiedJoinedInterface, CertifiedRecoveryProdu
 use crate::CompileError;
 
 #[cfg(test)]
-mod properties;
-#[cfg(test)]
 mod package_occurrence_linkage_tests;
+#[cfg(test)]
+mod properties;
 
 mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{
-    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
-    CompletedNativeImport, CompletedNativeSourceRow, IssuedNativeSelectionCompletion, CompletedNativeSelection, CompletedNativeTargetImport,
+    CompilerInputProjection, CompilerInputRole, CompletedNativeImport, CompletedNativeSelection,
+    CompletedNativeSourceRow, CompletedNativeTargetImport, IssuedNativeSelectionCompletion,
+    PublicationNativeAuthority,
 };
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
-    IssuedInputNativeDecisions, RecordedCompilerRole, RecordedInputNativeDecision, NativeSelectionCompletions,
-    NativeCompletionSnapshotFacts,
+    IssuedInputNativeDecisions, NativeCompletionSnapshotFacts, NativeSelectionCompletions,
+    RecordedCompilerRole, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -626,8 +627,7 @@ impl CertifiedTargetNativeInputs {
         prepared: &tidepool_repr::execution_schema::PreparedProgram,
         output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
-        links: &crate::certified_products::PackageLinks,
-        target_name: Option<&str>,
+        selection: crate::certified_products::BoundPackageSelection,
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
@@ -636,13 +636,15 @@ impl CertifiedTargetNativeInputs {
                 "native completion belongs to another prepared target owner",
             ));
         }
-        let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(self.resolve_sources()?, prepared)?;
+        let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(
+            self.resolve_sources()?,
+            prepared,
+        )?;
         let completed = compiler_projection::complete_native_selection(
             &sources,
             output,
             packages,
-            links,
-            target_name,
+            selection,
             inherited.native_completions(),
             operation,
         )?;
@@ -680,7 +682,9 @@ pub(crate) struct ResolvedNativeSourceTarget<'a> {
 
 impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
     type Target = ResolvedNativeTarget<'a>;
-    fn deref(&self) -> &Self::Target { &self.target }
+    fn deref(&self) -> &Self::Target {
+        &self.target
+    }
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
@@ -702,7 +706,9 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         self.completed
     }
 
-    pub(crate) fn target_requirements(&self) -> &'a [crate::certified_products::SelectedNativeTargetImport] {
+    pub(crate) fn target_requirements(
+        &self,
+    ) -> &'a [crate::certified_products::SelectedNativeTargetImport] {
         self.links
     }
 
@@ -5033,10 +5039,13 @@ impl ArtifactInventory {
             const ROW_LIMIT: usize = 32;
             const EDGE_LIMIT: usize = 16;
             let canonicals = || {
-                supplied
-                    .values()
-                    .filter(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)
-                        | ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)))
+                supplied.values().filter(|entry| {
+                    matches!(
+                        entry.payload,
+                        ArtifactPayload::Canonical(_)
+                            | ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                    )
+                })
             };
             let total = canonicals().count();
             for entry in canonicals().take(ROW_LIMIT) {
@@ -5348,7 +5357,9 @@ impl ArtifactInventory {
             || namespace
                 .values()
                 .any(|binding| !bindings.contains(binding))
-            || namespace.keys().any(|id| matches!(entries[id].payload, ArtifactPayload::PackageCode(_)))
+            || namespace
+                .keys()
+                .any(|id| matches!(entries[id].payload, ArtifactPayload::PackageCode(_)))
         {
             return Err(failure("invalid bound recovery namespace"));
         }
@@ -6020,11 +6031,7 @@ impl ViewLease {
             if previous.descriptor.owner == owner && previous_kind == kind {
                 return;
             }
-            Self::release_payload_owner(
-                owner_counts,
-                &previous.descriptor.owner,
-                previous_kind,
-            );
+            Self::release_payload_owner(owner_counts, &previous.descriptor.owner, previous_kind);
         }
         let counts = owner_counts.entry(owner).or_default();
         counts.observed += 1;
@@ -7150,8 +7157,14 @@ impl ArtifactView {
     ) -> BTreeMap<ExactModuleIdentity, ArtifactKind> {
         self.descriptors()
             .into_iter()
-            .filter(|descriptor| matches!(descriptor.kind,
-                ArtifactKind::OriginalModule | ArtifactKind::ValueInterface | ArtifactKind::LexicalJoin))
+            .filter(|descriptor| {
+                matches!(
+                    descriptor.kind,
+                    ArtifactKind::OriginalModule
+                        | ArtifactKind::ValueInterface
+                        | ArtifactKind::LexicalJoin
+                )
+            })
             .map(|descriptor| (descriptor.owner, descriptor.kind))
             .collect()
     }
@@ -7454,11 +7467,16 @@ impl ArtifactView {
         let owned = &self.read_projection(&state).nodes;
         for binding in bindings {
             crate::host_work::checkpoint()?;
-            operation.charge(1).map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             if !owned.contains(&InventoryNodeKey::Group(*binding)) {
-                return Err(admission_failure(ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact: binding.binding.artifact(), original_ordinal: binding.original_ordinal,
-                }));
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: binding.binding.artifact(),
+                        original_ordinal: binding.original_ordinal,
+                    },
+                ));
             }
         }
         Ok(())
@@ -7470,7 +7488,12 @@ impl ArtifactView {
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Vec<NativeGroupBinding>, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        original_group_children_in_scope(&state, &self.read_projection(&state).nodes, group, operation)
+        original_group_children_in_scope(
+            &state,
+            &self.read_projection(&state).nodes,
+            group,
+            operation,
+        )
     }
 
     pub(crate) fn acquired_original_group_carrier_pair(
@@ -7490,8 +7513,13 @@ impl ArtifactView {
     ) -> Result<ArtifactBinding, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         original_group_retained_binding_in_scope(
-            &state, &self.lease.payloads, &self.read_projection(&state).nodes,
-            group, identity, generation, operation,
+            &state,
+            &self.lease.payloads,
+            &self.read_projection(&state).nodes,
+            group,
+            identity,
+            generation,
+            operation,
         )
     }
 
@@ -9714,13 +9742,11 @@ mod tests {
         let parent = inventory
             .admit_shared(&inventory.empty_view(), vec![native])
             .unwrap();
-        assert!(
-            parent
-                .capture_graph_selection()
-                .roots
-                .iter()
-                .any(|node| matches!(node, InventoryNodeKey::Group(_)))
-        );
+        assert!(parent
+            .capture_graph_selection()
+            .roots
+            .iter()
+            .any(|node| matches!(node, InventoryNodeKey::Group(_))));
         let operation =
             tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
         let issued =
@@ -10470,12 +10496,7 @@ mod tests {
         let mut package_twin = package_entry.clone();
         package_twin.descriptor.id = id;
         ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
-        ViewLease::insert_payload(
-            &mut payloads,
-            &mut counts,
-            id,
-            Arc::new(package_twin),
-        );
+        ViewLease::insert_payload(&mut payloads, &mut counts, id, Arc::new(package_twin));
         assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 2);
         assert_eq!(
             counts.get(&owner),
@@ -10553,10 +10574,7 @@ mod tests {
         let other = Arc::new(entry("OtherSelection", &[]));
         let other_owner = other.descriptor.owner.clone();
         let homes = inventory
-            .admit_shared(
-                &inventory.empty_view(),
-                vec![Arc::clone(&home), other],
-            )
+            .admit_shared(&inventory.empty_view(), vec![Arc::clone(&home), other])
             .unwrap();
         let broad = homes;
         assert_eq!(
@@ -10579,7 +10597,10 @@ mod tests {
                 home: 1
             })
         );
-        assert!(!selected.lease.acquired_owner_counts.contains_key(&other_owner));
+        assert!(!selected
+            .lease
+            .acquired_owner_counts
+            .contains_key(&other_owner));
         assert_eq!(
             selected
                 .lease
@@ -23124,8 +23145,12 @@ mod package_code {
                 ))
             };
             operation.reserve::<Self>(1).map_err(account)?;
-            operation.reserve::<PackageCodeTarget>(roots.len()).map_err(account)?;
-            operation.reserve::<ArtifactBinding>(roots.len()).map_err(account)?;
+            operation
+                .reserve::<PackageCodeTarget>(roots.len())
+                .map_err(account)?;
+            operation
+                .reserve::<ArtifactBinding>(roots.len())
+                .map_err(account)?;
             operation
                 .reserve::<PackageCodePlan>(incoming_plans.len())
                 .map_err(account)?;
@@ -23312,13 +23337,15 @@ mod package_code {
             let provisional = ArtifactSelectionId([0; 32]);
             let node = |target: &PackageCodeTarget, scope| match target {
                 PackageCodeTarget::Held(held) => InventoryNodeKey::Artifact(held.binding),
-                PackageCodeTarget::Planned(id) => InventoryNodeKey::Artifact(reused.get(id).map_or(
-                    ArtifactBinding {
-                        artifact: *id,
-                        selection: scope,
-                    },
-                    |held| held.binding,
-                )),
+                PackageCodeTarget::Planned(id) => {
+                    InventoryNodeKey::Artifact(reused.get(id).map_or(
+                        ArtifactBinding {
+                            artifact: *id,
+                            selection: scope,
+                        },
+                        |held| held.binding,
+                    ))
+                }
             };
             let planned = required
                 .iter()
@@ -23360,7 +23387,9 @@ mod package_code {
             };
             let mut payloads = BTreeMap::new();
             for id in &required {
-                operation.reserve::<PackageCodeImport>(plans[id].imports.len()).map_err(account)?;
+                operation
+                    .reserve::<PackageCodeImport>(plans[id].imports.len())
+                    .map_err(account)?;
                 let binding = resolve(&PackageCodeTarget::Planned(*id))?;
                 let product = Arc::clone(&plans[id].product);
                 payloads.insert(
@@ -23410,8 +23439,14 @@ mod package_code {
                 .collect::<BTreeMap<_, _>>();
             for binding in rows.keys() {
                 if !payloads.contains_key(&binding.artifact) {
-                    let entry = acquired.lease.payloads.get(&binding.artifact)
-                        .ok_or_else(|| refusal(binding.artifact, PackageCodeRefusal::MissingProduct))?;
+                    let entry =
+                        acquired
+                            .lease
+                            .payloads
+                            .get(&binding.artifact)
+                            .ok_or_else(|| {
+                                refusal(binding.artifact, PackageCodeRefusal::MissingProduct)
+                            })?;
                     operation
                         .reserve::<(ArtifactId, Arc<ArtifactEntry>)>(1)
                         .map_err(account)?;
@@ -23446,9 +23481,8 @@ mod package_code {
                 },
                 introduced,
             );
-            let artifacts = acquired.retain_materializations_preserving_custody(
-                ArtifactView::from_custody(lease),
-            )?;
+            let artifacts = acquired
+                .retain_materializations_preserving_custody(ArtifactView::from_custody(lease))?;
             Ok(Arc::new(Self {
                 artifacts,
                 roots: roots.into(),
@@ -23471,8 +23505,12 @@ mod package_code {
                 ))
             };
             operation.reserve::<Self>(1).map_err(account)?;
-            operation.reserve::<[ArtifactBinding; 2]>(roots.len()).map_err(account)?;
-            operation.reserve::<InventoryNodeKey>(roots.len()).map_err(account)?;
+            operation
+                .reserve::<[ArtifactBinding; 2]>(roots.len())
+                .map_err(account)?;
+            operation
+                .reserve::<InventoryNodeKey>(roots.len())
+                .map_err(account)?;
             let inventory = artifacts.inventory();
             let state = inventory.0.lock().expect("inventory lock");
             let owned = &artifacts.read_projection(&state).nodes;
@@ -23602,9 +23640,8 @@ mod package_code {
                 },
                 introduced,
             );
-            let artifacts = artifacts.retain_materializations_preserving_custody(
-                ArtifactView::from_custody(lease),
-            )?;
+            let artifacts = artifacts
+                .retain_materializations_preserving_custody(ArtifactView::from_custody(lease))?;
             Ok(Arc::new(Self {
                 artifacts,
                 roots: roots.into(),

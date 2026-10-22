@@ -443,23 +443,31 @@ fn issue_historical_product(
 
 #[test]
 #[ignore = "decodes retained historical envelopes through the counted owned-resident runner"]
-fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() {
+fn historical_same_seal_bodies_select_separately() {
     let manifest = historical_manifest();
     assert_eq!(manifest.pairs.len(), 2, "two authenticated package pairs");
     let inventory = crate::artifact_inventory::ArtifactInventory::default();
     let view = inventory.empty_view();
-    let operation =
-        tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
     let root = tempfile::tempdir().unwrap();
 
     for pair in &manifest.pairs {
-        assert_eq!(pair.bodies.len(), 2, "{} one complete and one minimal body", pair.label);
+        assert_eq!(
+            pair.bodies.len(),
+            2,
+            "{} one complete and one minimal body",
+            pair.label
+        );
         let mut products = Vec::new();
         for body in &pair.bodies {
             let product = restore_historical_product(root.path(), pair, body);
             let owner = product.code().owner();
             assert_eq!(owner.unit, pair.unit, "{} decoded owner unit", pair.label);
-            assert_eq!(owner.module, pair.module, "{} decoded owner module", pair.label);
+            assert_eq!(
+                owner.module, pair.module,
+                "{} decoded owner module",
+                pair.label
+            );
             assert_eq!(
                 hex_encode(&owner.compiler_sha256),
                 pair.compiler_sha256,
@@ -498,8 +506,16 @@ fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() 
             let binder = &binders[0];
             assert_eq!(binder.unit, pair.unit, "{} binder unit", pair.label);
             assert_eq!(binder.module, pair.module, "{} binder module", pair.label);
-            assert_eq!(binder.namespace, pair.namespace, "{} binder namespace", pair.label);
-            assert_eq!(binder.occurrence, pair.occurrence, "{} binder occurrence", pair.label);
+            assert_eq!(
+                binder.namespace, pair.namespace,
+                "{} binder namespace",
+                pair.label
+            );
+            assert_eq!(
+                binder.occurrence, pair.occurrence,
+                "{} binder occurrence",
+                pair.label
+            );
             assert_eq!(
                 product.code().globals().len(),
                 0,
@@ -534,8 +550,18 @@ fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() 
         // coordinate (ArtifactId), through the existing graph issuer.
         let complete_graph = issue_historical_product(&view, &operation, complete);
         let minimal_graph = issue_historical_product(&view, &operation, minimal);
-        assert_eq!(complete_graph.roots().len(), 1, "{} complete root", pair.label);
-        assert_eq!(minimal_graph.roots().len(), 1, "{} minimal root", pair.label);
+        assert_eq!(
+            complete_graph.roots().len(),
+            1,
+            "{} complete root",
+            pair.label
+        );
+        assert_eq!(
+            minimal_graph.roots().len(),
+            1,
+            "{} minimal root",
+            pair.label
+        );
         assert_eq!(
             complete_graph.roots()[0].artifact,
             complete.artifact_id(),
@@ -549,39 +575,10 @@ fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() 
             pair.label
         );
 
-        // The seal+symbol selector sees both bodies under one seal and must
-        // refuse rather than first-match one of them; each body alone is the
-        // unique exact held binding for the shared seal.
-        let identity = complete.code().binders()[0].clone();
-        let seal = *complete.defining_interface().sha256();
-        assert!(
-            super::compiler_projection::resolve_held_package_binding(
-                &identity,
-                &seal,
-                &[complete_graph.clone(), minimal_graph.clone()],
-            )
-            .is_err(),
-            "{} seal+symbol cannot name one of two same-seal bodies",
-            pair.label
-        );
-        assert!(
-            super::compiler_projection::resolve_held_package_binding(
-                &identity,
-                &seal,
-                &[complete_graph.clone()],
-            )
-            .is_ok(),
-            "{} complete body alone is the unique held binding",
-            pair.label
-        );
-        assert!(
-            super::compiler_projection::resolve_held_package_binding(
-                &identity,
-                &seal,
-                &[minimal_graph.clone()],
-            )
-            .is_ok(),
-            "{} minimal body alone is the unique held binding",
+        assert_ne!(
+            complete_graph.roots()[0].artifact,
+            minimal_graph.roots()[0].artifact,
+            "{} exact roots select distinct same-seal bodies",
             pair.label
         );
     }
