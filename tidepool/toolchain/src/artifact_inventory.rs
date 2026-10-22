@@ -3286,6 +3286,7 @@ impl SelectedOwners {
         &self,
         state: &InventoryState,
         entries: &impl ArtifactEntryMap<ArtifactId>,
+        acquired_entries: &impl ArtifactEntryMap<ArtifactId>,
         groups: &BTreeSet<PlannedTarget>,
         stage: NativeClosureStage,
         namespace_bindings: &BTreeMap<ArtifactId, ArtifactBinding>,
@@ -3352,7 +3353,10 @@ impl SelectedOwners {
             if let Some(resolved) = current_dependencies.get(&key) {
                 for dependency in resolved {
                     let target_key = dependency.target_key();
-                    let child = entries
+                    // Exact historical dependencies keep their issuing custody
+                    // even when absent from this request's compiler namespace.
+                    // Checking their payload must not add them as planning roots.
+                    let child = acquired_entries
                         .get(&target_key.artifact)
                         .ok_or_else(|| failure("carried native dependency lost exact payload"))?;
                     let (target, label) = dependency.planned_edge(key, child)?;
@@ -4862,6 +4866,7 @@ impl ArtifactInventory {
         let (planned, closed_groups, exact_groups) = owners.planned_edges(
             &state,
             &planning_entries,
+            &selected,
             &selected_targets,
             NativeClosureStage::Admission,
             &namespace_bindings,
