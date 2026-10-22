@@ -34,6 +34,10 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
     ('tidepool-heap', frozenset({
         'tidepool/heap/src/static_region/properties.rs',
     })),
+    ('tidepool-repr', frozenset({
+        'tidepool/repr/src/execution_schema/encoding/legacy.rs',
+        'tidepool/repr/src/execution_schema/encoding/tests.rs',
+    })),
     ('tidepool-extract-cmd', frozenset({
         'tidepool/extract-cmd/src/diagnostics_tests.rs',
         'tidepool/extract-cmd/src/response_properties.rs',

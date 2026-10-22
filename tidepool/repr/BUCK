@@ -17,8 +17,6 @@ rust_filegroup(
         "src/execution_schema/codec.rs": "tidepool/repr/src/execution_schema/codec.rs",
         "src/execution_schema/decode.rs": "tidepool/repr/src/execution_schema/decode.rs",
         "src/execution_schema/encoding.rs": "tidepool/repr/src/execution_schema/encoding.rs",
-        "src/execution_schema/encoding/legacy.rs": "tidepool/repr/src/execution_schema/encoding/legacy.rs",
-        "src/execution_schema/encoding/tests.rs": "tidepool/repr/src/execution_schema/encoding/tests.rs",
         "src/execution_schema/link.rs": "tidepool/repr/src/execution_schema/link.rs",
         "src/execution_schema/shared_content.rs": "tidepool/repr/src/execution_schema/shared_content.rs",
         "src/execution_schema/symbol.rs": "tidepool/repr/src/execution_schema/symbol.rs",
@@ -126,6 +124,8 @@ tidepool_rust_isolated_test(
         "//third-party/rust:thiserror",
     ],
     required_test_modules = [
+        "tidepool/repr/src/execution_schema/encoding/legacy.rs",
+        "tidepool/repr/src/execution_schema/encoding/tests.rs",
         "tidepool/repr/src/lib.rs",
     ],
     visibility = ["PUBLIC"],

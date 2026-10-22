@@ -1,19 +1,29 @@
 use super::*;
 use crate::execution_schema::testing;
 use crate::execution_schema::testing::{envelope, identity, projected_group, wire_program};
-use crate::execution_schema::*;
 use proptest::prelude::*;
 
 proptest! {
     #[test]
-    fn streamed_groups_match_frozen_codec_and_exact_budget(result: i64, ordinal: u32) {
+    fn streamed_groups_match_frozen_codec_and_exact_budget(result: i64, ordinal: u32,
+        payload in prop::collection::vec(any::<u8>(), 0..1024), label in "[a-zA-Z]{0,80}", bytes_body: bool) {
         let mut wire = wire_program();
         wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
             bits: 64, bytes: result.to_be_bytes().to_vec(),
         })]);
+        if bytes_body {
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+            wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Bytes(payload))]);
+        }
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else { unreachable!() };
+        top.identity.occurrence = format!("entry_{label}");
+        let envelope = wire.envelope.clone();
+        let requirements = ProgramRequirements { schema_version: envelope.schema_version, projection_profile: envelope.projection_profile,
+            toolchain: envelope.toolchain, execution_abi_version: envelope.execution_abi_version, target: envelope.target };
         let group = projected_group(wire, ordinal).unwrap();
         let encoded = encode_projected_group(&group);
         prop_assert_eq!(&encoded, &legacy::encode_projected_group(&group));
+        prop_assert_eq!(parse_projected_group(&encoded, &requirements, DecodeLimits::default()).unwrap(), group.clone());
         let operation = InventoryOperation::new(InventoryDecodeLimits { max_work: encoded.len(), ..Default::default() });
         prop_assert_eq!(hash_projected_group(&group, &operation).unwrap(), <[u8;32]>::from(Sha256::digest(&encoded)));
         prop_assert_eq!(operation.work_usage().unwrap(), (encoded.len(), 0));
@@ -165,6 +175,24 @@ fn all_variant_fixture_cannot_bypass_semantic_admission() {
     wire.constructor_replies = vec![
         (ConstructorId(0), ConstructorReply::Static(TypeNodeId(1))),
         (ConstructorId(1), ConstructorReply::AtSite),
+        (
+            ConstructorId(2),
+            ConstructorReply::StaticWithSite {
+                reply: TypeNodeId(1),
+                field: 0,
+                payload_field: 1,
+                capture_input: None,
+            },
+        ),
+        (
+            ConstructorId(3),
+            ConstructorReply::StaticWithSite {
+                reply: TypeNodeId(1),
+                field: 0,
+                payload_field: 1,
+                capture_input: Some(0),
+            },
+        ),
     ];
     wire.json_layout = Some(JsonLayout {
         object: ConstructorId(0),
