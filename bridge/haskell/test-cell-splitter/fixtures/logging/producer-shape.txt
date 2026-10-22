@@ -1,0 +1,1 @@
+tidepool-log {"schema":1,"level":"trace","target":"compiler.world","event":"world.cell.stage","observed_ns":1,"fields":{"stage":"declaration-inputs-refused","count":2,"ok":true,"missing":null}}

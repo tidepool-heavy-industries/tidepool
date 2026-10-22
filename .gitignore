@@ -64,6 +64,7 @@ bridge/haskell/test/text_cbor/
 # Authenticated historical package fixtures (P3 same-seal/different-body controls).
 !tidepool/toolchain/tests/fixtures/package-occurrence-linkage/historical/*.cbor
 !tidepool/toolchain/tests/fixtures/package-occurrence-linkage/historical/interfaces/*.hi
+!bridge/haskell/test-cell-splitter/fixtures/logging/producer-shape.txt
 *.log
 dump_*.rs
 test_*.hs

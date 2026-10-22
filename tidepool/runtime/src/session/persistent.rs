@@ -4127,21 +4127,14 @@ impl PersistentSession {
         }
         .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let prepared = match &ticket.intent {
-            super::PublicationIntent::Final(intent) => match intent.world_native_snapshots() {
-                Some((_admitted, completed)) => self
+            super::PublicationIntent::Final(intent) => match intent.world() {
+                Some(world) => self
                     .bindings
                     .prepare_world_execution_selection(
                         &self.scopes,
                         ticket.private_scope,
                         ticket.public_scope,
-                        // A concurrent parked cell must promote onto the
-                        // latest public source selection, not the frozen
-                        // admission baseline. The visibility/currentness
-                        // checks above already rebase when the public advanced
-                        // after this restage; the frozen admission snapshot is
-                        // only the pre-publication birth record.
-                        &ticket.semantic.expected_public.source_selection,
-                        completed,
+                        &world.selection,
                         prepared,
                     )
                     .map_err(SessionError::InvalidPublicBindingPromotion)?,
