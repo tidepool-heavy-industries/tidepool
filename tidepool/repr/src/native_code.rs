@@ -1256,6 +1256,42 @@ mod tests {
             required_evaluated: false,
             required_generation: None,
         });
+        let mut public_wire = wire.clone();
+        public_wire.globals[0].identity = testing::identity("Fixture", "entry");
+        let public = NativeCodeComponent::link(
+            &[
+                NativeCodePlan {
+                    body: NativeCodeBody::Package(
+                        PackageGroupCode::admit(
+                            code.owner().clone(),
+                            testing::projected_group(public_wire, 0).unwrap(),
+                        )
+                        .unwrap(),
+                    ),
+                    imports: vec![NativeCodePlanImport::Local {
+                        occurrence: 1,
+                        value: ValueId(1),
+                    }],
+                },
+                NativeCodePlan {
+                    body: body.clone(),
+                    imports: vec![],
+                },
+            ],
+            &[0, 1],
+            &operation(),
+        )
+        .unwrap();
+        let public_imports = public[0].imports().collect::<Vec<_>>();
+        let [NativeCodeImport::Code {
+            code: imported,
+            value,
+        }] = public_imports.as_slice()
+        else {
+            panic!("one public entry import")
+        };
+        assert_eq!(*value, ValueId(1));
+        assert_eq!(imported.id(), public[1].id());
         importer.body = NativeCodeBody::Package(
             PackageGroupCode::admit(
                 code.owner().clone(),
