@@ -870,7 +870,7 @@ where
         .source_lease()?
         .original_source()
         .clone();
-    if !session.install_inspection_world_if_current(&completed, &evidence.reference, &original) {
+    if !session.consume_inspection_world_if_current(&completed, &evidence.reference, &original) {
         return Ok(F::CompilerUnavailable(
             "inspection world base changed before consumption".into(),
         ));

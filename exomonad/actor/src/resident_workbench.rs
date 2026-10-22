@@ -11986,7 +11986,7 @@ where
                                         after: current,
                                     }
                                 }
-                                Ok(_) => if session.install_inspection_world_if_current(
+                                Ok(_) => if session.consume_inspection_world_if_current(
                                 &completed,
                                 &evidence.reference,
                                 &original_source,
@@ -12920,9 +12920,10 @@ where
                         })
                     }
                     tidepool_runtime::session::PublicationAttempt::Rebase(_) => {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "host metadata refresh returned declaration intent".into(),
-                        ))
+                        crate::call_timing::publication_retry(
+                            crate::call_timing::PublicationRetryReason::Semantic,
+                        );
+                        continue;
                     }
                 }
             } else {
@@ -12931,7 +12932,7 @@ where
                     .access
                     .with_machine(context.clone(), move |session, _, _| {
                         session
-                            .snapshot_host_binding_publication(
+                            .snapshot_activation_publication(
                                 &snapshot_resources.execution.admission,
                                 &snapshot_resources.input,
                             )
@@ -13020,9 +13021,10 @@ where
                     continue;
                 }
                 tidepool_runtime::session::PublicationAttempt::Rebase(_) => {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "host binding publication returned declaration intent".into(),
-                    ));
+                    crate::call_timing::publication_retry(
+                        crate::call_timing::PublicationRetryReason::Semantic,
+                    );
+                    continue;
                 }
                 tidepool_runtime::session::PublicationAttempt::Settled(commit) => commit,
             };

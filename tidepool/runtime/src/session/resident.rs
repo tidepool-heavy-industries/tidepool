@@ -4841,17 +4841,14 @@ where
         self.state.revalidate_declaration_rejection(rejected)
     }
 
-    /// Stage only the original input mounted under this exact private admission.
-    /// Binding promotion retains the producer's native reachability; pure preview
-    /// programs remain private to their detached scope leases.
-    pub fn snapshot_host_binding_publication(
+    /// Freeze the exact activation input through its recipient's World intent.
+    /// Input type/root/renderer evidence retains its original producer source.
+    pub fn snapshot_activation_publication(
         &mut self,
         execution: &super::PrivateExecutionAdmission,
         input: &RuntimeActivationPreviewAdmission,
     ) -> Result<super::PublicManifestBase, ResidentError> {
         self.settle_dropped_custody();
-        self.state
-            .reconcile_private_visible_hosts(execution, false)?;
         self.validate_mounted_activation_input(&input.mounted)?;
         if input.mounted.scope != execution.private_scope()
             || !Arc::ptr_eq(&input.owner, self.state.admission_owner())
@@ -4865,17 +4862,28 @@ where
                 binding: input.mounted.binding,
             });
         }
-        let mut base = self.state.snapshot_publication_target(
-            execution.durable_owner.clone(),
-            execution.public_scope(),
-            execution.private_scope(),
+        let private = self
+            .state
+            .public_visibility_snapshot_in(execution.private_scope())
+            .ok_or(SessionError::DeadScope(execution.private_scope()))?;
+        let intent = self.state.freeze_execution_intent_with_policy(
+            execution,
             vec![input.mounted.binding],
-            Vec::new(),
-        )?;
-        base.intent = super::PublicationIntent::HostBindings(
+            private.source_instances,
             super::BindingPublicationPolicy::ActivationInput,
-        );
-        Ok(base)
+        )?;
+        let publication = match execution.durable_owner.clone() {
+            Some(owner) => self.state.restage_execution_publication(owner, intent),
+            None => self.state.restage_ephemeral_execution_publication(intent),
+        }?;
+        match publication {
+            super::ExecutionPublication::Bindings(base) => Ok(base),
+            // Activation cannot author declarations. Its original frozen intent
+            // stays retained by the execution when an unexpected suffix refuses.
+            super::ExecutionPublication::Declarations(_) => {
+                Err(SessionError::StaleStagedDeclaration.into())
+            }
+        }
     }
 
     pub fn attempt_public_manifest(
@@ -6458,7 +6466,7 @@ where
         if let Some(pending) = pending.as_mut() {
             pending.mounted = true;
         }
-        if let (Some((execution, _)), Some(prepared_write)) = (private, prepared_write) {
+        if let Some(prepared_write) = prepared_write {
             let before = private_before.expect("validated private activation");
             let key = self
                 .state
