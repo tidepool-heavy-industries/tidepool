@@ -387,6 +387,10 @@ pub struct NativeInstanceAttachment {
     domain: SourceInstanceDomain,
     lease: NativeInstanceLease,
     anchor: Option<NativeInstanceLease>,
+    package_slot: Option<(
+        crate::binding_table::WorldPackageSlotPermit,
+        super::WorldPackageInstanceWitness,
+    )>,
 }
 
 static_assertions::assert_not_impl_any!(NativeInstanceAttachment: Clone, Copy);
@@ -400,6 +404,7 @@ impl NativeInstanceAttachment {
             domain,
             lease,
             anchor: None,
+            package_slot: None,
         }
     }
     pub(crate) fn from_anchor(
@@ -411,6 +416,7 @@ impl NativeInstanceAttachment {
             domain,
             lease,
             anchor: Some(anchor),
+            package_slot: None,
         }
     }
     pub(crate) fn inherited(
@@ -431,7 +437,28 @@ impl NativeInstanceAttachment {
             domain: demand.domain(),
             lease: NativeInstanceLease::Home(lease),
             anchor: Some(NativeInstanceLease::Home(demand.anchor().clone())),
+            package_slot: None,
         })
+    }
+    pub(crate) fn from_world_package_slot(
+        lease: NativeInstanceLease,
+        permit: crate::binding_table::WorldPackageSlotPermit,
+        witness: super::WorldPackageInstanceWitness,
+    ) -> Self {
+        Self {
+            domain: permit.domain(),
+            lease,
+            anchor: None,
+            package_slot: Some((permit, witness)),
+        }
+    }
+    pub(crate) fn package_slot(
+        &self,
+    ) -> Option<&(
+        crate::binding_table::WorldPackageSlotPermit,
+        super::WorldPackageInstanceWitness,
+    )> {
+        self.package_slot.as_ref()
     }
     pub(crate) fn domain(&self) -> SourceInstanceDomain {
         self.domain

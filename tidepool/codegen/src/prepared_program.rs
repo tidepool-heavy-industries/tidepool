@@ -94,8 +94,9 @@ pub use machine::{
     BatchImport, BatchInstallReceipt, BatchLeaseRequest, BatchProgram, GroupInstanceId,
     ImportBindings, ManagedBuilder, ManagedField, ManagedNode, NativeExportRequest, ParkRequest,
     PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle, PreparedInput, PreparedMachine,
-    PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    Quiescent, ResidencyCounts, RetirementReceipt,
+    PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch,
+    PreparedWorldPackageSlots, ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
+    WorldPackageInstanceWitness,
 };
 pub use run::{
     BatchImportContractMismatch, BatchImportSelection, ExecutionError, ImportShapeFact, RunOptions,
@@ -110,13 +111,13 @@ mod bytes_tests;
 mod data_tag;
 mod demand;
 pub use demand::{
-    DemandError, DemandedHomeImage, DemandedImage, DemandedPackageImage, GroupInventory, InheritedSourceDemand,
-    NativeArtifactBinding, NativeBindingKey, NativeDomainSelection, NativeHomeBinding,
-    NativeInstanceAttachment, NativeInstanceLease, PackageInstanceLease, PendingGroupInventory,
-    PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup, ScopedDemandedImage,
-    ScopedInheritedSourceDemand, ScopedNativeExport, ScopedSourceBinder, ScopedSourceGroupDemand,
-    SealedDemand, SourceBinder, SourceDomainSelection, SourceGroupOutline, SourceInstanceDomain,
-    SourceInstanceLease,
+    DemandError, DemandedHomeImage, DemandedImage, DemandedPackageImage, GroupInventory,
+    InheritedSourceDemand, NativeArtifactBinding, NativeBindingKey, NativeDomainSelection,
+    NativeHomeBinding, NativeInstanceAttachment, NativeInstanceLease, PackageInstanceLease,
+    PendingGroupInventory, PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup,
+    ScopedDemandedImage, ScopedInheritedSourceDemand, ScopedNativeExport, ScopedSourceBinder,
+    ScopedSourceGroupDemand, SealedDemand, SourceBinder, SourceDomainSelection, SourceGroupOutline,
+    SourceInstanceDomain, SourceInstanceLease,
 };
 #[cfg(test)]
 mod double_to_int_tests;

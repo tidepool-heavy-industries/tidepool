@@ -80,6 +80,8 @@ use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity
 use tidepool_repr::{DataConId, PrincipalId};
 
 mod batch;
+mod package_slots;
+pub use package_slots::{PreparedWorldPackageSlots, WorldPackageInstanceWitness};
 #[cfg(test)]
 mod literal_manifest_tests;
 pub use batch::{
@@ -161,6 +163,8 @@ impl GroupInstanceId {
 /// One installation's code custody, instance identity, machine-local roots,
 /// and the descriptor/dispatch rows retirement must remove.
 struct InstalledProgram<'code> {
+    roots_attached: bool,
+    package_group: Option<Arc<package_slots::WorldPackageGroupMarker>>,
     program: ProgramCustody<'code>,
     instance: Arc<InstanceImage>,
     /// Collector-updated words for this machine's tops and imports.
@@ -225,6 +229,8 @@ pub struct ResidencyCounts {
 }
 
 pub struct PreparedMachine<'code> {
+    package_domains: HashMap<usize, package_slots::PackageDomainSlots>,
+    package_groups: HashMap<GroupInstanceId, HashSet<(usize, super::NativeArtifactBinding)>>,
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
@@ -854,6 +860,8 @@ impl<'code> PreparedMachine<'code> {
     pub fn empty(options: PreparedMachineOptions) -> Result<Self, ExecutionError> {
         Ok(Self {
             programs: BTreeMap::new(),
+            package_domains: HashMap::new(),
+            package_groups: HashMap::new(),
             next_program: 0,
             pins: BTreeSet::new(),
             nursery_bytes: options.nursery_bytes,
@@ -1194,6 +1202,8 @@ impl<'code> PreparedMachine<'code> {
         self.programs.insert(
             id,
             InstalledProgram {
+                roots_attached: true,
+                package_group: None,
                 program,
                 instance,
                 roots,
@@ -1914,7 +1924,11 @@ impl<'code> PreparedMachine<'code> {
     /// its block roots and forget remembered slots inside its block and
     /// statics. The program stays installed; its objects become garbage for
     /// the next collection. Idempotent, so a deferred program detaches again.
-    fn detach_roots(&self, id: ProgramId) -> Result<(), ExecutionError> {
+    fn detach_roots(&mut self, id: ProgramId) -> Result<(), ExecutionError> {
+        if !self.programs.contains_key(&id) {
+            return Err(ExecutionError::UnknownProgram(id));
+        }
+        self.invalidate_world_package_group(GroupInstanceId::from(id));
         let installed = self
             .programs
             .get(&id)
@@ -1945,6 +1959,7 @@ impl<'code> PreparedMachine<'code> {
     /// the root-block words freed. Infallible: the caller checked the
     /// descriptor space is installed, and an unknown id releases nothing.
     fn release_metadata(&mut self, id: ProgramId) -> usize {
+        self.invalidate_world_package_group(GroupInstanceId::from(id));
         let Some(installed) = self.programs.remove(&id) else {
             return 0;
         };

@@ -138,14 +138,16 @@ pub struct BatchLeaseRequest {
 
 /// One exact immutable export request, usable for a fresh batch or a sibling
 /// root in an already selected physical instance.
+#[derive(Clone)]
 pub struct NativeExportRequest {
-    image: Arc<CompiledProgram>,
-    evidence: LeaseRequestEvidence,
-    binding: ValueId,
-    domain: super::super::SourceInstanceDomain,
+    pub(super) image: Arc<CompiledProgram>,
+    pub(super) evidence: LeaseRequestEvidence,
+    pub(super) binding: ValueId,
+    pub(super) domain: super::super::SourceInstanceDomain,
 }
 
-enum LeaseRequestEvidence {
+#[derive(Clone)]
+pub(super) enum LeaseRequestEvidence {
     Home {
         key: NativeHomeBinding,
         owner: CachedHomeOwner,
@@ -158,6 +160,21 @@ enum LeaseRequestEvidence {
 }
 
 impl NativeExportRequest {
+    pub fn domain(&self) -> super::super::SourceInstanceDomain {
+        self.domain
+    }
+    pub fn is_package(&self) -> bool {
+        matches!(self.evidence, LeaseRequestEvidence::Package { .. })
+    }
+    pub fn package_key(&self) -> Option<NativeArtifactBinding> {
+        match &self.evidence {
+            LeaseRequestEvidence::Package { key, .. } => Some(*key),
+            _ => None,
+        }
+    }
+    pub fn value(&self) -> ValueId {
+        self.binding
+    }
     pub fn for_home(
         demanded: &DemandedImage,
         key: NativeHomeBinding,
@@ -241,7 +258,7 @@ impl NativeExportRequest {
             },
         })
     }
-    fn key(&self) -> super::super::NativeBindingKey {
+    pub(super) fn key(&self) -> super::super::NativeBindingKey {
         match &self.evidence {
             LeaseRequestEvidence::Home { key, .. } => super::super::NativeBindingKey::Home(*key),
             LeaseRequestEvidence::Package { key, .. } => {
@@ -249,7 +266,11 @@ impl NativeExportRequest {
             }
         }
     }
-    fn into_lease(self, instance: GroupInstanceId, handle: PreparedHandle) -> NativeInstanceLease {
+    pub(super) fn into_lease(
+        self,
+        instance: GroupInstanceId,
+        handle: PreparedHandle,
+    ) -> NativeInstanceLease {
         let export = &self.image.top_exports[&self.binding];
         match self.evidence {
             LeaseRequestEvidence::Home { key, owner, binder } => {
@@ -475,6 +496,15 @@ impl PreparedMachine<'_> {
         attachment: &super::super::NativeInstanceAttachment,
     ) -> Result<(), ExecutionError> {
         let lease = attachment.lease();
+        if let Some((permit, witness)) = attachment.package_slot() {
+            self.validate_world_package_witness(witness, permit)?;
+            if lease.instance() != witness.instance()
+                || lease.binding_key() != permit.request.key()
+                || lease.value() != permit.request.value()
+            {
+                return Err(Self::package_request_error(permit));
+            }
+        }
         self.handle_is_evaluated(lease.handle())?;
         let image = self
             .programs
@@ -860,6 +890,8 @@ impl PreparedMachine<'_> {
             self.programs.insert(
                 id,
                 InstalledProgram {
+                    roots_attached: true,
+                    package_group: None,
                     program: ProgramCustody::Shared(candidate.image),
                     statics: Arc::clone(&candidate.instance.statics),
                     instance: candidate.instance,

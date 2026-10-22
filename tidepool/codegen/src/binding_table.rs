@@ -122,6 +122,7 @@ pub struct PreparedBindingPromotion {
     names: PreparedNameChanges,
     custody: PreparedBindingCustody,
     selection: SourceSelectionView,
+    selection_install: PreparedSourceSelectionReplacement,
 }
 
 /// An admitted World execution's exact source-selection suffix. The binding
@@ -188,6 +189,7 @@ pub struct PreparedSourceOwnerOrigin {
     scope: ScopeId,
     owner: tidepool_repr::execution_schema::CachedHomeOwner,
     selection: SourceSelectionView,
+    selection_install: PreparedSourceSelectionReplacement,
     baseline: DeclarationPreparationBaseline,
 }
 
@@ -240,7 +242,7 @@ impl<'a> PreparedDeclarationProjection<'a> {
 pub struct PreparedDetachedBindingScope {
     child: ScopeId,
     tip: BindingTip,
-    selection: SourceSelectionView,
+    selection_install: PreparedSourceSelectionReplacement,
     membership: CapturableMembership,
     projection: HashTrieMapSync<BindingName, SessionVarId>,
     capture: PreparedCaptureLeases,
@@ -343,6 +345,10 @@ struct SourceSelectionView {
     current: crate::prepared_program::SourceInstanceDomain,
     domains: HashTrieMapSync<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
 }
+
+pub(crate) mod source_selections;
+use source_selections::{PreparedSourceSelectionReplacement, SourceSelections};
+pub use source_selections::{WorldPackageDomainRetirement, WorldPackageSlotPermit};
 
 enum SourceSelectionSeed<'a> {
     Fork,
@@ -798,7 +804,7 @@ pub struct BindingTable {
     promoted_source_instances: HashMap<ScopeId, HashSet<SourceLeaseKey>>,
     /// Explicit lexical installation choices. Custody promotion retains roots
     /// without granting an ambient choice among independent mutable instances.
-    source_selection: HashMap<ScopeId, SourceSelectionView>,
+    source_selection: SourceSelections,
     /// The exact public source selection each live World continuation admitted.
     /// Publication compares against this owner-issued baseline rather than a
     /// caller-selected snapshot.
@@ -1266,7 +1272,7 @@ impl Default for BindingTable {
             source_instances: HashMap::new(),
             source_owned: HashMap::new(),
             promoted_source_instances: HashMap::new(),
-            source_selection: HashMap::new(),
+            source_selection: SourceSelections::default(),
             world_execution_admissions: HashMap::new(),
         }
     }
@@ -2185,39 +2191,10 @@ impl BindingTable {
             .or_default()
             .insert(key.clone());
         self.add_capturable_sources(scope, [key.clone()]);
-        let selected = self
-            .source_selection
-            .entry(scope)
-            .or_insert_with(|| SourceSelectionView::for_scope(scope));
+        let selected = self.source_selection.ensure_scope(scope);
         selected.add(domain, key.clone());
         self.changed(scope);
         Ok(key)
-    }
-
-    /// Admit one native batch without leaving a partial lexical installation
-    /// if a scope retired or one exact group instance was already registered.
-    pub fn register_source_instances_in(
-        &mut self,
-        tree: &ScopeTree,
-        scope: ScopeId,
-        tokens: Vec<NativeInstanceLease>,
-    ) -> Result<Vec<SourceLeaseKey>, Vec<NativeInstanceLease>> {
-        let mut seen = HashSet::new();
-        if !tree.is_live(scope)
-            || tokens.iter().any(|token| {
-                let key = SourceLeaseKey::of(token);
-                !seen.insert(key.clone()) || self.source_instances.contains_key(&key)
-            })
-        {
-            return Err(tokens);
-        }
-        Ok(tokens
-            .into_iter()
-            .map(|token| {
-                self.register_source_instance_in(tree, scope, token)
-                    .expect("source batch was prevalidated under one checkout")
-            })
-            .collect())
     }
 
     /// Admit a domain-qualified native batch before committing its machine pins.
@@ -2256,7 +2233,14 @@ impl BindingTable {
                 return Err(tokens);
             }
             let key = SourceLeaseKey::of(token);
-            if let Some(anchor) = attachment.anchor() {
+            if let Some((permit, _)) = attachment.package_slot() {
+                if !self.validate_package_slot_permit(tree, scope, permit) {
+                    return Err(tokens);
+                }
+                if !self.source_instances.contains_key(&key) && !installs.insert(key.clone()) {
+                    return Err(tokens);
+                }
+            } else if let Some(anchor) = attachment.anchor() {
                 let anchor_key = SourceLeaseKey::of(anchor);
                 let selected = view
                     .domains
@@ -2328,10 +2312,7 @@ impl BindingTable {
                     self.add_capturable_sources(scope, [key.clone()]);
                     self.acquire_source_shares(&HashSet::from([key.clone()]));
                 }
-                self.source_selection
-                    .entry(scope)
-                    .or_insert_with(|| SourceSelectionView::for_scope(scope))
-                    .add(domain, key);
+                self.source_selection.ensure_scope(scope).add(domain, key);
             } else {
                 admission.owned.push(
                     self.register_source_instance_in_domain(tree, scope, domain, token)
@@ -2341,21 +2322,6 @@ impl BindingTable {
         }
         self.changed(scope);
         Ok(admission)
-    }
-
-    pub fn register_source_install_in(
-        &mut self,
-        tree: &ScopeTree,
-        scope: ScopeId,
-        tokens: Vec<NativeInstanceLease>,
-    ) -> Result<SourceScopeAdmission, Vec<NativeInstanceLease>> {
-        let keys = self.register_source_instances_in(tree, scope, tokens)?;
-        Ok(SourceScopeAdmission {
-            scope: Some(scope),
-            owned: keys.clone(),
-            keys,
-            ..Default::default()
-        })
     }
 
     pub fn rollback_source_admission(
@@ -2782,14 +2748,18 @@ impl BindingTable {
         Ok(PreparedSourceOwnerOrigin {
             scope,
             owner,
+            selection_install: self
+                .source_selection
+                .prepare_replace(scope, Some(selection.clone())),
             selection,
             baseline: self.declaration_preparation_baseline(),
         })
     }
 
     pub fn commit_source_owner_origin(&mut self, prepared: PreparedSourceOwnerOrigin) {
-        self.source_selection
-            .insert(prepared.scope, prepared.selection);
+        let mut selection_install = prepared.selection_install;
+        selection_install.set_view(prepared.selection);
+        self.source_selection.commit(selection_install);
         self.changed(prepared.scope);
     }
 
@@ -3128,6 +3098,9 @@ impl BindingTable {
             tracing::warn!(target: "tidepool_codegen::source_selection", reason = "publication_native_selection_invalid", ?source, ?target, current = ?selection.current, ?error, "World source selection refused");
             BindingPromotionError::ConflictingSourceOrigin
         })?;
+        prepared.selection_install = self
+            .source_selection
+            .prepare_replace(target, Some(selection.clone()));
         prepared.selection = selection;
         Ok(prepared)
     }
@@ -3262,6 +3235,9 @@ impl BindingTable {
                 new_promoted,
                 new_promoted_sources,
             },
+            selection_install: self
+                .source_selection
+                .prepare_replace(target, Some(selection.clone())),
             selection,
         })
     }
@@ -3703,10 +3679,12 @@ impl BindingTable {
             names,
             custody,
             selection,
+            mut selection_install,
         } = prepared;
         let target = plan.target;
         self.install_binding_custody(target, custody);
-        self.source_selection.insert(target, selection);
+        selection_install.set_view(selection);
+        self.source_selection.commit(selection_install);
         if let Some(next_tip) = plan.next_tip {
             self.next_tip = next_tip;
         }
@@ -4015,6 +3993,7 @@ impl BindingTable {
         {
             return Err(BindingPromotionError::UnverifiableSourceSelection);
         }
+        self.source_selection.materialize_scope(parent);
         let tip = self.seed_scope_with_selection(
             tree,
             parent,
@@ -4043,6 +4022,9 @@ impl BindingTable {
     ) -> BindingTipId {
         if let Some(tip) = self.tips.get(&child) {
             return tip.id;
+        }
+        if tree.is_live(parent) {
+            self.source_selection.materialize_scope(parent);
         }
         let id = BindingTipId(self.next_tip);
         let next_tip = self
@@ -4084,7 +4066,7 @@ impl BindingTable {
             }
             SourceSelectionSeed::WorldContinuation(admitted) => admitted.clone(),
         };
-        if let Some(previous) = self.source_selection.remove(&child) {
+        if let Some(previous) = self.source_selection.get(&child).cloned() {
             let mut record = selected
                 .domains
                 .get(&selected.current)
@@ -4105,7 +4087,7 @@ impl BindingTable {
             }
             selected.domains.insert_mut(selected.current, record);
         }
-        self.source_selection.insert(child, selected);
+        self.source_selection.replace(child, selected);
         let membership = self.capture_membership(tree, parent);
         let leases = self.capture_leases(parent, &membership);
         let CaptureMembership {
@@ -4253,7 +4235,9 @@ impl BindingTable {
         Ok(PreparedDetachedBindingScope {
             child,
             tip,
-            selection,
+            selection_install: self
+                .source_selection
+                .prepare_replace(child, Some(selection)),
             membership: child_membership,
             projection,
             capture,
@@ -4268,8 +4252,7 @@ impl BindingTable {
             .insert(prepared.child, prepared.projection);
         self.capturable_membership
             .insert(prepared.child, prepared.membership);
-        self.source_selection
-            .insert(prepared.child, prepared.selection);
+        self.source_selection.commit(prepared.selection_install);
         self.tips.insert(prepared.child, prepared.tip);
         self.changed(prepared.child);
     }
