@@ -29016,21 +29016,38 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             sha256: sha256(source.as_bytes()),
         });
         evidence.resolutions.clear();
-        evidence.modules = vec![crate::cache::ModuleEvidence {
-            unit: unit.into(),
-            module: "Tidepool.Agent.Ref".into(),
-            boot: false,
-            source: path,
-            imports: vec![],
-            product: crate::cache::ProductAvailability::InterfaceOnly,
-        }];
+        let mut target = evidence
+            .modules
+            .into_iter()
+            .find(|module| module.module == "Target")
+            .unwrap();
+        target.imports.clear();
+        evidence.modules = vec![
+            crate::cache::ModuleEvidence {
+                unit: unit.into(),
+                module: "Tidepool.Agent.Ref".into(),
+                boot: false,
+                source: path,
+                imports: vec![],
+                product: crate::cache::ProductAvailability::InterfaceOnly,
+            },
+            target,
+        ];
         fields[7] = text(serde_json::to_string(&evidence).unwrap());
-        fields[8] = Value::Array(vec![Value::Array(vec![
-            text(unit),
-            text("Tidepool.Agent.Ref"),
-            Value::Bool(false),
-            Value::Array(vec![]),
-        ])]);
+        fields[8] = Value::Array(
+            evidence
+                .modules
+                .iter()
+                .map(|module| {
+                    Value::Array(vec![
+                        text(&module.unit),
+                        text(&module.module),
+                        Value::Bool(module.boot),
+                        Value::Array(vec![]),
+                    ])
+                })
+                .collect(),
+        );
         write_receipt(&receipt, &value);
         request
             .validate_receipt(&receipt, None, request.context())
