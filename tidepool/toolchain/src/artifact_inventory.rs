@@ -8058,6 +8058,47 @@ impl ArtifactView {
         Ok(retained)
     }
 
+    /// Retain the exact payloads and groups named by issued native permissions
+    /// as non-executable custody. This repairs a narrowed support without
+    /// promoting those bodies into its compiler namespace.
+    pub(crate) fn retain_native_availability_custody(
+        &self,
+        availability: &crate::declaration_context::RequestNativeAvailability,
+    ) -> Result<Self, CompileError> {
+        let contributions = availability.custody_contributions();
+        if contributions.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut retained = self.inventory().empty_view();
+        for (id, contribution) in contributions {
+            crate::host_work::checkpoint()?;
+            let custody = Self::from_custody(Arc::clone(contribution.offer().custody_lease()));
+            let state = custody.lease.inventory.0.lock().expect("inventory lock");
+            let owned = &custody.read_projection(&state).nodes;
+            let binding = custody.resolve_binding(id, owned)?;
+            let mut nodes = BTreeSet::from([InventoryNodeKey::Artifact(binding)]);
+            for group in contribution.original_groups(id) {
+                let node = InventoryNodeKey::Group(group);
+                if !owned.contains(&node) {
+                    return Err(failure(
+                        "issued native permission lost its exact acquired Group",
+                    ));
+                }
+                nodes.insert(node);
+            }
+            drop(state);
+            let selected = custody.lease.inventory.retain(
+                Vec::new(),
+                nodes.into_iter().collect(),
+                Vec::new(),
+                Vec::new(),
+            );
+            let selected = custody.retain_projected_materializations(selected)?;
+            retained = retained.retain_custody(&selected)?;
+        }
+        self.retain_custody(&retained)
+    }
+
     /// Preserve exact support nodes even when they were dependencies of the
     /// generated root. Native byte custody stays separate from source roots.
     pub(crate) fn support_without_owner(
@@ -9168,18 +9209,15 @@ impl ArtifactView {
                 "World stage native inputs belong to another inventory",
             ));
         }
+        if !originals.belongs_to_world_stage(stage, stage.operation()) {
+            return Err(failure(
+                "World stage contributions have another emitted-stage owner",
+            ));
+        }
         let Some(selected) = stage.selection() else {
             return Ok(self.clone());
         };
         let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
-        if !originals.belongs_to(
-            &stage.initial_inputs().shared_compiler_source_support(),
-            stage.operation(),
-        ) {
-            return Err(failure(
-                "World stage contributions have another acquisition",
-            ));
-        }
         // The actual stage selected these uses from held offer contributions.
         // Its passive compiler view owns carrier bindings independently of the
         // offer's Group scopes, so reopen each exact selecting owner first.
