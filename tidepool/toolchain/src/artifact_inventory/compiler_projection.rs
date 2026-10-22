@@ -1190,12 +1190,7 @@ pub(crate) fn complete_native_selection(
         let mut prior = None;
         for completed in inherited.iter() {
             if let Some(old) = completed.rows.get(&row.binding()) {
-                let same_exact_rows = old.product.owner() == row.group().owner()
-                    && old.product.origin() == row.group().origin()
-                    && old.product.group() == row.group().group()
-                    && old.product.imports() == row.group().imports()
-                    && row.physical_current().is_some();
-                if !old.product.same_issuance(row.group()) && !same_exact_rows {
+                if !old.product.same_issuance(row.group()) {
                     tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         binding = ?row.binding(), owner = ?row.group().owner(),
                         previous_origin = ?old.product.origin(), incoming_origin = ?row.group().origin(),
