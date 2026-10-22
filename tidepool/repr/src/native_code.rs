@@ -273,6 +273,7 @@ pub struct NativeCodeBodyKey {
     pub definitions_sha256: [u8; 32],
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NativeCodeNominalKey {
     Home {
         owner: NativeHomeOwnerKey,
@@ -325,6 +326,7 @@ pub struct NativeRetainedFacts {
     pub type_artifact: Option<[u8; 32]>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NativeCodeEdgeFacts {
     Local {
         member: u32,
@@ -968,6 +970,48 @@ mod tests {
     }
     fn operation() -> InventoryOperation {
         InventoryOperation::new(Default::default())
+    }
+
+    #[test]
+    fn component_enums_refuse_unknown_fields_through_decoder() {
+        fn check<T>(valid: &T)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            use ciborium::value::Value;
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(valid, &mut bytes).unwrap();
+            assert_eq!(
+                ciborium::de::from_reader::<T, _>(bytes.as_slice()).unwrap(),
+                *valid
+            );
+            let mut value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+            let Value::Map(variants) = &mut value else {
+                panic!("enum map")
+            };
+            let Value::Map(fields) = &mut variants[0].1 else {
+                panic!("struct variant map")
+            };
+            fields.push((
+                Value::Text("unexpected".into()),
+                Value::Integer(0_u64.into()),
+            ));
+            bytes.clear();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            assert!(matches!(
+                ciborium::de::from_reader::<T, _>(bytes.as_slice()),
+                Err(ciborium::de::Error::Semantic(_, _))
+            ));
+        }
+        let linked = NativeCodeComponent::link(
+            &[plan("A", &[("B", 1)], 1), plan("B", &[("A", 0)], 2)],
+            &[0],
+            &operation(),
+        )
+        .unwrap();
+        let facts = linked[0].component().facts();
+        check(&facts.nodes[0].body.nominal);
+        check(&facts.nodes[0].imports[0]);
     }
 
     proptest! {
