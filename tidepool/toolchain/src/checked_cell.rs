@@ -5972,7 +5972,7 @@ mod tests {
         let fixed = inventory
             .bind_segment(&baseline, entries.clone(), &selection, &mut validation)
             .unwrap();
-        let physical = fixed.physical_inputs().physical_cohort().unwrap();
+        let physical = fixed.captured_stage().physical_cohort();
         let observed =
             AuthenticatedTargetImports::issue(&authored_target, &[], &validation.inventory)
                 .unwrap();
@@ -6155,7 +6155,7 @@ mod tests {
             AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory).unwrap();
         assert!(missing_inventory
             .select_native_target(
-                missing_fixed.physical_inputs().physical_cohort().unwrap(),
+                missing_fixed.captured_stage().physical_cohort(),
                 missing_fixed.source_selection(),
                 observed,
                 Some(entry),

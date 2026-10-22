@@ -672,7 +672,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             )
             .unwrap();
         let issued =
-            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 &physical,
                 entries,
@@ -833,7 +833,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                     .unwrap();
             let target = inventory
                 .select_native_target(
-                    physical.physical_inputs().physical_cohort().unwrap(),
+                    physical.captured_stage().physical_cohort(),
                     &receipt,
                     observed,
                     None,
@@ -870,7 +870,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                     .unwrap();
             let refused = inventory
                 .select_native_target(
-                    physical.physical_inputs().physical_cohort().unwrap(),
+                    physical.captured_stage().physical_cohort(),
                     &receipt,
                     observed,
                     None,
@@ -1517,7 +1517,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         &physical_projection, &physical.metadata_snapshot(),
                         &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                     ).unwrap();
-                    let issued = crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                    let issued = crate::declaration_context::CapturedCompilerStage::issue(
                         &mut physical_selection, &inventory.empty_view(), entries,
                      &mut crate::recovery_artifacts::PackageInterfaceValidation::default());
                     if !published[domain] {

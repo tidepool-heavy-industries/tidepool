@@ -3569,10 +3569,9 @@ fn validate_existing_rows(
 /// Namespace and native owner choice are fixed by the compiler's certified roles.
 #[derive(Clone)]
 pub(crate) struct BoundArtifactSelection {
-    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    captured_stage: Arc<crate::declaration_context::CapturedCompilerStage>,
     compiler_prefix: CompilerSourceSupport,
     produced_prefix: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
-    native_source: crate::certified_products::CertifiedSourceSelection,
 }
 
 /// Both native planners preserve an already-issued exact target separately
@@ -3623,23 +3622,23 @@ impl From<native_availability::NativeGroupTarget> for PlannedTarget {
 }
 
 impl BoundArtifactSelection {
-    pub(crate) fn physical_inputs(
+    pub(crate) fn captured_stage(
         &self,
-    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
-        &self.physical_inputs
+    ) -> &Arc<crate::declaration_context::CapturedCompilerStage> {
+        &self.captured_stage
     }
 
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
-        &self.native_source
+        self.captured_stage.source_selection()
     }
 
     pub(crate) fn advance_compiler_prefix(
         &mut self,
-        physical: &Arc<crate::declaration_context::OriginalCompilerInputs>,
+        physical: &Arc<crate::declaration_context::CapturedCompilerStage>,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Arc<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
-        if !Arc::ptr_eq(physical, &self.physical_inputs) {
+        if !Arc::ptr_eq(physical, &self.captured_stage) {
             return Err(failure(
                 "item compiler cursor belongs to another physical segment",
             ));
@@ -4048,7 +4047,7 @@ impl ArtifactInventory {
         }
         let mut selection = selection.clone();
         let physical = Arc::new(
-            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 parent,
                 entries,
@@ -4060,7 +4059,7 @@ impl ArtifactInventory {
 
     fn index_admitted_segment(
         &self,
-        physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        captured_stage: Arc<crate::declaration_context::CapturedCompilerStage>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<BoundArtifactSelection, CompileError> {
         let produced_prefix = selection
@@ -4072,13 +4071,12 @@ impl ArtifactInventory {
             .flat_map(|outputs| outputs.required())
             .map(|output| output.artifact_id())
             .collect();
-        let compiler_prefix = CompilerSourceSupport::close_complete_output(&physical_inputs)?
+        let compiler_prefix = CompilerSourceSupport::close_complete_output(captured_stage.compiler_inputs())?
             .segment_value_prefix(&excluded)?;
         Ok(BoundArtifactSelection {
-            physical_inputs,
+            captured_stage,
             compiler_prefix,
             produced_prefix,
-            native_source: selection.clone(),
         })
     }
 
@@ -11526,7 +11524,7 @@ mod tests {
             )
             .unwrap();
         assert!(!fixed
-            .physical_inputs()
+            .captured_stage()
             .issued_artifacts()
             .namespace()
             .contains_key(&id));
@@ -11541,7 +11539,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -11699,7 +11697,7 @@ mod tests {
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let physical = fixed.physical_inputs().issued_artifacts();
+        let physical = fixed.captured_stage().issued_artifacts();
         let selection = fixed.source_selection();
         assert_eq!(physical.selected_native_groups().len(), 3);
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
@@ -11712,7 +11710,7 @@ mod tests {
         .unwrap();
         let target = inventory
             .select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -11789,7 +11787,7 @@ mod tests {
         .unwrap();
         let empty_target = inventory
             .select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -11983,12 +11981,6 @@ mod tests {
             .new_product_native_requirements()
             .next()
             .is_none());
-        let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-            chosen_request.compiler_inputs().compiler_source_support(),
-        );
-        assert!(matches!(carried.physical_cohort(),
-            Err(CompileError::ExtractFailed(message))
-                if message == "exact declaration context: target requires its actual physical output cohort"));
         // This target has no new outputs. Its real empty physical cohort consumes
         // the chosen carried request while retaining the broader prefix custody.
         let fixed = inventory
@@ -12016,7 +12008,7 @@ mod tests {
             .unwrap();
             let target = inventory
                 .select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12338,7 +12330,7 @@ mod tests {
                     .with_new_product_dependencies(&view.metadata_snapshot(), &requirements)
                     .unwrap();
                 let issued =
-                    crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                    crate::declaration_context::CapturedCompilerStage::issue(
                         &mut selection,
                         &view,
                         vec![native.clone()],
@@ -12478,7 +12470,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12553,7 +12545,7 @@ mod tests {
                 .all(|offer| offer.is_full()));
 
             // Finish and select through the same actual producer before input use.
-            let issued = OriginalCompilerInputs::issue_segment_native_availability(
+            let issued = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut current,
                 &physical,
                 entries,
@@ -12606,7 +12598,7 @@ mod tests {
                 )
                 .unwrap();
                 owner.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12671,7 +12663,7 @@ mod tests {
                 )
                 .unwrap();
             let before = fixed
-                .physical_inputs()
+                .captured_stage()
                 .issued_artifacts()
                 .capture_graph_selection();
             let denied = {
@@ -12685,7 +12677,7 @@ mod tests {
                 )
                 .unwrap();
                 owner.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12718,7 +12710,7 @@ mod tests {
             }
             assert_eq!(
                 fixed
-                    .physical_inputs()
+                    .captured_stage()
                     .issued_artifacts()
                     .capture_graph_selection(),
                 before
@@ -12774,7 +12766,7 @@ mod tests {
                 .with_new_product_dependencies(&physical.metadata_snapshot(), &requirements)
                 .unwrap();
             let issued =
-                crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     &physical,
                     vec![native.clone()],
@@ -12868,7 +12860,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -12964,7 +12956,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                fixed.physical_inputs().issued_artifacts().namespace()[&id],
+                fixed.captured_stage().issued_artifacts().namespace()[&id],
                 selected_carrier
             );
 
@@ -12979,7 +12971,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -13782,7 +13774,7 @@ mod tests {
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-            let physical = fixed.physical_inputs().issued_artifacts();
+            let physical = fixed.captured_stage().issued_artifacts();
             assert!(physical.selected_native_groups().is_empty());
             assert!(physical
                 .roots()
@@ -13852,7 +13844,7 @@ mod tests {
                 .unwrap();
                 let target = inventory
                     .select_native_target(
-                        fixed.physical_inputs().physical_cohort().unwrap(),
+                        fixed.captured_stage().physical_cohort(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -13980,7 +13972,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -13995,7 +13987,7 @@ mod tests {
         assert!(!cursor.artifact_ids().contains(&value.descriptor.id));
         let before = inventory.metrics();
         let physical_before = fixed
-            .physical_inputs()
+            .captured_stage()
             .issued_artifacts()
             .capture_graph_selection();
 
@@ -14009,7 +14001,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -14024,7 +14016,7 @@ mod tests {
             if message == "artifact inventory: target reaches a future value interface"));
         assert_eq!(
             fixed
-                .physical_inputs()
+                .captured_stage()
                 .issued_artifacts()
                 .capture_graph_selection(),
             physical_before
@@ -14044,7 +14036,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -14147,7 +14139,7 @@ mod tests {
             )
             .unwrap();
         assert!(fixed
-            .physical_inputs()
+            .captured_stage()
             .issued_artifacts()
             .observed_payload(&captured.descriptor.id)
             .unwrap()
@@ -14164,7 +14156,7 @@ mod tests {
         .unwrap();
         let target = inventory
             .select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -14188,7 +14180,7 @@ mod tests {
         .unwrap();
         assert!(inventory
             .select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -14262,7 +14254,7 @@ mod tests {
             )
             .unwrap();
             inventory.select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,
@@ -16305,7 +16297,7 @@ mod tests {
                     )
                     .unwrap();
                     inventory.select_native_target(
-                        fixed.physical_inputs().physical_cohort().unwrap(),
+                        fixed.captured_stage().physical_cohort(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -16368,7 +16360,7 @@ mod tests {
                     )
                     .unwrap();
                     cold.select_native_target(
-                        fixed.physical_inputs().physical_cohort().unwrap(),
+                        fixed.captured_stage().physical_cohort(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -17756,7 +17748,7 @@ mod tests {
                 )
                 .unwrap();
                 inventory.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -18568,7 +18560,7 @@ mod tests {
                     )
                     .unwrap();
                     recovered_inventory.select_native_target(
-                        bound.physical_inputs().physical_cohort().unwrap(),
+                        bound.captured_stage().physical_cohort(),
                         bound.source_selection(),
                         observed,
                         None,
@@ -18591,7 +18583,7 @@ mod tests {
                 let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let (prepared, accepted) = source_target_data(&[(&helper, 7)]);
                 let observed = crate::certified_products::AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
-                recovered_inventory.select_native_target(bound.physical_inputs().physical_cohort().unwrap(), bound.source_selection(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
+                recovered_inventory.select_native_target(bound.captured_stage().physical_cohort(), bound.source_selection(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
                 }.map(|admitted| admitted.artifacts().clone()), Err(CompileError::ArtifactInventory(error))
                                    if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
                                        original: helper.descriptor.id,
@@ -18660,7 +18652,7 @@ mod tests {
                     )
                     .unwrap();
                     chosen.inventory().select_native_target(
-                        chosen_bound.physical_inputs().physical_cohort().unwrap(),
+                        chosen_bound.captured_stage().physical_cohort(),
                         chosen_bound.source_selection(),
                         observed,
                         None,
@@ -19569,7 +19561,7 @@ mod tests {
                     )
                     .unwrap();
                     issuer.select_native_target(
-                        fixed.physical_inputs().physical_cohort().unwrap(),
+                        fixed.captured_stage().physical_cohort(),
                         fixed.source_selection(),
                         observed,
                         None,
@@ -19693,7 +19685,7 @@ mod tests {
                 )
                 .unwrap();
                 issuer.select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,
@@ -19883,12 +19875,6 @@ mod tests {
             .prepare_compilation(request_directory.path(), producer)
             .unwrap();
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-            request.compiler_inputs().compiler_source_support(),
-        );
-        assert!(matches!(carried.physical_cohort(),
-            Err(CompileError::ExtractFailed(message))
-                if message == "exact declaration context: target requires its actual physical output cohort"));
         let certified = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             request.compiler_inputs(),
             &validation.inventory,
@@ -19946,7 +19932,7 @@ mod tests {
             .unwrap();
             let selected = inventory
                 .select_native_target(
-                    fixed.physical_inputs().physical_cohort().unwrap(),
+                    fixed.captured_stage().physical_cohort(),
                     fixed.source_selection(),
                     observed,
                     None,

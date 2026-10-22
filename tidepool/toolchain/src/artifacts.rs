@@ -550,7 +550,7 @@ pub struct CompiledArtifacts {
     pub module_products: Vec<RawModuleProduct>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
-    pub(crate) source_selection: Option<certified_products::CertifiedSourceSelection>,
+    pub(crate) issued_output: Option<crate::declaration_context::IssuedOriginalOutput>,
     /// Bound compiler producer identity for this exact invocation. `None`
     /// means the bundle was assembled from bytes without an endpoint.
     pub producer_identity: Option<[u8; 32]>,
@@ -4383,6 +4383,18 @@ fn seal_turn_outputs_with_validation(
         package_interfaces,
     } = admitted;
     let artifact_view = target_native.artifacts();
+    let issued_output = if segment_originals.is_some() {
+        crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)?
+    } else {
+        certified
+            .captured_stage
+            .as_ref()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("compiler output lacks its captured stage owner".into())
+            })?
+            .output()
+            .clone()
+    };
     let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let original_compile_input = if let Some((table, sites)) =
         identity_metadata.filter(|_| offer.exact.is_none())
@@ -4413,8 +4425,7 @@ fn seal_turn_outputs_with_validation(
                     &package_interfaces,
                     table.clone(),
                     sites.to_vec(),
-                    &artifact_view,
-                    &certified.source_selection,
+                    &issued_output,
                     target_native.resolve()?.native_sites()?,
                 )
             })
@@ -4427,22 +4438,7 @@ fn seal_turn_outputs_with_validation(
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original = match exact.as_ref() {
         Some(admission) => {
-            let output = tracing::debug_span!(
-                target: "exomonad_harness::timing",
-                "products.original_compiler_inputs",
-                inclusive = true,
-            )
-            .in_scope(|| {
-                if segment_originals.is_some() {
-                    crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)
-                } else {
-                    crate::declaration_context::IssuedOriginalOutput::issue(
-                        certified.source_selection.clone(),
-                        artifact_view.clone(),
-                    )
-                }
-            })?;
-            SealedOriginalEvidence::issue_exact(admission, output, &target_native)?
+            SealedOriginalEvidence::issue_exact(admission, issued_output, &target_native)?
         }
         None => match original_compile_input.as_ref() {
             Some(proof) => {
@@ -4594,14 +4590,14 @@ fn admit_native_target_products(
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
     let prepared = package_selection.prepared_program();
     let physical = match segment_originals {
-        Some(originals) => originals.physical_inputs().physical_cohort()?,
+        Some(originals) => originals.captured_stage().physical_cohort(),
         None => certified
-            .original_inputs
+            .captured_stage
             .as_ref()
             .ok_or_else(|| {
                 CompileError::ExtractFailed("ordinary target lacks physical cohort issuance".into())
             })?
-            .physical_cohort()?,
+            .physical_cohort(),
     };
     let target_admission_start = Instant::now();
     let observed = package_selection.authenticated_imports().clone();
@@ -4610,7 +4606,7 @@ fn admit_native_target_products(
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
             })?;
-            let cohort = originals.physical_inputs().physical_cohort()?;
+            let cohort = originals.captured_stage().physical_cohort();
             let physical = cohort.artifacts();
             let values = originals
                 .selected_value_entries(&certified.value_interfaces)
@@ -4629,14 +4625,14 @@ fn admit_native_target_products(
         }
         None => {
             let physical = certified
-                .original_inputs
+                .captured_stage
                 .as_ref()
                 .ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "ordinary target lacks physical cohort issuance".into(),
                     )
                 })?
-                .physical_cohort()?;
+                .physical_cohort();
             physical.artifacts().inventory().select_native_target(
                 physical,
                 &certified.source_selection,
@@ -6358,6 +6354,7 @@ fn compile_invocation_inner(
             certified_products::CertifiedProducts {
                 home_contracts: None,
                 original_inputs: None,
+                captured_stage: None,
                 groups: certified_products::IssuedGroupCandidates::empty(),
                 recovery_products: Arc::from([]),
                 module_interfaces: Arc::from([]),
@@ -6465,7 +6462,7 @@ fn compile_invocation_inner(
                 )?;
                 let observed = package_selection.authenticated_imports().clone();
                 let selected_target = physical.inventory().select_native_target(
-                    physical_inputs.physical_cohort()?,
+                    physical_inputs.physical_cohort(),
                     &certified.source_selection,
                     observed,
                     None,
@@ -6474,7 +6471,7 @@ fn compile_invocation_inner(
                     &package_catalog,
                     &mut validation,
                 )?;
-                let selected_groups = Arc::new(physical_inputs.physical_cohort()?.certify_groups(
+                let selected_groups = Arc::new(physical_inputs.physical_cohort().certify_groups(
                     selected_target.artifacts(),
                     &certified.groups,
                     exact_request.as_ref().map(|request| {
@@ -6526,8 +6523,8 @@ fn compile_invocation_inner(
             receipt.targets.len(),
         );
         invocation_timing.advance("candidate_publication");
-        artifacts.source_selection = Some(certified.source_selection);
-        artifacts.certified_groups = physical_inputs.physical_cohort()?.demanded_products()?;
+        artifacts.issued_output = Some(physical_inputs.output().clone());
+        artifacts.certified_groups = physical_inputs.physical_cohort().demanded_products()?;
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
@@ -7158,7 +7155,7 @@ pub(crate) fn assemble(
         module_products: Vec::new(),
         certified_groups: Arc::from([]),
         recovery_products: Vec::new(),
-        source_selection: None,
+        issued_output: None,
         producer_identity: None,
         module_inventory: None,
         completed_source_evidence: None,
@@ -10030,6 +10027,7 @@ mod module_product_tests {
             retained_core_products: Default::default(),
             source_selection: certified_products::CertifiedSourceSelection::empty_product_output(),
             original_inputs: None,
+            captured_stage: None,
         };
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let receipt = BTreeMap::from([(owner.clone(), observed.clone())]);
@@ -10286,11 +10284,11 @@ mod module_product_tests {
             .certified_groups
             .iter()
             .all(|group| group.owner().module != "Tidepool.FilePath"));
-        let selected = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            shadowed.source_selection.as_ref().unwrap(),
-            &shadowed.artifact_view,
-        )
-        .unwrap();
+        let selected = shadowed
+            .issued_output
+            .as_ref()
+            .expect("issued compiler output")
+            .compiler_inputs();
         let roles = selected.role_projection().snapshot_roles();
         let file_path_role = &roles[&crate::declaration_join::ExactModuleIdentity {
             unit: "main".into(),
@@ -10340,14 +10338,11 @@ mod module_product_tests {
                 .iter()
                 .any(|group| group.owner().module == module
                     && group.origin() == ProductOrigin::Cached));
-            let selected = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                shadowed
-                    .source_selection
-                    .as_ref()
-                    .expect("a completed worker selection"),
-                &shadowed.artifact_view,
-            )
-            .unwrap();
+            let selected = shadowed
+                .issued_output
+                .as_ref()
+                .expect("issued compiler output")
+                .compiler_inputs();
             let original = shadowed
                 .recovery_products
                 .iter()
@@ -10404,11 +10399,11 @@ mod module_product_tests {
         assert!(native.certified_groups.iter().all(|group| {
             group.owner().module != "Tidepool.FilePath" || group.origin() != ProductOrigin::Cached
         }));
-        let native_selection = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            native.source_selection.as_ref().unwrap(),
-            &native.artifact_view,
-        )
-        .unwrap();
+        let native_selection = native
+            .issued_output
+            .as_ref()
+            .expect("issued compiler output")
+            .compiler_inputs();
         let native_original = native
             .recovery_products
             .iter()
@@ -11355,17 +11350,15 @@ mod module_product_tests {
             |_, _, _| {},
         )
         .expect("ordinary compiler producer issues the exact context's interface");
-        let context_support = crate::declaration_context::recover_fixture_compiler_support(
-            context_products
-                .source_selection
-                .as_ref()
-                .unwrap()
-                .compiler_projection(&context_products.artifact_view)
-                .unwrap(),
-            context_products.artifact_view.clone(),
-            [],
-        )
-        .unwrap();
+        let context_support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                context_products
+                    .issued_output
+                    .as_ref()
+                    .unwrap()
+                    .compiler_inputs(),
+            )
+            .unwrap();
         let context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(
@@ -11469,15 +11462,14 @@ mod module_product_tests {
                     )
                     .unwrap()
                     .with_source_search_context(&include);
-                let original_output =
-                    crate::declaration_context::OriginalCompilerInputs::from_selection(
-                        compiled.source_selection.as_ref().unwrap(),
-                        &compiled.artifact_view,
-                    )
-                    .unwrap();
+                let original_output = compiled
+                    .issued_output
+                    .as_ref()
+                    .expect("issued compiler output")
+                    .compiler_inputs();
                 let original = (&request)
                     .product_admission(admission)
-                    .original_execution_context(&original_output)
+                    .original_execution_context(original_output)
                     .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(
@@ -11606,7 +11598,7 @@ mod module_product_tests {
                 .unwrap();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(&quoted_owner),
-                    &admission.home_imports().unwrap(),
+                    &admission.consumed_home_adjacency().unwrap(),
                     &[],
                     &compiled.artifact_view.retained_source_implementations(),
                 )
@@ -11627,14 +11619,14 @@ mod module_product_tests {
                     .collect::<Vec<_>>();
                 assert_eq!(native.len(), 1);
                 let owner = native[0].owner().clone();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    compiled.source_selection.as_ref().unwrap(),
-                    &compiled.artifact_view,
-                )
-                .unwrap();
+                let output = compiled
+                    .issued_output
+                    .as_ref()
+                    .expect("issued compiler output")
+                    .compiler_inputs();
                 let compiled_support =
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
-                        &output,
+                        output,
                     )
                     .unwrap();
                 let interfaces = compiled_support
@@ -11775,17 +11767,11 @@ mod module_product_tests {
                     group.owner().unit == selected.unit && group.owner().module == selected.module
                 })
             }));
-            let original_support = crate::declaration_context::recover_fixture_compiler_support(
-                original
-                    .source_selection
-                    .as_ref()
-                    .unwrap()
-                    .compiler_projection(&original.artifact_view)
-                    .unwrap(),
-                original.artifact_view.clone(),
-                [],
-            )
-            .unwrap();
+            let original_support =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    original.issued_output.as_ref().unwrap().compiler_inputs(),
+                )
+                .unwrap();
             let interfaces = original_support
                 .selected_interfaces()
                 .unwrap()

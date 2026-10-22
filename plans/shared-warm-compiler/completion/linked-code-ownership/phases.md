@@ -38,3 +38,14 @@ runtime refusal; do not claim Rust can statically prove arbitrary supplied facts
 Coordinate shared declaration_context.rs and compiler_projection.rs hunks with S/B
 using isolated branches and early shared-contract commits. Compile production and
 cfg(test) callers before claiming the phase migration complete.
+
+## Implementation progress
+
+- P first API slice: `CapturedCompilerStage` now owns the actual operation,
+  captured facts, demanded-row issuer and completed whole-stage output. Carried
+  `OriginalCompilerInputs` no longer contains an optional physical capability.
+- `BoundArtifactSelection` retains that stage and borrows its completed source
+  selection; selected item compiler prefixes remain separate carried inputs.
+- Production consumer migration is coordinated with C. Test caller migration,
+  raw-pair constructor deletion, compilation and executed qualification remain
+  pending. This source checkpoint is not integration-ready or test evidence.

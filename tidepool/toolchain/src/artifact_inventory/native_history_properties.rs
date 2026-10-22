@@ -1791,7 +1791,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
         let output =
-            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 &base,
                 Vec::new(),
@@ -1799,8 +1799,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
         let completed = output.issued_artifacts().clone();
-        assert!(output.physical_cohort().is_ok());
-        let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let support = CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
         let mut rows = Rows::default();
         let empty = View {
             inventory: 0,
@@ -1942,13 +1941,6 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                     &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                 )
                 .unwrap();
-            let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-                inputs.compiler_source_support(),
-            );
-            assert!(
-                matches!(carried.physical_cohort(), Err(CompileError::ExtractFailed(message))
-                if message == "exact declaration context: target requires its actual physical output cohort")
-            );
             let receiving_inventory = inputs.artifacts().inventory();
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             // The next target emits no products. Empty and opted-in input
@@ -1966,7 +1958,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
             let target = receiving_inventory.select_native_target(
-                physical.physical_inputs().physical_cohort().unwrap(),
+                physical.captured_stage().physical_cohort(),
                 physical.source_selection(),
                 observed,
                 None,

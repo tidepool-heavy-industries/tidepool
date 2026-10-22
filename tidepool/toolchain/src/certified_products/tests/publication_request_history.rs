@@ -483,18 +483,18 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     selection.bind_produced_originals(
                         &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&product)).unwrap(),
                     ).unwrap();
-                    let completed = OriginalCompilerInputs::issue_segment_native_availability(
+                    let completed = crate::declaration_context::CapturedCompilerStage::issue(
                         &mut selection, request.compiler_inputs().artifacts(), vec![output.clone()],
                         &mut PackageInterfaceValidation::default(),
                     ).unwrap();
-                    let actual_role = &completed.role_projection().snapshot_roles()[&output.descriptor.owner];
+                    let actual_role = &completed.compiler_inputs().role_projection().snapshot_roles()[&output.descriptor.owner];
                     prop_assert_eq!(actual_role, &expected_output_role,
                         "completed output role: step={} ordinal={} owner={:?} origin={:?} input_role={:?}",
                         step, ordinal, output.descriptor.owner, origin, existing);
-                    let output_permission = completed.native_availability().rows()
+                    let output_permission = completed.compiler_inputs().native_availability().rows()
                         .find(|row| row.original_owner() == product.owner()).unwrap();
                     prop_assert!(output_permission.permits(0));
-                    prop_assert_eq!(completed.native_availability().snapshot_facts().unwrap()[&output.descriptor.id].mode.clone(),
+                    prop_assert_eq!(completed.compiler_inputs().native_availability().snapshot_facts().unwrap()[&output.descriptor.id].mode.clone(),
                         crate::declaration_context::NativeTransportMode::Full);
                     prop_assert!(!completed.issued_artifacts().selected_native_groups().iter()
                         .any(|group| group.artifact == output.descriptor.id));
@@ -526,7 +526,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         carried_reuses.set(carried_reuses.get() + 1);
                         None
                     };
-                    let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed).unwrap();
+                    let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(completed.compiler_inputs()).unwrap();
                     context = context.extend_issued_compiler_support(&support).unwrap();
                     if let Some(bindings) = new_bindings {
                         output_producers.insert(ordinal, (selection, completed, bindings, origin));
@@ -709,7 +709,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         &prepared, &observations, &validation.inventory,
                     ).unwrap();
                     let target = inventory.select_native_target(
-                        physical.physical_cohort().unwrap(), selection,
+                        physical.physical_cohort(), selection,
                         observed, None, None, &[], &BTreeMap::new(), &mut validation,
                     ).unwrap();
                     let groups = target.resolve().unwrap().groups().clone();

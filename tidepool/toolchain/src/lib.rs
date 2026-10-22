@@ -26,7 +26,10 @@ pub mod compiler_world;
 mod host_work;
 pub use compile_input::CompileInputError;
 mod declaration_context;
-pub use declaration_context::{ExactImportWitnessFailure, ExactImportWitnessRefusal};
+pub use declaration_context::{
+    ExactImportWitnessFailure, ExactImportWitnessRefusal, SourceAdmissionBoundary,
+    SourceAdmissionFailure, SourceAdmissionRefusal, SourceLexicalClaim,
+};
 pub mod declaration_join;
 pub mod diag;
 pub mod digest;
@@ -127,6 +130,8 @@ pub enum CompileError {
     ExtractFailed(String),
     #[error("extractor contract failure: {0}")]
     ExactImportWitness(#[source] Box<ExactImportWitnessFailure>),
+    #[error("extractor contract failure: {0}")]
+    SourceAdmission(#[source] Box<SourceAdmissionFailure>),
     /// Retained compiler evidence could not be read or decoded. Keep its
     /// resource and filesystem causes distinct from a compiler contract skew.
     #[error("compiler evidence rejected: {0}")]

@@ -730,8 +730,7 @@ pub(crate) fn seal(
     package_interfaces: &CertifiedTargetPackageInterfaces,
     table: DataConTable,
     sites: Vec<YieldSite>,
-    artifacts: &crate::artifact_inventory::ArtifactView,
-    source_selection: &crate::certified_products::CertifiedSourceSelection,
+    output: &crate::declaration_context::IssuedOriginalOutput,
     native_sites: crate::checked_cell::SelectedNativeSites,
 ) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
     // Original completed source output can retain compile-time execution.
@@ -777,7 +776,7 @@ pub(crate) fn seal(
             "original input lacks one authenticated generated target owner".into(),
         ));
     };
-    let lexical = original_source_lexical(evidence, artifacts)?;
+    let lexical = original_source_lexical(evidence, output.artifacts())?;
     let required_instance_owners = evidence
         .modules
         .iter()
@@ -788,11 +787,10 @@ pub(crate) fn seal(
         })
         .collect::<Vec<_>>();
     let original_execution = Arc::new(
-        crate::declaration_context::ExactDeclarationContext::from_source_selection(
+        crate::declaration_context::ExactDeclarationContext::from_issued_output(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                 .sha256(),
-            source_selection,
-            artifacts,
+            output,
             lexical,
             original_target.clone(),
             &required_instance_owners,

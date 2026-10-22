@@ -148,7 +148,7 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     let issued = inventory.metrics().issued_scope_nodes;
     let staged = inventory
         .select_native_target(
-            fixed.physical_inputs().physical_cohort().unwrap(),
+            fixed.captured_stage().physical_cohort(),
             fixed.source_selection(),
             observed,
             None,

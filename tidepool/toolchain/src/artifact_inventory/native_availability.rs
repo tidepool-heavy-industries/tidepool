@@ -3748,7 +3748,7 @@ mod normalized_dependency_tests {
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
-        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+        let completed = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             entries,
@@ -3854,7 +3854,7 @@ mod normalized_dependency_tests {
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
-        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+        let completed = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             entries,
@@ -4227,14 +4227,14 @@ mod normalized_dependency_tests {
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
-        let inputs = OriginalCompilerInputs::issue_segment_native_availability(
+        let inputs = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &artifacts,
             entries.clone(),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+        let complete = CompilerSourceSupport::close_complete_output(inputs.compiler_inputs()).unwrap();
         let root_owner = ExactModuleIdentity {
             unit: products[1].owner().unit.clone(),
             module: products[1].owner().module.clone(),
@@ -4688,7 +4688,7 @@ mod normalized_dependency_tests {
         let fixed = inventory
             .bind_segment(&receiving, vec![], &selection, &mut validation)
             .unwrap();
-        let cohort = fixed.physical_inputs().physical_cohort().unwrap();
+        let cohort = fixed.captured_stage().physical_cohort();
         let physical = cohort.artifacts();
         assert!(!physical.namespace().contains_key(&hidden_id));
         assert_ne!(
@@ -4771,7 +4771,7 @@ mod normalized_dependency_tests {
         // Finish the product through the real completion issuer so the
         // selection carries issued availability rather than an unresolved
         // pending requirement.
-        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+        let completed = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &artifacts,
             vec![entry.clone()],
@@ -4779,7 +4779,7 @@ mod normalized_dependency_tests {
         )
         .unwrap();
         assert!(completed
-            .native_availability()
+            .compiler_inputs().native_availability()
             .issued_row(entry.descriptor.id)
             .is_some());
         (entry, selection)

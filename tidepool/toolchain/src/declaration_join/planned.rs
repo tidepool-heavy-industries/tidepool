@@ -10,8 +10,19 @@ use std::collections::{BTreeMap, BTreeSet};
 /// required type interfaces. Other whole-check consumers stay transient.
 pub(super) fn authored_interface_context(
     baseline: Option<&Arc<ExactDeclarationContext>>,
-    compiled: &crate::artifact_inventory::ArtifactView,
-    issued: &crate::artifact_inventory::CompilerInputProjection,
+    output: &crate::declaration_context::IssuedOriginalOutput,
+    original_owners: impl IntoIterator<Item = ExactModuleIdentity>,
+    source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+    let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        output.compiler_inputs(),
+    )?;
+    authored_support_context(baseline, &support, original_owners, source_imports)
+}
+
+fn authored_support_context(
+    baseline: Option<&Arc<ExactDeclarationContext>>,
+    support: &crate::artifact_inventory::CompilerSourceSupport,
     original_owners: impl IntoIterator<Item = ExactModuleIdentity>,
     source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
 ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
@@ -26,7 +37,7 @@ pub(super) fn authored_interface_context(
         Some(context) => context.as_ref().clone(),
         None => ExactDeclarationContext::new(&[], &[], vec![])?,
     };
-    let support = issued.source_support(compiled, &owners)?;
+    let support = support.source_support(&owners)?;
     Ok(Arc::new(context.extend_issued_compiler_support(&support)?))
 }
 
@@ -885,18 +896,14 @@ fn certify_admitted_planned_declaration(
             "planned original sealed product has a different declaration origin",
         ));
     }
-    let issued = source_selection
-        .compiler_support_projection(sealed_artifacts, std::slice::from_ref(source_admission))
-        .map_err(|error| contract(format!("planned compiler source selection: {error}")))?;
     let artifact_context = authored_interface_context(
         Some(baseline),
-        sealed_artifacts,
-        &issued,
+        output,
         products.iter().map(|product| ExactModuleIdentity {
             unit: product.owner().unit.clone(),
             module: product.owner().module.clone(),
         }),
-        &source_admission.home_imports()?,
+        &source_admission.consumed_home_adjacency()?,
     )?;
     let artifact_context = Arc::new(
         artifact_context
@@ -916,7 +923,7 @@ fn certify_admitted_planned_declaration(
         toolchain_identity_sha256,
         evidence,
         Some(source_admission),
-        &source_admission.home_imports()?,
+        &source_admission.consumed_home_adjacency()?,
         Some(&artifact_context),
         admission.program_source_lexical(),
         includes,
@@ -1198,10 +1205,14 @@ mod tests {
             )
             .unwrap();
         assert!(scoped.selected_native_groups().is_empty());
-        let baseline = authored_interface_context(
+        let baseline = authored_support_context(
             Some(&Arc::new(baseline)),
-            &scoped,
-            &issued,
+            &crate::declaration_context::recover_fixture_compiler_support(
+                issued.clone(),
+                scoped.clone(),
+                [],
+            )
+            .unwrap(),
             products.iter().map(|product| ExactModuleIdentity {
                 unit: product.owner().unit.clone(),
                 module: product.owner().module.clone(),
@@ -1410,9 +1421,18 @@ mod tests {
                         vec![module("NativeA"), module("NativeB")],
                     ),
                 ]);
-                let context =
-                    authored_interface_context(None, &view, &issued, [root.clone()], &imports)
-                        .unwrap();
+                let context = authored_support_context(
+                    None,
+                    &crate::declaration_context::recover_fixture_compiler_support(
+                        issued.clone(),
+                        view.clone(),
+                        [],
+                    )
+                    .unwrap(),
+                    [root.clone()],
+                    &imports,
+                )
+                .unwrap();
                 assert_eq!(
                     context
                         .compiler_input_projection()
@@ -1516,9 +1536,18 @@ mod tests {
                 let before = first.selected_native_groups();
                 assert_eq!(before.len(), 1);
                 assert!(before.iter().all(|group| group.original_ordinal == 7));
-                let narrowed =
-                    authored_interface_context(None, &first, &issued, [root.clone()], &imports)
-                        .unwrap();
+                let narrowed = authored_support_context(
+                    None,
+                    &crate::declaration_context::recover_fixture_compiler_support(
+                        issued.clone(),
+                        first.clone(),
+                        [],
+                    )
+                    .unwrap(),
+                    [root.clone()],
+                    &imports,
+                )
+                .unwrap();
                 assert_eq!(
                     narrowed.artifact_view().selected_native_groups(),
                     before,
@@ -1527,12 +1556,16 @@ mod tests {
                 let historical = product(&dependency.module, 2);
                 let (conflicting, conflict_selection) = issued_view(&[historical]);
                 assert!(
-                    authored_interface_context(
+                    authored_support_context(
                         Some(&context),
-                        &conflicting,
-                        &conflict_selection,
+                        &crate::declaration_context::recover_fixture_compiler_support(
+                            conflict_selection.clone(),
+                            conflicting.clone(),
+                            []
+                        )
+                        .unwrap(),
                         [dependency.clone()],
-                        &BTreeMap::from([(dependency, vec![])]),
+                        &BTreeMap::from([(dependency, vec![])])
                     )
                     .is_err(),
                     "another native version cannot replace the selected owner"
@@ -1572,15 +1605,19 @@ mod tests {
             None,
         )
         .unwrap();
-        let context = authored_interface_context(
+        let context = authored_support_context(
             None,
-            &compiled,
-            &crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
-                Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(source)),
-                Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
-                    dependency,
-                )),
-            ])
+            &crate::declaration_context::recover_fixture_compiler_support(
+                crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                    Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(source)),
+                    Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
+                        dependency,
+                    )),
+                ])
+                .unwrap(),
+                compiled.clone(),
+                [],
+            )
             .unwrap(),
             [root.clone()],
             &admitted,
@@ -1633,10 +1670,14 @@ mod tests {
         )
         .unwrap();
 
-        let missing = authored_interface_context(
+        let missing = authored_support_context(
             None,
-            &ArtifactInventory::default().empty_view(),
-            &Default::default(),
+            &crate::declaration_context::recover_fixture_compiler_support(
+                crate::artifact_inventory::CompilerInputProjection::default(),
+                ArtifactInventory::default().empty_view(),
+                [],
+            )
+            .unwrap(),
             [root.clone()],
             &admitted,
         )
@@ -1661,10 +1702,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let wrong = authored_interface_context(
+        let wrong = authored_support_context(
             None,
-            &wrong,
-            &Default::default(),
+            &crate::declaration_context::recover_fixture_compiler_support(
+                crate::artifact_inventory::CompilerInputProjection::default(),
+                wrong.clone(),
+                [],
+            )
+            .unwrap(),
             [root.clone()],
             &admitted,
         )
@@ -1740,18 +1785,26 @@ mod tests {
         let (first_offer, first_roles) = offer([1; 32]);
         let (second_offer, second_roles) = offer([2; 32]);
         assert!(first_offer.merge_fixture_selections(&second_offer).is_err());
-        let first = authored_interface_context(
+        let first = authored_support_context(
             None,
-            &first_offer,
-            &first_roles,
+            &crate::declaration_context::recover_fixture_compiler_support(
+                first_roles.clone(),
+                first_offer.clone(),
+                [],
+            )
+            .unwrap(),
             [original.clone()],
             &admitted,
         )
         .unwrap();
-        let second = authored_interface_context(
+        let second = authored_support_context(
             Some(&first),
-            &second_offer,
-            &second_roles,
+            &crate::declaration_context::recover_fixture_compiler_support(
+                second_roles.clone(),
+                second_offer.clone(),
+                [],
+            )
+            .unwrap(),
             [original.clone()],
             &admitted,
         )

@@ -331,7 +331,7 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         module: "CachedPackageWorldHome".into(),
     };
     let primary = Arc::new(
-        crate::declaration_join::ExactDeclarationContext::from_source_selection(
+        crate::declaration_join::ExactDeclarationContext::from_issued_output(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                 &compiled_home
                     .producer_identity
@@ -339,10 +339,9 @@ fn real_cached_home_world_item_admits_its_package_roots() {
             )
             .sha256(),
             compiled_home
-                .source_selection
+                .issued_output
                 .as_ref()
                 .expect("fresh compiler selection"),
-            &compiled_home.artifact_view,
             vec![crate::declaration_join::ExactLexicalNode {
                 owner: owner.clone(),
                 imports: Vec::new(),
