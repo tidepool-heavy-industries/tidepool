@@ -1295,12 +1295,17 @@ mod tests {
     #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
     fn finite_package_targets_reuse_exact_bindings_without_crossing_target_slots() {
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("LinkedNativeDependency.hs"),
+            include_str!("../../tests/fixtures/invocation-output/LinkedNativeDependency.hs"),
+        )
+        .unwrap();
         let includes = [root.path().to_owned()];
         let invocation = crate::artifacts::CompileInvocation {
-            source: include_str!("../../tests/fixtures/invocation-output/NativePackageTargets.hs"),
+            source: include_str!("../../tests/fixtures/invocation-output/LinkedNativeTargets.hs"),
             targets: &["second", "first"],
             include: &includes,
-            fallback_module_name: "NativePackageTargets",
+            fallback_module_name: "LinkedNativeTargets",
         };
         let mut executions = 0;
         let output =
@@ -1319,6 +1324,20 @@ mod tests {
         };
         let first = linked("first");
         let second = linked("second");
+        assert!(
+            first
+                .acquired()
+                .all(|acquired| matches!(acquired.grant(), NativeCodeGrant::Package { .. })),
+            "the first target acquires package code without a HOME carrier"
+        );
+        assert!(
+            second.acquired().any(|acquired| matches!(
+                acquired.code().body(),
+                tidepool_repr::native_code::NativeCodeBody::Home(body)
+                    if body.owner().module == "LinkedNativeDependency"
+            )),
+            "the dependent target must acquire its actual external HOME body"
+        );
         assert!(
             !Arc::ptr_eq(first.closure(), second.closure()),
             "distinct physical targets retain distinct actual closure owners"
