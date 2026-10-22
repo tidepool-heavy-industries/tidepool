@@ -2086,11 +2086,11 @@ impl PublicationNativeFacts {
             role: &crate::artifact_inventory::RecordedCompilerRole,
             operation: &tidepool_repr::execution_schema::InventoryOperation,
         ) -> Result<(), SnapshotProjectionError> {
-            if let CompilerInputRole::PublishedSourceOriginal {
+            if let crate::artifact_inventory::RecordedCompilerRole::PublishedSourceOriginal {
                 source_revision,
                 original_input_identity,
                 ..
-            } = role.as_role()
+            } = role
             {
                 operation.charge(source_revision.len())?;
                 operation.charge(original_input_identity.len())?;
@@ -2376,7 +2376,7 @@ impl ExactContextSnapshot {
     pub fn compiler_roles(&self) -> Vec<CompilerInputRole> {
         self.roles
             .values()
-            .map(|role| role.as_role().clone())
+            .map(|role| role.to_recorded_role())
             .collect()
     }
     pub fn lexical(&self) -> Vec<ExactLexicalNode> {
@@ -2499,7 +2499,42 @@ impl SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole> for Com
         store: &mut Materializer<'_, BS>,
         value: &crate::artifact_inventory::RecordedCompilerRole,
     ) -> Result<Cid, SnapshotError> {
-        <Self as SnapshotValueCodec<CompilerInputRole>>::encode(store, value.as_role())
+        use crate::artifact_inventory::RecordedCompilerRole;
+        let fact = match value {
+            RecordedCompilerRole::InterfaceOnly { interface } => CompilerRoleFact::InterfaceOnly {
+                interface: *interface,
+            },
+            RecordedCompilerRole::ReusableOriginal {
+                interface,
+                original,
+            } => CompilerRoleFact::ReusableOriginal {
+                interface: *interface,
+                original: *original,
+            },
+            RecordedCompilerRole::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+                native_authority,
+            } => {
+                let authority = store.materialize_publication_native(native_authority)?;
+                let base = store.selection_base.clone();
+                let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
+                CompilerRoleFact::PublishedSourceOriginal {
+                    interface: *interface,
+                    original: *original,
+                    source_revision: source_revision.clone(),
+                    original_input_identity: original_input_identity.clone(),
+                    selection: selection.root,
+                    selection_sha256: *selection_sha256,
+                    native_authority: authority,
+                }
+            }
+        };
+        store.materialize_value(&fact)
     }
     fn decode<BS: Blockstore>(
         store: &SnapshotHydrator<'_, BS>,

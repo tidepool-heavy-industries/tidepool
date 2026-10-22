@@ -69,12 +69,12 @@ impl PublicationNativeAuthority {
             ));
         };
         let facts = Arc::clone(self.facts());
-        if facts.roles.get(owner).map(RecordedCompilerRole::as_role)
-            != Some(&CompilerInputRole::ReusableOriginal {
+        if facts.roles.get(owner).is_none_or(|role| {
+            role != &CompilerInputRole::ReusableOriginal {
                 interface: *interface,
                 original: *original,
-            })
-        {
+            }
+        }) {
             return Err(failure(
                 "publication birth root is not its exact pre-endorsement role",
             ));
@@ -212,15 +212,35 @@ impl Eq for CompilerInputRole {}
 impl CompilerInputRole {
     /// Durable facts share the birth descriptor, never its per-view acquisition.
     pub(crate) fn recorded_fact(&self) -> RecordedCompilerRole {
-        let mut fact = self.clone();
-        if let Self::PublishedSourceOriginal {
-            native_authority, ..
-        } = &mut fact
-        {
-            *native_authority =
-                PublicationNativeAuthority::recorded(Arc::clone(native_authority.facts()));
+        match self {
+            Self::InterfaceOnly { interface } => RecordedCompilerRole::InterfaceOnly {
+                interface: *interface,
+            },
+            Self::ReusableOriginal {
+                interface,
+                original,
+            } => RecordedCompilerRole::ReusableOriginal {
+                interface: *interface,
+                original: *original,
+            },
+            Self::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+                native_authority,
+            } => RecordedCompilerRole::PublishedSourceOriginal {
+                interface: *interface,
+                original: *original,
+                source_revision: source_revision.clone(),
+                original_input_identity: original_input_identity.clone(),
+                selection: selection.clone(),
+                selection_sha256: *selection_sha256,
+                native_authority: Arc::clone(native_authority.facts()),
+            },
         }
-        RecordedCompilerRole(fact)
     }
 
     pub fn interface(&self) -> ArtifactId {
@@ -299,38 +319,182 @@ pub(crate) enum CompilerRoleObservation<'a> {
     },
 }
 
-/// A closed immutable role fact. Construction strips only a per-view acquired
-/// wrapper; neither deserialization nor this value grants a live compiler role.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(crate) struct RecordedCompilerRole(CompilerInputRole);
+/// Closed immutable role facts retain no per-view acquired input or payload
+/// custody. Acquisition validates these facts against the receiving view.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RecordedCompilerRole {
+    InterfaceOnly {
+        interface: ArtifactId,
+    },
+    ReusableOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+    },
+    PublishedSourceOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+        source_revision: String,
+        original_input_identity: String,
+        selection: ExactArtifactSelection,
+        selection_sha256: [u8; 32],
+        native_authority: Arc<crate::exact_context::PublicationNativeFacts>,
+    },
+}
 
 impl RecordedCompilerRole {
-    pub(crate) fn as_role(&self) -> &CompilerInputRole {
-        &self.0
+    /// A recorded role still needs the existing receiving-view acquisition.
+    pub(crate) fn to_recorded_role(&self) -> CompilerInputRole {
+        match self {
+            Self::InterfaceOnly { interface } => CompilerInputRole::InterfaceOnly {
+                interface: *interface,
+            },
+            Self::ReusableOriginal {
+                interface,
+                original,
+            } => CompilerInputRole::ReusableOriginal {
+                interface: *interface,
+                original: *original,
+            },
+            Self::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+                native_authority,
+            } => CompilerInputRole::PublishedSourceOriginal {
+                interface: *interface,
+                original: *original,
+                source_revision: source_revision.clone(),
+                original_input_identity: original_input_identity.clone(),
+                selection: selection.clone(),
+                selection_sha256: *selection_sha256,
+                native_authority: PublicationNativeAuthority::recorded(Arc::clone(
+                    native_authority,
+                )),
+            },
+        }
     }
     /// Read the recorded interface fact without exposing the live role surface.
     pub(crate) fn interface(&self) -> ArtifactId {
-        self.0.interface()
+        match self {
+            Self::InterfaceOnly { interface }
+            | Self::ReusableOriginal { interface, .. }
+            | Self::PublishedSourceOriginal { interface, .. } => *interface,
+        }
     }
     /// Read the recorded original fact without exposing the live role surface.
     pub(crate) fn original(&self) -> Option<ArtifactId> {
-        self.0.original()
+        match self {
+            Self::InterfaceOnly { .. } => None,
+            Self::ReusableOriginal { original, .. }
+            | Self::PublishedSourceOriginal { original, .. } => Some(*original),
+        }
     }
 }
+impl PartialEq for RecordedCompilerRole {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InterfaceOnly { interface: left }, Self::InterfaceOnly { interface: right }) => {
+                left == right
+            }
+            (
+                Self::ReusableOriginal {
+                    interface: li,
+                    original: lo,
+                },
+                Self::ReusableOriginal {
+                    interface: ri,
+                    original: ro,
+                },
+            ) => li == ri && lo == ro,
+            (
+                Self::PublishedSourceOriginal {
+                    interface: li,
+                    original: lo,
+                    source_revision: lr,
+                    original_input_identity: lp,
+                    selection: ls,
+                    selection_sha256: ld,
+                    native_authority: la,
+                },
+                Self::PublishedSourceOriginal {
+                    interface: ri,
+                    original: ro,
+                    source_revision: rr,
+                    original_input_identity: rp,
+                    selection: rs,
+                    selection_sha256: rd,
+                    native_authority: ra,
+                },
+            ) => {
+                li == ri
+                    && lo == ro
+                    && lr == rr
+                    && lp == rp
+                    && ld == rd
+                    && la == ra
+                    && (Arc::ptr_eq(ls.snapshot(), rs.snapshot()) || ls.snapshot() == rs.snapshot())
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for RecordedCompilerRole {}
 impl PartialEq<CompilerInputRole> for RecordedCompilerRole {
     fn eq(&self, other: &CompilerInputRole) -> bool {
-        self.0 == *other
+        match (self, other) {
+            (
+                Self::InterfaceOnly { interface: left },
+                CompilerInputRole::InterfaceOnly { interface: right },
+            ) => left == right,
+            (
+                Self::ReusableOriginal {
+                    interface: li,
+                    original: lo,
+                },
+                CompilerInputRole::ReusableOriginal {
+                    interface: ri,
+                    original: ro,
+                },
+            ) => li == ri && lo == ro,
+            (
+                Self::PublishedSourceOriginal {
+                    interface: li,
+                    original: lo,
+                    source_revision: lr,
+                    original_input_identity: lp,
+                    selection: ls,
+                    selection_sha256: ld,
+                    native_authority: la,
+                },
+                CompilerInputRole::PublishedSourceOriginal {
+                    interface: ri,
+                    original: ro,
+                    source_revision: rr,
+                    original_input_identity: rp,
+                    selection: rs,
+                    selection_sha256: rd,
+                    native_authority: ra,
+                },
+            ) => {
+                li == ri
+                    && lo == ro
+                    && lr == rr
+                    && lp == rp
+                    && ld == rd
+                    && la == ra.facts()
+                    && (Arc::ptr_eq(ls.snapshot(), rs.snapshot()) || ls.snapshot() == rs.snapshot())
+            }
+            _ => false,
+        }
     }
 }
 impl PartialEq<RecordedCompilerRole> for CompilerInputRole {
     fn eq(&self, other: &RecordedCompilerRole) -> bool {
-        *self == other.0
-    }
-}
-impl<'de> Deserialize<'de> for RecordedCompilerRole {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        CompilerInputRole::deserialize(deserializer).map(|role| role.recorded_fact())
+        other == self
     }
 }
 
@@ -2093,7 +2257,11 @@ impl IssuedInputNativeDecisions {
     fn for_exact_roles(&self, projection: &CompilerInputProjection) -> Self {
         let mut facts = self.facts.clone();
         for (owner, fact) in &self.facts {
-            if projection.snapshot_roles().get(owner) != Some(fact.role.as_role()) {
+            if projection
+                .snapshot_roles()
+                .get(owner)
+                .is_none_or(|role| &fact.role != role)
+            {
                 facts.remove(owner);
             }
         }
@@ -2107,7 +2275,11 @@ impl IssuedInputNativeDecisions {
         let roots = view.roots();
         let mut facts = self.facts.clone();
         for (owner, fact) in &self.facts {
-            if projection.snapshot_roles().get(owner) != Some(fact.role.as_role()) {
+            if projection
+                .snapshot_roles()
+                .get(owner)
+                .is_none_or(|role| &fact.role != role)
+            {
                 facts.remove(owner);
                 continue;
             }
@@ -4469,7 +4641,12 @@ impl CompilerSourceSupport {
             .lock()
             .expect("inventory lock");
         for (owner, fact) in decision_facts {
-            if restored.projection.snapshot_roles().get(owner) != Some(fact.role.as_role()) {
+            if restored
+                .projection
+                .snapshot_roles()
+                .get(owner)
+                .is_none_or(|role| &fact.role != role)
+            {
                 return Err(failure(
                     "recorded input decision differs from its exact compiler role",
                 ));
@@ -5542,7 +5719,7 @@ impl CompilerInputProjection {
         let metadata = view.metadata_snapshot();
         let mut projection = Self::default();
         for (owner, fact) in recorded_roles {
-            let role = fact.as_role();
+            let role = fact.to_recorded_role();
             if metadata
                 .artifacts
                 .get(&role.interface())
@@ -5552,7 +5729,7 @@ impl CompilerInputProjection {
                     "recorded compiler role differs from its retained owner",
                 ));
             }
-            projection.admit_role(owner.clone(), role.clone())?;
+            projection.admit_role(owner.clone(), role)?;
         }
         projection.validate(view)?;
         Ok(projection)
@@ -5898,7 +6075,7 @@ impl CompilerInputProjection {
         if self
             .recorded_roles
             .get(&owner)
-            .is_none_or(|fact| fact.as_role() != role)
+            .is_none_or(|fact| fact != role)
         {
             self.recorded_roles.insert(owner, role.recorded_fact());
         }

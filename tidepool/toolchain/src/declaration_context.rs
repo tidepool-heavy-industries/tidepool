@@ -19875,8 +19875,8 @@ mod tests {
         );
         assert_eq!(first.interface(), overlapping.interface());
         assert_eq!(first.original(), overlapping.original());
-        let first_dependency = first_authority.roles[&dependency].as_role();
-        let overlapping_dependency = overlapping_authority.roles[&dependency].as_role();
+        let first_dependency = first_authority.roles[&dependency].to_recorded_role();
+        let overlapping_dependency = overlapping_authority.roles[&dependency].to_recorded_role();
         assert!(matches!(
             first_dependency,
             CompilerInputRole::ReusableOriginal { .. }
@@ -21477,6 +21477,35 @@ mod tests {
         let live_role = restored.compiler_input_projection().snapshot_roles()[&root].clone();
         let recorded_role = live_role.recorded_fact();
         assert_eq!(recorded_role, live_role);
+        for role in [
+            CompilerInputRole::InterfaceOnly {
+                interface: live_role.interface(),
+            },
+            CompilerInputRole::ReusableOriginal {
+                interface: live_role.interface(),
+                original: live_role.original().unwrap(),
+            },
+            live_role.clone(),
+        ] {
+            let facts = role.recorded_fact();
+            let wire = fvm_ipld_encoding::to_vec(&role).unwrap();
+            assert_eq!(wire, fvm_ipld_encoding::to_vec(&facts).unwrap());
+            let decoded: crate::artifact_inventory::RecordedCompilerRole =
+                fvm_ipld_encoding::from_slice(&wire).unwrap();
+            assert_eq!(decoded, facts);
+            let wire_store = MemoryBlockstore::new();
+            let mut wire_writer = Materializer::new(&wire_store);
+            let live_cid = <crate::exact_context::CompilerRoleCodec as
+                crate::exact_context::SnapshotValueCodec<CompilerInputRole>>::encode(
+                    &mut wire_writer, &role,
+                ).unwrap();
+            let fact_cid = <crate::exact_context::CompilerRoleCodec as
+                crate::exact_context::SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole>>::encode(
+                    &mut wire_writer, &facts,
+                ).unwrap();
+            assert_eq!(live_cid, fact_cid);
+            wire_writer.finish().unwrap();
+        }
         drop(live_role);
         let fact_only_snapshot = restored.snapshot();
         drop(restored);
@@ -21484,7 +21513,9 @@ mod tests {
             restored_birth_row.upgrade().is_none(),
             "pure fact roots cannot retain an acquired native row after its context drops"
         );
-        assert!(recorded_role.as_role().is_published_source_original());
+        assert!(recorded_role
+            .to_recorded_role()
+            .is_published_source_original());
         let fact_store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&fact_store);
         writer
