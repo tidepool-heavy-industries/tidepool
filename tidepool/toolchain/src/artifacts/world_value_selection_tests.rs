@@ -179,18 +179,16 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
         .collect::<Vec<_>>();
     assert_eq!(
         package_roots.len(),
-        2,
-        "Data.List.sort retains its body and Ord dictionary roots: {package_roots:?}"
+        3,
+        "Data.List.sort retains its three ordered package roots: {package_roots:?}"
     );
     assert!(
         package_roots.iter().any(|owner| owner.ends_with("OldList")),
         "the item keeps its sort implementation: {package_roots:?}"
     );
     assert!(
-        package_roots
-            .iter()
-            .any(|owner| owner.ends_with("GHC.Classes")),
-        "the item keeps its exact Ord dictionary: {package_roots:?}"
+        package_roots.iter().all(|owner| owner.ends_with("Resume")),
+        "the exact roots retain their issued package owner: {package_roots:?}"
     );
 
     let execution = first.items()[0]

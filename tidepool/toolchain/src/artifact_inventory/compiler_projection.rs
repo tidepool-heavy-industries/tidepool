@@ -1182,9 +1182,48 @@ pub(crate) fn complete_native_selection(
     // authoritative, but the fresh occurrence must match its product and ordered
     // children exactly before admission. Non-fresh rows without a prior
     // completion have no reconstructable choice.
-    let expected_home_keys = selection
+    let selected_home_keys = selection
         .home_root_coordinates()
         .into_iter()
+        .collect::<BTreeSet<_>>();
+    let source_home_rows = row_inputs
+        .iter()
+        .map(|(row, _)| {
+            let owner = row.group().owner();
+            let package_slots = row
+                .imports()
+                .iter()
+                .filter(|link| matches!(link, SelectedNativeImport::Package { .. }))
+                .count();
+            (
+                (
+                    owner.unit.clone(),
+                    owner.module.clone(),
+                    row.binding().original_ordinal,
+                ),
+                row.group().origin() == crate::certified_products::ProductOrigin::Fresh,
+                package_slots,
+            )
+        })
+        .collect::<Vec<_>>();
+    let package_free_fresh = source_home_rows
+        .iter()
+        .filter(|(_, fresh, slots)| *fresh && *slots == 0)
+        .map(|(key, _, _)| key.clone())
+        .collect::<BTreeSet<_>>();
+    let forbidden_home_roots = selected_home_keys
+        .intersection(&package_free_fresh)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !forbidden_home_roots.is_empty() {
+        return Err(failure(
+            "package HOME root names a package-free fresh group",
+        ));
+    }
+    let expected_home_keys = source_home_rows
+        .iter()
+        .filter(|(_, fresh, slots)| *fresh && *slots > 0)
+        .map(|(key, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
     let mut consumed_home_keys = BTreeSet::new();
     for (row, prior) in &row_inputs {
@@ -1199,7 +1238,11 @@ pub(crate) fn complete_native_selection(
         }
         let owner = row.group().owner();
         let fresh = row.group().origin() == crate::certified_products::ProductOrigin::Fresh;
-        let fresh_links = if fresh {
+        let package_slots = imports
+            .iter()
+            .filter(|link| matches!(link, SelectedNativeImport::Package { .. }))
+            .count();
+        let fresh_links = if fresh && package_slots > 0 {
             Some(
                 selection
                     .home_roots(&owner.unit, &owner.module, row.binding().original_ordinal)
@@ -1275,7 +1318,7 @@ pub(crate) fn complete_native_selection(
     }
     if consumed_home_keys != expected_home_keys {
         return Err(failure(
-            "package HOME roots do not exactly cover the selected fresh groups",
+            "package HOME roots do not exactly cover the selected package-bearing fresh groups",
         ));
     }
     let target = sources.target();

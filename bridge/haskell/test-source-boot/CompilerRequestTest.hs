@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -49,7 +49,8 @@ import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
-  ( captureSelectedPackageWitnesses, encodeReceiptIdentity )
+  ( captureSelectedPackageWitnesses, encodeReceiptIdentity
+  , validatePackageTargetRoots )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 import qualified Crypto.Hash.SHA256 as SHA256
 
@@ -66,6 +67,18 @@ nativeReceiptIdentityChecks = forM_ [Nothing, Just (Text.pack "Record")] $ \pare
   case deserialiseFromBytes decodeTerm (BL.fromStrict (toStrictByteString (encodeReceiptIdentity symbol))) of
     Right (remaining, actual) | BL.null remaining && actual == expected -> pure ()
     other -> fail ("compiler receipt symbol grammar changed: " ++ show other)
+
+packageTargetRootDriftRefusal :: IO ()
+packageTargetRootDriftRefusal = do
+  let expected = Map.fromList [(Text.pack "item", [0, 1])]
+      mutated = Map.fromList [(Text.pack "item", [0, 2])]
+  case validatePackageTargetRoots expected expected of
+    Right () -> pure ()
+    Left reason -> fail ("unchanged target roots refused: " ++ reason)
+  case validatePackageTargetRoots expected mutated of
+    Left reason
+      | "target package roots changed" `isInfixOf` reason -> pure ()
+    other -> fail ("target root mutation was not refused: " ++ show other)
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do

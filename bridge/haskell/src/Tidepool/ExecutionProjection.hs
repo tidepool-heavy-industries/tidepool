@@ -982,28 +982,6 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ho
           && toUnitId (moduleUnit (symbolOwner (globalIdentity global))) `Set.notMember` homeUnitIds
   unless (all ((`Set.notMember` packageOwners) . pmModule) home)
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
-  homeImports <- concat <$> forM home (\prepared -> do
-    let selected = Set.fromList
-          [ ordinal
-          | (ordinal, one) <- preparedBindingGroups prepared
-          , item <- pmBindings one
-          , reachable item ]
-    groups <- maybe
-      (Left (InvalidPreparedRepresentation "selected HOME module lacks its issued original product"))
-      Right (Map.lookup (pmModule prepared) homeProducts)
-    forM (Set.toAscList selected) $ \ordinal -> do
-      group <- maybe
-        (Left (InvalidPreparedRepresentation "selected HOME group lacks its issued original product"))
-        Right (Map.lookup ordinal groups)
-      let key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
-                , Text.pack (moduleNameString (moduleName (pmModule prepared)))
-                , fromIntegral ordinal )
-      let (unit,name,ordinalKey) = key
-      pure (unit, name, ordinalKey
-        , [ globalIdentity global
-          | global <- projectedGlobals (projectedBody group)
-          , isPackageImport global ])
-    )
   products <- projectPreparedPackageGroupsWithIdentities context components reach identities
   let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
       imported = Set.fromList exports
@@ -1014,6 +992,42 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ho
   candidate <- projectPreparedCandidateWithImports imported hostBindings
     checkedContext selected checkedIdentities
   (program, constructors) <- finalizePreparedCandidate candidate
+  let programBinders = Set.fromList
+        [ identity
+        | group <- programBindings program
+        , binding <- case group of
+            NonRecursive top -> [top]
+            Recursive tops -> tops
+        , TopBinding identity _ <- [binding] ]
+      targetSymbols = Set.union programBinders
+        (Set.fromList (map globalIdentity (programGlobals program)))
+  homeImports <- concat <$> forM home (\prepared -> do
+    let selected = Set.fromList
+          [ ordinal
+          | (ordinal, one) <- preparedBindingGroups prepared
+          , item <- pmBindings one
+          , reachable item ]
+    groups <- maybe
+      (Left (InvalidPreparedRepresentation "selected HOME module lacks its issued original product"))
+      Right (Map.lookup (pmModule prepared) homeProducts)
+    rows <- forM (Set.toAscList selected) (\ordinal -> do
+      group <- maybe
+        (Left (InvalidPreparedRepresentation "selected HOME group lacks its issued original product"))
+        Right (Map.lookup ordinal groups)
+      let groupSymbols = Set.fromList (projectedBinders group)
+      let key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
+                , Text.pack (moduleNameString (moduleName (pmModule prepared)))
+                , fromIntegral ordinal )
+      let (unit,name,ordinalKey) = key
+          identities =
+            [ globalIdentity global
+            | global <- projectedGlobals (projectedBody group)
+            , isPackageImport global ]
+          demanded = not (Set.null (Set.intersection groupSymbols targetSymbols))
+      pure (unit, name, ordinalKey, identities, demanded))
+    pure (map (\(unit,name,ordinal,identities,_) -> (unit,name,ordinal,identities))
+      (filter (\(_,_,_,identities,demanded) ->
+        demanded && not (null identities)) rows)))
   let targetImports =
         [ globalIdentity global
         | global <- programGlobals program

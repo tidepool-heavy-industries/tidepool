@@ -10,7 +10,8 @@ module Tidepool.CertifiedProducts
   , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
   , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
   , PackageOccurrence, PackageLinks, PackageLinkIndex
-  , emptyPackageLinks, emptyPackageLinkIndex, encodePackageLinks ) where
+  , emptyPackageLinks, emptyPackageLinkIndex, encodePackageLinks
+  , validatePackageTargetRoots ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -227,6 +228,15 @@ packageStageIdentity occurrences targetRoots homeRoots products = SHA256.hash
       [array [encodeString target,encodeString unit,encodeString name,encodeWord ordinal]
       , list encodeLink roots]
     encodeProduct (path, seal) = array [encodeString (T.pack path),encodeBytes seal]
+
+validatePackageTargetRoots
+  :: Map.Map T.Text [Word32]
+  -> Map.Map T.Text [Word32]
+  -> Either String ()
+validatePackageTargetRoots expected produced =
+  if expected == produced
+    then Right ()
+    else Left "target package roots changed after stage identity issuance"
 
 data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
@@ -687,6 +697,12 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   (Map.findWithDefault Map.empty (T.pack target)
                     (packageLinkIndexTargetOwners packageLinks))))
             pure (T.pack target, roots))
+          case kind of
+            OrdinaryProductFacts -> either fail pure
+              (validatePackageTargetRoots
+                (packageLinkIndexTargetRoots packageLinks)
+                targetRootsFromWitnesses)
+            SegmentOriginalFacts -> pure ()
           let moduleRows =
                 [(product, group, witnesses)
                 | (product, group, Right witnesses) <- modules]
@@ -735,7 +751,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
               homeRoots = Map.restrictKeys
                 (packageLinkIndexHomeRoots packageLinks) expectedHomeRoots
               targetRoots = case kind of
-                OrdinaryProductFacts -> targetRootsFromWitnesses
+                OrdinaryProductFacts -> packageLinkIndexTargetRoots packageLinks
                 SegmentOriginalFacts -> packageLinkIndexTargetRoots packageLinks
               encodedPackageLinks = encodePackageLinks
                 (PackageLinks
@@ -875,7 +891,7 @@ encodeItemPackageSelection selection = array
   , encodeBytes (itemSelectionStageSha256 selection)
   , encodeBytes (SHA256.hash (encodeWireProgram (itemSelectionProgram selection)))
   , encodeString (itemSelectionTarget selection)
-  , list (encodeWord . fromIntegral) (itemSelectionTargetRoots selection)
+  , list encodeLink (itemSelectionTargetRoots selection)
   , list encodeHomeRoot (Map.toAscList (itemSelectionHomeRoots selection))
   ]
   where

@@ -1193,7 +1193,7 @@ tidepool_rust_test_cases(
         "artifact_inventory::package_occurrence_linkage_tests::multi_ordinal_home_keeps_per_ordinal_package_roots",
         "artifact_inventory::package_occurrence_linkage_tests::repeated_fresh_home_targets_reuse_exact_ordinal_bindings",
         "artifact_inventory::package_occurrence_linkage_tests::same_direct_package_with_different_children_has_a_real_premise",
-        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match",
+        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately",
         "artifacts::world_value_selection_tests::real_world_package_item_keeps_exact_roots_for_a_later_cell",
     ],
     expected_count = 9,
@@ -1209,7 +1209,7 @@ tidepool_rust_test_cases(
         "artifact_inventory::package_occurrence_linkage_tests::multi_ordinal_home_keeps_per_ordinal_package_roots": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::repeated_fresh_home_targets_reuse_exact_ordinal_bindings": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::same_direct_package_with_different_children_has_a_real_premise": "owned-resident",
-        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match": "owned-resident",
+        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately": "owned-resident",
         "artifacts::world_value_selection_tests::real_world_package_item_keeps_exact_roots_for_a_later_cell": "owned-resident",
     },
     env = {

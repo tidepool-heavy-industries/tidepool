@@ -1175,7 +1175,7 @@ impl CertifiedSegmentOriginals {
         }
         check_package_link_range(
             &item.selection.target_roots,
-            self.receipt.package_links.occurrences().len(),
+            self.receipt.package_links.occurrences.len(),
         )?;
         for (key, roots) in &item.selection.home_roots {
             if key.target != item.selection.target {
@@ -1205,7 +1205,7 @@ impl CertifiedSegmentOriginals {
                     "item HOME package link count differs from its globals",
                 ));
             }
-            check_package_link_range(roots, self.receipt.package_links.occurrences().len())?;
+            check_package_link_range(roots, self.receipt.package_links.occurrences.len())?;
         }
         match (&self.products.source_selection.produced_types, produced) {
             (None, None) => {}
