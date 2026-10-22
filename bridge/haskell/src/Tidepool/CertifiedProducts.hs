@@ -19,7 +19,7 @@ import Codec.CBOR.Encoding
   , encodeWord64 )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try)
-import Control.Monad (foldM, forM, unless, when)
+import Control.Monad (foldM, forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)

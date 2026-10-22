@@ -133,7 +133,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, publishStagedOriginalProducts, stagedOriginalExternalDemand
+  , writeCertifiedSegmentProducts, publishStagedOriginalProducts, stagedOriginalExternalDemand, validateStagedPriorHomeGroups
   , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
@@ -3647,10 +3647,13 @@ originalProjectionProductsWithRequest work request = do
   writeFile (work </> "ProjectionUnavailableProvider.hs") $ unlines
     ["module ProjectionUnavailableProvider (missing) where", "{-# NOINLINE missing #-}", "missing :: Int -> Int", "missing x = if x == 0 then 7 else missing (x - 1)"]
   writeFile (work </> "ProjectionOwner.hs") $ unlines
-    [ "module ProjectionOwner (bad, good) where"
+    [ "module ProjectionOwner (bad, good, packageful, packagefree) where"
     , "import ProjectionUnavailableProvider"
     , "{-# NOINLINE bad #-}", "bad :: Int -> Int", "bad x = missing x + 1"
-    , "{-# NOINLINE good #-}", "good :: Int -> Int", "good x = if x == 0 then 42 else good (x - 1)" ]
+    , "{-# NOINLINE good #-}", "good :: Int -> Int", "good x = if x == 0 then 42 else good (x - 1)"
+    , "{-# NOINLINE packageful #-}", "packageful :: Int -> Int"
+    , "packageful x = length (show x) + length (reverse (show x))"
+    , "{-# NOINLINE packagefree #-}", "packagefree :: Int", "packagefree = 7" ]
   writeFile (work </> "ProjectionIndependent.hs") $ unlines
     ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
@@ -3813,6 +3816,37 @@ originalProjectionProductsWithRequest work request = do
   unless (Map.null (originalExternalPriorHomeGroups unusedPrior)
       && null (originalExternalPackageGlobals unusedPrior)) $
     fail "empty final demand scanned or selected prior HOME availability"
+  packageful <- findBinder ownerModule "packageful"
+  packagefree <- findBinder ownerModule "packagefree"
+  let laterDemand symbol = either fail pure
+        (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [symbol])
+      rejectPrior label groups = case validateStagedPriorHomeGroups (Just sharedCertificate) groups of
+        Left _ -> pure ()
+        Right () -> fail ("prior HOME accepted " ++ label)
+  laterPackageful <- laterDemand packageful
+  laterPackagefree <- laterDemand packagefree
+  let packagefulGroups = originalExternalPriorHomeGroups laterPackageful
+      packagefreeGroups = originalExternalPriorHomeGroups laterPackagefree
+  unless (not (Map.null packagefulGroups) && any (not . null) (Map.elems packagefulGroups)
+      && not (null (originalExternalPackageGlobals laterPackageful))) $
+    fail "later prior-body fixture did not expose its real package obligations"
+  unless (not (Map.null packagefreeGroups) && all null (Map.elems packagefreeGroups)
+      && null (originalExternalPackageGlobals laterPackagefree)) $
+    fail "package-free prior-body fixture did not retain its empty HOME obligation"
+  unless (packageful `notElem` map globalIdentity currentGlobals
+      && packagefree `notElem` map globalIdentity currentGlobals) $
+    fail "later prior-body controls were already demanded by the initial target"
+  either fail pure (validateStagedPriorHomeGroups (Just sharedCertificate) packagefulGroups)
+  either fail pure (validateStagedPriorHomeGroups (Just sharedCertificate) packagefreeGroups)
+  case validateStagedPriorHomeGroups Nothing packagefulGroups of
+    Left _ -> pure ()
+    Right () -> fail "prior HOME accepted an absent predecessor"
+  rejectPrior "a substituted prior version" (Map.mapKeys
+    (\(unit,name,_,ordinal) -> (unit,name,Just "unissued-prior-version",ordinal)) packagefulGroups)
+  rejectPrior "an unissued prior ordinal" (Map.mapKeys
+    (\(unit,name,version,_) -> (unit,name,version,maxBound)) packagefulGroups)
+  rejectPrior "changed ordered direct package imports" (Map.map
+    (\identities -> case identities of [] -> []; first : _ -> first : identities) packagefulGroups)
   let direct = [global | global <- currentGlobals,globalIdentity global == known]
   unless (not (null direct) && requiredOriginalExternalGlobalsWithPrior [] [] [] Set.empty priorPackages direct
       == Right (Set.toAscList packages)) $

@@ -12,7 +12,7 @@ module Tidepool.CompilerProducts
   , CompletedWorldProducts, completeWorldProducts, completedWorldNative, completedWorldPredecessor
   , WorldStageInputs, bindWorldStageInputs, bindWorldStageInputsWithNativeDemand, requireWorldStageInputs, exchangeWorldNativeDemand, worldStagePriorOriginals, withWorldStageBindings, withPreparedWorldStageInputs, withWorldStageCompilation, withWorldStageBasis, newPreparedWorldInterfaceArtifacts
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
-  , StagedProductFailure(..), stagedOriginalBinders, withStagedOriginalBindings, stagedOriginalExternalDemand, stagedOriginalReference, withWorldStageInputs, newPreparedOriginalInterfaceArtifactsWithPrior
+  , StagedProductFailure(..), stagedOriginalBinders, withStagedOriginalBindings, stagedOriginalExternalDemand, stagedOriginalReference, validateStagedPriorHomeGroups, withWorldStageInputs, newPreparedOriginalInterfaceArtifactsWithPrior
   , retainTypeInterfaceCaptures, retainedTypeInterfaceBody
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
@@ -78,7 +78,7 @@ import Tidepool.CertifiedProducts
   , issuePackageLinkIndex
   , PackageLinkIndex, emptyPackageLinkIndex )
 import Tidepool.OriginalProductRoots
-  ( ReconciledOriginalProducts, reconcileOriginalProducts, PriorOriginalExternalDemand )
+  ( ReconciledOriginalProducts, reconcileOriginalProducts, PriorHomeGroup, PriorOriginalExternalDemand )
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, originalRetainedInterfaceCaptures, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup, exactInterfaceSummary )
@@ -448,6 +448,17 @@ stagedOriginalExternalDemand (Just (StagedOriginalProducts certified _ _ _ _)) i
     (certifiedTargetContext certified)
   certifiedOriginalExternalDemand context identity
 
+validateStagedPriorHomeGroups :: Maybe StagedOriginalProducts
+  -> Map.Map PriorHomeGroup [SymbolIdentity] -> Either String ()
+validateStagedPriorHomeGroups prior reached
+  | Map.null reached = Right ()
+  | otherwise = do
+      staged <- maybe (Left "prior HOME package roots lack their completed predecessor") Right prior
+      let StagedOriginalProducts previous _ _ _ _ = staged
+      previousContext <- maybe (Left "prior HOME package roots lack their certification context") Right
+        (certifiedTargetContext previous)
+      validatePriorHomeGroups previousContext reached
+
 -- File identities come from actual emitter writes, including the staged
 -- terminal certificate. Callers do not inventory an output directory.
 stagedOriginalOutputFiles :: StagedOriginalProducts -> [(FilePath,String)]
@@ -562,13 +573,7 @@ retainPreparedPackageTargets provenance targets captures context = do
       pure (packageTargetName target, roots))
     priorHomeGroups <- Map.fromList <$> forM targets (\target -> do
       let reached = packageTargetPriorHomeImports target
-      unless (Map.null reached) $ do
-        StagedOriginalProducts previous _ _ _ _ <- maybe
-          (fail "prior HOME package roots lack their completed predecessor") pure
-          (preparedPriorOriginalProducts context)
-        previousContext <- maybe (fail "prior HOME package roots lack their certification context") pure
-          (certifiedTargetContext previous)
-        either fail pure (validatePriorHomeGroups previousContext reached)
+      either fail pure (validateStagedPriorHomeGroups (preparedPriorOriginalProducts context) reached)
       pure (packageTargetName target,reached))
     let homeRows =
           [ ((packageTargetName target, unit, name, ordinal), identities)
