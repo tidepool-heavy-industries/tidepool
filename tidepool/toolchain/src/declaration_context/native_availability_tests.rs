@@ -10272,7 +10272,7 @@ fn source_support_with_empty_native_permissions_discards_unrelated_parent_custod
     let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
     let support = recover_fixture_compiler_support(projection, parent, []).unwrap();
     assert!(support.native_availability().rows().next().is_none());
-    assert_eq!(support.native_completions().iter().count(), 0);
+    assert_eq!(support.acquired_native_closures().iter().count(), 0);
     assert!(support
         .artifacts()
         .artifact_ids()

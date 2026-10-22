@@ -1,6 +1,6 @@
--- Two compiler histories share the direct sort implementation but select
--- different Ord dictionaries. Their serialized program/package pairs must not
--- be interchangeable even when the direct package identity is equal.
+-- Two targets share the direct sort implementation and pass different Ord
+-- dictionaries as siblings. Unrelated target roots can change receipt cohorts
+-- while the shared package body keeps the same closed code identity.
 module SameDirectDifferentChildren where
 
 import Data.List (sort)

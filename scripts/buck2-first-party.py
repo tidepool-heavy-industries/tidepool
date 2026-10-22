@@ -1170,8 +1170,8 @@ def toolchain_package_occurrence_test_cases(binary):
         "duplicate_envelope_smoke_compiles_both_targets",
         "multi_ordinal_home_keeps_per_ordinal_package_roots",
         "repeated_fresh_home_targets_reuse_exact_ordinal_bindings",
-        "same_direct_package_with_different_children_has_a_real_premise",
-        "historical_same_seal_bodies_select_separately",
+        "same_direct_package_ignores_unrelated_dictionary_cohort",
+        "historical_same_seal_bodies_keep_distinct_code_identities",
         "transitive_home_package_demand_reaches_the_final_target",
     )]
     tests += ["artifacts::world_value_selection_tests::" + name for name in (
