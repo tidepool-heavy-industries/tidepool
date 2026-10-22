@@ -87,7 +87,7 @@ import GHC.Unit.Home.ModInfo
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Driver.Session (DynFlags, importPaths, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
-import qualified GHC.Parser as Parser (parseImport, parseHeader)
+import qualified GHC.Parser as Parser (parseHeader)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, fsLit)
@@ -370,17 +370,6 @@ instance Show GeneratedScaffoldRecipe where
   show (GeneratedScaffoldRecipe path name _ line interfaces _ _ role _) =
     "GeneratedScaffoldRecipe " ++ show (path,name,line,interfaces,role)
 
-parseTemplateImport :: DynFlags -> String -> Maybe (String, TemplateImportShape)
-parseTemplateImport flags source = case unP Parser.parseImport
-    (initParserState (initParserOpts flags) (stringToStringBuffer source)
-      (mkRealSrcLoc (mkFastString "<checked-template-import>") 1 1)) of
-  PFailed _ -> Nothing
-  POk _ located ->
-    let declaration = unLoc located
-        owner = moduleNameString (unLoc (ideclName declaration))
-        shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
-    in Just (owner,shape)
-
 captureProtectedTemplateImports :: DynFlags -> String -> Either String ProtectedTemplateImports
 captureProtectedTemplateImports = captureProtectedTemplateImportsAt preambleImportMarker
 
@@ -498,7 +487,7 @@ generatedScaffoldRecipeWithRenderingFor purpose flags imports mapped protected r
 generatedScaffoldRecipeWithOriginsFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports
   -> RenderedProtectedTemplateImports -> String -> String -> [(Int,Int,ImportOrigin)] -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
-generatedScaffoldRecipeWithOriginsFor purpose flags
+generatedScaffoldRecipeWithOriginsFor purpose _flags
     (CheckedTemplateImports roots interfaces) mapped protectedTemplate rendered origins path name = do
   canonical <- canonicalizePath path
   let compilerImport = "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as "
@@ -510,13 +499,10 @@ generatedScaffoldRecipeWithOriginsFor purpose flags
         [occurrence | occurrence@(owner,_,_,source,_) <- mappedOccurrences
         , owner == templateInterfaceModule interface, source /= compilerImport]
       compilerImportLines = [line | (_,line,_,source,_) <- mappedOccurrences, source == compilerImport]
-      mappedOccurrence (owner,line,offset,source,shape) = do
+      mappedOccurrence (_,line,offset,source,_) = do
         let first = sum (map ((+1) . length) (take (line-1) (lines rendered))) + offset
             renderedSource = take (length source) (drop first rendered)
         unless (renderedSource == source) (Left "checked template interface import is missing, duplicated, or changed")
-        case parseTemplateImport flags renderedSource of
-          Just (renderedOwner,renderedShape) | renderedOwner == owner && renderedShape == shape -> Right ()
-          _ -> Left "checked template interface import is missing, duplicated, or changed"
       templateOccurrences interface = do
         let selected = mappedFor interface
         mapM_ mappedOccurrence selected
