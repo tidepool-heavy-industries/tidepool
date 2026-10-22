@@ -5,7 +5,7 @@
 repair below. The peer review is [REVIEW-29231ed3](REVIEW-29231ed3.md).
 
 - Integration checkout: `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-- Branch: `root/g2-final-20261021`; code checkpoint `ff889e254e`.
+- Branch: `root/g2-final-20261021`; code checkpoint `b8c58aa224`.
 - Push remote: `github`; `origin` is local replication. Reconcile release/main
   separately; the isolated checkout's strict status reports `local_main_missing`.
 - The interactive `/srv/swarm/checkouts/tidepool` is unrelated; preserve its work.
@@ -19,8 +19,8 @@ repair below. The peer review is [REVIEW-29231ed3](REVIEW-29231ed3.md).
 | N | Cumulative settled frontier, exact snapshot/operand issuance, active freeze refusal, private query lease, private carrier token, exact retirement | Execute real multi-program, parked, cancellation and publication histories |
 | A | Issuer-returned affine host lease; original-epoch confirmed cleanup; Final activation intent; exact inherited activation replacement | Compile and execute joined activation/reuse/refusal controls |
 | C | World-issued host TYPE origins; typed producer diagnostics; ordinary types avoid origin scanning | Warm World and parked Job; exact mixed Text outcome remains unresolved |
-| P | Physical issued rows and operation ownership; target-local source association; closed ordinary target; real parsed test inputs | Compile repairs, actual repeat-target installation, then remove remaining `same_exact_rows` escape |
-| D / Rust leaf | Target-specific Original-use package occurrences; join to exact retained group/slot obligations; format v4/item v2 | Close emitted-stage ownership API gap; execute producer/decoder mutations and real notebook |
+| P | Physical issued rows and operation ownership; target-local source association; closed ordinary target; real parsed test inputs | Repeat-target issuer passed before strict cut; equality escape now removed; retest strict identity and real installation |
+| D / Rust leaf | Target-specific Original-use package occurrences; join to exact retained group/slot obligations; format v4/item v2 | Emitted-stage owner closure integrated; execute producer/decoder mutations and real notebook |
 | T | Real World histories, package premises, generated ownership, canonical cached-HOME producer identity | Execute repaired controls; same-source-slot transfer and durable reopen remain explicitly limited |
 | V | One warm joined validation lane, exact source/artifact/command receipts | Next joined compiler/runtime/actor compilation, then discriminating cohorts |
 
@@ -33,9 +33,10 @@ closure from module inventory, broaden HOME roots, or repeat the judgment.
 ArtifactBinding and NativeGroupBinding identifiers belong to different domains;
 their differing selection IDs alone are not an identity defect.
 
-The Rust leaf identified one remaining API closure question: the item package
-selection and its retained demand must derive from the same emitted stage,
-not merely belong to the same operation. Close that in the existing issuer.
+The item package selection now derives its retained demand from the same emitted
+stage inside the existing issuer. Associations are checked before advancing the
+private cursor and carried forward. The raw item and unused fixture constructors
+are removed; authenticated imports and prepared programs are always present.
 
 ## Executed evidence
 
@@ -56,6 +57,11 @@ are in `validation/`. T records are also in the peer-review evidence directory.
   absent from selected argv; startup investigation is retained separately.
 - `dc556799e4`: compilation stopped in P production/cfg(test) API migrations;
   no actor/runtime execution established. Bounded repairs are now integrated.
+- `e18e226316`: exact repeated-target issuer passed 1/1 with owned compiler cleanup
+  confirmed; Haskell original recovery/reachability case passed 1/1 (8.84s).
+  Joined compilation exposed six caller/type migrations; fixes are integrated
+  but not yet recompiled. Strict identity and the final stage-owner cut follow
+  these runs, so these counts do not qualify the new checkpoint.
 - Baseline notebook at `3ad3aafc`: four executed failures shared the missing
   Original package completion boundary; no passing notebook claim yet.
 
@@ -66,8 +72,8 @@ are in `validation/`. T records are also in the peer-review evidence directory.
 2. Execute exact P repeated-target and real source installer controls, cached
    HOME receipt mutations, native producer tests, then the registered notebook
    and private-publication/custody histories. Diagnose first shared failure.
-3. Delete the P equality escape only after its proper issuer is demonstrated;
-   keep genuine crossed/stale refusals. Close D's stage owner at construction.
+3. Retest strict issuance after the removed equality escape, preserving genuine
+   crossed/stale refusals and final stage-owner/mutation controls.
 4. Once ordinary G2 histories pass on one source, freeze one matched bundle,
    verify Persona spec/tools/initial memory and run bounded DeepSeek smoke.
 5. G3 force/fork/worker-loss/full qualification and main/release convergence
