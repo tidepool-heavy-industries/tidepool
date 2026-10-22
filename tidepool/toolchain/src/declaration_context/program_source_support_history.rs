@@ -25,13 +25,6 @@ mod program_source_support_history {
         (custody, projection)
     }
 
-    fn original_support(
-        products: &[CertifiedRecoveryProduct],
-    ) -> crate::artifact_inventory::CompilerSourceSupport {
-        let (artifacts, projection) = original_offer(products);
-        crate::declaration_context::issue_fixture_compiler_support(projection, artifacts).unwrap()
-    }
-
     fn source_selection(
         projection: &CompilerInputProjection,
         custody: &ArtifactView,
@@ -47,21 +40,15 @@ mod program_source_support_history {
     type Graph = BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>;
 
     #[derive(Default, Debug)]
-    struct Coverage {
-        histories: usize,
-        queries: usize,
-        extensions: usize,
-        graph_refusals: usize,
-        artifact_refusals: usize,
-        missing_rows: usize,
-        missing_queries: usize,
-        reached_missing_frontiers: usize,
-        unreachable_deletions: usize,
-        blocked_downstream_queries: usize,
-        repairs: usize,
-        captured_queries: usize,
-        cyclic_histories: usize,
-        shared_dependency_histories: usize,
+    struct ClosureCoverage {
+        complete: usize,
+        missing: usize,
+        disconnected: usize,
+        reordered_duplicates: usize,
+        captured: usize,
+        repaired: usize,
+        cyclic: usize,
+        shared_children: usize,
     }
 
     // Finite-set saturation is independent of the production stack traversal.
@@ -82,92 +69,62 @@ mod program_source_support_history {
         }
     }
 
-    fn assert_query(
-        root: &Path,
-        support: &ProgramSourceSupport,
+    // This reader consumes plain graph data. These checks issue no source
+    // admission, compiler role, completed product or lexical authority.
+    fn assert_closure_reader(
         graph: &Graph,
-        owners: &BTreeSet<ExactModuleIdentity>,
-        selected: &ExactModuleIdentity,
-        coverage: &mut Coverage,
+        rows: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+        root: &ExactModuleIdentity,
+        duplicate_root: bool,
+        coverage: &mut ClosureCoverage,
     ) {
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(root, empty.clone()).program_admission();
-        assert_retained_input_reads(&request);
-        request.program.program_support = Some(support.clone());
-        let receipt = import_receipt_owner(
-            root,
-            request.receipt_admission().physical_request(),
-            &selected.unit,
-            &selected.module,
-            "none",
-            false,
+        let expected = reachable(graph, root);
+        let complete = expected.iter().all(|owner| graph.contains_key(owner));
+        let roots = if duplicate_root {
+            vec![root.clone(), root.clone()]
+        } else {
+            vec![root.clone()]
+        };
+        let reads = std::cell::RefCell::new(BTreeMap::<ExactModuleIdentity, usize>::new());
+        let actual = crate::declaration_join::keyed_source_lexical_closure(
+            &roots,
+            |owner| {
+                *reads.borrow_mut().entry(owner.clone()).or_default() += 1;
+                rows.get(owner).cloned()
+            },
+            |_| None,
         );
-        let admission = request
-            .receipt_admission()
-            .validate_receipt_with_validation(
-                &receipt,
-                None,
-                &empty,
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap();
-        let artifacts = support
-            .compiler_support
-            .artifacts()
-            .merge_fixture_selections(&support_view(&[support_product("Consumer")]))
-            .unwrap();
-        let actual = (&request)
-            .receipt_admission()
-            .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
-            .unwrap();
-
-        let reached = reachable(graph, selected);
-        let known = reached
-            .iter()
-            .filter(|owner| owners.contains(*owner) && graph.contains_key(*owner))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let missing = reached.difference(&known).cloned().collect::<Vec<_>>();
-        let consumer = identity("fixture", "Consumer");
-        let expected = known
-            .iter()
-            .map(|owner| {
-                (
-                    owner.clone(),
-                    graph[owner].intersection(&known).cloned().collect(),
-                )
-            })
-            .chain(std::iter::once((
-                consumer.clone(),
-                known
-                    .contains(selected)
-                    .then(|| selected.clone())
-                    .into_iter()
-                    .collect(),
-            )))
-            .collect::<Graph>();
+        if !complete {
+            assert!(
+                actual.is_err(),
+                "a reached unknown row is not an empty leaf"
+            );
+            coverage.missing += 1;
+            return;
+        }
+        let actual = actual.unwrap();
         let actual_graph = actual
-            .lexical_graph()
+            .lexical
             .iter()
             .map(|node| (node.owner.clone(), node.imports.iter().cloned().collect()))
             .collect::<Graph>();
-        assert_eq!(actual_graph, expected);
-        if missing.is_empty() {
-            assert_eq!(
-                actual.original_instance_environment(),
-                &OriginalInstanceEnvironment::Complete { target: consumer }
-            );
-        } else {
-            assert_eq!(
-                actual.original_instance_environment(),
-                &OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
-            );
-        }
-        // Private execution evidence cannot change the request's public scope.
-        assert!(request.context().lexical_graph().is_empty());
-        assert!(request.program_source_lexical().is_empty());
-        coverage.queries += 1;
+        let expected_graph = graph
+            .iter()
+            .filter(|(owner, _)| expected.contains(*owner))
+            .map(|(owner, edges)| (owner.clone(), edges.clone()))
+            .collect::<Graph>();
+        assert_eq!(actual_graph, expected_graph);
+        assert_eq!(
+            actual.roots.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([root.clone()])
+        );
+        let reads = reads.into_inner();
+        assert_eq!(reads.keys().cloned().collect::<BTreeSet<_>>(), expected);
+        assert!(
+            reads.values().all(|count| *count == 1),
+            "cycles and repeated edges visit each reached row once"
+        );
+        coverage.complete += 1;
     }
 
     fn assert_retained_input_reads(request: &ProgramAdmissionContinuation) {
@@ -465,26 +422,25 @@ mod program_source_support_history {
     }
 
     #[test]
-    fn bounded_artifact_and_original_import_histories_match_set_oracle() {
-        let directory = tempfile::tempdir().unwrap();
+    fn bounded_source_closure_reader_histories_match_set_oracle() {
         let owners = ["A", "B", "C"].map(|module| identity("fixture", module));
         let unrelated = identity("fixture", "Unrelated");
-        let products = ["A", "B", "C", "Unrelated"].map(support_product);
-        let all_support = original_support(&products);
-        let all_artifacts = all_support.artifacts();
-        // These interfaces intentionally have no nominal/type requirements.
-        assert!(all_artifacts
-            .entries()
-            .iter()
-            .all(|entry| entry.requirements.is_empty()));
-        let all_owners = owners
+        let all = owners
             .iter()
             .cloned()
             .chain([unrelated.clone()])
             .collect::<BTreeSet<_>>();
-        let mut coverage = Coverage::default();
+        let rows = |graph: &Graph| {
+            graph
+                .iter()
+                .map(|(owner, edges)| (owner.clone(), edges.iter().cloned().collect::<Vec<_>>()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut coverage = ClosureCoverage::default();
+        // Every directed three-node graph without reflexive edges, including
+        // diamonds and cycles. The saturation oracle does not use the reader.
         for mask in 0..64u8 {
-            let mut graph = all_owners
+            let mut graph = all
                 .iter()
                 .cloned()
                 .map(|owner| (owner, BTreeSet::new()))
@@ -500,263 +456,70 @@ mod program_source_support_history {
                     }
                 }
             }
-            for first in 0..3 {
-                coverage.histories += 1;
-                coverage.cyclic_histories += usize::from(owners.iter().any(|owner| {
+            for root in &owners {
+                let captured = graph.clone();
+                assert_closure_reader(&graph, &rows(&graph), root, false, &mut coverage);
+                coverage.cyclic += usize::from(owners.iter().any(|owner| {
                     graph[owner]
                         .iter()
                         .any(|next| reachable(&graph, next).contains(owner))
                 }));
-                coverage.shared_dependency_histories +=
+                coverage.shared_children +=
                     usize::from(owners.iter().any(|owner| {
                         graph.values().filter(|edges| edges.contains(owner)).count() > 1
                     }));
-                let first_owner = owners[first].clone();
-                let initial_graph =
-                    Graph::from([(first_owner.clone(), graph[&first_owner].clone())]);
-                let initial_owners = BTreeSet::from([first_owner.clone()]);
-                let initial_support = original_support(&[products[first].clone()]);
-                let initial = ProgramSourceSupport::extend(
-                    None,
-                    initial_support,
-                    [(
-                        first_owner.clone(),
-                        graph[&first_owner].iter().cloned().collect(),
-                    )],
-                )
-                .unwrap();
-                coverage.extensions += 1;
-                let captured = initial.clone();
-                assert_query(
-                    directory.path(),
-                    &initial,
-                    &initial_graph,
-                    &initial_owners,
-                    &first_owner,
-                    &mut coverage,
-                );
 
-                let mut rows = graph
-                    .iter()
-                    .map(|(owner, edges)| {
-                        (owner.clone(), edges.iter().cloned().collect::<Vec<_>>())
-                    })
-                    .collect::<Vec<_>>();
-                rows.rotate_left(first);
-                if mask & 1 != 0 {
-                    rows.reverse();
-                }
-                let current =
-                    ProgramSourceSupport::extend(Some(&initial), all_support.clone(), rows.clone())
-                        .unwrap();
-                coverage.extensions += 1;
-                assert_eq!(
-                    current.imports.as_ref(),
-                    &graph
-                        .iter()
-                        .map(|(owner, edges)| (
-                            owner.clone(),
-                            ProgramSourceSupportRow {
-                                imports: edges.iter().cloned().collect::<Vec<_>>(),
-                                physical_product: None,
-                            }
-                        ))
-                        .collect()
-                );
-                for selected in &owners {
-                    assert_query(
-                        directory.path(),
-                        &current,
-                        &graph,
-                        &all_owners,
-                        selected,
-                        &mut coverage,
-                    );
-                }
-                for (_, edges) in &mut rows {
+                let mut reordered = rows(&graph);
+                for edges in reordered.values_mut() {
                     edges.reverse();
                     edges.extend(edges.clone());
                 }
-                rows.reverse();
-                let reordered =
-                    ProgramSourceSupport::extend(Some(&current), all_support.clone(), rows)
-                        .unwrap();
-                coverage.extensions += 1;
-                assert_eq!(reordered.imports, current.imports);
-                assert_query(
-                    directory.path(),
-                    &reordered,
-                    &graph,
-                    &all_owners,
-                    &first_owner,
-                    &mut coverage,
-                );
-                assert_query(
-                    directory.path(),
-                    &captured,
-                    &initial_graph,
-                    &initial_owners,
-                    &first_owner,
-                    &mut coverage,
-                );
-                coverage.captured_queries += 1;
+                assert_closure_reader(&graph, &reordered, root, true, &mut coverage);
+                coverage.reordered_duplicates += 1;
 
-                let mut changed = graph[&first_owner].iter().cloned().collect::<Vec<_>>();
-                changed.push(unrelated.clone());
-                assert!(ProgramSourceSupport::extend(
-                    Some(&current),
-                    all_support.clone(),
-                    [(first_owner.clone(), changed)]
-                )
-                .is_err());
-                coverage.graph_refusals += 1;
-                assert_query(
-                    directory.path(),
-                    &current,
-                    &graph,
-                    &all_owners,
-                    &first_owner,
+                let mut disconnected = graph.clone();
+                disconnected.remove(&unrelated);
+                assert_closure_reader(
+                    &disconnected,
+                    &rows(&disconnected),
+                    root,
+                    false,
                     &mut coverage,
                 );
+                coverage.disconnected += 1;
 
                 for omitted in &owners {
-                    let mut incomplete = current.clone();
-                    Arc::make_mut(&mut incomplete.imports).remove(omitted);
-                    let mut incomplete_graph = graph.clone();
-                    incomplete_graph.remove(omitted);
-                    for selected in &owners {
-                        assert_query(
-                            directory.path(),
-                            &incomplete,
-                            &incomplete_graph,
-                            &all_owners,
-                            selected,
-                            &mut coverage,
-                        );
-                        coverage.missing_queries += 1;
-                        if reachable(&incomplete_graph, selected).contains(omitted) {
-                            coverage.reached_missing_frontiers += 1;
-                        } else {
-                            coverage.unreachable_deletions += 1;
-                        }
-                        coverage.blocked_downstream_queries += usize::from(
-                            !reachable(&graph, selected)
-                                .is_subset(&reachable(&incomplete_graph, selected)),
-                        );
-                    }
-                    coverage.missing_rows += 1;
-                    let repaired = ProgramSourceSupport::extend(
-                        Some(&incomplete),
-                        all_support.clone(),
-                        [(omitted.clone(), graph[omitted].iter().cloned().collect())],
-                    )
-                    .unwrap();
-                    coverage.extensions += 1;
-                    assert_query(
-                        directory.path(),
-                        &repaired,
-                        &graph,
-                        &all_owners,
-                        omitted,
+                    let mut incomplete = graph.clone();
+                    incomplete.remove(omitted);
+                    assert_closure_reader(
+                        &incomplete,
+                        &rows(&incomplete),
+                        root,
+                        false,
                         &mut coverage,
                     );
-                    coverage.repairs += 1;
-                    assert!(!incomplete.imports.contains_key(omitted));
+                    let mut repaired = incomplete;
+                    repaired.insert(omitted.clone(), graph[omitted].clone());
+                    assert_closure_reader(&repaired, &rows(&repaired), root, false, &mut coverage);
+                    coverage.repaired += 1;
                 }
 
-                let context = Arc::new(
-                    ExactDeclarationContext::new(&[], &[], vec![])
-                        .unwrap()
-                        .extend_issued_compiler_support(&match support_offer(&products) {
-                            CompilerSupportFixture::Complete(inputs) => {
-                                inputs.compiler_source_support().clone()
-                            }
-                            CompilerSupportFixture::RecordedRoles { .. } => {
-                                unreachable!("closed zero-group output cohort")
-                            }
-                        })
-                        .unwrap(),
-                );
-                let mut request =
-                    program_request(directory.path(), context.clone()).program_admission();
-                assert_retained_input_reads(&request);
-                let retained_inputs = Arc::clone(&request.inputs.compiler);
-                request.program.program_support = Some(current.clone());
-                let before_graph = Arc::clone(&current.imports);
-                let before_artifacts = current.compiler_support.artifacts().descriptors();
-                let before_projection = current.compiler_support.projection().clone();
-                let (conflict, conflict_projection) =
-                    original_offer(&[support_product_with_interface(
-                        "fixture",
-                        &first_owner.module,
-                        b"replacement interface".to_vec(),
-                    )]);
-                assert!(request
-                    .admit_program_support_with_selection(
-                        context.clone(),
-                        &conflict,
-                        &[],
-                        None,
-                        &source_selection(&conflict_projection, &conflict),
-                    )
-                    .is_err());
-                coverage.artifact_refusals += 1;
-                assert!(std::ptr::eq(
-                    retained_inputs.as_ref(),
-                    request.compiler_inputs()
-                ));
-                assert_retained_input_reads(&request);
-                let after = request.program.program_support.as_ref().unwrap();
-                assert!(Arc::ptr_eq(&after.imports, &before_graph));
-                assert_eq!(
-                    after.compiler_support.artifacts().descriptors(),
-                    before_artifacts
-                );
-                assert_eq!(*after.compiler_support.projection(), before_projection);
-                assert_query(
-                    directory.path(),
-                    after,
-                    &graph,
-                    &all_owners,
-                    &first_owner,
-                    &mut coverage,
-                );
-                let retried = request
-                    .admit_program_support_with_selection(
-                        context.clone(),
-                        &all_artifacts,
-                        &[],
-                        None,
-                        &source_selection(all_support.projection(), all_artifacts),
-                    )
-                    .unwrap();
-                coverage.extensions += 1;
-                assert_eq!(retried.as_ref(), context.as_ref());
-                assert!(retried.lexical_graph().is_empty());
-                assert_query(
-                    directory.path(),
-                    request.program.program_support.as_ref().unwrap(),
-                    &graph,
-                    &all_owners,
-                    &first_owner,
-                    &mut coverage,
-                );
+                let mut changed = graph.clone();
+                changed.get_mut(root).unwrap().insert(unrelated.clone());
+                assert!(reachable(&changed, root).contains(&unrelated));
+                assert!(!reachable(&captured, root).contains(&unrelated));
+                assert_closure_reader(&changed, &rows(&changed), root, false, &mut coverage);
+                assert_closure_reader(&captured, &rows(&captured), root, false, &mut coverage);
+                assert_eq!(captured, graph);
+                coverage.captured += 1;
             }
         }
-        assert_eq!(coverage.histories, 192);
-        assert_eq!(coverage.queries, 4032);
-        assert_eq!(coverage.extensions, 1344);
-        assert_eq!(coverage.graph_refusals, 192);
-        assert_eq!(coverage.artifact_refusals, 192);
-        assert_eq!(coverage.missing_rows, 576);
-        assert_eq!(coverage.missing_queries, 1728);
-        assert_eq!(coverage.reached_missing_frontiers, 1296);
-        assert_eq!(coverage.unreachable_deletions, 432);
-        assert_eq!(coverage.blocked_downstream_queries, 576);
-        assert_eq!(coverage.repairs, 576);
-        assert_eq!(coverage.captured_queries, 192);
-        assert_eq!(coverage.cyclic_histories, 117);
-        assert_eq!(coverage.shared_dependency_histories, 111);
-        println!("original-import component coverage: {coverage:?}");
+        assert_eq!(coverage.reordered_duplicates, 64 * 3);
+        assert_eq!(coverage.disconnected, 64 * 3);
+        assert_eq!(coverage.repaired, 64 * 3 * 3);
+        assert_eq!(coverage.captured, 64 * 3);
+        assert!(coverage.complete > 0 && coverage.missing > 0);
+        assert!(coverage.cyclic > 0 && coverage.shared_children > 0);
+        tracing::info!(?coverage, "pure source closure reader histories");
     }
 }
