@@ -730,7 +730,7 @@ pub(super) mod tests {
 
             // Two distinct lookup keys deliberately alias one DATA record. This
             // checks restored block sharing without granting either key code authority.
-            let aliases =
+            let aliases: OrdMap<u64, ImmutableNativeComponentRecordRef> =
                 OrdMap::from_iter([(0u64, records[&0].clone()), (1, records[&0].clone())]);
             let mut writer = Materializer::new(&store);
             let alias_root = writer
