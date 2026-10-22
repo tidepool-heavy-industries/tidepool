@@ -348,7 +348,7 @@ struct SourceSelectionView {
 
 pub(crate) mod source_selections;
 use source_selections::{PreparedSourceSelectionReplacement, SourceSelections};
-pub use source_selections::{WorldPackageDomainRetirement, WorldPackageSlotPermit};
+pub use source_selections::{WorldNativeDomainRetirement, WorldNativeSlotPermit};
 
 enum SourceSelectionSeed<'a> {
     Fork,
@@ -2232,8 +2232,8 @@ impl BindingTable {
                 return Err(tokens);
             }
             let key = SourceLeaseKey::of(token);
-            if let Some((permit, _)) = attachment.package_slot() {
-                if !self.validate_package_slot_permit(tree, scope, permit) {
+            if let Some((permit, _)) = attachment.native_slot() {
+                if !self.validate_native_slot_permit(tree, scope, permit) {
                     return Err(tokens);
                 }
                 if !self.source_instances.contains_key(&key) && !installs.insert(key.clone()) {

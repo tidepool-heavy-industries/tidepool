@@ -80,8 +80,8 @@ use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity
 use tidepool_repr::{DataConId, PrincipalId};
 
 mod batch;
-mod package_slots;
-pub use package_slots::{PreparedWorldPackageSlots, WorldPackageInstanceWitness};
+mod native_slots;
+pub use native_slots::{PreparedWorldNativeSlots, WorldNativeInstanceWitness};
 #[cfg(test)]
 mod literal_manifest_tests;
 pub use batch::{
@@ -164,7 +164,7 @@ impl GroupInstanceId {
 /// and the descriptor/dispatch rows retirement must remove.
 struct InstalledProgram<'code> {
     roots_attached: bool,
-    package_group: Option<Arc<package_slots::WorldPackageGroupMarker>>,
+    native_group: Option<Arc<native_slots::WorldNativeGroupMarker>>,
     program: ProgramCustody<'code>,
     instance: Arc<InstanceImage>,
     /// Collector-updated words for this machine's tops and imports.
@@ -229,8 +229,8 @@ pub struct ResidencyCounts {
 }
 
 pub struct PreparedMachine<'code> {
-    package_domains: HashMap<usize, package_slots::PackageDomainSlots>,
-    package_groups: HashMap<GroupInstanceId, HashSet<(usize, super::NativeArtifactBinding)>>,
+    native_domains: HashMap<usize, native_slots::NativeDomainSlots>,
+    native_groups: HashMap<GroupInstanceId, HashSet<(usize, super::NativeBindingKey)>>,
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
@@ -860,8 +860,8 @@ impl<'code> PreparedMachine<'code> {
     pub fn empty(options: PreparedMachineOptions) -> Result<Self, ExecutionError> {
         Ok(Self {
             programs: BTreeMap::new(),
-            package_domains: HashMap::new(),
-            package_groups: HashMap::new(),
+            native_domains: HashMap::new(),
+            native_groups: HashMap::new(),
             next_program: 0,
             pins: BTreeSet::new(),
             nursery_bytes: options.nursery_bytes,
@@ -1203,7 +1203,7 @@ impl<'code> PreparedMachine<'code> {
             id,
             InstalledProgram {
                 roots_attached: true,
-                package_group: None,
+                native_group: None,
                 program,
                 instance,
                 roots,
@@ -1928,7 +1928,7 @@ impl<'code> PreparedMachine<'code> {
         if !self.programs.contains_key(&id) {
             return Err(ExecutionError::UnknownProgram(id));
         }
-        self.invalidate_world_package_group(GroupInstanceId::from(id));
+        self.invalidate_world_native_group(GroupInstanceId::from(id));
         let installed = self
             .programs
             .get(&id)
@@ -1959,7 +1959,7 @@ impl<'code> PreparedMachine<'code> {
     /// the root-block words freed. Infallible: the caller checked the
     /// descriptor space is installed, and an unknown id releases nothing.
     fn release_metadata(&mut self, id: ProgramId) -> usize {
-        self.invalidate_world_package_group(GroupInstanceId::from(id));
+        self.invalidate_world_native_group(GroupInstanceId::from(id));
         let Some(installed) = self.programs.remove(&id) else {
             return 0;
         };

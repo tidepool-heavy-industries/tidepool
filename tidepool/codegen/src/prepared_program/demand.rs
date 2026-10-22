@@ -387,9 +387,9 @@ pub struct NativeInstanceAttachment {
     domain: SourceInstanceDomain,
     lease: NativeInstanceLease,
     anchor: Option<NativeInstanceLease>,
-    package_slot: Option<(
-        crate::binding_table::WorldPackageSlotPermit,
-        super::WorldPackageInstanceWitness,
+    native_slot: Option<(
+        crate::binding_table::WorldNativeSlotPermit,
+        super::WorldNativeInstanceWitness,
     )>,
 }
 
@@ -404,7 +404,7 @@ impl NativeInstanceAttachment {
             domain,
             lease,
             anchor: None,
-            package_slot: None,
+            native_slot: None,
         }
     }
     pub(crate) fn from_anchor(
@@ -416,7 +416,7 @@ impl NativeInstanceAttachment {
             domain,
             lease,
             anchor: Some(anchor),
-            package_slot: None,
+            native_slot: None,
         }
     }
     pub(crate) fn inherited(
@@ -437,28 +437,28 @@ impl NativeInstanceAttachment {
             domain: demand.domain(),
             lease: NativeInstanceLease::Home(lease),
             anchor: Some(NativeInstanceLease::Home(demand.anchor().clone())),
-            package_slot: None,
+            native_slot: None,
         })
     }
-    pub(crate) fn from_world_package_slot(
+    pub(crate) fn from_world_native_slot(
         lease: NativeInstanceLease,
-        permit: crate::binding_table::WorldPackageSlotPermit,
-        witness: super::WorldPackageInstanceWitness,
+        permit: crate::binding_table::WorldNativeSlotPermit,
+        witness: super::WorldNativeInstanceWitness,
     ) -> Self {
         Self {
             domain: permit.domain(),
             lease,
             anchor: None,
-            package_slot: Some((permit, witness)),
+            native_slot: Some((permit, witness)),
         }
     }
-    pub(crate) fn package_slot(
+    pub(crate) fn native_slot(
         &self,
     ) -> Option<&(
-        crate::binding_table::WorldPackageSlotPermit,
-        super::WorldPackageInstanceWitness,
+        crate::binding_table::WorldNativeSlotPermit,
+        super::WorldNativeInstanceWitness,
     )> {
-        self.package_slot.as_ref()
+        self.native_slot.as_ref()
     }
     pub(crate) fn domain(&self) -> SourceInstanceDomain {
         self.domain

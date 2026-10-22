@@ -11,9 +11,9 @@ use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
 pub enum BatchImport {
-    WorldPackageLiteral {
-        permit: crate::binding_table::WorldPackageSlotPermit,
-        witness: super::WorldPackageInstanceWitness,
+    WorldNativeLiteral {
+        permit: crate::binding_table::WorldNativeSlotPermit,
+        witness: super::WorldNativeInstanceWitness,
     },
     Existing {
         handle: PreparedHandle,
@@ -108,16 +108,28 @@ impl BatchProgram {
                 found: ImportShapeFact::Evaluated(false),
             });
         }
+        Self::validate_literal_producer(&target.image, slot, binding)?;
+        Ok(())
+    }
+
+    pub(super) fn validate_literal_producer(
+        image: &CompiledProgram,
+        slot: &super::super::plan::ImportSlot,
+        binding: ValueId,
+    ) -> Result<(), ExecutionError> {
+        let export = image
+            .top_exports
+            .get(&binding)
+            .ok_or(ExecutionError::MissingEntry(binding))?;
         if let Some(literal) = &slot.literal {
-            if target.image.byte_tops.get(&binding).map(Arc::as_ref) != Some(literal.as_ref()) {
+            if image.byte_tops.get(&binding).map(Arc::as_ref) != Some(literal.as_ref()) {
                 return Err(ExecutionError::BatchSourceContract(Box::new(
                     slot.identity.clone(),
                 )));
             }
         }
         if let Some(source) = &slot.literal_source {
-            if target
-                .image
+            if image
                 .source_literal_producer
                 .as_ref()
                 .is_none_or(|(value, producer)| *value != binding || producer != source)
@@ -166,15 +178,6 @@ pub(super) enum LeaseRequestEvidence {
 impl NativeExportRequest {
     pub fn domain(&self) -> super::super::SourceInstanceDomain {
         self.domain
-    }
-    pub fn is_package(&self) -> bool {
-        matches!(self.evidence, LeaseRequestEvidence::Package { .. })
-    }
-    pub fn package_key(&self) -> Option<NativeArtifactBinding> {
-        match &self.evidence {
-            LeaseRequestEvidence::Package { key, .. } => Some(*key),
-            _ => None,
-        }
     }
     pub fn value(&self) -> ValueId {
         self.binding
@@ -262,11 +265,26 @@ impl NativeExportRequest {
             },
         })
     }
-    pub(super) fn key(&self) -> super::super::NativeBindingKey {
+    pub fn binding_key(&self) -> super::super::NativeBindingKey {
         match &self.evidence {
             LeaseRequestEvidence::Home { key, .. } => super::super::NativeBindingKey::Home(*key),
             LeaseRequestEvidence::Package { key, .. } => {
                 super::super::NativeBindingKey::Package(*key)
+            }
+        }
+    }
+    pub(super) fn matches_image_evidence(&self, image: &CompiledProgram) -> bool {
+        let Some(export) = image.top_exports.get(&self.binding) else {
+            return false;
+        };
+        match &self.evidence {
+            LeaseRequestEvidence::Home { key, owner, binder } => {
+                image.certified_source.as_ref() == Some(&(owner.clone(), key.original_ordinal))
+                    && binder.version == owner.module_version
+                    && binder.binder == export.identity
+            }
+            LeaseRequestEvidence::Package { image: package, .. } => {
+                std::ptr::eq(image, package.image().as_ref())
             }
         }
     }
@@ -376,7 +394,9 @@ impl PreparedMachine<'_> {
             .ok_or(ExecutionError::UnknownProgram(anchor.instance().program()))?
             .program
             .get();
-        if anchor.binding_key() != request.key() || !std::ptr::eq(image, request.image.as_ref()) {
+        if anchor.binding_key() != request.binding_key()
+            || !std::ptr::eq(image, request.image.as_ref())
+        {
             return Err(ExecutionError::BatchSourceContract(Box::new(
                 anchor.export().clone(),
             )));
@@ -500,13 +520,13 @@ impl PreparedMachine<'_> {
         attachment: &super::super::NativeInstanceAttachment,
     ) -> Result<(), ExecutionError> {
         let lease = attachment.lease();
-        if let Some((permit, witness)) = attachment.package_slot() {
-            self.validate_world_package_witness(witness, permit)?;
+        if let Some((permit, witness)) = attachment.native_slot() {
+            self.validate_world_native_witness(witness, permit)?;
             if lease.instance() != witness.instance()
-                || lease.binding_key() != permit.request.key()
+                || lease.binding_key() != permit.request.binding_key()
                 || lease.value() != permit.request.value()
             {
-                return Err(Self::package_request_error(permit));
+                return Err(Self::native_request_error(permit));
             }
         }
         self.handle_is_evaluated(lease.handle())?;
@@ -637,8 +657,8 @@ impl PreparedMachine<'_> {
                 .enumerate()
             {
                 match origin {
-                    BatchImport::WorldPackageLiteral { permit, witness } => {
-                        self.validate_world_package_literal_import(permit, witness, slot)?;
+                    BatchImport::WorldNativeLiteral { permit, witness } => {
+                        self.validate_world_native_literal_import(permit, witness, slot)?;
                     }
                     BatchImport::Source { group, binding } => {
                         BatchProgram::validate_source(
@@ -898,7 +918,7 @@ impl PreparedMachine<'_> {
                 id,
                 InstalledProgram {
                     roots_attached: true,
-                    package_group: None,
+                    native_group: None,
                     program: ProgramCustody::Shared(candidate.image),
                     statics: Arc::clone(&candidate.instance.statics),
                     instance: candidate.instance,
@@ -1079,7 +1099,7 @@ impl PreparedMachine<'_> {
         }
         for candidate in candidates {
             for (slot, origin) in candidate.image.import_slots.iter().zip(&candidate.imports) {
-                if let BatchImport::WorldPackageLiteral { .. } = origin {
+                if let BatchImport::WorldNativeLiteral { .. } = origin {
                     let literal = slot
                         .literal
                         .as_ref()

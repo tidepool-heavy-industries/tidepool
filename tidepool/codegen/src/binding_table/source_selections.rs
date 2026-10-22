@@ -4,19 +4,19 @@ use crate::prepared_program::{NativeExportRequest, SourceInstanceDomain};
 /// Live lexical ownership of one source domain. Immutable snapshots carry only
 /// the domain's semantic identity, never this lifetime.
 #[derive(Debug)]
-pub(crate) struct WorldPackageDomainOwner;
+pub(crate) struct WorldNativeDomainOwner;
 
-/// Authority for exactly one checked PACKAGE export in an actual live scope.
+/// Authority for exactly one checked native export in an actual live scope.
 /// It retains neither the scope, a native root, nor a source-domain lifetime.
 #[derive(Clone)]
-pub struct WorldPackageSlotPermit {
-    pub(crate) owner: Weak<WorldPackageDomainOwner>,
+pub struct WorldNativeSlotPermit {
+    pub(crate) owner: Weak<WorldNativeDomainOwner>,
     table: Weak<()>,
     scope: ScopeId,
     pub(crate) request: NativeExportRequest,
 }
 
-impl WorldPackageSlotPermit {
+impl WorldNativeSlotPermit {
     pub fn request(&self) -> &NativeExportRequest {
         &self.request
     }
@@ -31,18 +31,18 @@ impl WorldPackageSlotPermit {
 
 /// Metadata retirement only. Native roots retain their ordinary machine and
 /// scope custody; retiring a domain never releases a heap handle.
-pub struct WorldPackageDomainRetirement {
-    pub(crate) owner: Weak<WorldPackageDomainOwner>,
+pub struct WorldNativeDomainRetirement {
+    pub(crate) owner: Weak<WorldNativeDomainOwner>,
 }
 
-impl WorldPackageDomainRetirement {
+impl WorldNativeDomainRetirement {
     pub(crate) fn key(&self) -> usize {
         self.owner.as_ptr() as usize
     }
 }
 
 struct DomainMembership {
-    owner: Arc<WorldPackageDomainOwner>,
+    owner: Arc<WorldNativeDomainOwner>,
     live_views: usize,
 }
 
@@ -51,7 +51,7 @@ pub(super) struct SourceSelections {
     views: HashMap<ScopeId, SourceSelectionView>,
     implicit: HashSet<ScopeId>,
     domains: HashMap<SourceInstanceDomain, DomainMembership>,
-    retired: Vec<WorldPackageDomainRetirement>,
+    retired: Vec<WorldNativeDomainRetirement>,
 }
 
 pub(super) struct PreparedSourceSelectionReplacement {
@@ -62,8 +62,8 @@ pub(super) struct PreparedSourceSelectionReplacement {
 }
 
 enum PreparedDomainOwner {
-    Existing(Weak<WorldPackageDomainOwner>),
-    Fresh(Arc<WorldPackageDomainOwner>),
+    Existing(Weak<WorldNativeDomainOwner>),
+    Fresh(Arc<WorldNativeDomainOwner>),
 }
 
 impl PreparedSourceSelectionReplacement {
@@ -113,7 +113,7 @@ impl SourceSelections {
                         PreparedDomainOwner::Existing(Arc::downgrade(&record.owner))
                     })
                     .unwrap_or_else(|| {
-                        PreparedDomainOwner::Fresh(Arc::new(WorldPackageDomainOwner))
+                        PreparedDomainOwner::Fresh(Arc::new(WorldNativeDomainOwner))
                     });
                 added.push((*domain, owner));
             }
@@ -167,7 +167,7 @@ impl SourceSelections {
                     .domains
                     .remove(&domain)
                     .expect("retiring source domain");
-                self.retired.push(WorldPackageDomainRetirement {
+                self.retired.push(WorldNativeDomainRetirement {
                     owner: Arc::downgrade(&record.owner),
                 });
             }
@@ -259,13 +259,13 @@ impl SourceSelections {
 }
 
 impl BindingTable {
-    pub fn package_slot_permit_in(
+    pub fn native_slot_permit_in(
         &mut self,
         tree: &ScopeTree,
         scope: ScopeId,
         request: &NativeExportRequest,
-    ) -> Result<WorldPackageSlotPermit, BindingPromotionError> {
-        if !tree.is_live(scope) || !request.is_package() {
+    ) -> Result<WorldNativeSlotPermit, BindingPromotionError> {
+        if !tree.is_live(scope) {
             return Err(BindingPromotionError::UnverifiableSourceSelection);
         }
         let view = self.source_selection.materialize_scope(scope);
@@ -278,7 +278,7 @@ impl BindingTable {
             .get(&request.domain())
             .expect("live view owns every source domain")
             .owner;
-        Ok(WorldPackageSlotPermit {
+        Ok(WorldNativeSlotPermit {
             owner: Arc::downgrade(owner),
             table: Arc::downgrade(&self.declaration_preparation_owner),
             scope,
@@ -286,11 +286,11 @@ impl BindingTable {
         })
     }
 
-    pub fn validate_package_slot_permit(
+    pub fn validate_native_slot_permit(
         &self,
         tree: &ScopeTree,
         scope: ScopeId,
-        permit: &WorldPackageSlotPermit,
+        permit: &WorldNativeSlotPermit,
     ) -> bool {
         tree.is_live(scope)
             && permit.scope == scope
@@ -308,14 +308,14 @@ impl BindingTable {
                 .is_some_and(|record| permit.owner.ptr_eq(&Arc::downgrade(&record.owner)))
     }
 
-    pub fn take_package_domain_retirements(&mut self) -> Vec<WorldPackageDomainRetirement> {
+    pub fn take_native_domain_retirements(&mut self) -> Vec<WorldNativeDomainRetirement> {
         std::mem::take(&mut self.source_selection.retired)
     }
 
-    pub fn retained_world_package_attachment(
+    pub fn retained_world_native_attachment(
         &self,
-        permit: &WorldPackageSlotPermit,
-        witness: &crate::prepared_program::WorldPackageInstanceWitness,
+        permit: &WorldNativeSlotPermit,
+        witness: &crate::prepared_program::WorldNativeInstanceWitness,
     ) -> Option<crate::prepared_program::NativeInstanceAttachment> {
         let token = &self
             .source_instances
@@ -324,13 +324,11 @@ impl BindingTable {
                 value: permit.request.value(),
             })?
             .token;
-        if token.binding_key()
-            != crate::prepared_program::NativeBindingKey::Package(permit.request.package_key()?)
-        {
+        if token.binding_key() != permit.request.binding_key() {
             return None;
         }
         Some(
-            crate::prepared_program::NativeInstanceAttachment::from_world_package_slot(
+            crate::prepared_program::NativeInstanceAttachment::from_world_native_slot(
                 token.clone(),
                 permit.clone(),
                 witness.clone(),

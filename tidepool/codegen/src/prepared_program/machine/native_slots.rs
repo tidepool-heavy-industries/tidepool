@@ -1,42 +1,40 @@
 use super::*;
-use crate::binding_table::source_selections::WorldPackageDomainOwner;
-use crate::binding_table::{WorldPackageDomainRetirement, WorldPackageSlotPermit};
-use crate::prepared_program::{
-    NativeArtifactBinding, NativeInstanceAttachment, NativeInstanceLease,
-};
+use crate::binding_table::source_selections::WorldNativeDomainOwner;
+use crate::binding_table::{WorldNativeDomainRetirement, WorldNativeSlotPermit};
+use crate::prepared_program::{NativeBindingKey, NativeInstanceAttachment, NativeInstanceLease};
 use std::sync::Weak;
 
-/// A non-rooting identity of one actual roots-attached PACKAGE installation.
-pub(super) struct WorldPackageGroupMarker {
-    binding: NativeArtifactBinding,
+/// A non-rooting identity of one actual roots-attached native installation.
+pub(super) struct WorldNativeGroupMarker {
+    binding: NativeBindingKey,
 }
 
 #[derive(Clone)]
-pub struct WorldPackageInstanceWitness {
+pub struct WorldNativeInstanceWitness {
     instance: GroupInstanceId,
-    marker: Weak<WorldPackageGroupMarker>,
-    domain: Weak<WorldPackageDomainOwner>,
+    marker: Weak<WorldNativeGroupMarker>,
+    domain: Weak<WorldNativeDomainOwner>,
 }
 
-impl WorldPackageInstanceWitness {
+impl WorldNativeInstanceWitness {
     pub fn instance(&self) -> GroupInstanceId {
         self.instance
     }
 }
 
-pub struct PreparedWorldPackageSlots {
-    entries: Vec<(WorldPackageSlotPermit, GroupInstanceId)>,
-    domains: HashMap<usize, PackageDomainSlots>,
-    groups: HashMap<GroupInstanceId, HashSet<(usize, NativeArtifactBinding)>>,
+pub struct PreparedWorldNativeSlots {
+    entries: Vec<(WorldNativeSlotPermit, GroupInstanceId)>,
+    domains: HashMap<usize, NativeDomainSlots>,
+    groups: HashMap<GroupInstanceId, HashSet<(usize, NativeBindingKey)>>,
 }
 
-pub(super) struct PackageDomainSlots {
-    owner: Weak<WorldPackageDomainOwner>,
-    entries: HashMap<NativeArtifactBinding, GroupInstanceId>,
+pub(super) struct NativeDomainSlots {
+    owner: Weak<WorldNativeDomainOwner>,
+    entries: HashMap<NativeBindingKey, GroupInstanceId>,
 }
 
 impl PreparedMachine<'_> {
-    pub(super) fn package_request_error(permit: &WorldPackageSlotPermit) -> ExecutionError {
+    pub(super) fn native_request_error(permit: &WorldNativeSlotPermit) -> ExecutionError {
         ExecutionError::BatchSourceContract(Box::new(
             permit.request.image.top_exports[&permit.request.binding]
                 .identity
@@ -44,10 +42,10 @@ impl PreparedMachine<'_> {
         ))
     }
 
-    fn check_world_package_group(
+    fn check_world_native_group(
         &self,
         instance: GroupInstanceId,
-        permit: &WorldPackageSlotPermit,
+        permit: &WorldNativeSlotPermit,
     ) -> Result<(), ExecutionError> {
         let request = &permit.request;
         let installed = self
@@ -55,11 +53,11 @@ impl PreparedMachine<'_> {
             .get(&instance.program())
             .ok_or(ExecutionError::UnknownProgram(instance.program()))?;
         if permit.owner.upgrade().is_none()
-            || !request.is_package()
+            || !request.matches_image_evidence(installed.program.get())
             || !installed.roots_attached
             || !std::ptr::eq(installed.program.get(), request.image.as_ref())
         {
-            return Err(Self::package_request_error(permit));
+            return Err(Self::native_request_error(permit));
         }
         let top = installed
             .program
@@ -69,65 +67,59 @@ impl PreparedMachine<'_> {
             .ok_or(ExecutionError::MissingEntry(request.binding))?;
         let expected = &request.image.top_exports[&request.binding];
         if top.identity != expected.identity || top.entry_signature != expected.entry_signature {
-            return Err(Self::package_request_error(permit));
+            return Err(Self::native_request_error(permit));
         }
         Ok(())
     }
 
-    fn world_package_marker(
+    fn world_native_marker(
         &mut self,
         instance: GroupInstanceId,
-        permit: &WorldPackageSlotPermit,
-    ) -> Result<Weak<WorldPackageGroupMarker>, ExecutionError> {
-        self.check_world_package_group(instance, permit)?;
-        let binding = permit
-            .request
-            .package_key()
-            .ok_or_else(|| Self::package_request_error(permit))?;
+        permit: &WorldNativeSlotPermit,
+    ) -> Result<Weak<WorldNativeGroupMarker>, ExecutionError> {
+        self.check_world_native_group(instance, permit)?;
+        let binding = permit.request.binding_key();
         let installed = self
             .programs
             .get_mut(&instance.program())
-            .expect("checked package group");
-        if let Some(marker) = &installed.package_group {
+            .expect("checked native group");
+        if let Some(marker) = &installed.native_group {
             if marker.binding != binding {
-                return Err(Self::package_request_error(permit));
+                return Err(Self::native_request_error(permit));
             }
         } else {
-            installed.package_group = Some(Arc::new(WorldPackageGroupMarker { binding }));
+            installed.native_group = Some(Arc::new(WorldNativeGroupMarker { binding }));
         }
         Ok(Arc::downgrade(
-            installed.package_group.as_ref().expect("package marker"),
+            installed.native_group.as_ref().expect("native marker"),
         ))
     }
 
     /// Reconcile an actual selected anchor before considering lazy occupancy.
     /// Lookup issues no root and publishes no choice; native commit does both.
-    pub fn lookup_world_package_slot(
+    pub fn lookup_world_native_slot(
         &mut self,
-        permit: &WorldPackageSlotPermit,
+        permit: &WorldNativeSlotPermit,
         selected: Option<&NativeInstanceLease>,
-    ) -> Result<Option<WorldPackageInstanceWitness>, ExecutionError> {
-        let binding = permit
-            .request
-            .package_key()
-            .ok_or_else(|| Self::package_request_error(permit))?;
+    ) -> Result<Option<WorldNativeInstanceWitness>, ExecutionError> {
+        let binding = permit.request.binding_key();
         if permit.owner.upgrade().is_none() {
-            return Err(Self::package_request_error(permit));
+            return Err(Self::native_request_error(permit));
         }
         let occupied = self
-            .package_domains
+            .native_domains
             .get(&permit.domain_key())
             .filter(|domain| domain.owner.ptr_eq(&permit.owner))
             .and_then(|domain| domain.entries.get(&binding))
             .copied();
         let instance = if let Some(anchor) = selected {
-            if anchor.binding_key() != permit.request.key() {
-                return Err(Self::package_request_error(permit));
+            if anchor.binding_key() != permit.request.binding_key() {
+                return Err(Self::native_request_error(permit));
             }
             self.handle_is_evaluated(anchor.handle())?;
-            self.check_world_package_group(anchor.instance(), permit)?;
+            self.check_world_native_group(anchor.instance(), permit)?;
             if occupied.is_some_and(|other| other != anchor.instance()) {
-                return Err(Self::package_request_error(permit));
+                return Err(Self::native_request_error(permit));
             }
             anchor.instance()
         } else if let Some(instance) = occupied {
@@ -135,49 +127,46 @@ impl PreparedMachine<'_> {
         } else {
             return Ok(None);
         };
-        let marker = self.world_package_marker(instance, permit)?;
-        Ok(Some(WorldPackageInstanceWitness {
+        let marker = self.world_native_marker(instance, permit)?;
+        Ok(Some(WorldNativeInstanceWitness {
             instance,
             marker,
             domain: permit.owner.clone(),
         }))
     }
 
-    pub fn validate_world_package_witness(
+    pub fn validate_world_native_witness(
         &self,
-        witness: &WorldPackageInstanceWitness,
-        permit: &WorldPackageSlotPermit,
+        witness: &WorldNativeInstanceWitness,
+        permit: &WorldNativeSlotPermit,
     ) -> Result<(), ExecutionError> {
-        self.check_world_package_group(witness.instance, permit)?;
+        self.check_world_native_group(witness.instance, permit)?;
         let installed = &self.programs[&witness.instance.program()];
         let valid = witness.domain.ptr_eq(&permit.owner)
-            && installed.package_group.as_ref().is_some_and(|marker| {
+            && installed.native_group.as_ref().is_some_and(|marker| {
                 witness.marker.ptr_eq(&Arc::downgrade(marker))
-                    && Some(marker.binding) == permit.request.package_key()
+                    && marker.binding == permit.request.binding_key()
             });
         if !valid {
-            return Err(Self::package_request_error(permit));
+            return Err(Self::native_request_error(permit));
         }
         Ok(())
     }
 
     /// Reserve every mutable index slot before source custody commits. The
     /// groups may be newly staged, but no domain occupancy is visible yet.
-    pub fn prepare_world_package_slot_publication(
+    pub fn prepare_world_native_slot_publication(
         &mut self,
-        entries: Vec<(WorldPackageSlotPermit, GroupInstanceId)>,
-    ) -> Result<PreparedWorldPackageSlots, ExecutionError> {
-        let mut domains = HashMap::<usize, PackageDomainSlots>::new();
-        let mut groups = HashMap::<GroupInstanceId, HashSet<(usize, NativeArtifactBinding)>>::new();
+        entries: Vec<(WorldNativeSlotPermit, GroupInstanceId)>,
+    ) -> Result<PreparedWorldNativeSlots, ExecutionError> {
+        let mut domains = HashMap::<usize, NativeDomainSlots>::new();
+        let mut groups = HashMap::<GroupInstanceId, HashSet<(usize, NativeBindingKey)>>::new();
         for (permit, instance) in &entries {
-            self.world_package_marker(*instance, permit)?;
+            self.world_native_marker(*instance, permit)?;
             let key = permit.domain_key();
-            let binding = permit
-                .request
-                .package_key()
-                .expect("checked PACKAGE request");
+            let binding = permit.request.binding_key();
             let occupied = self
-                .package_domains
+                .native_domains
                 .get(&key)
                 .and_then(|domain| domain.entries.get(&binding))
                 .or_else(|| {
@@ -186,11 +175,11 @@ impl PreparedMachine<'_> {
                         .and_then(|domain| domain.entries.get(&binding))
                 });
             if occupied.is_some_and(|old| old != instance) {
-                return Err(Self::package_request_error(permit));
+                return Err(Self::native_request_error(permit));
             }
             domains
                 .entry(key)
-                .or_insert_with(|| PackageDomainSlots {
+                .or_insert_with(|| NativeDomainSlots {
                     owner: permit.owner.clone(),
                     entries: HashMap::new(),
                 })
@@ -198,59 +187,59 @@ impl PreparedMachine<'_> {
                 .insert(binding, *instance);
             groups.entry(*instance).or_default().insert((key, binding));
         }
-        self.package_domains.reserve(domains.len());
-        self.package_groups.reserve(groups.len());
+        self.native_domains.reserve(domains.len());
+        self.native_groups.reserve(groups.len());
         for (key, additions) in &domains {
-            if let Some(domain) = self.package_domains.get_mut(key) {
+            if let Some(domain) = self.native_domains.get_mut(key) {
                 domain.entries.reserve(additions.entries.len());
             }
         }
         for (group, additions) in &groups {
-            if let Some(aliases) = self.package_groups.get_mut(group) {
+            if let Some(aliases) = self.native_groups.get_mut(group) {
                 aliases.reserve(additions.len());
             }
         }
-        Ok(PreparedWorldPackageSlots {
+        Ok(PreparedWorldNativeSlots {
             entries,
             domains,
             groups,
         })
     }
 
-    pub fn commit_world_package_slots(&mut self, prepared: PreparedWorldPackageSlots) {
+    pub fn commit_world_native_slots(&mut self, prepared: PreparedWorldNativeSlots) {
         for (permit, instance) in &prepared.entries {
             assert!(
-                self.check_world_package_group(*instance, permit).is_ok(),
-                "exclusive package commit remains current"
+                self.check_world_native_group(*instance, permit).is_ok(),
+                "exclusive native commit remains current"
             );
         }
         for (key, domain) in prepared.domains {
-            if let Some(existing) = self.package_domains.get_mut(&key) {
+            if let Some(existing) = self.native_domains.get_mut(&key) {
                 existing.entries.extend(domain.entries);
             } else {
-                self.package_domains.insert(key, domain);
+                self.native_domains.insert(key, domain);
             }
         }
         for (group, aliases) in prepared.groups {
-            if let Some(existing) = self.package_groups.get_mut(&group) {
+            if let Some(existing) = self.native_groups.get_mut(&group) {
                 existing.extend(aliases);
             } else {
-                self.package_groups.insert(group, aliases);
+                self.native_groups.insert(group, aliases);
             }
         }
     }
 
-    pub fn retire_world_package_domains(
+    pub fn retire_world_native_domains(
         &mut self,
-        retired: impl IntoIterator<Item = WorldPackageDomainRetirement>,
+        retired: impl IntoIterator<Item = WorldNativeDomainRetirement>,
     ) {
         for retired in retired {
-            if let Some(domain) = self.package_domains.remove(&retired.key()) {
+            if let Some(domain) = self.native_domains.remove(&retired.key()) {
                 for (binding, group) in domain.entries {
-                    if let Some(aliases) = self.package_groups.get_mut(&group) {
+                    if let Some(aliases) = self.native_groups.get_mut(&group) {
                         aliases.remove(&(retired.key(), binding));
                         if aliases.is_empty() {
-                            self.package_groups.remove(&group);
+                            self.native_groups.remove(&group);
                         }
                     }
                 }
@@ -258,68 +247,68 @@ impl PreparedMachine<'_> {
         }
     }
 
-    pub(super) fn invalidate_world_package_group(&mut self, group: GroupInstanceId) {
+    pub(super) fn invalidate_world_native_group(&mut self, group: GroupInstanceId) {
         if let Some(installed) = self.programs.get_mut(&group.program()) {
-            installed.package_group = None;
+            installed.native_group = None;
             installed.roots_attached = false;
         }
-        if let Some(aliases) = self.package_groups.remove(&group) {
+        if let Some(aliases) = self.native_groups.remove(&group) {
             for (domain, binding) in aliases {
-                if let Some(slots) = self.package_domains.get_mut(&domain) {
+                if let Some(slots) = self.native_domains.get_mut(&domain) {
                     if slots.entries.get(&binding) == Some(&group) {
                         slots.entries.remove(&binding);
                     }
                     if slots.entries.is_empty() {
-                        self.package_domains.remove(&domain);
+                        self.native_domains.remove(&domain);
                     }
                 }
             }
         }
     }
 
-    pub fn retain_world_package_export(
+    pub fn retain_world_native_export(
         &mut self,
-        witness: &WorldPackageInstanceWitness,
-        permit: &WorldPackageSlotPermit,
+        witness: &WorldNativeInstanceWitness,
+        permit: &WorldNativeSlotPermit,
     ) -> Result<NativeInstanceAttachment, ExecutionError> {
-        self.validate_world_package_witness(witness, permit)?;
+        self.validate_world_native_witness(witness, permit)?;
         let handle = self.retain_top(witness.instance.program(), permit.request.binding)?;
         self.handles
             .retain_native_instance(handle.raw, witness.instance.program());
         let lease = permit.request.clone().into_lease(witness.instance, handle);
-        Ok(NativeInstanceAttachment::from_world_package_slot(
+        Ok(NativeInstanceAttachment::from_world_native_slot(
             lease,
             permit.clone(),
             witness.clone(),
         ))
     }
 
-    pub fn world_package_literal_import(
+    pub fn world_native_literal_import(
         &self,
-        witness: &WorldPackageInstanceWitness,
-        permit: &WorldPackageSlotPermit,
+        witness: &WorldNativeInstanceWitness,
+        permit: &WorldNativeSlotPermit,
     ) -> Result<BatchImport, ExecutionError> {
-        self.validate_world_package_witness(witness, permit)?;
+        self.validate_world_native_witness(witness, permit)?;
         let request = &permit.request;
         let export = &request.image.top_exports[&request.binding];
         if export.rep != tidepool_repr::execution_schema::RuntimeRep::Address
             || !request.image.byte_tops.contains_key(&request.binding)
         {
-            return Err(Self::package_request_error(permit));
+            return Err(Self::native_request_error(permit));
         }
-        Ok(BatchImport::WorldPackageLiteral {
+        Ok(BatchImport::WorldNativeLiteral {
             permit: permit.clone(),
             witness: witness.clone(),
         })
     }
 
-    pub(super) fn validate_world_package_literal_import(
+    pub(super) fn validate_world_native_literal_import(
         &self,
-        permit: &WorldPackageSlotPermit,
-        witness: &WorldPackageInstanceWitness,
+        permit: &WorldNativeSlotPermit,
+        witness: &WorldNativeInstanceWitness,
         slot: &crate::prepared_program::plan::ImportSlot,
     ) -> Result<(), ExecutionError> {
-        self.validate_world_package_witness(witness, permit)?;
+        self.validate_world_native_witness(witness, permit)?;
         let request = &permit.request;
         let export = &request.image.top_exports[&request.binding];
         let valid = slot.rep == tidepool_repr::execution_schema::RuntimeRep::Address
@@ -330,19 +319,21 @@ impl PreparedMachine<'_> {
                 .as_ref()
                 .is_none_or(|expected| export.entry_signature.as_ref() == Some(expected))
             && (!slot.required_evaluated || export.evaluated)
-            && slot.literal_source.is_none()
-            && slot.literal.as_ref().is_some_and(|literal| {
-                request
-                    .image
-                    .byte_tops
-                    .get(&request.binding)
-                    .map(Arc::as_ref)
-                    == Some(literal.as_ref())
-            });
+            && slot.literal.is_some()
+            && match &request.evidence {
+                super::batch::LeaseRequestEvidence::Home { key, owner, binder } => {
+                    slot.literal_source.as_ref().is_some_and(|source| {
+                        &source.owner == owner
+                            && source.original_ordinal == key.original_ordinal
+                            && &source.binder == binder
+                    })
+                }
+                super::batch::LeaseRequestEvidence::Package { .. } => slot.literal_source.is_none(),
+            };
         if !valid {
-            return Err(Self::package_request_error(permit));
+            return Err(Self::native_request_error(permit));
         }
-        Ok(())
+        BatchProgram::validate_literal_producer(&request.image, slot, request.binding)
     }
 }
 
@@ -352,7 +343,7 @@ mod tests {
     use crate::binding_table::BindingTable;
     use crate::prepared_program::{
         BatchImport, BatchLeaseRequest, BatchProgram, DemandedPackageImage, ImageRegistry,
-        NativeExportRequest, PreparedCallOptions, PreparedResult,
+        NativeArtifactBinding, NativeExportRequest, PreparedCallOptions, PreparedResult,
     };
     use crate::scope::{ScopeId, ScopeTree};
     use crate::suspension::RealmId;
@@ -505,7 +496,7 @@ mod tests {
         package: &Arc<DemandedPackageImage>,
         binding: NativeArtifactBinding,
         value: u32,
-    ) -> WorldPackageSlotPermit {
+    ) -> WorldNativeSlotPermit {
         let domain = table
             .native_domain_selection_in(tree, scope)
             .unwrap()
@@ -513,7 +504,7 @@ mod tests {
         let request =
             NativeExportRequest::for_package(package.clone(), binding, domain, ValueId(value))
                 .unwrap();
-        table.package_slot_permit_in(tree, scope, &request).unwrap()
+        table.native_slot_permit_in(tree, scope, &request).unwrap()
     }
 
     fn release_scope(
@@ -524,7 +515,7 @@ mod tests {
     ) {
         for scope in tree.retire(scope) {
             let drained = table.drain_scope_with_sources(scope);
-            machine.retire_world_package_domains(table.take_package_domain_retirements());
+            machine.retire_world_native_domains(table.take_native_domain_retirements());
             assert!(drained.bindings.is_empty());
             for lease in drained.source_instances {
                 assert!(machine.release(lease.handle()));
@@ -554,7 +545,7 @@ mod tests {
         );
         let first = permit(&mut table, &tree, a, &package, key(1), 0);
         assert!(machine
-            .lookup_world_package_slot(&first, None)
+            .lookup_world_native_slot(&first, None)
             .unwrap()
             .is_none());
         let receipt = machine
@@ -584,13 +575,13 @@ mod tests {
             .unwrap();
         let group = receipt.leases[0].instance();
         let staged = machine
-            .prepare_world_package_slot_publication(vec![(first.clone(), group)])
+            .prepare_world_native_slot_publication(vec![(first.clone(), group)])
             .unwrap();
         let admission = table
             .register_source_instances_in_domains(&tree, a, receipt.source_attachments, &machine)
             .ok()
             .unwrap();
-        machine.commit_world_package_slots(staged);
+        machine.commit_world_native_slots(staged);
         let result = machine
             .run_entry_retained(
                 receipt.programs[0],
@@ -614,7 +605,7 @@ mod tests {
             assert!(machine.release(lease.handle()));
         }
         release_scope(&mut table, &mut machine, &mut tree, a);
-        assert!(!table.validate_package_slot_permit(&tree, a, &first));
+        assert!(!table.validate_native_slot_permit(&tree, a, &first));
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert!(
             machine.programs.contains_key(&group.program()),
@@ -626,7 +617,7 @@ mod tests {
             .unwrap();
         let sibling = permit(&mut table, &tree, b, &package, key(1), 1);
         let witness = machine
-            .lookup_world_package_slot(&sibling, None)
+            .lookup_world_native_slot(&sibling, None)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -635,27 +626,27 @@ mod tests {
             "implicit live parent preserves domain identity"
         );
         let attachment = machine
-            .retain_world_package_export(&witness, &sibling)
+            .retain_world_native_export(&witness, &sibling)
             .unwrap();
         assert_eq!(
             machine.handle_current_pointer(closure),
             machine.handle_current_pointer(attachment.lease().handle())
         );
         let staged = machine
-            .prepare_world_package_slot_publication(vec![(sibling.clone(), group)])
+            .prepare_world_native_slot_publication(vec![(sibling.clone(), group)])
             .unwrap();
         table
             .register_source_instances_in_domains(&tree, b, vec![attachment], &machine)
             .ok()
             .unwrap();
-        machine.commit_world_package_slots(staged);
+        machine.commit_world_native_slots(staged);
         let caf = permit(&mut table, &tree, b, &package, key(1), 0);
         let caf_witness = machine
-            .lookup_world_package_slot(&caf, None)
+            .lookup_world_native_slot(&caf, None)
             .unwrap()
             .unwrap();
         let caf_root = machine
-            .retain_world_package_export(&caf_witness, &caf)
+            .retain_world_native_export(&caf_witness, &caf)
             .unwrap();
         assert!(
             machine
@@ -676,7 +667,7 @@ mod tests {
             .unwrap()
             .clone();
         let fork_witness = machine
-            .lookup_world_package_slot(&fork_permit, Some(&selected))
+            .lookup_world_native_slot(&fork_permit, Some(&selected))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -685,21 +676,21 @@ mod tests {
             "forked domain first honors inherited physical anchor"
         );
         let fork_publication = machine
-            .prepare_world_package_slot_publication(vec![(fork_permit.clone(), group)])
+            .prepare_world_native_slot_publication(vec![(fork_permit.clone(), group)])
             .unwrap();
         let fork_root = machine
-            .retain_world_package_export(&fork_witness, &fork_permit)
+            .retain_world_native_export(&fork_witness, &fork_permit)
             .unwrap();
         table
             .register_source_instances_in_domains(&tree, fork, vec![fork_root], &machine)
             .ok()
             .unwrap();
-        machine.commit_world_package_slots(fork_publication);
+        machine.commit_world_native_slots(fork_publication);
         let independent = tree.mint_isolated();
         let independent_permit = permit(&mut table, &tree, independent, &package, key(1), 0);
         assert!(
             machine
-                .lookup_world_package_slot(&independent_permit, None)
+                .lookup_world_native_slot(&independent_permit, None)
                 .unwrap()
                 .is_none(),
             "independent vacant domain does not share another CAF"
@@ -707,7 +698,7 @@ mod tests {
         let different = permit(&mut table, &tree, b, &package, key(3), 0);
         assert!(
             machine
-                .lookup_world_package_slot(&different, None)
+                .lookup_world_native_slot(&different, None)
                 .unwrap()
                 .is_none(),
             "exact binding selection remains distinct"
@@ -722,18 +713,18 @@ mod tests {
         );
         release_scope(&mut table, &mut machine, &mut tree, b);
         assert!(
-            machine.lookup_world_package_slot(&first, None).is_err(),
+            machine.lookup_world_native_slot(&first, None).is_err(),
             "retained snapshot or stale permit cannot revive dead parent domain"
         );
         assert_eq!(
-            machine.package_domains.len(),
+            machine.native_domains.len(),
             1,
             "only the actual fork's alias remains"
         );
         release_scope(&mut table, &mut machine, &mut tree, fork);
         release_scope(&mut table, &mut machine, &mut tree, independent);
         assert!(
-            machine.package_domains.is_empty(),
+            machine.native_domains.is_empty(),
             "dead fork metadata disappears despite surviving closure"
         );
         assert!(machine.programs.contains_key(&group.program()));
@@ -743,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn package_slot_commit_refuses_failed_admission_conflicts_and_detached_group() {
+    fn native_slot_commit_refuses_failed_admission_conflicts_and_detached_group() {
         let (package, _) = fixture();
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
@@ -762,33 +753,33 @@ mod tests {
         let group = GroupInstanceId::from(groups[0]);
         machine.pin(group.program()).unwrap();
         let failed = machine
-            .prepare_world_package_slot_publication(vec![(address.clone(), group)])
+            .prepare_world_native_slot_publication(vec![(address.clone(), group)])
             .unwrap();
         drop(failed);
         assert!(
             machine
-                .lookup_world_package_slot(&address, None)
+                .lookup_world_native_slot(&address, None)
                 .unwrap()
                 .is_none(),
             "cancelled precommit publishes no occupancy"
         );
         let staged = machine
-            .prepare_world_package_slot_publication(vec![(address.clone(), group)])
+            .prepare_world_native_slot_publication(vec![(address.clone(), group)])
             .unwrap();
         table
             .register_source_instances_in_domains(&tree, scope, vec![], &machine)
             .ok()
             .unwrap();
-        machine.commit_world_package_slots(staged);
+        machine.commit_world_native_slots(staged);
         let literal_witness = machine
-            .lookup_world_package_slot(&address, None)
+            .lookup_world_native_slot(&address, None)
             .unwrap()
             .unwrap();
         let literal_image = literal_consumer(&package);
         let closed = vec![BatchProgram {
             image: literal_image.clone(),
             imports: vec![machine
-                .world_package_literal_import(&literal_witness, &address)
+                .world_native_literal_import(&literal_witness, &address)
                 .unwrap()],
         }];
         assert!(
@@ -812,7 +803,7 @@ mod tests {
                 .install_shared_batch(vec![BatchProgram {
                     image: literal_consumer(&wrong_bytes),
                     imports: vec![machine
-                        .world_package_literal_import(&literal_witness, &address)
+                        .world_native_literal_import(&literal_witness, &address)
                         .unwrap()]
                 }])
                 .is_err(),
@@ -821,12 +812,12 @@ mod tests {
         assert_eq!(machine.residency().programs, before);
         let value = permit(&mut table, &tree, scope, &package, key(1), 1);
         let witness = machine
-            .lookup_world_package_slot(&value, None)
+            .lookup_world_native_slot(&value, None)
             .unwrap()
             .unwrap();
         assert!(
             machine
-                .world_package_literal_import(&witness, &value)
+                .world_native_literal_import(&witness, &value)
                 .is_err(),
             "managed export cannot stand in for PACKAGE literal"
         );
@@ -853,20 +844,20 @@ mod tests {
             .unwrap();
         assert!(
             machine
-                .lookup_world_package_slot(&value, Some(&other.leases[0]))
+                .lookup_world_native_slot(&value, Some(&other.leases[0]))
                 .is_err(),
             "independently selected conflicting group is never overwritten"
         );
         assert_eq!(
             machine
-                .lookup_world_package_slot(&value, None)
+                .lookup_world_native_slot(&value, None)
                 .unwrap()
                 .unwrap()
                 .instance(),
             group
         );
         let root = machine
-            .retain_world_package_export(&witness, &value)
+            .retain_world_native_export(&witness, &value)
             .unwrap();
         let root_handle = root.lease().handle();
         let foreign_scope = tree.mint_isolated();
@@ -876,7 +867,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             machine
-                .lookup_world_package_slot(&value, None)
+                .lookup_world_native_slot(&value, None)
                 .unwrap()
                 .unwrap()
                 .instance(),
@@ -899,15 +890,15 @@ mod tests {
             "metadata may remain while block roots are detached"
         );
         assert!(machine
-            .validate_world_package_witness(&witness, &value)
+            .validate_world_native_witness(&witness, &value)
             .is_err());
         assert!(machine
-            .retain_world_package_export(&witness, &value)
+            .retain_world_native_export(&witness, &value)
             .is_err());
         assert!(machine
-            .world_package_literal_import(&literal_witness, &address)
+            .world_native_literal_import(&literal_witness, &address)
             .is_err());
-        assert!(machine.package_domains.is_empty());
+        assert!(machine.native_domains.is_empty());
         drop(held_marker);
         machine.unpin(group.program());
         release_scope(&mut table, &mut machine, &mut tree, scope);

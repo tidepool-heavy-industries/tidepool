@@ -95,8 +95,8 @@ pub use machine::{
     ImportBindings, ManagedBuilder, ManagedField, ManagedNode, NativeExportRequest, ParkRequest,
     PreparedCallOptions, PreparedCompileSnapshot, PreparedHandle, PreparedInput, PreparedMachine,
     PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch,
-    PreparedWorldPackageSlots, ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
-    WorldPackageInstanceWitness,
+    PreparedWorldNativeSlots, ProgramId, Quiescent, ResidencyCounts, RetirementReceipt,
+    WorldNativeInstanceWitness,
 };
 pub use run::{
     BatchImportContractMismatch, BatchImportSelection, ExecutionError, ImportShapeFact, RunOptions,
