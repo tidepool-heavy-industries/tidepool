@@ -22,7 +22,7 @@ use super::world_cell_test_support::{
 };
 use super::*;
 use crate::session::{
-    insert_preamble_imports, resident_cell_check_template, resident_workbench_templates,
+    insert_preamble_imports, resident_workbench_templates,
     turn::{self, run_turn, CompiledTurn, TurnRequest, TurnResult},
     ModuleEnv, SessionCompileView, SessionId,
 };

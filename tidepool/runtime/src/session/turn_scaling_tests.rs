@@ -1300,8 +1300,6 @@ pub(super) fn assert_compiler_work(
     stderr: &[u8],
     expected_shape: Option<SegmentWorkShape>,
 ) {
-    use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
-
     if let Some(shape) = expected_shape {
         assert_segment_shape(program, shape);
     }
