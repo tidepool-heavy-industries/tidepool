@@ -18927,7 +18927,11 @@ pub(crate) mod request_tests {
             None,
         );
         let (workbench, context) = workbench
-            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+            .admit_private_cell_with_source_for_test(
+                public.clone(),
+                captured.clone(),
+                source_owner.clone(),
+            )
             .await;
         workbench
             .bind_tool_result(context.clone(), "tool_one".into(), "output one".into())
@@ -18945,20 +18949,6 @@ pub(crate) mod request_tests {
             )
             .await
             .unwrap();
-        workbench
-            .publish_completed_cell_for_test(context)
-            .await
-            .unwrap();
-        let (workbench, context) = workbench
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            workbench
-                .host_binding_identity_for_test(context.clone(), "tool_one")
-                .await,
-            original
-        );
         workbench
             .execute_cell_for_test(context.clone(), "data Text = SourceText Bool")
             .await
@@ -19023,9 +19013,6 @@ pub(crate) mod request_tests {
             original
         );
         workbench
-            .host_binding_identity_for_test(context.clone(), "tool_two")
-            .await;
-        workbench
             .publish_completed_cell_for_test(context)
             .await
             .unwrap();
@@ -19035,7 +19022,9 @@ pub(crate) mod request_tests {
                 .await,
             original
         );
-        let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+        let (workbench, fresh) = workbench
+            .admit_private_cell_with_source_for_test(public, captured, source_owner)
+            .await;
         workbench
             .execute_cell_for_test(
                 fresh,
@@ -19063,7 +19052,11 @@ pub(crate) mod request_tests {
             None,
         );
         let (workbench, private) = workbench
-            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+            .admit_private_cell_with_source_for_test(
+                public.clone(),
+                captured.clone(),
+                source_owner.clone(),
+            )
             .await;
         workbench
             .execute_cell_for_test(
@@ -19158,7 +19151,9 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
-        let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+        let (workbench, fresh) = workbench
+            .admit_private_cell_with_source_for_test(public, captured, source_owner)
+            .await;
         workbench
             .execute_cell_for_test(
                 fresh,
@@ -19188,7 +19183,11 @@ pub(crate) mod request_tests {
                 None,
             );
             let (workbench, private) = workbench
-                .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+                .admit_private_cell_with_source_for_test(
+                    public.clone(),
+                    captured.clone(),
+                    source_owner.clone(),
+                )
                 .await;
             let retained = workbench
                 .bind_tool_result(private.clone(), "hostOnly".into(), "host only".into())
@@ -19212,7 +19211,9 @@ pub(crate) mod request_tests {
                 .host_binding_identity_for_test(public.clone(), &retained)
                 .await;
             let public_for_read = public.clone();
-            let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+            let (workbench, fresh) = workbench
+                .admit_private_cell_with_source_for_test(public, captured, source_owner)
+                .await;
             workbench
                 .execute_cell_for_test(fresh, &format!("freshHost <- pure {retained}"))
                 .await
@@ -19397,66 +19398,256 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn two_abandoned_visible_host_mounts_retire_before_publication() {
         with_test_compiler_owner(|preparation_client| async move {
+            two_abandoned_visible_host_mounts_retire_in_order(preparation_client.clone(), false)
+                .await;
+            two_abandoned_visible_host_mounts_retire_in_order(preparation_client, true).await;
+        })
+        .await;
+    }
+
+    async fn two_abandoned_visible_host_mounts_retire_in_order(
+        preparation_client: crate::CompilerPreparationClient,
+        reverse: bool,
+    ) {
+        let (machines, mut public, source, _root) = actor_registry_fixture();
+        let (captured, source_owner) =
+            world_query_test_source_files_with_support(&[], &source.base_include);
+        public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+        let workbench = ResidentActorWorkbench::new(
+            machines,
+            (source).bind_preparation(preparation_client),
+            None,
+        );
+        let (workbench, private) = workbench
+            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+            .await;
+        let (carrier, hidden_dependencies) = workbench
+            .prepare_host_input(private.clone(), HostCarrierKind::Json, None)
+            .await
+            .expect("prepare the hidden operand carrier");
+        let hidden = workbench
+            .mount_prepared_json_input(
+                private.clone(),
+                carrier,
+                serde_json::json!({"hidden": reverse}),
+            )
+            .await
+            .expect("mount the hidden operand");
+        let hidden_name = hidden.mounted_input().name.clone();
+        let first = workbench
+            .bind_tool_result(private.clone(), "abandonOne".into(), "one".into())
+            .await
+            .unwrap();
+        let second = workbench
+            .bind_tool_result(private.clone(), "abandonTwo".into(), "two".into())
+            .await
+            .unwrap();
+        let names = [first.name().to_owned(), second.name().to_owned()];
+        if reverse {
+            drop(second);
+            drop(first);
+        } else {
+            drop(first);
+            drop(second);
+        }
+        for name in names {
+            workbench
+                .wait_for_host_input_retirement_for_test(private.clone(), name)
+                .await;
+        }
+        workbench
+            .execute_cell_for_test(private.clone(), "afterTwo <- pure (45 :: Int)")
+            .await
+            .unwrap();
+        let execution = workbench.private_execution.as_ref().unwrap().clone();
+        let refusal = match workbench_runner_for_test(&workbench)
+            .publish_private_execution(private.clone(), execution.clone())
+            .await
+        {
+            Ok(_) => panic!("a live hidden operand must fence publication"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                &refusal,
+                ResidentActorWorkbenchError::PrivatePublication { source, .. }
+                    if matches!(
+                        source.as_ref(),
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                            tidepool_runtime::session::SessionError::WorldCellPublicationIncomplete
+                        ))
+                    )
+            ),
+            "reverse={reverse}: {refusal:?}"
+        );
+        drop(hidden_dependencies);
+        drop(hidden);
+        workbench
+            .wait_for_host_input_retirement_for_test(private.clone(), hidden_name)
+            .await;
+        workbench
+            .execute_cell_for_test(private.clone(), "afterHidden <- pure (46 :: Int)")
+            .await
+            .unwrap();
+        assert!(matches!(
+            workbench_runner_for_test(&workbench)
+                .publish_private_execution(private, execution)
+                .await
+                .unwrap(),
+            PrivateExecutionPublication::Manifest {
+                commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn declaration_only_history_publishes_real_progress_for_a_fresh_cell() {
+        with_test_compiler_owner(|preparation_client| async move {
             let (machines, mut public, source, _root) = actor_registry_fixture();
             let (captured, source_owner) =
                 world_query_test_source_files_with_support(&[], &source.base_include);
             public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
-            let workbench = ResidentActorWorkbench::new(
+            let (workbench, private) = ResidentActorWorkbench::new(
                 machines,
                 (source).bind_preparation(preparation_client),
                 None,
-            );
-            let (workbench, private) = workbench
+            )
+            .admit_private_cell_with_source_for_test(
+                public.clone(),
+                captured.clone(),
+                source_owner.clone(),
+            )
+            .await;
+            workbench
+                .execute_cell_for_test(
+                    private.clone(),
+                    "data DeclarationOnly = DeclarationOnly\ndeclarationValue :: Int\ndeclarationValue = 41",
+                )
+                .await
+                .expect("a declaration-only compiler item reaches its actual terminal owner");
+            workbench
+                .publish_completed_cell_for_test(private)
+                .await
+                .expect("declaration-only progress publishes its declarations");
+            let (workbench, fresh) = workbench
                 .admit_private_cell_with_source_for_test(public, captured, source_owner)
                 .await;
-            let first = workbench
-                .bind_tool_result(private.clone(), "abandonOne".into(), "one".into())
-                .await
-                .unwrap();
-            let second = workbench
-                .bind_tool_result(private.clone(), "abandonTwo".into(), "two".into())
-                .await
-                .unwrap();
-            let names = [first.name().to_owned(), second.name().to_owned()];
-            drop(first);
-            drop(second);
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let current = names.to_vec();
-                    let absent = workbench
-                        .access
-                        .with_machine(private.clone(), move |session, context, _| {
-                            Ok(current.iter().all(|name| {
-                                session
-                                    .current_binding_in(context.placement.lexical_scope, name)
-                                    .is_none()
-                            }))
-                        })
-                        .await
-                        .unwrap();
-                    if absent {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("both visible abandonments join the private retirement chain");
             workbench
-                .execute_cell_for_test(private.clone(), "afterTwo <- pure (45 :: Int)")
+                .execute_cell_for_test(
+                    fresh,
+                    "case DeclarationOnly of DeclarationOnly -> (declarationValue :: Int) == 41",
+                )
+                .await
+                .expect("a fresh captured-source cell consumes the published declaration");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn empty_import_only_history_has_an_explicit_terminal_transition() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut public, source, _root) = actor_registry_fixture();
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[], &source.base_include);
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let (workbench, private) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            )
+            .admit_private_cell_with_source_for_test(
+                public.clone(),
+                captured.clone(),
+                source_owner.clone(),
+            )
+            .await;
+            workbench
+                .execute_cell_for_test(private.clone(), "import Data.List\n")
+                .await
+                .expect("import-only source executes as a declaration item");
+            workbench
+                .publish_completed_cell_for_test(private)
+                .await
+                .expect("empty executable demand still commits a terminal transition");
+            let (workbench, fresh) = workbench
+                .admit_private_cell_with_source_for_test(public, captured, source_owner)
+                .await;
+            workbench
+                .execute_cell_for_test(fresh, "(42 :: Int) == 42")
+                .await
+                .expect("a later captured-source program starts after empty completion");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn failed_later_item_keeps_its_private_progress_unpublished() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut public, source, _root) = actor_registry_fixture();
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[], &source.base_include);
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let (workbench, private) = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            )
+            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+            .await;
+            let before = workbench
+                .access
+                .with_machine(public.clone(), |session, context, _| {
+                    Ok(session
+                        .public_visibility_snapshot_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
                 .await
                 .unwrap();
+            let failure = workbench
+                .execute_cell_for_test(
+                    private.clone(),
+                    "keptPrivate <- pure (41 :: Int)\nerror \"later item failed\"",
+                )
+                .await
+                .expect_err("the later item fails after genuine private progress");
+            assert!(
+                failure.to_string().contains("later item failed"),
+                "{failure:?}"
+            );
+            assert!(
+                workbench
+                    .access
+                    .with_machine(public.clone(), |session, context, _| {
+                        Ok(session
+                            .current_binding_in(context.placement.lexical_scope, "keptPrivate")
+                            .is_none())
+                    })
+                    .await
+                    .unwrap(),
+                "failed progress cannot become public"
+            );
             let execution = workbench.private_execution.as_ref().unwrap().clone();
-            assert!(matches!(
+            assert!(
                 workbench_runner_for_test(&workbench)
                     .publish_private_execution(private, execution)
                     .await
-                    .unwrap(),
-                PrivateExecutionPublication::Manifest {
-                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
-                    ..
-                }
-            ));
+                    .is_err(),
+                "an incomplete failed program cannot be frozen as successful publication"
+            );
+            let after = workbench
+                .access
+                .with_machine(public, |session, context, _| {
+                    Ok(session
+                        .public_visibility_snapshot_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                after, before,
+                "failed publication leaves the public World unchanged"
+            );
         })
         .await;
     }
@@ -22583,18 +22774,17 @@ pub(crate) mod request_tests {
                         error
                     })?;
                 let settled = match step {
-                    ResidentWorkbenchStep::Running { fragment, outcome } => {
-                        self.settle_item(context.clone(), *fragment, (*outcome).into())
-                            .await
-                            .map_err(|error| {
-                                tracing::debug!(
-                                    stage = "settle",
-                                    %error,
-                                    "test cell execution failed"
-                                );
-                                error
-                            })?
-                    }
+                    ResidentWorkbenchStep::Running { fragment, outcome } => self
+                        .settle_item(context.clone(), *fragment, (*outcome).into())
+                        .await
+                        .map_err(|error| {
+                            tracing::debug!(
+                                stage = "settle",
+                                %error,
+                                "test cell execution failed"
+                            );
+                            error
+                        })?,
                     other => other,
                 };
                 assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));

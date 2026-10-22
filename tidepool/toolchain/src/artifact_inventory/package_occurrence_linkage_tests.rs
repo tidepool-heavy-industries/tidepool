@@ -42,6 +42,52 @@ struct PackageSlotRecord {
     graph: PackageGraphObservation,
 }
 
+fn collect_package_plans(
+    binding: &PackageCodeBinding,
+    plans: &mut BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::PackageCodePlan,
+    >,
+) {
+    let id = binding.product().artifact_id();
+    if plans.contains_key(&id) {
+        return;
+    }
+    let mut imports = Vec::new();
+    for child in binding.imports() {
+        collect_package_plans(&child, plans);
+        imports.push(crate::artifact_inventory::PackageCodeTarget::Planned(
+            child.product().artifact_id(),
+        ));
+    }
+    plans.insert(
+        id,
+        crate::artifact_inventory::PackageCodePlan {
+            product: Arc::clone(binding.product()),
+            imports,
+        },
+    );
+}
+
+fn issue_package_graph(
+    binding: &PackageCodeBinding,
+    inherited: &[Arc<crate::artifact_inventory::IssuedPackageCodeGraph>],
+) -> Result<Arc<crate::artifact_inventory::IssuedPackageCodeGraph>, crate::CompileError> {
+    let mut plans = BTreeMap::new();
+    collect_package_plans(binding, &mut plans);
+    let inventory = crate::artifact_inventory::ArtifactInventory::default();
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    crate::artifact_inventory::IssuedPackageCodeGraph::issue(
+        &inventory.empty_view(),
+        plans.into_values().collect(),
+        vec![crate::artifact_inventory::PackageCodeTarget::Planned(
+            binding.product().artifact_id(),
+        )],
+        inherited,
+        &operation,
+    )
+}
+
 fn observe_package_graph(binding: &PackageCodeBinding) -> PackageGraphObservation {
     let root = binding.binding();
     let mut nodes = BTreeMap::new();
@@ -488,23 +534,89 @@ fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
 
 #[test]
 #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+fn transitive_home_package_demand_reaches_the_final_target() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("TransitiveHomeMiddle.hs"),
+        include_str!("../../tests/fixtures/package-occurrence-linkage/TransitiveHomeMiddle.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("TransitiveHomeLeaf.hs"),
+        include_str!("../../tests/fixtures/package-occurrence-linkage/TransitiveHomeLeaf.hs"),
+    )
+    .unwrap();
+    let output = compile_invocation(
+        &CompileInvocation {
+            source: include_str!(
+                "../../tests/fixtures/package-occurrence-linkage/TransitiveHomeTarget.hs"
+            ),
+            targets: &["target"],
+            include: &[root.path().to_owned()],
+            fallback_module_name: "TransitiveHomeTarget",
+        },
+        |_, _, _| {},
+    )
+    .expect("the target-local transitive HOME graph compiles through common admission");
+    let selection = completed_selection(&output, "target");
+    let row = |module: &str| {
+        selection
+            .completion()
+            .rows()
+            .find(|row| row.product().owner().module == module)
+            .unwrap_or_else(|| panic!("completed target lacks its {module} HOME row"))
+    };
+    let package_modules = |module: &str| {
+        row(module)
+            .imports()
+            .iter()
+            .filter_map(|import| match import {
+                CompletedNativeImport::Package { binding, .. } => {
+                    Some(binding.product().code().owner().module.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        package_modules("TransitiveHomeTarget").is_empty(),
+        "the final target directly names HOME code, not the package leaf"
+    );
+    let middle_packages = package_modules("TransitiveHomeMiddle");
+    assert!(
+        middle_packages
+            .iter()
+            .all(|module| module != "Data.Text.Internal"),
+        "the package demand is reached through the second HOME edge: {middle_packages:?}"
+    );
+    let leaf_packages = package_modules("TransitiveHomeLeaf");
+    assert!(
+        leaf_packages
+            .iter()
+            .any(|module| module == "Data.Text.Internal"),
+        "the target-local HOME walk retains the transitive Data.Text package: {leaf_packages:?}"
+    );
+    drop(output);
+}
+
+#[test]
+#[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
 fn same_direct_package_with_different_children_has_a_real_premise() {
     let source = include_str!(
         "../../tests/fixtures/package-occurrence-linkage/SameDirectDifferentChildren.hs"
     );
     let ints = compile_fixture(source, &["sortInts"]);
     let strings = compile_fixture(source, &["sortStrings"]);
-    let int_slots =
-        package_slot_records(&ints, &completed_selection(&ints, "sortInts"), "sortInts");
-    let string_slots = package_slot_records(
-        &strings,
-        &completed_selection(&strings, "sortStrings"),
-        "sortStrings",
-    );
+    let int_selection = completed_selection(&ints, "sortInts");
+    let string_selection = completed_selection(&strings, "sortStrings");
+    let int_slots = package_slot_records(&ints, &int_selection, "sortInts");
+    let string_slots = package_slot_records(&strings, &string_selection, "sortStrings");
     let mut crossed_children = Vec::new();
-    for left in &int_slots {
+    let mut crossed_indices = None;
+    for (left_index, left) in int_slots.iter().enumerate() {
         let left = &left.graph.nodes[&left.graph.root];
-        for right in &string_slots {
+        for (right_index, right) in string_slots.iter().enumerate() {
             let right = &right.graph.nodes[&right.graph.root];
             if left.owner == right.owner
                 && left.interface_sha256 == right.interface_sha256
@@ -512,6 +624,7 @@ fn same_direct_package_with_different_children_has_a_real_premise() {
                 && left.body_sha256 == right.body_sha256
                 && left.imports != right.imports
             {
+                crossed_indices = Some((left_index, right_index));
                 crossed_children.push((
                     left.owner.clone(),
                     left.envelope_sha256,
@@ -525,6 +638,117 @@ fn same_direct_package_with_different_children_has_a_real_premise() {
         crossed_children.len(),
         1,
         "exactly one direct package identity must have two real child histories: {crossed_children:#?}"
+    );
+    let package_bindings =
+        |selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>| {
+            selection
+                .target_imports()
+                .iter()
+                .filter_map(|import| match import {
+                    CompletedNativeTargetImport::Package { binding, .. } => Some(binding.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+    let int_bindings = package_bindings(&int_selection);
+    let string_bindings = package_bindings(&string_selection);
+    let Some((left_index, right_index)) = crossed_indices else {
+        unreachable!("the crossed child premise was asserted above")
+    };
+    let left = &int_bindings[left_index];
+    let right = &string_bindings[right_index];
+    assert_eq!(
+        left.product().artifact_id(),
+        right.product().artifact_id(),
+        "equal direct package content keeps one product identity"
+    );
+    assert_eq!(
+        left.product().bytes(),
+        right.product().bytes(),
+        "the discriminator starts from equal package bytes"
+    );
+    let issued_left = issue_package_graph(left, &[]).unwrap();
+    let issued_right = issue_package_graph(right, &[]).unwrap();
+    assert_eq!(
+        issued_left.roots()[0].artifact,
+        issued_right.roots()[0].artifact
+    );
+    assert_ne!(
+        issued_left.roots()[0].selection,
+        issued_right.roots()[0].selection,
+        "equal content with different ordered children receives distinct issuance"
+    );
+    let reused_left = issue_package_graph(left, &[Arc::clone(&issued_right)]).unwrap();
+    assert_eq!(
+        reused_left.roots(),
+        issued_left.roots(),
+        "an unused equal-content issuance cannot change the selected child history"
+    );
+    let reused_exact =
+        issue_package_graph(left, &[Arc::clone(&issued_right), Arc::clone(&issued_left)]).unwrap();
+    assert_eq!(
+        reused_exact.roots(),
+        issued_left.roots(),
+        "the exact selected issuance wins over its equal-content sibling"
+    );
+    let mut conflicting_plan = crate::artifact_inventory::PackageCodePlan {
+        product: Arc::clone(left.product()),
+        imports: left
+            .imports()
+            .map(|_| {
+                crate::artifact_inventory::PackageCodeTarget::Planned(
+                    right
+                        .imports()
+                        .next()
+                        .expect("crossed package has an ordered child")
+                        .product()
+                        .artifact_id(),
+                )
+            })
+            .collect(),
+    };
+    let left_plan = crate::artifact_inventory::PackageCodePlan {
+        product: Arc::clone(left.product()),
+        imports: left
+            .imports()
+            .map(|child| {
+                crate::artifact_inventory::PackageCodeTarget::Planned(child.product().artifact_id())
+            })
+            .collect(),
+    };
+    if conflicting_plan.imports == left_plan.imports {
+        conflicting_plan.imports.reverse();
+    }
+    let mut plans = BTreeMap::new();
+    collect_package_plans(left, &mut plans);
+    plans.insert(left.product().artifact_id(), conflicting_plan);
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let inventory = crate::artifact_inventory::ArtifactInventory::default();
+    let refusal = crate::artifact_inventory::IssuedPackageCodeGraph::issue(
+        &inventory.empty_view(),
+        std::iter::once(left_plan)
+            .chain(plans.into_values())
+            .collect(),
+        vec![crate::artifact_inventory::PackageCodeTarget::Planned(
+            left.product().artifact_id(),
+        )],
+        &[],
+        &operation,
+    )
+    .expect_err("one selected package id cannot issue two child histories");
+    assert!(
+        matches!(
+            refusal,
+            crate::CompileError::ArtifactInventory(ref error)
+                if matches!(
+                    error.failure,
+                    crate::artifact_inventory::ArtifactInventoryFailure::PackageCode {
+                        reason: crate::artifact_inventory::PackageCodeRefusal::ConflictingPlan,
+                        ..
+                    }
+                )
+        ),
+        "the same selected issuance must reject conflicting content: {refusal:?}"
     );
     drop(ints);
     drop(strings);
