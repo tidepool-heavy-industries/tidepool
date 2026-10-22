@@ -347,7 +347,7 @@ mod tests {
     use crate::binding_table::BindingTable;
     use crate::prepared_program::{
         BatchImport, BatchLeaseRequest, BatchProgram, ImageRegistry, PreparedCallOptions,
-        PreparedNativeCode, PreparedResult, SourceInstanceDomain,
+        PreparedNativeCode, PreparedResult,
     };
     use crate::scope::{ScopeId, ScopeTree};
     use crate::suspension::RealmId;

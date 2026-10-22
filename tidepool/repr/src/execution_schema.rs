@@ -1443,6 +1443,11 @@ impl PackageGroupCode {
 }
 
 impl CertifiedGroupCode {
+    /// Exact exported suffix; helper definitions cannot be selected as exports.
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        self.group.exported_values()
+    }
+
     pub(crate) fn projected_group(&self) -> &ProjectedGroup {
         &self.group
     }
