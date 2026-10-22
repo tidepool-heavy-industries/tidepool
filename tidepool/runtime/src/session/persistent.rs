@@ -18,33 +18,22 @@ use tidepool_codegen::binding_table::{
     BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
-use tidepool_codegen::prepared_program::{
-    ImageRegistry, InheritedSourceDemand, NativeInstanceLease, ProgramId, ResidencyCounts,
-    SourceBinder,
-};
 #[cfg(test)]
+use tidepool_codegen::prepared_program::SourceInstanceLease;
 use tidepool_codegen::prepared_program::{
-    PendingGroupInventory, SourceGroupOutline, SourceInstanceLease,
+    ImageRegistry, NativeInstanceLease, ProgramId, ResidencyCounts,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-#[cfg(test)]
-use tidepool_repr::execution_schema::{CertifiedGroup, GlobalDecl};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{
-    CachedHomeOwner, ImportOwner, PreparedProgram, SymbolIdentity,
-};
-#[cfg(test)]
-use tidepool_toolchain::certified_products::PendingImportOwner;
+use tidepool_repr::execution_schema::{CachedHomeOwner, PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::resident::NativeSourceCustody;
-#[cfg(test)]
-use super::turn::TurnCertification;
 use super::{
     DeclarationCandidateRender, ExactExportError, ExactExportSurface, PublicManifestBase,
     PublicManifestCommit, PublicationDecision, RecoveryPublicOwner, SessionCompileView,

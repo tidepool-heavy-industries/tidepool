@@ -6,16 +6,11 @@
 //! Parsing, linking, compiled-owner construction, execution, cancellation,
 //! disposition, and retained-program reuse cross this boundary in that order.
 
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc, OnceLock};
-#[cfg(test)]
-use tidepool_codegen::prepared_program::{InheritedSourceDemand, SourceInstanceLease};
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
-use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 
 #[path = "prepared/closed.rs"]
 mod closed;
@@ -27,8 +22,6 @@ pub(super) use closed::{
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
-#[cfg(test)]
-use tidepool_codegen::prepared_program::SourceInstanceDomain;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder,
@@ -36,7 +29,7 @@ use tidepool_codegen::prepared_program::{
     Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
     PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
     PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
-    ScopedDemandedImage, ScopedSourceBinder, SourceBinder, SourceLiteral, MAX_ANSWER_DEPTH,
+    SourceBinder, SourceLiteral, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a

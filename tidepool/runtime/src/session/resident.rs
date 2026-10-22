@@ -17,10 +17,6 @@ use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{
     session_var_id, ImageRegistry, Parcel, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
 };
-#[cfg(test)]
-use tidepool_codegen::prepared_program::{InheritedSourceDemand, SourceBinder};
-#[cfg(test)]
-use tidepool_repr::execution_schema::CachedHomeOwner;
 use tidepool_repr::execution_schema::{
     ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity, TypeIdentity,
 };
