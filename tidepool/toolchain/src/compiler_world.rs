@@ -1738,7 +1738,7 @@ pub struct PrivateSettledFrontier {
     kind: PrivateSettledKind,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrivateSettledKind {
     Borrowed,
     Host,
@@ -1839,8 +1839,12 @@ impl PrivateSettledFrontier {
         &self,
         birth: &Arc<CompilerWorld>,
         current: &Arc<CompilerWorld>,
+        expected: PrivateSettledKind,
     ) -> Result<(), CompileError> {
-        if self.birth != *birth.logical_id() || !self.matches_world(current) {
+        if self.birth != *birth.logical_id()
+            || !self.matches_world(current)
+            || self.kind != expected
+        {
             return Err(source_failure(
                 "private publication has another settled frontier",
             ));
@@ -2183,11 +2187,19 @@ impl CompilerWorld {
     ) -> Result<Arc<Self>, CompileError> {
         let checked_prefix = match progress {
             PrivateCompilerProgress::Checked(frontier) => {
-                frontier.validate_publication(original_public, private)?;
+                frontier.validate_publication(
+                    original_public,
+                    private,
+                    PrivateSettledKind::Checked,
+                )?;
                 true
             }
             PrivateCompilerProgress::HostChanged(frontier) => {
-                frontier.validate_publication(original_public, private)?;
+                frontier.validate_publication(
+                    original_public,
+                    private,
+                    PrivateSettledKind::Host,
+                )?;
                 false
             }
             PrivateCompilerProgress::Unchanged | PrivateCompilerProgress::Incomplete => {

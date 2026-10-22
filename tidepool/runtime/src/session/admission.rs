@@ -2817,7 +2817,7 @@ impl CheckedTurnCompletion {
         let mut lifecycle = private.map(|private| private.state.lock());
         let terminal = lifecycle
             .as_ref()
-            .map(|lifecycle| {
+            .map(|lifecycle| -> Result<_, SessionError> {
                 let frontier = PrivateExecutionAdmission::active_terminal(
                     lifecycle,
                     self.prefix.admission.digest(),
