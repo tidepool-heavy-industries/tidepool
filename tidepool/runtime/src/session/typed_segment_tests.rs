@@ -113,6 +113,10 @@ impl SemanticSession {
             1024 * 1024,
             Some(lib),
         );
+        assert_eq!(
+            resident.effect_policy(),
+            tidepool_effect::EffectRunPolicy::HandleOrSuspend
+        );
         let public_source = resident.mint_notebook_scope_with_lease(None).unwrap();
         let public = public_source.scope();
         resident
@@ -346,6 +350,17 @@ fn execute_semantic_cell(
                 assert_eq!(declaration.span().start_line(), line);
                 assert_eq!(declaration.span().end_line(), line + 1);
                 assert_eq!(declaration.source_ordinals().len(), 2);
+                let prologues = plan
+                    .items()
+                    .iter()
+                    .filter(|item| item.kind() == ParsedCellPlanKind::Prologue)
+                    .collect::<Vec<_>>();
+                assert!(prologues.len() <= 1);
+                for prologue in prologues {
+                    assert!(prologue.index() < declaration.index());
+                    assert_eq!(prologue.span().start_line(), 1);
+                    assert!(prologue.source().is_empty() && prologue.binders().is_empty());
+                }
             }
         }
         let settled = original
@@ -412,35 +427,48 @@ fn execute_semantic_cell(
                 if matches!(checks, SemanticChecks::NativeEntries) && index == 1 {
                     assert_checked_capture_refusals(&compiled, &reservation);
                 }
-                source_action_with_original(resident, original.clone(), |resident, report| {
-                    if item.kind() != CheckedItemKind::Bind {
-                        resident.run_observation_with_sites(
-                            compiled.code(),
-                            &bound[0],
-                            reservation.generation(),
-                            false,
-                            report,
-                        )
-                    } else if bound.is_empty() {
-                        resident.run_with_sites(label, compiled.code(), report)
-                    } else if bound.len() == 1 {
-                        resident.run_bind_with_sites(
-                            &bound[0].name,
-                            compiled.code(),
-                            &bound[0],
-                            reservation.generation(),
-                            report,
-                        )
-                    } else {
-                        resident.run_projected_bind_with_sites(
-                            label,
-                            compiled.code(),
-                            &bound,
-                            reservation.generation(),
-                            report,
-                        )
-                    }
-                })?;
+                let outcome =
+                    source_action_with_original(resident, original.clone(), |resident, report| {
+                        if item.kind() != CheckedItemKind::Bind {
+                            resident.run_observation_with_sites(
+                                compiled.code(),
+                                &bound[0],
+                                reservation.generation(),
+                                false,
+                                report,
+                            )
+                        } else if bound.is_empty() {
+                            resident.run_with_sites(label, compiled.code(), report)
+                        } else if bound.len() == 1 {
+                            resident.run_bind_with_sites(
+                                &bound[0].name,
+                                compiled.code(),
+                                &bound[0],
+                                reservation.generation(),
+                                report,
+                            )
+                        } else {
+                            resident.run_projected_bind_with_sites(
+                                label,
+                                compiled.code(),
+                                &bound,
+                                reservation.generation(),
+                                report,
+                            )
+                        }
+                    })?;
+                if item.kind() == CheckedItemKind::Bind && bound.len() > 1 {
+                    assert!(
+                        matches!(
+                            outcome,
+                            crate::session::ResidentOutcome::BindingsCommitted { .. }
+                        ),
+                        "projected semantic bind must publish all original binders: {outcome:?}"
+                    );
+                } else {
+                    assert!(matches!(outcome, crate::session::ResidentOutcome::Completed { .. }),
+                        "semantic native item must complete after dispatching its real effects: {outcome:?}");
+                }
             }
             assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
             assert_eq!(
