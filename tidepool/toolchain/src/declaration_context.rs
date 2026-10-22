@@ -13296,17 +13296,16 @@ impl ExactDeclarationContext {
 
     /// Retain already authenticated original code owners and their original
     /// lexical graph. Only the original compiler output proof issues this.
-    pub(crate) fn from_source_selection(
+    pub(crate) fn from_issued_output(
         producer: [u8; 32],
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        artifacts: &ArtifactView,
+        output: &IssuedOriginalOutput,
         lexical: Vec<ExactLexicalNode>,
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
-        let output = OriginalCompilerInputs::from_selection(selection, artifacts)?;
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)?;
+        let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            output.compiler_inputs(),
+        )?;
         Self::from_authenticated_execution_support(
             producer,
             support,

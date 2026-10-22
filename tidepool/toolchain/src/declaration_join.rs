@@ -793,15 +793,13 @@ fn certify_authored_declaration_inner(
     // its owner would make successive declarations retain different probes
     // under one module identity. The shared closure admission below refuses
     // any unexpected retained reference to that transient owner.
-    let originals = compiled
-        .source_selection
+    let output = compiled
+        .issued_output
         .as_ref()
-        .ok_or_else(|| contract("authored certification has no issued original selection"))?
-        .selected_authored_original_closure(
-            &compiled.artifact_view,
-            &candidates[0].unit,
-            &module_name,
-        )
+        .ok_or_else(|| contract("authored certification has no issued output owner"))?;
+    let originals = output
+        .source_selection()
+        .selected_authored_original_closure(output.artifacts(), &candidates[0].unit, &module_name)
         .map_err(|error| contract(&format!("authored original closure: {error}")))?;
     let products = originals.products();
     let mut matches = products.iter().filter(|product| {
@@ -839,37 +837,20 @@ fn certify_authored_declaration_inner(
             &Default::default(),
         )?,
     };
-    let issued = compiled
-        .source_selection
-        .as_ref()
-        .ok_or_else(|| contract("authored certification has no issued source selection"))?
-        .compiler_support_projection(
-            &compiled.artifact_view,
-            compiled.exact_source_admission.as_slice(),
-        )
-        .map_err(|error| contract(format!("authored compiler source selection: {error}")))?;
     let artifact_context = planned::authored_interface_context(
         context.as_ref(),
-        &compiled.artifact_view,
-        &issued,
+        output,
         products.iter().map(|product| ExactModuleIdentity {
             unit: product.owner().unit.clone(),
             module: product.owner().module.clone(),
         }),
         &source_imports,
     )?;
-    let issued_inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
-        compiled
-            .source_selection
-            .as_ref()
-            .expect("validated source selection"),
-        &compiled.artifact_view,
-    )?;
     let artifact_context = Arc::new(
         artifact_context
             .as_ref()
             .clone()
-            .retain_issued_native_inputs(&issued_inputs)?,
+            .retain_issued_native_inputs(output.compiler_inputs())?,
     );
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let planned::AuthoredClosureObservation {
