@@ -4639,7 +4639,6 @@ struct PackageInterfaceCatalog<'a> {
         'a,
         BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
     >,
-    decisions: Vec<certified_products::PackageInterfaceDecision>,
 }
 
 impl certified_products::PackageInterfaceLookup for PackageInterfaceCatalog<'_> {
@@ -4726,11 +4725,9 @@ fn segment_package_availability<'a>(
     originals: &'a certified_products::CertifiedSegmentOriginals,
     additions: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
 ) -> PackageInterfaceCatalog<'a> {
-    let interfaces = std::borrow::Cow::Borrowed(originals.package_availability());
     PackageInterfaceCatalog {
         current: std::borrow::Cow::Borrowed(additions),
-        interfaces,
-        decisions: Vec::new(),
+        interfaces: std::borrow::Cow::Owned(originals.package_witnesses()),
     }
 }
 
@@ -4756,7 +4753,6 @@ fn package_availability_with_validation<'a>(
     Ok(PackageInterfaceCatalog {
         current: std::borrow::Cow::Owned(current),
         interfaces: std::borrow::Cow::Owned(interfaces),
-        decisions,
     })
 }
 
@@ -9933,15 +9929,13 @@ mod module_product_tests {
         };
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let receipt = BTreeMap::from([(owner.clone(), observed.clone())]);
-        let catalog = package_availability_with_validation(
+        let reconciled = certified_products::reconcile_ordinary_package_interfaces(
+            &compiled.recovery_products,
             &receipt,
-            &certified,
             &mut validation,
         )
         .unwrap();
-        assert!(catalog.current.is_empty());
-        assert_eq!(&catalog.interfaces[owner], selected);
-        let [reuse] = catalog.decisions.as_slice() else {
+        let [reuse] = reconciled.decisions() else {
             panic!("one ordinary package observation expected");
         };
         assert_eq!(
@@ -9950,7 +9944,27 @@ mod module_product_tests {
         );
         assert_eq!(reuse.selected(), selected);
         assert_eq!(reuse.observed(), &observed);
-        assert!(reuse.token().is_some_and(|token| token.sha256() == &selected.sha256));
+        assert!(reuse
+            .token()
+            .is_some_and(|token| token.sha256() == &selected.sha256));
+        assert!(matches!(
+            reuse.issuer(),
+            Some(certified_products::PackageInterfaceIssuer::Original(issuer))
+                if compiled
+                    .recovery_products
+                    .iter()
+                    .any(|product| product.owner() == issuer)
+        ));
+
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let catalog = package_availability_with_validation(
+            &receipt,
+            &certified,
+            &mut validation,
+        )
+        .unwrap();
+        assert!(catalog.current.is_empty());
+        assert_eq!(&catalog.interfaces[owner], selected);
 
         let binder = tidepool_repr::execution_schema::SymbolIdentity {
             unit: owner.0.clone(),

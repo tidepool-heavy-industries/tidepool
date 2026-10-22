@@ -368,15 +368,77 @@ pub(crate) enum PackageInterfaceSelectionKind {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum PackageInterfaceIssuer {
+    Original(CachedHomeOwner),
+    CurrentOutput,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum InheritedPackageInterfaceCustody {
+    Issued {
+        issuer: PackageInterfaceIssuer,
+        token: Arc<CertifiedPackageInterface>,
+    },
+    Legacy,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InheritedPackageInterface {
+    witness: PackageInterfaceWitness,
+    custody: InheritedPackageInterfaceCustody,
+}
+
+impl InheritedPackageInterface {
+    fn issued(
+        witness: PackageInterfaceWitness,
+        issuer: PackageInterfaceIssuer,
+        token: Arc<CertifiedPackageInterface>,
+    ) -> Self {
+        Self {
+            witness,
+            custody: InheritedPackageInterfaceCustody::Issued { issuer, token },
+        }
+    }
+
+    fn legacy(witness: PackageInterfaceWitness) -> Self {
+        Self {
+            witness,
+            custody: InheritedPackageInterfaceCustody::Legacy,
+        }
+    }
+
+    pub(crate) fn witness(&self) -> &PackageInterfaceWitness {
+        &self.witness
+    }
+
+    fn custody(&self) -> &InheritedPackageInterfaceCustody {
+        &self.custody
+    }
+
+    #[cfg(test)]
+    fn token(&self) -> Option<&Arc<CertifiedPackageInterface>> {
+        match &self.custody {
+            InheritedPackageInterfaceCustody::Issued { token, .. } => Some(token),
+            InheritedPackageInterfaceCustody::Legacy => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn issuer(&self) -> Option<&PackageInterfaceIssuer> {
+        match &self.custody {
+            InheritedPackageInterfaceCustody::Issued { issuer, .. } => Some(issuer),
+            InheritedPackageInterfaceCustody::Legacy => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PackageInterfaceDecisionAction {
     Reuse {
         selected: PackageInterfaceWitness,
-        observed: PackageInterfaceWitness,
-        token: Option<Arc<CertifiedPackageInterface>>,
+        custody: InheritedPackageInterfaceCustody,
     },
-    New {
-        token: Option<Arc<CertifiedPackageInterface>>,
-    },
+    New,
 }
 
 #[derive(Clone, Debug)]
@@ -394,21 +456,40 @@ impl PackageInterfaceDecision {
     pub(crate) fn selected(&self) -> &PackageInterfaceWitness {
         match &self.action {
             PackageInterfaceDecisionAction::Reuse { selected, .. } => selected,
-            PackageInterfaceDecisionAction::New { .. } => &self.observed,
+            PackageInterfaceDecisionAction::New => &self.observed,
         }
     }
 
     pub(crate) fn observed(&self) -> &PackageInterfaceWitness {
-        match &self.action {
-            PackageInterfaceDecisionAction::Reuse { observed, .. } => observed,
-            PackageInterfaceDecisionAction::New { .. } => &self.observed,
-        }
+        &self.observed
     }
 
     pub(crate) fn token(&self) -> Option<&Arc<CertifiedPackageInterface>> {
         match &self.action {
-            PackageInterfaceDecisionAction::Reuse { token, .. }
-            | PackageInterfaceDecisionAction::New { token } => token.as_ref(),
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Issued { token, .. },
+                ..
+            } => Some(token),
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Legacy,
+                ..
+            }
+            | PackageInterfaceDecisionAction::New => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn issuer(&self) -> Option<&PackageInterfaceIssuer> {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Issued { issuer, .. },
+                ..
+            } => Some(issuer),
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Legacy,
+                ..
+            }
+            | PackageInterfaceDecisionAction::New => None,
         }
     }
 
@@ -416,14 +497,14 @@ impl PackageInterfaceDecision {
     pub(crate) fn kind(&self) -> PackageInterfaceSelectionKind {
         match self.action {
             PackageInterfaceDecisionAction::Reuse { .. } => PackageInterfaceSelectionKind::Reuse,
-            PackageInterfaceDecisionAction::New { .. } => {
+            PackageInterfaceDecisionAction::New => {
                 PackageInterfaceSelectionKind::NewSelection
             }
         }
     }
 
     pub(crate) fn is_new(&self) -> bool {
-        matches!(self.action, PackageInterfaceDecisionAction::New { .. })
+        matches!(self.action, PackageInterfaceDecisionAction::New)
     }
 }
 
@@ -503,14 +584,24 @@ pub(crate) fn inherited_package_witnesses_with_validation(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
-    let mut selected: BTreeMap<(String,String),PackageInterfaceWitness> = BTreeMap::new();
+    Ok(inherited_package_interfaces_with_validation(products, validation)?
+        .into_iter()
+        .map(|(owner, inherited)| (owner, inherited.witness))
+        .collect())
+}
+
+fn inherited_package_interfaces_with_validation(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<BTreeMap<(String, String), InheritedPackageInterface>> {
+    let mut selected: BTreeMap<(String, String), InheritedPackageInterface> = BTreeMap::new();
     for product in products {
         let decoded;
-        let packages = match product.original_native() {
+        let (packages, custody) = match product.original_native() {
             Some(witness) if witness.matches_original(product) => {
                 witness.validate_package_interfaces(validation)?;
-                &witness.packages
-            },
+                (&witness.packages, Some(witness.package_interfaces()))
+            }
             Some(_) => {
                 return Err(CertificationError::Mismatch(
                     "original native witness bytes",
@@ -526,29 +617,46 @@ pub(crate) fn inherited_package_witnesses_with_validation(
                         "inherited package product owner",
                     ));
                 }
-                &decoded.packages
+                (&decoded.packages, None)
             }
         };
         for (owner, interface) in packages {
             verify_package_interface(validation, interface)?;
             match selected.get(owner) {
-                Some(old) if old.sha256 != interface.sha256 => {
+                Some(old) if old.witness.sha256 != interface.sha256 => {
                     return Err(CertificationError::Mismatch("inherited package selection"));
                 }
                 Some(_) => continue,
                 None => {}
             }
+            let inherited = match custody {
+                Some(custody) => {
+                    let token = custody
+                        .get(owner)
+                        .filter(|token| token.sha256() == &interface.sha256)
+                        .cloned()
+                        .ok_or(CertificationError::Mismatch(
+                            "inherited package interface custody",
+                        ))?;
+                    InheritedPackageInterface::issued(
+                        interface.clone(),
+                        PackageInterfaceIssuer::Original(product.owner().clone()),
+                        token,
+                    )
+                }
+                None => InheritedPackageInterface::legacy(interface.clone()),
+            };
             // The returned selection owns its containers; the issued witness
             // retains immutable native facts under the original byte anchors.
             validation
                 .inventory
-                .reserve::<((String, String), PackageInterfaceWitness, [usize; 4])>(1)?;
+                .reserve::<(String, String, InheritedPackageInterface, [usize; 4])>(1)?;
             validation.inventory.charge(owner.0.len())?;
             validation.inventory.charge(owner.1.len())?;
             validation
                 .inventory
                 .charge(interface.selected_path.as_os_str().as_encoded_bytes().len())?;
-            selected.insert(owner.clone(), interface.clone());
+            selected.insert(owner.clone(), inherited);
         }
     }
     Ok(selected)
@@ -558,7 +666,7 @@ pub(crate) fn inherited_package_witnesses_with_validation(
 /// by retained originals. Only genuine new selections remain in `current`;
 /// authenticated overlaps retain the inherited witness and its custody.
 pub(crate) struct OrdinaryPackageInterfaces {
-    inherited: BTreeMap<(String, String), PackageInterfaceWitness>,
+    inherited: BTreeMap<(String, String), InheritedPackageInterface>,
     decisions: Vec<PackageInterfaceDecision>,
 }
 
@@ -571,7 +679,7 @@ impl OrdinaryPackageInterfaces {
     #[cfg(test)]
     pub(crate) fn inherited(
         &self,
-    ) -> &BTreeMap<(String, String), PackageInterfaceWitness> {
+    ) -> &BTreeMap<(String, String), InheritedPackageInterface> {
         &self.inherited
     }
 
@@ -581,7 +689,13 @@ impl OrdinaryPackageInterfaces {
         BTreeMap<(String, String), PackageInterfaceWitness>,
         Vec<PackageInterfaceDecision>,
     ) {
-        (self.inherited, self.decisions)
+        (
+            self.inherited
+                .into_iter()
+                .map(|(owner, inherited)| (owner, inherited.witness))
+                .collect(),
+            self.decisions,
+        )
     }
 }
 
@@ -590,12 +704,12 @@ pub(crate) fn reconcile_ordinary_package_interfaces(
     receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<OrdinaryPackageInterfaces> {
-    let inherited = inherited_package_witnesses_with_validation(products, validation)?;
+    let inherited = inherited_package_interfaces_with_validation(products, validation)?;
     let mut decisions = Vec::new();
     for (owner, witness) in receipt_packages {
         verify_package_interface(validation, witness)?;
         match inherited.get(owner) {
-            Some(inherited) if inherited.sha256 != witness.sha256 => {
+            Some(inherited) if inherited.witness.sha256 != witness.sha256 => {
                 return Err(CertificationError::Mismatch(
                     "exact inherited package selection differs from current target",
                 ));
@@ -605,16 +719,15 @@ pub(crate) fn reconcile_ordinary_package_interfaces(
                     owner: owner.clone(),
                     observed: witness.clone(),
                     action: PackageInterfaceDecisionAction::Reuse {
-                        selected: inherited.clone(),
-                        observed: witness.clone(),
-                        token: issued_package_token(products, owner, &inherited.sha256),
+                        selected: inherited.witness.clone(),
+                        custody: inherited.custody.clone(),
                     },
                 });
             }
             None => decisions.push(PackageInterfaceDecision {
                 owner: owner.clone(),
                 observed: witness.clone(),
-                action: PackageInterfaceDecisionAction::New { token: None },
+                action: PackageInterfaceDecisionAction::New,
             }),
         }
     }
@@ -727,7 +840,7 @@ pub(crate) struct CertifiedSegmentOriginals {
     raw: ParsedModuleProducts,
     receipt: CertifiedReceipt,
     products: CertifiedProducts,
-    package_availability: BTreeMap<(String, String), PackageInterfaceWitness>,
+    package_availability: BTreeMap<(String, String), InheritedPackageInterface>,
     artifact_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
     value_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
     value_entry_index: BTreeMap<
@@ -796,18 +909,32 @@ impl CertifiedSegmentOriginals {
         )?;
         products.source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
-        let mut package_availability =
-            inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
+        let mut package_availability = inherited_package_interfaces_with_validation(
+            &products.recovery_products,
+            validation,
+        )?;
         for (owner, witness) in &receipt.packages {
             if let Some(previous) = package_availability.get(owner) {
-                if previous.sha256 != witness.sha256 {
+                if previous.witness.sha256 != witness.sha256 {
                     return Err(CertificationError::Mismatch(
                         "segment original package selection",
                     ));
                 }
             } else {
                 charge_package_copy(owner, witness, &validation.inventory)?;
-                package_availability.insert(owner.clone(), witness.clone());
+                let custody = package_interfaces
+                    .get(owner)
+                    .filter(|token| token.sha256() == &witness.sha256)
+                    .cloned()
+                    .map(|token| {
+                        InheritedPackageInterface::issued(
+                            witness.clone(),
+                            PackageInterfaceIssuer::CurrentOutput,
+                            token,
+                        )
+                    })
+                    .unwrap_or_else(|| InheritedPackageInterface::legacy(witness.clone()));
+                package_availability.insert(owner.clone(), custody);
             }
         }
         timing.advance("source_membership");
@@ -975,8 +1102,17 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn package_availability(
         &self,
-    ) -> &BTreeMap<(String, String), PackageInterfaceWitness> {
+    ) -> &BTreeMap<(String, String), InheritedPackageInterface> {
         &self.package_availability
+    }
+
+    pub(crate) fn package_witnesses(
+        &self,
+    ) -> BTreeMap<(String, String), PackageInterfaceWitness> {
+        self.package_availability
+            .iter()
+            .map(|(owner, inherited)| (owner.clone(), inherited.witness.clone()))
+            .collect()
     }
 
     pub(crate) fn artifact_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
@@ -1088,7 +1224,6 @@ impl CertifiedSegmentOriginals {
             &item.packages,
             &self.receipt.packages,
             &self.package_availability,
-            &self.products.recovery_products,
             validation,
         )?;
         let additions = reconciled.into_additions();
@@ -1175,41 +1310,25 @@ impl CertifiedSegmentOriginals {
 /// package interface whose copied location has changed. The inherited witness
 /// keeps its original issuance provenance; only its authenticated bytes are
 /// re-registered under the issued logical path.
-fn carry_inherited_package_witness(
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-    owner: &(String, String),
-    inherited: &PackageInterfaceWitness,
+fn retain_inherited_package_custody(
+    inherited: &InheritedPackageInterface,
     validation: &mut PackageInterfaceValidation,
-) -> CertResult<Option<Arc<CertifiedPackageInterface>>> {
-    // Prefer the exact issued token: its retained bytes survive removal of the
-    // original transaction copy without reopening storage.
-    if let Some(token) = issued_package_token(products, owner, &inherited.sha256) {
-        validation
-            .register_package_interface(&inherited.selected_path, &token)
-            .map_err(package_validation_error)?;
-        return Ok(Some(token));
+) -> CertResult<()> {
+    match inherited.custody() {
+        InheritedPackageInterfaceCustody::Issued { token, .. } => {
+            // The exact token paired with the selected witness survives removal
+            // of the producer copy without reopening storage.
+            validation
+                .register_package_interface(&inherited.witness.selected_path, token)
+                .map_err(package_validation_error)
+        }
+        InheritedPackageInterfaceCustody::Legacy => {
+            // Legacy witnesses have no retained token. Their selected path is
+            // the only byte authority and keeps missing/inaccessible/corrupt
+            // observations as distinct typed refusals.
+            verify_package_interface(validation, &inherited.witness)
+        }
     }
-    // A legacy decoded home witness has no retained token. Authenticate its
-    // inherited bytes through the existing capture path and register them
-    // under the issued logical path. Missing, inaccessible or corrupt storage
-    // keeps its typed refusal; the incoming new path is never consumed as
-    // authority.
-    verify_package_interface(validation, inherited)?;
-    Ok(None)
-}
-
-fn issued_package_token(
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-    owner: &(String, String),
-    seal: &[u8; 32],
-) -> Option<Arc<CertifiedPackageInterface>> {
-    products.iter().find_map(|product| {
-        product
-            .original_native()
-            .and_then(|native| native.package_interfaces().get(owner))
-            .filter(|token| token.sha256() == seal)
-            .cloned()
-    })
 }
 
 /// An incoming segment-item package observation, classified against the
@@ -1227,7 +1346,7 @@ fn classify_segment_package_addition(
     owner: &(String, String),
     witness: &PackageInterfaceWitness,
     receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
-    available_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    available_packages: &BTreeMap<(String, String), InheritedPackageInterface>,
 ) -> CertResult<SegmentPackageAddition> {
     // The producer computes item deltas against its emitted receipt. An
     // inherited native witness can independently retain the same package.
@@ -1237,9 +1356,11 @@ fn classify_segment_package_addition(
         ));
     }
     match available_packages.get(owner) {
-        Some(previous) if previous.sha256 != witness.sha256 => Err(CertificationError::Mismatch(
-            "item replaces an inherited package selection",
-        )),
+        Some(previous) if previous.witness.sha256 != witness.sha256 => {
+            Err(CertificationError::Mismatch(
+                "item replaces an inherited package selection",
+            ))
+        }
         Some(_) => Ok(SegmentPackageAddition::Reuse),
         None => Ok(SegmentPackageAddition::NewSelection),
     }
@@ -1248,8 +1369,7 @@ fn classify_segment_package_addition(
 fn reconcile_segment_package_additions(
     item_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
-    available_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    available_packages: &BTreeMap<(String, String), InheritedPackageInterface>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<SegmentPackageAdditions> {
     let mut decisions = Vec::new();
@@ -1265,7 +1385,7 @@ fn reconcile_segment_package_additions(
                 decisions.push(PackageInterfaceDecision {
                     owner: owner.clone(),
                     observed: witness.clone(),
-                    action: PackageInterfaceDecisionAction::New { token: None },
+                    action: PackageInterfaceDecisionAction::New,
                 });
             }
             SegmentPackageAddition::Reuse => {
@@ -1273,14 +1393,13 @@ fn reconcile_segment_package_additions(
                 let inherited = available_packages
                     .get(owner)
                     .expect("reused owner retains its inherited witness");
-                let token = carry_inherited_package_witness(products, owner, inherited, validation)?;
+                retain_inherited_package_custody(inherited, validation)?;
                 decisions.push(PackageInterfaceDecision {
                     owner: owner.clone(),
                     observed: witness.clone(),
                     action: PackageInterfaceDecisionAction::Reuse {
-                        selected: inherited.clone(),
-                        observed: witness.clone(),
-                        token,
+                        selected: inherited.witness.clone(),
+                        custody: inherited.custody.clone(),
                     },
                 });
             }
@@ -26104,13 +26223,19 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(selected, expected);
-        let (owner, witness) = selected.iter().next().unwrap();
+        let available = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let (owner, inherited_package) = available.iter().next().unwrap();
+        let witness = inherited_package.witness();
         assert!(matches!(
-            classify_segment_package_addition(owner, witness, &BTreeMap::new(), &selected),
+            classify_segment_package_addition(owner, witness, &BTreeMap::new(), &available),
             Ok(SegmentPackageAddition::Reuse)
         ));
         assert!(matches!(
-            classify_segment_package_addition(owner, witness, &selected, &selected),
+            classify_segment_package_addition(owner, witness, &selected, &available),
             Err(CertificationError::Mismatch(
                 "item repeats an original package selection"
             ))
@@ -26118,7 +26243,7 @@ pub(crate) mod tests {
         let mut conflicting = witness.clone();
         conflicting.sha256[0] ^= 1;
         assert!(matches!(
-            classify_segment_package_addition(owner, &conflicting, &BTreeMap::new(), &selected),
+            classify_segment_package_addition(owner, &conflicting, &BTreeMap::new(), &available),
             Err(CertificationError::Mismatch(
                 "item replaces an inherited package selection"
             ))
@@ -26126,7 +26251,7 @@ pub(crate) mod tests {
         let mut another_path = witness.clone();
         another_path.selected_path = root.path().join("AnotherExternal.hi");
         assert!(matches!(
-            classify_segment_package_addition(owner, &another_path, &BTreeMap::new(), &selected),
+            classify_segment_package_addition(owner, &another_path, &BTreeMap::new(), &available),
             Ok(SegmentPackageAddition::Reuse),
         ));
         assert!(matches!(
@@ -26134,7 +26259,7 @@ pub(crate) mod tests {
                 &("absent-package".into(), "Absent".into()),
                 &another_path,
                 &BTreeMap::new(),
-                &selected
+                &available
             ),
             Ok(SegmentPackageAddition::NewSelection),
         ));
@@ -26307,7 +26432,7 @@ pub(crate) mod tests {
                 && observation.owner() == &new_owner
                 && observation.selected().selected_path == root.path().join("New.hi")
         }));
-        assert_eq!(reconciled.inherited()[&owner], selected_witness);
+        assert_eq!(reconciled.inherited()[&owner].witness(), &selected_witness);
         verify_package_interface(&mut validation, &selected_witness).unwrap();
 
         // A fresh admission, after the producer path was removed, reaches the
@@ -26329,7 +26454,10 @@ pub(crate) mod tests {
             .decisions()
             .iter()
             .all(|decision| !decision.is_new()));
-        assert_eq!(cold_reconciled.inherited()[&owner], selected_witness);
+        assert_eq!(
+            cold_reconciled.inherited()[&owner].witness(),
+            &selected_witness
+        );
         verify_package_interface(&mut cold, &selected_witness).unwrap();
 
         // Same bytes at another owner classify as that owner's new selection,
@@ -26345,7 +26473,7 @@ pub(crate) mod tests {
             .decisions()
             .iter()
             .any(|decision| decision.owner() == &wrong_owner && decision.is_new()));
-        assert_eq!(separated.inherited()[&owner], selected_witness);
+        assert_eq!(separated.inherited()[&owner].witness(), &selected_witness);
 
         // A genuine different seal refuses rather than replacing the inherited
         // selection, even when the incoming observation is readable.
@@ -26446,7 +26574,7 @@ pub(crate) mod tests {
                 sha256: sha(&[0x43]),
             },
         )]);
-        let available = inherited_package_witnesses_with_validation(
+        let available = inherited_package_interfaces_with_validation(
             std::slice::from_ref(&issued),
             &mut PackageInterfaceValidation::default(),
         )
@@ -26458,7 +26586,6 @@ pub(crate) mod tests {
             &item,
             &BTreeMap::new(),
             &available,
-            std::slice::from_ref(&issued),
             &mut validation,
         )
         .unwrap();
@@ -26479,7 +26606,6 @@ pub(crate) mod tests {
                 &item,
                 &item,
                 &available,
-                std::slice::from_ref(&issued),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::Mismatch(
@@ -26493,7 +26619,6 @@ pub(crate) mod tests {
                 &conflict,
                 &BTreeMap::new(),
                 &available,
-                std::slice::from_ref(&issued),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::Mismatch(
@@ -26506,7 +26631,6 @@ pub(crate) mod tests {
             &BTreeMap::from([(wrong_owner.clone(), item[&owner].clone())]),
             &BTreeMap::new(),
             &available,
-            std::slice::from_ref(&issued),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
@@ -26514,7 +26638,7 @@ pub(crate) mod tests {
             .decisions()
             .iter()
             .any(|decision| decision.owner() == &wrong_owner && decision.is_new()));
-        assert_eq!(available[&owner], selected_witness);
+        assert_eq!(available[&owner].witness(), &selected_witness);
 
         std::fs::write(&relocated, [0x44]).unwrap();
         assert!(matches!(
@@ -26522,7 +26646,6 @@ pub(crate) mod tests {
                 &item,
                 &BTreeMap::new(),
                 &available,
-                std::slice::from_ref(&issued),
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::CapturedModulePayload(
@@ -26703,7 +26826,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn carry_inherited_package_witness_prefers_token_then_legacy_copy() {
+    fn retain_inherited_package_custody_pairs_exact_token_with_legacy_fallbacks() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("External.hi");
         std::fs::write(&path, [0x43]).unwrap();
@@ -26741,31 +26864,32 @@ pub(crate) mod tests {
         );
         assert!(legacy.original_native().is_none());
         let owner = ("external-package".to_owned(), "External".to_owned());
-        let inherited = packages[&owner].clone();
+        let native = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
+        let legacy = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&legacy),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
 
         // Native token preferred: retained bytes survive producer removal and
         // re-register under the issued logical path without reopening storage.
         std::fs::remove_file(&path).unwrap();
         let mut native_validation = PackageInterfaceValidation::default();
-        carry_inherited_package_witness(
-            std::slice::from_ref(&issued),
-            &owner,
-            &inherited,
-            &mut native_validation,
-        )
-        .unwrap();
-        assert!(verify_package_interface(&mut native_validation, &inherited).is_ok());
+        retain_inherited_package_custody(&native, &mut native_validation).unwrap();
+        assert!(verify_package_interface(&mut native_validation, &native.witness).is_ok());
 
         // Legacy readable copy re-registers through the existing capture path.
         std::fs::write(&path, [0x43]).unwrap();
         let mut legacy_validation = PackageInterfaceValidation::default();
-        carry_inherited_package_witness(
-            std::slice::from_ref(&legacy),
-            &owner,
-            &inherited,
-            &mut legacy_validation,
-        )
-        .unwrap();
+        retain_inherited_package_custody(&legacy, &mut legacy_validation).unwrap();
 
         #[cfg(unix)]
         {
@@ -26773,11 +26897,9 @@ pub(crate) mod tests {
 
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             assert!(matches!(
-                carry_inherited_package_witness(
-                    std::slice::from_ref(&legacy),
-                    &owner,
-                    &inherited,
-                    &mut PackageInterfaceValidation::default(),
+                retain_inherited_package_custody(
+                    &legacy,
+                    &mut PackageInterfaceValidation::default()
                 ),
                 Err(CertificationError::CapturedModulePayload(
                     crate::recovery_artifacts::RecoveryArtifactError::Unreadable { .. }
@@ -26790,12 +26912,7 @@ pub(crate) mod tests {
         std::fs::remove_file(&path).unwrap();
         let mut removed_validation = PackageInterfaceValidation::default();
         assert!(matches!(
-            carry_inherited_package_witness(
-                std::slice::from_ref(&legacy),
-                &owner,
-                &inherited,
-                &mut removed_validation,
-            ),
+            retain_inherited_package_custody(&legacy, &mut removed_validation),
             Err(CertificationError::CapturedModulePayload(_))
         ));
 
@@ -26803,15 +26920,123 @@ pub(crate) mod tests {
         std::fs::write(&path, [0x44]).unwrap();
         let mut corrupt_validation = PackageInterfaceValidation::default();
         assert!(matches!(
-            carry_inherited_package_witness(
-                std::slice::from_ref(&legacy),
-                &owner,
-                &inherited,
-                &mut corrupt_validation,
-            ),
+            retain_inherited_package_custody(&legacy, &mut corrupt_validation),
             Err(CertificationError::CapturedModulePayload(
                 crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
             ))
+        ));
+    }
+
+    #[test]
+    fn inherited_package_reuse_keeps_the_token_paired_with_the_selected_product() {
+        let root = tempfile::tempdir().unwrap();
+        let first_path = root.path().join("First.hi");
+        let second_path = root.path().join("Second.hi");
+        std::fs::write(&first_path, [0x43]).unwrap();
+        std::fs::write(&second_path, [0x43]).unwrap();
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let package = |path| {
+            BTreeMap::from([(
+                owner.clone(),
+                PackageInterfaceWitness {
+                    selected_path: path,
+                    sha256: sha(&[0x43]),
+                },
+            )])
+        };
+        let fixture = |module, path| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    vec![(
+                        7,
+                        vec![PendingImportOwner::Package {
+                            unit: owner.0.clone(),
+                            module: owner.1.clone(),
+                            binder: SymbolIdentity {
+                                unit: owner.0.clone(),
+                                ..testing::identity(&owner.1, "entry")
+                            },
+                            interface_digest: sha(&[0x43]),
+                        }],
+                    )],
+                    7,
+                    &package(path),
+                    format!("{module} interface").into_bytes(),
+                ),
+                [1; 32],
+            )
+        };
+        let originals = recovered_witness_fixtures(&[
+            fixture("First", first_path.clone()),
+            fixture("Second", second_path.clone()),
+        ]);
+        let first_token = originals[0]
+            .product
+            .original_native()
+            .unwrap()
+            .package_interfaces()
+            .get(&owner)
+            .unwrap()
+            .clone();
+        let second_token = originals[1]
+            .product
+            .original_native()
+            .unwrap()
+            .package_interfaces()
+            .get(&owner)
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&first_token, &second_token));
+
+        let selected = inherited_package_interfaces_with_validation(
+            &[
+                originals[0].product.clone(),
+                originals[1].product.clone(),
+            ],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
+        assert_eq!(selected.witness.selected_path, first_path);
+        assert!(Arc::ptr_eq(selected.token().unwrap(), &first_token));
+        assert!(!Arc::ptr_eq(selected.token().unwrap(), &second_token));
+        assert!(matches!(
+            selected.issuer(),
+            Some(PackageInterfaceIssuer::Original(issuer))
+                if issuer == originals[0].product.owner()
+        ));
+
+        let legacy_first = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            originals[0].product.owner().clone(),
+            originals[0].product.interface_bytes().to_vec(),
+            originals[0].product.product_bytes().to_vec(),
+            originals[0].product.package_imports_bytes().to_vec(),
+            originals[0].product.certification_bytes().to_vec(),
+        );
+        let legacy_selected = inherited_package_interfaces_with_validation(
+            &[legacy_first, originals[1].product.clone()],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
+        assert!(legacy_selected.token().is_none());
+        assert!(legacy_selected.issuer().is_none());
+
+        std::fs::remove_file(&first_path).unwrap();
+        retain_inherited_package_custody(
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            retain_inherited_package_custody(
+                &legacy_selected,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(_))
         ));
     }
 
