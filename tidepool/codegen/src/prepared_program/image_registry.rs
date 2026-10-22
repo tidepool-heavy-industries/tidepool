@@ -990,27 +990,24 @@ mod tests {
             .unwrap();
         let completed = table.scope_snapshot(&tree, private).unwrap();
         let before = table.scope_snapshot(&tree, public).unwrap();
-        let stale = table
-            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+        assert!(matches!(
+            table.prepare_world_execution_selection_delta(&tree, private, &stale_private),
+            Err(BindingPromotionError::ConflictingSourceOrigin)
+        ));
+        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
+        let private_selection = table
+            .prepare_world_execution_selection_delta(&tree, private, &completed)
+            .unwrap();
+        let missing = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &[])
             .unwrap();
         assert!(matches!(
             table.prepare_world_execution_selection(
                 &tree,
                 private,
                 public,
-                &admitted,
-                &stale_private,
-                stale,
-            ),
-            Err(BindingPromotionError::ConflictingSourceOrigin)
-        ));
-        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
-        let missing = table
-            .prepare_exact_publication_in(&tree, private, public, &[], &[])
-            .unwrap();
-        assert!(matches!(
-            table.prepare_world_execution_selection(
-                &tree, private, public, &admitted, &completed, missing,
+                &private_selection,
+                missing,
             ),
             Err(BindingPromotionError::MissingOrForeignSourceInstance)
         ));
@@ -1027,13 +1024,16 @@ mod tests {
                 .is_empty(),
             "generic custody publication does not select a package instance"
         );
-        let foreign = table.scope_snapshot(&tree, capture).unwrap();
         let prepared = table
             .prepare_exact_publication_in(&tree, private, public, &[], &owned)
             .unwrap();
         assert!(matches!(
             table.prepare_world_execution_selection(
-                &tree, private, public, &foreign, &completed, prepared,
+                &tree,
+                capture,
+                public,
+                &private_selection,
+                prepared,
             ),
             Err(BindingPromotionError::ConflictingSourceOrigin)
         ));
@@ -1046,9 +1046,7 @@ mod tests {
             .prepare_exact_publication_in(&tree, private, public, &[], &owned)
             .unwrap();
         let prepared = table
-            .prepare_world_execution_selection(
-                &tree, private, public, &admitted, &completed, prepared,
-            )
+            .prepare_world_execution_selection(&tree, private, public, &private_selection, prepared)
             .unwrap();
         table.commit_exact_binding_promotion(prepared);
         let selected = table.native_domain_selection_in(&tree, public).unwrap();
@@ -1074,21 +1072,452 @@ mod tests {
         let stale = table
             .prepare_exact_publication_in(&tree, private, public, &[], &owned)
             .unwrap();
-        assert!(
-            matches!(
-                table.prepare_world_execution_selection(
-                    &tree, private, public, &admitted, &completed, stale,
-                ),
-                Err(BindingPromotionError::ConflictingSourceOrigin)
-            ),
-            "a changed public selection refuses even within the SAME domain"
-        );
+        let preserved = table
+            .prepare_world_execution_selection(&tree, private, public, &private_selection, stale)
+            .unwrap();
+        drop(preserved);
         assert_eq!(table.scope_snapshot(&tree, public).unwrap(), published);
         assert!(table
             .drain_scope_with_sources(private)
             .source_instances
             .is_empty());
         for lease in table.drain_scope_with_sources(public).source_instances {
+            assert!(machine.release(lease.handle()));
+        }
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
+    fn world_execution_preserves_latest_public_source_after_unchanged_private_work() {
+        use super::super::{
+            BatchLeaseRequest, BatchProgram, DemandedPackageImage, NativeArtifactBinding,
+            PreparedMachine, PreparedMachineOptions,
+        };
+        use crate::binding_table::BindingPromotionError;
+        use crate::suspension::RealmId;
+        use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion, ValueId};
+
+        fn owner(version: u8) -> CachedHomeOwner {
+            CachedHomeOwner {
+                unit: "unit".into(),
+                module: "Source".into(),
+                module_version: ModuleVersion([version; 32]),
+                skinny_iface_sha256: [version; 32],
+                product_sha256: [version; 32],
+            }
+        }
+
+        fn install(
+            machine: &mut PreparedMachine<'_>,
+            table: &mut crate::binding_table::BindingTable,
+            tree: &crate::scope::ScopeTree,
+            scope: crate::scope::ScopeId,
+            package: &Arc<DemandedPackageImage>,
+            key: NativeArtifactBinding,
+        ) -> super::super::NativeInstanceLease {
+            let domain = table
+                .native_domain_selection_in(tree, scope)
+                .unwrap()
+                .current();
+            let receipt = machine
+                .install_shared_batch_with_leases(
+                    vec![BatchProgram {
+                        image: Arc::clone(package.image()),
+                        imports: vec![],
+                    }],
+                    vec![BatchLeaseRequest::for_package(
+                        0,
+                        Arc::clone(package),
+                        key,
+                        domain,
+                        ValueId(0),
+                    )
+                    .unwrap()],
+                )
+                .unwrap();
+            table
+                .register_source_instances_in_domains(
+                    tree,
+                    scope,
+                    receipt.source_attachments,
+                    machine,
+                )
+                .ok()
+                .unwrap();
+            receipt.leases[0].clone()
+        }
+
+        fn publish_selected(
+            table: &mut crate::binding_table::BindingTable,
+            tree: &crate::scope::ScopeTree,
+            source: crate::scope::ScopeId,
+            target: crate::scope::ScopeId,
+            owner: CachedHomeOwner,
+        ) {
+            let mut origin = table
+                .prepare_source_owner_origin_in(tree, source, owner.clone())
+                .unwrap();
+            let changes = table
+                .prepare_declaration_binding_changes_with_custody_in(
+                    tree,
+                    source,
+                    &mut origin,
+                    &[],
+                    &[],
+                    &[],
+                )
+                .unwrap();
+            table.commit_source_owner_origin(origin);
+            table.commit_declaration_binding_changes(changes);
+            let prepared = table
+                .prepare_authored_source_publication_in(tree, source, target, &[], &[], &[owner])
+                .unwrap();
+            table.commit_exact_binding_promotion(prepared);
+        }
+
+        let registry = ImageRegistry::new();
+        let package = Arc::new(
+            DemandedPackageImage::prepare(
+                package_code(testing::wire_program(), 0),
+                &[],
+                &Default::default(),
+                &Default::default(),
+                &registry,
+            )
+            .unwrap(),
+        );
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut tree = crate::scope::ScopeTree::new();
+        let public = tree.mint_isolated();
+        let seed = tree.mint_isolated();
+        let later = tree.mint_isolated();
+        let private = tree.mint_isolated();
+        let mut table = crate::binding_table::BindingTable::new();
+
+        let seed_lease = install(
+            &mut machine,
+            &mut table,
+            &tree,
+            seed,
+            &package,
+            NativeArtifactBinding {
+                artifact: [1; 32],
+                selection: [2; 32],
+            },
+        );
+        publish_selected(&mut table, &tree, seed, public, owner(3));
+        let original = table.scope_snapshot(&tree, public).unwrap();
+        assert!(table
+            .native_domain_selection_in(&tree, public)
+            .unwrap()
+            .roots()
+            .values()
+            .any(|lease| lease.handle() == seed_lease.handle()));
+
+        table
+            .seed_world_execution_scope(&tree, public, private, &original)
+            .unwrap();
+
+        let later_lease = install(
+            &mut machine,
+            &mut table,
+            &tree,
+            later,
+            &package,
+            NativeArtifactBinding {
+                artifact: [3; 32],
+                selection: [4; 32],
+            },
+        );
+        publish_selected(&mut table, &tree, later, public, owner(5));
+        let completed = table.scope_snapshot(&tree, private).unwrap();
+        let private_selection = table
+            .prepare_world_execution_selection_delta(&tree, private, &completed)
+            .unwrap();
+        let selected = table.native_domain_selection_in(&tree, public).unwrap();
+        assert_eq!(selected.roots().len(), 2);
+        assert!(selected
+            .roots()
+            .values()
+            .any(|lease| lease.handle() == later_lease.handle()));
+        drop(selected);
+
+        let prepared = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &[])
+            .unwrap();
+        let prepared = table
+            .prepare_world_execution_selection(&tree, private, public, &private_selection, prepared)
+            .unwrap();
+        table.commit_exact_binding_promotion(prepared);
+        assert!(table.drain_scope_with_sources(private).bindings.is_empty());
+        let selected = table.native_domain_selection_in(&tree, public).unwrap();
+        assert_eq!(selected.roots().len(), 2);
+        let held = selected
+            .roots()
+            .values()
+            .find(|lease| lease.handle() == later_lease.handle())
+            .unwrap();
+        let readable = machine
+            .retain_handle_value(held.handle(), RealmId::ROOT)
+            .unwrap();
+        assert!(machine.release(readable));
+        drop(selected);
+
+        for scope in [seed, later] {
+            for lease in table.drain_scope_with_sources(scope).source_instances {
+                assert!(machine.release(lease.handle()));
+            }
+        }
+        for lease in table.drain_scope_with_sources(public).source_instances {
+            assert!(machine.release(lease.handle()));
+        }
+
+        let disjoint_public = tree.mint_isolated();
+        let disjoint_seed = tree.mint_isolated();
+        let disjoint_private = tree.mint_isolated();
+        let disjoint_later = tree.mint_isolated();
+        install(
+            &mut machine,
+            &mut table,
+            &tree,
+            disjoint_seed,
+            &package,
+            NativeArtifactBinding {
+                artifact: [21; 32],
+                selection: [22; 32],
+            },
+        );
+        publish_selected(&mut table, &tree, disjoint_seed, disjoint_public, owner(23));
+        let original = table.scope_snapshot(&tree, disjoint_public).unwrap();
+        table
+            .seed_world_execution_scope(&tree, disjoint_public, disjoint_private, &original)
+            .unwrap();
+        table
+            .seed_world_execution_scope(&tree, disjoint_public, disjoint_later, &original)
+            .unwrap();
+        install(
+            &mut machine,
+            &mut table,
+            &tree,
+            disjoint_private,
+            &package,
+            NativeArtifactBinding {
+                artifact: [24; 32],
+                selection: [25; 32],
+            },
+        );
+        install(
+            &mut machine,
+            &mut table,
+            &tree,
+            disjoint_later,
+            &package,
+            NativeArtifactBinding {
+                artifact: [26; 32],
+                selection: [27; 32],
+            },
+        );
+        let later_completed = table.scope_snapshot(&tree, disjoint_later).unwrap();
+        let later_selection = table
+            .prepare_world_execution_selection_delta(&tree, disjoint_later, &later_completed)
+            .unwrap();
+        let later_keys = table
+            .source_instance_keys_in(&tree, disjoint_later)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let later_prepared = table
+            .prepare_exact_publication_in(&tree, disjoint_later, disjoint_public, &[], &later_keys)
+            .unwrap();
+        let later_prepared = table
+            .prepare_world_execution_selection(
+                &tree,
+                disjoint_later,
+                disjoint_public,
+                &later_selection,
+                later_prepared,
+            )
+            .unwrap();
+        table.commit_exact_binding_promotion(later_prepared);
+
+        let private_completed = table.scope_snapshot(&tree, disjoint_private).unwrap();
+        let private_selection = table
+            .prepare_world_execution_selection_delta(&tree, disjoint_private, &private_completed)
+            .unwrap();
+        let private_keys = table
+            .source_instance_keys_in(&tree, disjoint_private)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let private_prepared = table
+            .prepare_exact_publication_in(
+                &tree,
+                disjoint_private,
+                disjoint_public,
+                &[],
+                &private_keys,
+            )
+            .unwrap();
+        let private_prepared = table
+            .prepare_world_execution_selection(
+                &tree,
+                disjoint_private,
+                disjoint_public,
+                &private_selection,
+                private_prepared,
+            )
+            .unwrap();
+        table.commit_exact_binding_promotion(private_prepared);
+        assert_eq!(
+            table
+                .native_domain_selection_in(&tree, disjoint_public)
+                .unwrap()
+                .roots()
+                .len(),
+            3,
+            "seed, public B, and disjoint private A all remain selected"
+        );
+        for scope in [disjoint_seed, disjoint_private, disjoint_later] {
+            for lease in table.drain_scope_with_sources(scope).source_instances {
+                assert!(machine.release(lease.handle()));
+            }
+        }
+        for lease in table
+            .drain_scope_with_sources(disjoint_public)
+            .source_instances
+        {
+            assert!(machine.release(lease.handle()));
+        }
+
+        let conflict_public = tree.mint_isolated();
+        let conflict_seed = tree.mint_isolated();
+        let conflict_private = tree.mint_isolated();
+        let conflict_later = tree.mint_isolated();
+        let mut table = crate::binding_table::BindingTable::new();
+        install(
+            &mut machine,
+            &mut table,
+            &tree,
+            conflict_seed,
+            &package,
+            NativeArtifactBinding {
+                artifact: [6; 32],
+                selection: [7; 32],
+            },
+        );
+        publish_selected(&mut table, &tree, conflict_seed, conflict_public, owner(8));
+        let original = table.scope_snapshot(&tree, conflict_public).unwrap();
+        table
+            .seed_world_execution_scope(&tree, conflict_public, conflict_private, &original)
+            .unwrap();
+        table
+            .seed_world_execution_scope(&tree, conflict_public, conflict_later, &original)
+            .unwrap();
+
+        let private_lease = install(
+            &mut machine,
+            &mut table,
+            &tree,
+            conflict_private,
+            &package,
+            NativeArtifactBinding {
+                artifact: [9; 32],
+                selection: [10; 32],
+            },
+        );
+        install(
+            &mut machine,
+            &mut table,
+            &tree,
+            conflict_later,
+            &package,
+            NativeArtifactBinding {
+                artifact: [9; 32],
+                selection: [10; 32],
+            },
+        );
+        let completed = table.scope_snapshot(&tree, conflict_private).unwrap();
+        let completed_later = table.scope_snapshot(&tree, conflict_later).unwrap();
+        let later_selection = table
+            .prepare_world_execution_selection_delta(&tree, conflict_later, &completed_later)
+            .unwrap();
+        let later_keys = table
+            .source_instance_keys_in(&tree, conflict_later)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let public_prepared = table
+            .prepare_exact_publication_in(&tree, conflict_later, conflict_public, &[], &later_keys)
+            .unwrap();
+        let public_prepared = table
+            .prepare_world_execution_selection(
+                &tree,
+                conflict_later,
+                conflict_public,
+                &later_selection,
+                public_prepared,
+            )
+            .unwrap();
+        table.commit_exact_binding_promotion(public_prepared);
+        let before = table
+            .native_domain_selection_in(&tree, conflict_public)
+            .unwrap()
+            .roots()
+            .len();
+        assert!(before >= 2);
+        let private_keys = table
+            .source_instance_keys_in(&tree, conflict_private)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let prepared = table
+            .prepare_exact_publication_in(
+                &tree,
+                conflict_private,
+                conflict_public,
+                &[],
+                &private_keys,
+            )
+            .unwrap();
+        let private_selection = table
+            .prepare_world_execution_selection_delta(&tree, conflict_private, &completed)
+            .unwrap();
+        assert!(matches!(
+            table.prepare_world_execution_selection(
+                &tree,
+                conflict_private,
+                conflict_public,
+                &private_selection,
+                prepared,
+            ),
+            Err(BindingPromotionError::ConflictingSourceOrigin)
+        ));
+        assert_eq!(
+            table
+                .native_domain_selection_in(&tree, conflict_public)
+                .unwrap()
+                .roots()
+                .len(),
+            before
+        );
+        let selected = table
+            .native_domain_selection_in(&tree, conflict_public)
+            .unwrap();
+        assert!(!selected
+            .roots()
+            .values()
+            .any(|lease| lease.handle() == private_lease.handle()));
+        drop(selected);
+
+        for scope in [conflict_seed, conflict_private, conflict_later] {
+            for lease in table.drain_scope_with_sources(scope).source_instances {
+                assert!(machine.release(lease.handle()));
+            }
+        }
+        for lease in table
+            .drain_scope_with_sources(conflict_public)
+            .source_instances
+        {
             assert!(machine.release(lease.handle()));
         }
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
