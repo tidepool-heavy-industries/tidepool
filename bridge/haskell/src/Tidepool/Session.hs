@@ -152,7 +152,7 @@ import System.FilePath (takeDirectory, (</>), (<.>))
 newtype Generation = Generation Word64 deriving (Eq, Ord, Show)
 
 -- | @Val@ = value-binding ifaces (this Wave). @Lib@ = user decls (Wave 3b).
-data SessionModuleKind = ValMod | LibMod deriving (Eq, Show)
+data SessionModuleKind = ValMod | LibMod deriving (Eq, Ord, Show)
 
 -- | The ONE place a gen-versioned session module is represented. The
 -- module-name string is produced ONLY by 'sessionModuleString' — no bare
@@ -161,7 +161,7 @@ data SessionModuleKind = ValMod | LibMod deriving (Eq, Show)
 data SessionModule = SessionModule
   { smKind :: !SessionModuleKind
   , smGen  :: !Generation
-  } deriving (Eq, Show)
+  } deriving (Eq, Ord, Show)
 
 sessionKindString :: SessionModuleKind -> String
 sessionKindString ValMod = "Val"

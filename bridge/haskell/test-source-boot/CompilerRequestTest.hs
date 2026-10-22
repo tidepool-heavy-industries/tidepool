@@ -123,9 +123,12 @@ worldRequestBoundaries = do
         other -> fail ("invalid held cell fixture: " ++ show other)
   let decodeSlots slots = workerRequestFromArgv (workerArgv
         [WorldCellPrepare cellPrepare {worldCellPrepareSlots=slots}])
-  case decodeSlots [(0,PlannedDeclaration 1),(1,PlannedBind 1)] of
-    Right (Just _) -> pure ()
-    other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
+  forM_ [[(0,PlannedDeclaration 1),(1,PlannedBind 1)]
+    ,[(0,PlannedBind 1),(1,PlannedDeclaration 1)]
+    ,[(0,PlannedExpression 1 "observation"),(1,PlannedPrologue 1)]] $ \slots ->
+      case decodeSlots slots of
+        Right (Just _) -> pure ()
+        other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
   forM_ [[(0,PlannedBind 1),(1,PlannedExpression 1 "observation")]
     ,[(0,PlannedPrologue 1),(1,PlannedDeclaration 1)]] $ \slots ->
       case decodeSlots slots of

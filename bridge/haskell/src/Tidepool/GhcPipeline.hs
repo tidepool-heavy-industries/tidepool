@@ -3428,20 +3428,24 @@ advanceWorldCellPrefix executor facts question offset current result completion
     (WorldCellPrefix cursor homes graph dependencies inventories scope inherited _) = do
   let environment = prHscEnv (pprPipelineResult result)
       captures = prProducedSessionInterfaces (pprPipelineResult result)
-      slotByGeneration = Map.fromList
-        [(generation,(ordinal,slot)) | (ordinal,slot) <- worldCellPrepareSlots question
-          , let generation = case slot of
-                  PlannedPrologue value -> value
-                  PlannedDeclaration value -> value
-                  PlannedBind value -> value
-                  PlannedExpression value _ -> value]
+  slotByModule <- foldM (\known (ordinal,slot) -> do
+    let owner = case slot of
+          PlannedPrologue value -> SessionModule LibMod (Generation value)
+          PlannedDeclaration value -> SessionModule LibMod (Generation value)
+          PlannedBind value -> SessionModule ValMod (Generation value)
+          PlannedExpression value _ -> SessionModule ValMod (Generation value)
+    when (Map.member owner known) (throwIO WorldCellCorrupt)
+    pure (Map.insert owner ordinal known)) Map.empty (worldCellPrepareSlots question)
   additions <- fmap concat $ forM captures $ \capture -> do
     let (owner,bytes) = capturedSessionInterface capture
     selected <- evaluate (lookupHpt (hsc_HPT environment) (moduleName owner)) >>= maybe (throwIO WorldCellCorrupt) evaluate
     unless (mi_module (hm_iface selected) == owner) (throwIO WorldCellCorrupt)
-    SessionModule ValMod (Generation generation) <- maybe (throwIO WorldCellCorrupt) pure
+    selectedModule <- maybe (throwIO WorldCellCorrupt) pure
       (parseSessionModule (moduleNameString (moduleName owner)))
-    (ordinal,_) <- maybe (throwIO WorldCellCorrupt) pure (Map.lookup generation slotByGeneration)
+    generation <- case selectedModule of
+      SessionModule ValMod (Generation value) -> pure value
+      _ -> throwIO WorldCellCorrupt
+    ordinal <- maybe (throwIO WorldCellCorrupt) pure (Map.lookup selectedModule slotByModule)
     unless (fromIntegral ordinal >= offset && fromIntegral ordinal < offset + length (cellPlanItems current)) (throwIO WorldCellCorrupt)
     let requirements = maybe [] (\(_,_,required) -> required) (capturedSessionInterfaceEvidence capture)
         artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
