@@ -4729,6 +4729,7 @@ impl ArtifactInventory {
         let mut demanded_offers = Vec::new();
         let mut resolved_targets = BTreeMap::new();
         let mut current_dependencies = BTreeMap::new();
+        let mut acquired_payload_ids = BTreeSet::new();
         let acquisition = match root_intent {
             ArtifactRootIntent::CurrentCohort { classified, .. } => {
                 Some(native_availability::bind_classified_cohort(
@@ -4765,6 +4766,9 @@ impl ArtifactInventory {
             offers,
         }) = acquisition
         {
+            // Exact historical terminals need no newly bound logical row, but
+            // their checked acquisition still transfers actual payload custody.
+            acquired_payload_ids.extend(entries.keys().copied());
             selected.extend(entries);
             demanded_offers = offers;
             for (key, verified) in bindings {
@@ -5250,6 +5254,16 @@ impl ArtifactInventory {
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let issuing_payloads = selected.clone();
+        acquired_payload_ids.extend(bound.keys().filter_map(|node| match node {
+            ArtifactBindingNode::Artifact(binding) => Some(binding.artifact),
+            ArtifactBindingNode::Group(_) => None,
+        }));
+        if acquired_payload_ids
+            .iter()
+            .any(|id| !issuing_payloads.contains_key(id))
+        {
+            return Err(failure("native admission lost its acquired payload custody"));
+        }
         // Validate proof retention before publishing the immutable scope. No payload
         // is retained for an unselected source row in an ancestor proof.
         let prepared_proofs = scope_proof::prepare_install(&state, witness)?;
@@ -5265,13 +5279,6 @@ impl ArtifactInventory {
                 .custody_lease()
                 .collect_materializations(&mut demanded_materializations, &mut BTreeSet::new())?;
         }
-        let introduced = bound
-            .keys()
-            .filter_map(|node| match node {
-                ArtifactBindingNode::Artifact(binding) => Some(binding.artifact),
-                ArtifactBindingNode::Group(_) => None,
-            })
-            .collect();
         let mut lease = ViewLease::from_issued_draft(
             ViewDraft {
                 roots,
@@ -5284,7 +5291,7 @@ impl ArtifactInventory {
                 materialization_parents,
                 materialization: Mutex::new(BTreeMap::new()),
             },
-            introduced,
+            acquired_payload_ids,
         );
         if !demanded_materializations.is_empty() {
             let mut observation = ArtifactView::from_custody(lease);
