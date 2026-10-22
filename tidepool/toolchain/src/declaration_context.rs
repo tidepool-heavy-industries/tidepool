@@ -12892,7 +12892,6 @@ fn decode_source_import_roles(
     for value in rows {
         let fields = row(value, 5)?;
         let qualifier = string(&fields[0])?;
-        crate::cache::ImportQualifier::try_from(qualifier.to_owned()).map_err(failure)?;
         let module = string(&fields[1])?;
         let boot = boolean(&fields[2])?;
         let unit = string(&fields[3])?;
@@ -12911,6 +12910,7 @@ fn decode_source_import_roles(
                     .saturating_add(unit.len()),
             )
             .map_err(|error| compiler_evidence_failure(error.into()))?;
+        crate::cache::ImportQualifier::try_from(qualifier.to_owned()).map_err(failure)?;
         let decoded_row = source_admission::RawSourceImportRole {
             qualifier: qualifier.to_owned(),
             module: module.to_owned(),

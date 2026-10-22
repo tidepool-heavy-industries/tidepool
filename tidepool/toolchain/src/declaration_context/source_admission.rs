@@ -7,6 +7,8 @@ use super::*;
 pub enum SourceAdmissionBoundary {
     FiniteRequest,
     WorldStage(usize),
+    AuthoredDeclaration,
+    OriginalExecution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,19 +129,27 @@ impl RootSourceImportRoles {
     ) -> Result<Arc<Self>, CompileError> {
         let root = authenticated_compilation_root(evidence, source_path)?;
         let mut expected = BTreeSet::new();
-        let mut insert = |qualifier: String, module: String, boot: bool, unit: String| {
+        let mut insert = |qualifier: &crate::cache::ImportQualifier,
+                          module: &str,
+                          boot: bool,
+                          unit: &str| {
+            let qualifier_bytes = match qualifier {
+                crate::cache::ImportQualifier::Unqualified => 4,
+                crate::cache::ImportQualifier::ThisUnit(unit) => 5usize.saturating_add(unit.len()),
+                crate::cache::ImportQualifier::OtherUnit(unit) => 6usize.saturating_add(unit.len()),
+            };
             operation
                 .reserve::<(String, String, bool, String)>(1)
                 .and_then(|_| {
                     operation.charge(
-                        qualifier
-                            .len()
+                        qualifier_bytes
                             .saturating_add(module.len())
                             .saturating_add(unit.len()),
                     )
                 })
                 .map_err(|error| compiler_evidence_failure(error.into()))?;
-            expected.insert((qualifier, module, boot, unit));
+            let qualifier = String::from(qualifier.clone());
+            expected.insert((qualifier, module.to_owned(), boot, unit.to_owned()));
             Ok::<_, CompileError>(())
         };
         let node = evidence
@@ -149,12 +159,7 @@ impl RootSourceImportRoles {
             .ok_or_else(|| failure("source roles lack their authenticated root"))?;
         for edge in &node.imports {
             if edge.selected.is_some() {
-                insert(
-                    String::from(edge.qualifier.clone()),
-                    edge.module.clone(),
-                    edge.boot,
-                    root.unit.clone(),
-                )?;
+                insert(&edge.qualifier, &edge.module, edge.boot, &root.unit)?;
             }
         }
         for module in exact
@@ -162,12 +167,7 @@ impl RootSourceImportRoles {
             .filter(|module| !module.boot && module.owner == root)
         {
             for edge in &module.imports {
-                insert(
-                    String::from(edge.qualifier.clone()),
-                    edge.module.clone(),
-                    edge.boot,
-                    edge.unit.clone(),
-                )?;
+                insert(&edge.qualifier, &edge.module, edge.boot, &edge.unit)?;
             }
         }
         if !expected
@@ -188,8 +188,8 @@ impl RootSourceImportRoles {
         }
         let mut masks = BTreeMap::new();
         for row in &rows {
+            charge_owner_fields(operation, &row.unit, &row.module, 1)?;
             let imported = identity(&row.unit, &row.module);
-            charge_owner(operation, &imported, 1)?;
             *masks.entry(imported).or_insert(0) |= row.mask;
         }
         let mut inherited_lexical = BTreeSet::new();
@@ -415,14 +415,21 @@ fn charge_owner(
     owner: &ExactModuleIdentity,
     copies: usize,
 ) -> Result<(), CompileError> {
+    charge_owner_fields(operation, &owner.unit, &owner.module, copies)
+}
+
+fn charge_owner_fields(
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+    unit: &str,
+    module: &str,
+    copies: usize,
+) -> Result<(), CompileError> {
     operation
         .reserve::<(ExactModuleIdentity, Vec<ExactModuleIdentity>)>(copies)
         .and_then(|_| {
             operation.charge(
-                owner
-                    .unit
-                    .len()
-                    .saturating_add(owner.module.len())
+                unit.len()
+                    .saturating_add(module.len())
                     .saturating_mul(copies),
             )
         })
