@@ -1276,6 +1276,11 @@ impl CertifiedSegmentOriginals {
         };
         let mut unused = Vec::new();
         for group in self.products.groups.iter() {
+            if !self.receipt.modules.iter().any(|module| {
+                module.unit == group.owner().unit && module.module == group.owner().module
+            }) {
+                continue;
+            }
             if group
                 .group()
                 .binders()
@@ -1296,6 +1301,14 @@ impl CertifiedSegmentOriginals {
         }
         for prior in self.products.source_selection.prior_program_products.iter() {
             let owner = prior.row().original_owner();
+            if self
+                .receipt
+                .modules
+                .iter()
+                .any(|module| module.unit == owner.unit && module.module == owner.module)
+            {
+                continue;
+            }
             let entry = prior
                 .row()
                 .target_original(owner)
