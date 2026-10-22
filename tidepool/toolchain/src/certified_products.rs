@@ -459,6 +459,104 @@ impl BoundPackageSelection {
         Ok(PackageHomeSourceOrigin::PriorProgramContract)
     }
 
+    #[cfg(test)]
+    fn assert_prior_home_contract_controls(&self, operation: &InventoryOperation) {
+        let BoundPackageSelectionState::Item {
+            prior_program_products,
+            selection,
+            links,
+            ..
+        } = &self.mode
+        else {
+            return;
+        };
+        for key in selection.home_roots.keys() {
+            let Some(product) = prior_program_products.iter().find(|product| {
+                let owner = product.row().original_owner();
+                owner.unit == key.unit && owner.module == key.module
+            }) else {
+                continue;
+            };
+            let group_key = crate::artifact_inventory::NativeGroupKey {
+                artifact: product.row().original_artifact_id(),
+                original_ordinal: key.original_ordinal,
+            };
+            let Some(binding) = product.groups(group_key).next() else {
+                continue;
+            };
+            let owner = product.row().original_owner();
+            assert!(matches!(
+                self.home_source_origin(binding, owner, operation).unwrap(),
+                PackageHomeSourceOrigin::PriorProgramContract
+            ));
+            let mut without = self.clone();
+            {
+                let BoundPackageSelectionState::Item {
+                    selection: changed, ..
+                } = &mut without.mode
+                else {
+                    unreachable!()
+                };
+                changed.home_roots.remove(key);
+                assert!(
+                    check_item_package_selection(links, changed, selection.program_sha256())
+                        .is_err()
+                );
+            }
+            assert!(matches!(without.home_source_origin(binding, owner, operation).unwrap(), PackageHomeSourceOrigin::NoContract),
+                "retained same-product Source evidence must not force an Original-use or held row into HOME");
+            let mut wrong_owner = owner.clone();
+            wrong_owner.module_version.0[0] ^= 1;
+            assert!(matches!(
+                self.home_source_origin(binding, &wrong_owner, operation),
+                Err(CertificationError::Mismatch(
+                    "HOME source differs from its prior program issuer"
+                ))
+            ));
+            let mut wrong_binding = serde_json::to_value(binding).unwrap();
+            let scope = wrong_binding["binding"]["selection"]
+                .as_array_mut()
+                .unwrap();
+            let first = scope[0].as_u64().unwrap();
+            scope[0] = serde_json::Value::from(first ^ 1);
+            let wrong_binding = serde_json::from_value(wrong_binding).unwrap();
+            assert!(matches!(
+                self.home_source_origin(wrong_binding, owner, operation),
+                Err(CertificationError::Mismatch(
+                    "prior HOME source has another exact group issuer"
+                ))
+            ));
+            let mut absent = self.clone();
+            let BoundPackageSelectionState::Item {
+                selection: changed, ..
+            } = &mut absent.mode
+            else {
+                unreachable!()
+            };
+            let mut absent_key = key.clone();
+            absent_key.original_ordinal = u32::MAX;
+            changed.home_roots.insert(absent_key, Vec::new());
+            let absent_binding = crate::artifact_inventory::NativeGroupBinding {
+                original_ordinal: u32::MAX,
+                ..binding
+            };
+            assert!(matches!(
+                absent.home_source_origin(absent_binding, owner, operation),
+                Err(CertificationError::Mismatch(
+                    "prior HOME source lacks its own offered group"
+                ))
+            ));
+            let mut wrong_stage = selection.clone();
+            wrong_stage.stage_id[0] ^= 1;
+            assert!(
+                check_item_package_selection(links, &wrong_stage, selection.program_sha256())
+                    .is_err()
+            );
+            eprintln!("actual prior HOME contract controls: accepted 1, same-product NoContract 1, crossed item 1, wrong owner 1, wrong issuer 1, absent ordinal 1, wrong stage 1");
+            break;
+        }
+    }
+
     pub(crate) fn ordinary(
         target: crate::artifacts::invocation_output::CapturedOrdinaryTarget,
     ) -> CertResult<Self> {
@@ -1627,6 +1725,8 @@ impl CertifiedSegmentOriginals {
                 ),
             },
         };
+        #[cfg(test)]
+        package_selection.assert_prior_home_contract_controls(&validation.inventory);
         let original_inputs = cursor
             .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;

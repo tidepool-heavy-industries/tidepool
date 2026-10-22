@@ -7086,3 +7086,182 @@ pub(in crate::session) fn run_checked_native_source_selection() {
         );
     }
 }
+
+#[test]
+fn prior_source_home_contracts_execute_first_demands_and_published_originals() {
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("PriorSourceBodies.hs"),
+        include_str!("fixtures/prior-source-bodies.hs"),
+    )
+    .unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.insert(0, root.path().to_owned());
+    let recipe = InputRecipe::capture(
+        insert_preamble_imports(effects.preamble(), "qualified PriorSourceBodies"),
+        effects.row().to_owned(),
+        include,
+    );
+    let library = SessionLib::open(
+        SessionId(1754),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let cell = check_fixture_cell(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/prior-source-first-demands.hs"),
+        execution.clone(),
+        2,
+    );
+    assert_eq!(cell.checked.items.len(), 5);
+    let mut source_uses = 0;
+    for index in 0..cell.checked.items.len() {
+        let item = cell.checked.checked_item(index).unwrap();
+        if item.planned_declaration().is_some() {
+            source_action(&mut resident, |resident, _| {
+                let admission = resident
+                    .admit_checked_item(cell.prefix.clone(), item)
+                    .unwrap();
+                resident.adopt_checked_declaration(admission).unwrap();
+            });
+            continue;
+        }
+        let (bound, compiled, reservation) = cell.compile_binding(&mut resident, index);
+        let [binder] = bound.as_slice() else {
+            panic!("one checked result per prior Source demand")
+        };
+        let certification = compiled.certification.as_ref().unwrap();
+        let selection = certification.native_selection.as_ref().unwrap();
+        if binder.name == "priorSeed" {
+            assert!(
+                !selection
+                    .completion()
+                    .rows()
+                    .any(|row| row.product().owner().module == "PriorSourceBodies"),
+                "the first target must not select either later-demanded body"
+            );
+        } else {
+            let expected = if binder.name == "priorPlain" {
+                "plainNumber"
+            } else {
+                "textNumber"
+            };
+            let actual_binder = certification
+                .target_owners
+                .iter()
+                .find_map(|owner| match owner {
+                    PendingImportOwner::Source { owner, binder, .. }
+                        if owner.module == "PriorSourceBodies" =>
+                    {
+                        Some(binder)
+                    }
+                    _ => None,
+                })
+                .expect("the same-program target names its actual prior Source binder");
+            assert!(selection.completion().rows().any(|row| row.product().owner().module == "PriorSourceBodies"
+                && row.product().group().binders().contains(actual_binder)),
+                "the actual non-inline prior body is selected, including an optimized worker if issued");
+            let packages = selection
+                .completion()
+                .rows()
+                .filter(|row| row.product().owner().module == "PriorSourceBodies")
+                .flat_map(|row| row.product().imports())
+                .filter(|owner| matches!(owner, PendingImportOwner::Package { .. }))
+                .count();
+            if expected == "plainNumber" {
+                assert_eq!(packages, 0, "package-free prior HOME witness premise");
+            } else {
+                assert!(
+                    packages > 0,
+                    "first packageful demand must retain actual package imports after optimization"
+                );
+            }
+            source_uses += 1;
+        }
+        let outcome = source_action(&mut resident, |resident, settlement| {
+            resident.run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                binder,
+                reservation.generation(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    }
+    assert_eq!(source_uses, 2);
+    for (name, expected) in [("priorPlain", "41"), ("priorText", "9")] {
+        let custody = resident
+            .retain_visible_binding_custody(name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resident.render_retained_preview(&custody, 64).as_deref(),
+            Some(expected)
+        );
+    }
+    publish_checked_fixture(&mut resident, &execution, 3);
+    resident.set_run_context(resident.public_context()).unwrap();
+    resident.retire_scope(execution.private_scope());
+    let reopened = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: reopened.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let cell = check_fixture_cell(&mut resident, &recipe,
+        "publishedPlain <- pure (PriorSourceBodies.plainNumber (41 :: Int))\npublishedText <- pure (PriorSourceBodies.textNumber \"forty-one\")",
+        reopened.clone(), 0);
+    for index in 0..cell.checked.items.len() {
+        let (bound, compiled, reservation) = cell.compile_binding(&mut resident, index);
+        let [binder] = bound.as_slice() else {
+            panic!("one reopened result per target")
+        };
+        let outcome = source_action(&mut resident, |resident, settlement| {
+            resident.run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                binder,
+                reservation.generation(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    }
+    for (name, expected) in [("publishedPlain", "41"), ("publishedText", "9")] {
+        let custody = resident
+            .retain_visible_binding_custody(name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resident.render_retained_preview(&custody, 64).as_deref(),
+            Some(expected)
+        );
+    }
+    publish_checked_fixture(&mut resident, &reopened, 2);
+    resident.set_run_context(resident.public_context()).unwrap();
+    resident.retire_scope(reopened.private_scope());
+}

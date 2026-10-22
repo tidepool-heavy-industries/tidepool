@@ -42,6 +42,7 @@ rust_filegroup(
         "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
         "src/fixtures/compiler-world-question.hs": "exomonad/actor/src/fixtures/compiler-world-question.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
+        "src/fixtures/host-text-display-reopened.hs": "exomonad/actor/src/fixtures/host-text-display-reopened.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fixtures/world-declaration-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-captured-input.hs",
         "src/fixtures/world-declaration-invoke-after-failure.hs": "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs",
@@ -288,6 +289,7 @@ rust_filegroup(
         "src/fixtures/compiler-world-info.hs": "exomonad/actor/src/fixtures/compiler-world-info.hs",
         "src/fixtures/compiler-world-question.hs": "exomonad/actor/src/fixtures/compiler-world-question.hs",
         "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
+        "src/fixtures/host-text-display-reopened.hs": "exomonad/actor/src/fixtures/host-text-display-reopened.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fixtures/world-declaration-captured-input.hs": "exomonad/actor/src/fixtures/world-declaration-captured-input.hs",
         "src/fixtures/world-declaration-invoke-after-failure.hs": "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs",
@@ -1879,6 +1881,7 @@ filegroup(
         "exomonad/actor/src/fixtures/compiler-world-info.hs": "src/fixtures/compiler-world-info.hs",
         "exomonad/actor/src/fixtures/compiler-world-question.hs": "src/fixtures/compiler-world-question.hs",
         "exomonad/actor/src/fixtures/host-json-nested.hs": "src/fixtures/host-json-nested.hs",
+        "exomonad/actor/src/fixtures/host-text-display-reopened.hs": "src/fixtures/host-text-display-reopened.hs",
         "exomonad/actor/src/fixtures/scope-live-result.hs": "src/fixtures/scope-live-result.hs",
         "exomonad/actor/src/fixtures/world-declaration-captured-input.hs": "src/fixtures/world-declaration-captured-input.hs",
         "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs": "src/fixtures/world-declaration-invoke-after-failure.hs",
@@ -2174,6 +2177,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d72657461696e65642e6873",
     src = "src/fixtures/host-json-retained.hs",
     out = "host-json-retained.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d746578742d646973706c61792d72656f70656e65642e6873",
+    src = "src/fixtures/host-text-display-reopened.hs",
+    out = "host-text-display-reopened.hs",
     visibility = ["PUBLIC"],
 )
 

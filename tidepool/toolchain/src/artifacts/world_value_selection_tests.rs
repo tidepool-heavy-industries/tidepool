@@ -479,6 +479,149 @@ fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() 
     });
 }
 
+#[test]
+#[ignore = "requires the declared rooted compiler service"]
+fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
+    let ((prepared, checked), admission) = settle(|| {
+        let (endpoint, world, source) = open_world_with_primary_and_module(
+            None,
+            include_bytes!("../../tests/fixtures/world-native/PriorSourceModule.hs"),
+        )?;
+        let template = include_str!("../../tests/fixtures/world-native/CellTemplate.hs").replace(
+            "{{CELL_IMPORTS}}",
+            "import qualified Module\n{{CELL_IMPORTS}}",
+        );
+        let plan = crate::compiler_world::plan_cell(
+            &endpoint,
+            &world,
+            Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                source: include_str!(
+                    "../../tests/fixtures/world-native/PriorSourceFirstDemands.hs"
+                )
+                .into(),
+                template,
+                turn_templates: Vec::new(),
+            }),
+            None,
+        )?;
+        assert_eq!(plan.items().len(), 5);
+        let origin = CompilerTransactionOrigin::current().unwrap();
+        let subject = WorldCellAdmissionSubject::for_source_transaction(
+            &origin,
+            [19; 16],
+            0,
+            1,
+            1,
+            [b"prior Source first-demand control".to_vec()],
+        )?;
+        let slots = vec![
+            CheckedPlannedCellSlot::Bind { value: 71 },
+            CheckedPlannedCellSlot::Declaration { declaration: 72 },
+            CheckedPlannedCellSlot::Bind { value: 73 },
+            CheckedPlannedCellSlot::Declaration { declaration: 74 },
+            CheckedPlannedCellSlot::Bind { value: 75 },
+        ];
+        let mut binders = vec![Vec::new(); 5];
+        for (index, generation, name) in [
+            (0, 71, "priorSeed"),
+            (2, 73, "priorPlain"),
+            (4, 75, "priorText"),
+        ] {
+            binders[index].push((
+                name.to_owned(),
+                tidepool_repr::SessionVarId::from_extract(
+                    tidepool_codegen::prepared_program::session_var_id(
+                        &tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
+                            .module_name(),
+                        name,
+                    ),
+                ),
+            ));
+        }
+        let reservation = plan.reserve(plan.issue_admission_token(subject, slots, binders)?)?;
+        let checked = crate::compiler_world::admit_world_cell_program(
+            &endpoint,
+            reservation,
+            source.clone(),
+            source,
+            &origin,
+        )?
+        .map_err(|refusal| {
+            CompileError::ExtractFailed(format!("prior Source World producer refused: {refusal:?}"))
+        })?;
+        assert_eq!(checked.stages().len(), 5);
+        let prepared = prepare_world_cell_program(Arc::clone(&checked))?;
+        Ok((prepared, checked))
+    });
+    let program = prepared
+        .seal(&admission)
+        .expect("actual prior Source program END");
+    assert_eq!(program.items().len(), 5);
+    for (index, packageful) in [(2, false), (4, true)] {
+        let products = program.items()[index].native_products().unwrap();
+        let completed = products.completed_native_selection().unwrap();
+        let actual_binder = products
+            .pending_imports()
+            .iter()
+            .find_map(|owner| match owner {
+                certified_products::PendingImportOwner::Source { owner, binder, .. }
+                    if owner.module == "Module" =>
+                {
+                    Some(binder)
+                }
+                _ => None,
+            })
+            .expect("target carries its actual prior Source binder");
+        assert!(
+            completed
+                .rows()
+                .any(|row| row.product().owner().module == "Module"
+                    && row.product().group().binders().contains(actual_binder)),
+            "actual non-inline prior Source export must be selected"
+        );
+        let packages = completed
+            .rows()
+            .filter(|row| row.product().owner().module == "Module")
+            .flat_map(|row| row.product().imports())
+            .filter(|owner| {
+                matches!(
+                    owner,
+                    certified_products::PendingImportOwner::Package { .. }
+                )
+            })
+            .count();
+        assert_eq!(packages > 0, packageful, "optimized package slot premise");
+    }
+    let first = program.items()[0]
+        .native_products()
+        .unwrap()
+        .completed_native_selection()
+        .unwrap();
+    assert!(
+        !first
+            .rows()
+            .any(|row| row.product().owner().module == "Module"),
+        "initial target does not demand the later bodies"
+    );
+    let request = checked.native_demand_completion();
+    let stage = &checked.stages()[0];
+    let unknown = Arc::new(stage.as_ref().clone());
+    let validation =
+        PackageInterfaceValidation::with_inventory(Arc::clone(&checked.validation().inventory));
+    assert!(
+        request
+            .checked_stage(&checked, &unknown, &validation)
+            .is_err(),
+        "equal cloned stage observations do not issue a stage"
+    );
+    assert!(
+        request
+            .checked_stage(&checked, stage, &PackageInterfaceValidation::default())
+            .is_err(),
+        "another operation cannot supply the predecessor witness"
+    );
+}
+
 fn open_empty_world() -> Result<
     (
         AdmittedCompilerEndpoint,
@@ -487,43 +630,25 @@ fn open_empty_world() -> Result<
     ),
     CompileError,
 > {
-    let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
-        .expect("declared compiler deployment");
-    let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
-        .expect("configured compiler endpoint");
-    let endpoint =
-        AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
-    let root = Arc::new(tempfile::tempdir()?);
-    let body = b"module Module where\n";
-    std::fs::write(root.path().join("Module.hs"), body)?;
-    let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
-        vec![CapturedCompilerSourceRoot {
-            manifest: crate::cache::SourceRootManifest::from_file_digests([(
-                PathBuf::from("Module.hs"),
-                blake3::hash(body).to_hex().to_string(),
-            )])
-            .expect("actual captured source manifest"),
-            bodies: BTreeMap::from([(
-                PathBuf::from("Module.hs"),
-                Arc::<[u8]>::from(body.as_slice()),
-            )]),
-        }],
-        Arc::from(&b"world-selection-source"[..]),
-        root,
-    )?);
-    let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
-    let inputs = ModuleCandidateOffer::compiler_world_inputs(
-        None,
-        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
-        sources,
-        CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
-    )?;
-    let world = crate::compiler_world::open_world(inputs, &endpoint)?;
-    Ok((endpoint, world, source))
+    open_empty_world_with_primary(None)
 }
 
 fn open_empty_world_with_primary(
     primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+) -> Result<
+    (
+        AdmittedCompilerEndpoint,
+        Arc<CompilerWorld>,
+        WorldSourceSelection,
+    ),
+    CompileError,
+> {
+    open_world_with_primary_and_module(primary, b"module Module where\n")
+}
+
+fn open_world_with_primary_and_module(
+    primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+    body: &[u8],
 ) -> Result<
     (
         AdmittedCompilerEndpoint,
@@ -539,7 +664,6 @@ fn open_empty_world_with_primary(
     let endpoint =
         AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
     let root = Arc::new(tempfile::tempdir()?);
-    let body = b"module Module where\n";
     std::fs::write(root.path().join("Module.hs"), body)?;
     let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
         vec![CapturedCompilerSourceRoot {
@@ -548,10 +672,7 @@ fn open_empty_world_with_primary(
                 blake3::hash(body).to_hex().to_string(),
             )])
             .expect("actual captured source manifest"),
-            bodies: BTreeMap::from([(
-                PathBuf::from("Module.hs"),
-                Arc::<[u8]>::from(body.as_slice()),
-            )]),
+            bodies: BTreeMap::from([(PathBuf::from("Module.hs"), Arc::<[u8]>::from(body))]),
         }],
         Arc::from(&b"world-selection-source"[..]),
         root,

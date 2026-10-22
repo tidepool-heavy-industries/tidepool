@@ -18960,7 +18960,10 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) {
         use tidepool_runtime::session::turn::HostBindingAuthority;
-        let (machines, mut public, source, _root) = actor_registry_fixture();
+        let (machines, mut public, mut source, _root) = actor_registry_fixture();
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Inspection.Display as PriorDisplay");
         let (captured, source_owner) =
             world_query_test_source_files_with_support(&[], &source.base_include);
         public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
@@ -19071,7 +19074,10 @@ pub(crate) mod request_tests {
         workbench
             .execute_cell_for_test(
                 fresh,
-                "freshText <- pure tool_two\nfreshMatch <- pure (tool_one == \"output one\")",
+                &format!(
+                    "freshText <- pure tool_two\nfreshMatch <- pure (tool_one == \"output one\")\n{}",
+                    include_str!("fixtures/host-text-display-reopened.hs"),
+                ),
             )
             .await
             .expect("fresh private execution reads both published retained Text values");
