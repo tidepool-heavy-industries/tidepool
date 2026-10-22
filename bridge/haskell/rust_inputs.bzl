@@ -16,6 +16,7 @@ def declare_rust_test_inputs():
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_NextConsumer_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/NextConsumer.hs", out = "NextConsumer.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_Old_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/Old.hs", out = "Old.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_Public_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/Public.hs", out = "Public.hs", visibility = ["PUBLIC"])
+    export_file(name = "rust_input_test_cell_splitter_fixtures_logging_producer_shape_txt", src = "test-cell-splitter/fixtures/logging/producer-shape.txt", out = "producer-shape.txt", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_model_turn_Fixture_JevFormWorkflow_hs", src = "test-model-turn/Fixture/JevFormWorkflow.hs", out = "JevFormWorkflow.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_prepared_stg_FreerResumeExpectations_json", src = "test-prepared-stg/FreerResumeExpectations.json", out = "FreerResumeExpectations.json", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_prepared_stg_IntrospectionFrontDoor_hs", src = "test-prepared-stg/IntrospectionFrontDoor.hs", out = "IntrospectionFrontDoor.hs", visibility = ["PUBLIC"])

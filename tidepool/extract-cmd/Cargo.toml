@@ -27,12 +27,11 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-
-# Tests only: the structured daemon trace is asserted field by field, not by
-# substring. The crate stays a dependency leaf — a dev-dependency is absent
-# from the graph every dependent builds.
-[dev-dependencies]
+serde.workspace = true
 serde_json = "1"
+
+# Tests assert the structured daemon trace field by field, not by substring.
+[dev-dependencies]
 proptest.workspace = true
 
 [lints]
