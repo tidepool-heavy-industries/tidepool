@@ -73,11 +73,11 @@ impl NativeDomainSelection {
                 return Err(DemandError::MissingDomain(domain));
             }
             let binding = lease.binding_key();
-            if anchors
-                .insert((domain, binding), lease.instance())
-                .is_some_and(|old| old != lease.instance())
-            {
-                return Err(DemandError::ConflictingNativeInstance { domain, binding });
+            if let Some(old) = anchors.insert((domain, binding), lease.instance()) {
+                if old != lease.instance() {
+                    tracing::warn!(target: "tidepool_codegen::source_selection", reason = "native_binding_instance_diverged", ?domain, ?binding, expected_instance = ?old, observed_instance = ?lease.instance(), "native source selection refused");
+                    return Err(DemandError::ConflictingNativeInstance { domain, binding });
+                }
             }
             let key = ScopedNativeExport {
                 domain,
@@ -89,6 +89,7 @@ impl NativeDomainSelection {
                     || old.entry_signature() != lease.entry_signature()
                     || old.export() != lease.export()
             }) {
+                tracing::warn!(target: "tidepool_codegen::source_selection", reason = "native_export_diverged", ?domain, ?binding, value = ?lease.value(), "native source selection refused");
                 return Err(DemandError::ConflictingNativeInstance { domain, binding });
             }
             roots.insert(key, lease);

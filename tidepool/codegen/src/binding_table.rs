@@ -379,6 +379,7 @@ impl SourceSelectionView {
         let mut merged = latest.clone();
         if completed.current != admitted.current {
             if latest.current != admitted.current && latest.current != completed.current {
+                tracing::warn!(target: "tidepool_codegen::source_selection", reason = "current_domain_diverged", latest = ?latest.current, admitted = ?admitted.current, completed = ?completed.current, "private source delta refused");
                 return Err(BindingPromotionError::ConflictingSourceOrigin);
             }
             merged.current = completed.current;
@@ -409,6 +410,7 @@ impl SourceSelectionView {
                     continue;
                 }
                 if latest_record != admitted_record {
+                    tracing::warn!(target: "tidepool_codegen::source_selection", reason = "removed_domain_changed", ?domain, "private source delta refused");
                     return Err(BindingPromotionError::ConflictingSourceOrigin);
                 }
                 merged.domains.remove(&domain);
@@ -417,7 +419,10 @@ impl SourceSelectionView {
             let latest_record = match latest_record {
                 Some(record) => Some(record),
                 None if admitted_record.is_none() => None,
-                None => return Err(BindingPromotionError::ConflictingSourceOrigin),
+                None => {
+                    tracing::warn!(target: "tidepool_codegen::source_selection", reason = "changed_domain_absent", ?domain, "private source delta refused");
+                    return Err(BindingPromotionError::ConflictingSourceOrigin);
+                }
             };
 
             let mut selected = admitted_record
@@ -460,6 +465,7 @@ impl SourceSelectionView {
                     if current == after {
                         continue;
                     }
+                    tracing::warn!(target: "tidepool_codegen::source_selection", reason = "selected_key_diverged", ?domain, ?key, before, after, current, "private source delta refused");
                     return Err(BindingPromotionError::ConflictingSourceOrigin);
                 }
                 if after {
@@ -479,6 +485,7 @@ impl SourceSelectionView {
                     if current == after {
                         continue;
                     }
+                    tracing::warn!(target: "tidepool_codegen::source_selection", reason = "authored_origin_diverged", ?domain, ?owner, admitted = ?before.map(|origin| origin.domain), completed = ?after.map(|origin| origin.domain), latest = ?current.map(|origin| origin.domain), "private source delta refused");
                     return Err(BindingPromotionError::ConflictingSourceOrigin);
                 }
                 match after {
@@ -2698,7 +2705,10 @@ impl BindingTable {
             entries,
         )
         .map(|_| ())
-        .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
+        .map_err(|error| {
+            tracing::warn!(target: "tidepool_codegen::source_selection", reason = "scope_native_selection_invalid", ?scope, current = ?view.current, ?error, "source selection refused");
+            BindingPromotionError::ConflictingSourceOrigin
+        })
     }
 
     fn source_domain_entries_in<'a>(
@@ -3030,7 +3040,9 @@ impl BindingTable {
         source: ScopeId,
         completed: &BindingScopeSnapshot,
     ) -> Result<PreparedWorldExecutionSelection, BindingPromotionError> {
-        if self.scope_snapshot(tree, source)? != *completed {
+        let observed = self.scope_snapshot(tree, source)?;
+        if observed != *completed {
+            tracing::warn!(target: "tidepool_codegen::source_selection", reason = "freeze_snapshot_changed", ?source, expected_tip = ?completed.inherited, observed_tip = ?observed.inherited, expected_current = ?completed.selection.current, observed_current = ?observed.selection.current, dependencies_match = (observed.dependencies == completed.dependencies), observations_match = (observed.observation_dependencies == completed.observation_dependencies), selection_match = (observed.selection == completed.selection), "World source selection refused");
             return Err(BindingPromotionError::ConflictingSourceOrigin);
         }
         let admitted = self
@@ -3060,14 +3072,22 @@ impl BindingTable {
     ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
         let empty = SourceSelectionView::for_scope(target);
         let target_view = self.source_selection.get(&target).unwrap_or(&empty);
-        if prepared.plan.target != target || self.scope_snapshot(tree, source)? != private.completed
-        {
+        if prepared.plan.target != target {
+            tracing::warn!(target: "tidepool_codegen::source_selection", reason = "publication_target_changed", ?source, ?target, prepared_target = ?prepared.plan.target, "World source selection refused");
+            return Err(BindingPromotionError::ConflictingSourceOrigin);
+        }
+        let observed = self.scope_snapshot(tree, source)?;
+        if observed != private.completed {
+            tracing::warn!(target: "tidepool_codegen::source_selection", reason = "publication_snapshot_changed", ?source, ?target, prepared_target = ?prepared.plan.target, expected_tip = ?private.completed.inherited, observed_tip = ?observed.inherited, expected_current = ?private.completed.selection.current, observed_current = ?observed.selection.current, dependencies_match = (observed.dependencies == private.completed.dependencies), observations_match = (observed.observation_dependencies == private.completed.observation_dependencies), selection_match = (observed.selection == private.completed.selection), "World source selection refused");
             return Err(BindingPromotionError::ConflictingSourceOrigin);
         }
         let admitted = &private.admitted.selection;
         let completed = &private.completed.selection;
         let selection =
-            SourceSelectionView::compose_private_delta(target_view, admitted, completed)?;
+            SourceSelectionView::compose_private_delta(target_view, admitted, completed).map_err(|error| {
+                tracing::warn!(target: "tidepool_codegen::source_selection", reason = "publication_delta_invalid", ?source, ?target, latest_current = ?target_view.current, admitted_current = ?admitted.current, completed_current = ?completed.current, ?error, "World source selection refused");
+                error
+            })?;
         // Accepted authored publication has already issued its frozen domain
         // additions. Compose those same facts over the completed execution.
         let selection = Self::selection_for_promotion(&prepared.plan, &selection)?;
@@ -3104,7 +3124,10 @@ impl BindingTable {
                 .map(|origin| origin.domain),
             entries,
         )
-        .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)?;
+        .map_err(|error| {
+            tracing::warn!(target: "tidepool_codegen::source_selection", reason = "publication_native_selection_invalid", ?source, ?target, current = ?selection.current, ?error, "World source selection refused");
+            BindingPromotionError::ConflictingSourceOrigin
+        })?;
         prepared.selection = selection;
         Ok(prepared)
     }
@@ -3641,6 +3664,7 @@ impl BindingTable {
             .iter()
             .any(|owner| target_record.is_some_and(|record| record.authored.contains_key(owner)))
         {
+            tracing::warn!(target: "tidepool_codegen::source_selection", reason = "authored_owner_already_public", ?source, ?target, current = ?target_view.map(|view| view.current), owner = ?accepted_owners.iter().find(|owner| target_record.is_some_and(|record| record.authored.contains_key(*owner))), "authored source publication refused");
             return Err(BindingPromotionError::ConflictingSourceOrigin);
         }
         let next_tip = self
