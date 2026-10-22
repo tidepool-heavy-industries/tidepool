@@ -1469,6 +1469,10 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
             hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
               ++ ": " ++ show reason)
             pure (key, ProductProjectionRejected, Nothing, Nothing)
+          -- A captured interface with no current groups carries metadata only.
+          -- It cannot issue a native owner without a current executable group;
+          -- prior native ownership remains in the staged certification context.
+          Right [] -> pure (key, ProductInterfaceOnly, Nothing, Nothing)
           Right groups -> issue timing key name owner groups
   let products = [moduleProduct | (_, _, Just moduleProduct, _) <- outcomes]
       packageBundles =

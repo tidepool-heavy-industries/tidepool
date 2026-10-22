@@ -3615,11 +3615,13 @@ originalProjectionProducts = withScratch $ \work -> do
     , "{-# NOINLINE good #-}", "good :: Int -> Int", "good x = if x == 0 then 42 else good (x - 1)" ]
   writeFile (work </> "ProjectionIndependent.hs") $ unlines
     ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
+  writeFile (work </> "ProjectionMetadata.hs") $ unlines
+    ["module ProjectionMetadata (Scalar) where", "type Scalar = Int"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
     [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
     , "module ProjectionConsumer (usesGood) where"
-    , "import ProjectionOwner", "import ProjectionIndependent"
-    , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
+    , "import ProjectionOwner", "import ProjectionIndependent", "import ProjectionMetadata"
+    , "usesGood :: Int -> Scalar", "usesGood x = good x + 1" ]
   paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
   let findPrepared name = case [prepared | prepared <- pprModules paired
@@ -3733,6 +3735,17 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "target duplicated a current support group or assigned a retained generation"
   currentCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     captureDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
+  let metadataOwner = ("main", "ProjectionMetadata")
+      emitted = map moduleProductInput (certifiedOriginalProducts currentCertificate)
+      metadataDependencies = [dependencyModuleProduct node
+        | node <- dependencyModules (certifiedFreshDependencies currentCertificate)
+        , (dependencyModuleUnit node,dependencyModuleName node) == metadataOwner]
+  unless (all (\(_,_,_,groups) -> not (null groups)) emitted
+      && all (\(unit,owner,_,_) -> (T.unpack unit,T.unpack owner) /= metadataOwner) emitted
+      && Map.member metadataOwner
+          (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate))
+      && metadataDependencies == [ProductInterfaceOnly]) $
+    fail "metadata-only owner lost its finalization or acquired native product authority"
   let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
         , let (_,_,_,groups) = moduleProductInput product'
         , group <- groups, binder <- projectedBinders group]
