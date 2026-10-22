@@ -3737,9 +3737,6 @@ originalProjectionProducts = withScratch $ \work -> do
     captureDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
   let metadataOwner = ("main", "ProjectionMetadata")
       emitted = map moduleProductInput (certifiedOriginalProducts currentCertificate)
-      metadataDependencies = [dependencyModuleProduct node
-        | node <- dependencyModules (certifiedFreshDependencies currentCertificate)
-        , (dependencyModuleUnit node,dependencyModuleName node) == metadataOwner]
   unless (all (\(_,_,_,groups) -> not (null groups)) emitted
       && all (\(unit,owner,_,_) -> (T.unpack unit,T.unpack owner) /= metadataOwner) emitted
       && (case lookup (mkModule (stringToUnit "main") (mkModuleName "ProjectionMetadata"))
@@ -3747,8 +3744,7 @@ originalProjectionProducts = withScratch $ \work -> do
             Just (Right []) -> True
             _ -> False)
       && maybe False (isJust . localFinalizedCore) (Map.lookup metadataOwner
-          (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate)))
-      && metadataDependencies == [ProductInterfaceOnly]) $
+          (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate)))) $
     fail "metadata-only owner lost its finalization or acquired native product authority"
   let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
         , let (_,_,_,groups) = moduleProductInput product'
@@ -3801,6 +3797,9 @@ originalProjectionProducts = withScratch $ \work -> do
   prematureCertificate <- doesFileExist (segmentDirectory </> "certified-products.cbor")
   when prematureCertificate (fail "staged segment published its original certificate before completion")
   ordinaryFacts <- readCertificateCodecFacts work (captureDirectory </> "certified-products.cbor")
+  unless (all (\(unit,owner,ordinals) -> (unit,owner) /= metadataOwner && not (null ordinals))
+      (codecCertificateModules ordinaryFacts)) $
+    fail "emitted certificate granted native authority to an interface-only owner"
   receiptsAfterItems <- doesDirectoryExist receiptDirectory >>= \exists ->
     if exists then listDirectory receiptDirectory else pure []
   unless (receiptsAfterItems == receiptsBefore) $
