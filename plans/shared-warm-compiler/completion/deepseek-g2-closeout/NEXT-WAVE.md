@@ -1,6 +1,6 @@
 # G2 ownership closeout
 
-Implementation checkpoint: `2bbc30c9c8` on `root/g2-final-20261021`.
+Implementation checkpoint: `e43985078b` on `root/g2-final-20261021`.
 This is the accepted bounded structural closeout; prior A/B and P/C work below
 is integrated and awaits joined qualification.
 [STATE](STATE.md) records evidence; [TEST-GATES](TEST-GATES.md) owns qualification.
@@ -16,7 +16,7 @@ frontier is not acceptance.
 
 | Lane | Owner | Implementation boundary |
 |---|---|---|
-| A | g2_actor_custody | codegen source-domain membership and machine PACKAGE occupancy |
+| A | g2_actor_custody | codegen source-domain membership and machine HOME/PACKAGE occupancy |
 | B | review_private_progress | runtime resolve/install/publication/retirement; joins A |
 | P | review_package_selection | Rust prior Source evidence and all consumers |
 | C | review_support_text | Haskell reached prior HOME/package demand; joins P |
@@ -64,7 +64,7 @@ T closes gaps using actual receipt ingress and full notebook histories. Owner-lo
 representation tests remain labelled as such. D reviews authority/selection;
 C reviews producer semantics. Root reviews joined consumers and integrations.
 
-## A/B: actual live PACKAGE instance ownership
+## A/B: actual live native instance ownership
 
 Canonical occupancy belongs to PreparedMachine, keyed by an opaque live source
 domain identity and exact native binding. Maintain forward and group-reverse
@@ -76,7 +76,7 @@ owned by the existing collector, not inferred from BindingTable handle count.
 SourceSelections owns all actual scope view replacements/removals and unique
 live-domain membership. A prepared replacement pre-reserves capacity and commits
 infallibly, returning retired-domain metadata deltas. Materialize an implicit
-empty parent view before WorldContinuation admission or PACKAGE permit issuance.
+empty parent view before WorldContinuation admission or native permit issuance.
 Snapshots keep semantic evidence, not live tokens. Retiring the final logical
 view removes aliases; a stale token cannot regain authority by numeric equality.
 
@@ -86,10 +86,12 @@ requested alias from that exact inherited group, idempotently, and refuse a
 different live group. Do not select broad inherited inventories. Independent
 unseeded domains may have distinct instances.
 
-An opaque PACKAGE permit authorizes only a checked plan's requested exports in
+An opaque native-slot permit authorizes only a checked plan's requested exports in
 its live scope. Reuse existing exact table tokens when present; otherwise root
 the requested export through the actual live machine group witness. Preserve
-original ProgramFacts. Do not relax generic inherited-anchor or HOME checks.
+original ProgramFacts and captures. HOME reuse additionally validates its exact
+certified source owner, ordinal and binder; literals retain original producer
+identity, ordinal and bytes. Reuse cuts traversal under the existing group.
 
 Resolve once where current synchronous ownership permits; any necessary phase
 split must retain one prepared decision rather than reconstruct demand. Publish
@@ -107,6 +109,12 @@ bindings/domains; independently installed same-domain conflict refusal. Generate
 membership histories against independent recomputation. Delete unused wrappers.
 
 ## P/C: carry physical evidence without promoting compiler roles
+
+Nominal prior Source lookup validates membership in the actual immediate predecessor's
+physical product. Absence from the receiving selected namespace does not invalidate
+that reference. Explicit Original selection and executable own-offer checks remain
+separate and strict; metadata custody grants neither. The integrated repair is
+pending full Text execution and real completed Empty/Partial offer controls.
 
 ProgramSourceSupportRow retains one physical_product reference from the actual
 completed output independently of its canonical SOURCE/TYPE role. append_fragment

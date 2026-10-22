@@ -1,6 +1,6 @@
 # G2 joined qualification gates
 
-Test-integration checkpoint `2bbc30c9c8`; use the current exact integration OID for
+Test-integration checkpoint `e43985078b`; use the current exact integration OID for
 each run. [NEXT-WAVE](NEXT-WAVE.md) defines the repairs. Existing evidence is in
 `/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md`.
 Do not add counts from different checkpoints into one passing suite.
@@ -19,7 +19,7 @@ Do not add counts from different checkpoints into one passing suite.
    newly added package lifetime/prior Source histories.
 4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner6,
    typed segment World semantics18 plus separately registered finite component3.
-   PACKAGE owner/lifetime component4, closed runtime vacancy1 and abort composition
+   HOME/PACKAGE owner/lifetime component4, source membership2, closed runtime vacancy1 and abort composition
    complement the required authored notebook history; they do not replace it.
 5. Ordinary query/discovery/status; successful/frozen/cancelled/caller-loss default
    reload and explicit force refusal; uncertain END; package/source and historical
@@ -39,7 +39,7 @@ and expected nonzero count. Check V-HANDOFF for exact current labels and command
 
 ## Required behavioral controls
 
-PACKAGE reuse follows actual machine liveness, not handle disappearance or
+HOME/PACKAGE reuse follows actual machine liveness, not handle disappearance or
 installed metadata. Cover implicit live parent, inherited fork anchors, retained
 closure/parked work, detached roots, failed install, stale token and conflicting
 independent instance. Preserve real conflict refusal.
