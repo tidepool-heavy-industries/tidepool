@@ -221,3 +221,78 @@ pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
         );
     }
 }
+
+/// Count actual newly prepared targets that borrowed a package-bearing HOME
+/// witness from a different current compiler cohort. The caller must observe
+/// the incoming stage ID from its actual compiler receipt, never infer it from
+/// already selected grants.
+pub(crate) fn assert_borrowed_cohort_witnesses(
+    prior: &LinkedNativeTarget,
+    incoming: &LinkedNativeTarget,
+    incoming_manifest_stage: [u8; 32],
+) -> usize {
+    let mut witnessed = 0;
+    for selected in incoming.acquired() {
+        let NativeOccurrenceId::Home(binding) = selected.occurrence() else {
+            continue;
+        };
+        let Some(held) = prior.closure().home(binding) else {
+            continue;
+        };
+        if held.code() != selected.code() {
+            continue;
+        }
+        let original = held.selected_occurrences();
+        if !original.iter().any(|node| {
+            matches!(node.occurrence,
+            NativeOccurrenceId::Package {stage_id,..} if stage_id != incoming_manifest_stage)
+        }) {
+            continue;
+        }
+        for node in original {
+            let borrowed = &incoming.closure().occurrences[&node.occurrence];
+            assert_eq!(
+                borrowed.code, node.code,
+                "borrowing cannot change a historical code choice"
+            );
+            assert_eq!(
+                borrowed.imports, node.imports,
+                "borrowing preserves ordered exact selectors"
+            );
+            match (&node.acquisition, &borrowed.acquisition) {
+                (
+                    NativeAcquisition::Home { grant: old },
+                    NativeAcquisition::Home { grant: new },
+                ) => {
+                    assert_eq!(old.binding(), new.binding());
+                    assert!(old.product().same_issuance(new.product()));
+                }
+                (
+                    NativeAcquisition::Package {
+                        product: old,
+                        receipt: old_receipt,
+                        occurrence: old_occ,
+                    },
+                    NativeAcquisition::Package {
+                        product: new,
+                        receipt: new_receipt,
+                        occurrence: new_occ,
+                    },
+                ) => {
+                    assert!(
+                        Arc::ptr_eq(old, new),
+                        "borrow the actual immutable package product owner"
+                    );
+                    assert!(
+                        Arc::ptr_eq(old_receipt, new_receipt),
+                        "preserve the original receipt rather than rebinding the same code"
+                    );
+                    assert_eq!(old_occ, new_occ);
+                }
+                _ => panic!("borrowed acquired witness changed grant kind"),
+            }
+        }
+        witnessed += 1;
+    }
+    witnessed
+}
