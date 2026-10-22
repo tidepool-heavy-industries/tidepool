@@ -3,9 +3,12 @@
 **Implementation active; G2 unqualified.** Integration branch
 `root/g2-final-20261021`, checkout
 `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-The current code repair is `facfdc8ade`, with completion-slot diagnostics in
-`2520a897bb`. The prior candidate `cd12aef513` compiled all 13 affected consumers
-but failed both endpoint histories. These new changes remain unexecuted.
+The current code candidate is `4f41d59996`. Text certificate metadata repair
+compiled and passed its former boundary at `cd2809c410`; Text then failed at
+native planning because an exact acquired historical dependency was looked up
+in the narrower compiler namespace. `2dee420781` separates those input views;
+three focused certificate/availability controls and a strengthened existing
+historical-child test are integrated but not yet executed.
 Root owns integration and publication to `github`; `origin` is local replication.
 
 [NEXT-WAVE](NEXT-WAVE.md) owns the accepted design and assignments;
@@ -33,11 +36,19 @@ after prior-issuer validation. The repair carries normalized exact nominal membe
 into a certificate-only index rather than reconstructing them from executable
 source groups. It does not add native availability.
 
-Acknowledgement1 executed 1/1 and failed at final publication after both A items
-committed: `native completion changed an exact HOME slot`. B is tracing the
-retained completion owner across physical reuse. A filtered diagnostic records
-the first differing ordered import and exact binding; the mismatch remains a
-refusal. The next run must establish the actual competing identities.
+At `cd2809c410`, Text1 failed after 54.52s at `carried native dependency lost
+exact payload`. The admitted acquisition contained the dependency; filtering
+planning roots must not erase payload access for an already-issued exact edge.
+
+Acknowledgement1 failed after 154.10s at final publication. The new structured
+trace identifies `Tidepool.Effects.Core.error`, ordinal 5536, slot 1:
+`GHC.Internal.Err.error` has the same package artifact and ValueId(0), but two
+different package selection scopes. This confirms the conflict rather than
+establishing that those graphs are interchangeable. B/root are reviewing how
+prepared completion custody, actual installed choices and captured instance
+domains should meet. No equality relaxation or broad completion rewrite is
+approved. Dormant declaration birth proofs must remain usable; clearing raw
+completion fields would lose legitimate evidence.
 
 Both failed process/compiler cleanups were confirmed. Earlier fixture repairs
 and new component controls still require execution on the joined candidate.
