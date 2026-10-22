@@ -4641,7 +4641,13 @@ where
         authority_digest: [u8; 32],
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state.admit_world_planned_private_host_carrier(preparation, plan, binding, expected, authority_digest)
+        self.state.admit_world_planned_private_host_carrier(
+            preparation,
+            plan,
+            binding,
+            expected,
+            authority_digest,
+        )
     }
 
     pub fn private_publication_diagnostic(
@@ -5343,7 +5349,8 @@ where
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
-        self.state.consume_inspection_world_if_current(completed, source, original_source)
+        self.state
+            .consume_inspection_world_if_current(completed, source, original_source)
     }
 
     /// Install an acquired world only while its exact source/base is current.
@@ -6629,11 +6636,15 @@ where
     ) -> Result<Arc<super::RuntimeHostBindingAdmission>, ResidentError> {
         self.settle_dropped_custody();
         if self.run_context.lexical_scope != preparation.scope()
-            || !self.host_binding_prototypes.iter().any(|original| Arc::ptr_eq(original, &prototype))
+            || !self
+                .host_binding_prototypes
+                .iter()
+                .any(|original| Arc::ptr_eq(original, &prototype))
         {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        self.state.admit_private_host_binding_interface(preparation, binding, prototype)
+        self.state
+            .admit_private_host_binding_interface(preparation, binding, prototype)
             .map_err(ResidentError::Session)
     }
 
@@ -7231,41 +7242,41 @@ where
             (false, true) => super::admission::PendingHostKind::Visible,
             _ => return Err(SessionError::StaleStagedDeclaration.into()),
         };
-        facts
-            .original_source
-            .with_open_target(&target, || {
-                let scope = execution.private_scope();
-                if (hidden
+        execution.commit_pending_retirement(id, kind, || {
+            facts
+                .original_source
+                .with_open_target(&target, || {
+                    let scope = execution.private_scope();
+                    if (hidden
                         && self.hidden_host_bindings.get(&id)
                             != Some(&HiddenHostBinding::PrivateInput))
-                    || (visible && execution.completed_values.lock().contains_key(&id))
-                    || self
+                        || (visible && execution.completed_values.lock().contains_key(&id))
+                        || self
+                            .state
+                            .bindings()
+                            .get(id)
+                            .is_none_or(|entry| entry.scope != scope || entry.name.0 != binder.name)
+                    {
+                        return Err(SessionError::StaleStagedDeclaration);
+                    }
+                    let association = self
                         .state
-                        .bindings()
-                        .get(id)
-                        .is_none_or(|entry| entry.scope != scope || entry.name.0 != binder.name)
-                {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                let association = self
-                    .state
-                    .lib()
-                    .tips
-                    .get(&scope)
-                    .and_then(|tip| tip.inspection_world.clone())
-                    .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                if !association
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.clone())
+                        .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                    if !association
                         .base
                         .original_source
                         .matches(&facts.original_source)
-                    || !association.base.target.matches(&target)
-                    || !Arc::ptr_eq(&association.base.source, &facts.source)
-                    || self.state.compile_view_key_in(scope).as_ref()
-                        != Some(&association.base.key)
-                {
-                    return Err(SessionError::WorldCellPublicationBaseStale);
-                }
-                execution.commit_pending_retirement(id, kind, || {
+                        || !association.base.target.matches(&target)
+                        || !Arc::ptr_eq(&association.base.source, &facts.source)
+                        || self.state.compile_view_key_in(scope).as_ref()
+                            != Some(&association.base.key)
+                    {
+                        return Err(SessionError::WorldCellPublicationBaseStale);
+                    }
                     self.retire_binding_owner_settled(id);
                     let after = self
                         .state
@@ -7286,8 +7297,8 @@ where
                         .inspection_world = Some(updated);
                     Ok(())
                 })
-            })
-            .map_err(SessionError::from)??;
+                .map_err(SessionError::from)?
+        })?;
         Ok(())
     }
 
