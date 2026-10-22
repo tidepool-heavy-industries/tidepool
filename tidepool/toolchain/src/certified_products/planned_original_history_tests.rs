@@ -42,7 +42,7 @@ impl IssuedOriginal {
         )
         .unwrap();
         let issued_view =
-            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            crate::declaration_context::CapturedCompilerStage::issue(
                 &mut self.certified.source_selection,
                 self.request.compiler_inputs().artifacts(),
                 physical.entries(),

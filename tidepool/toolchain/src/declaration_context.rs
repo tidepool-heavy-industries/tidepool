@@ -532,10 +532,10 @@ pub(crate) struct OriginalCompilerInputs {
     artifacts: ArtifactView,
     native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
     native_availability: RequestNativeAvailability,
-    physical: Option<Arc<PhysicalValueCaptures>>,
 }
 
-struct PhysicalValueCaptures {
+pub(crate) struct CapturedCompilerStage {
+    output: IssuedOriginalOutput,
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
     // Admission issues only demanded rows. Their owner survives every target
@@ -545,9 +545,9 @@ struct PhysicalValueCaptures {
     >,
 }
 
-impl std::fmt::Debug for PhysicalValueCaptures {
+impl std::fmt::Debug for CapturedCompilerStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("PhysicalValueCaptures")
+        formatter.debug_struct("CapturedCompilerStage")
             .field("facts", &self.facts)
             .field("groups", &self.groups)
             .finish_non_exhaustive()
@@ -559,13 +559,12 @@ impl std::fmt::Debug for PhysicalValueCaptures {
 /// construct this capability.
 #[derive(Clone, Copy)]
 pub(crate) struct PhysicalCohortInputs<'a> {
-    inputs: &'a OriginalCompilerInputs,
-    captures: &'a PhysicalValueCaptures,
+    stage: &'a CapturedCompilerStage,
 }
 
 impl<'a> PhysicalCohortInputs<'a> {
     pub(crate) fn artifacts(&self) -> &'a ArtifactView {
-        self.inputs.issued_artifacts()
+        self.stage.issued_artifacts()
     }
 
     pub(crate) fn certify_groups(
@@ -575,11 +574,11 @@ impl<'a> PhysicalCohortInputs<'a> {
         baseline: Option<CertifiedNativeGroupBaseline<'_>>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
-        if !Arc::ptr_eq(&self.captures.operation, &validation.inventory) {
+        if !Arc::ptr_eq(&self.stage.operation, &validation.inventory) {
             return Err(failure("physical cohort has another accounting owner"));
         }
         let mut issued = self
-            .captures
+            .stage
             .groups
             .lock()
             .expect("physical group issuance lock");
@@ -610,8 +609,8 @@ impl<'a> PhysicalCohortInputs<'a> {
     }
 
     pub(crate) fn demanded_products(&self) -> Result<Arc<[PendingCertifiedGroup]>, CompileError> {
-        let issued = self.captures.groups.lock().expect("physical group issuance lock");
-        self.captures.operation.reserve::<PendingCertifiedGroup>(issued.len())
+        let issued = self.stage.groups.lock().expect("physical group issuance lock");
+        self.stage.operation.reserve::<PendingCertifiedGroup>(issued.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         Ok(issued.values().map(|row| row.product().as_ref().clone())
             .collect::<Vec<_>>().into())
@@ -623,7 +622,7 @@ impl<'a> PhysicalCohortInputs<'a> {
             .is_some_and(|resident| {
                 resident.has_fact_owner(entry.fact_owner())
                     || self
-                        .captures
+                        .stage
                         .facts
                         .get(&entry.descriptor.id)
                         .is_some_and(|captured| entry.has_fact_owner(captured))
@@ -673,9 +672,105 @@ fn retain_native_offers(
     context.retain_issued_offer_custody(offers.iter().cloned())
 }
 
+impl CapturedCompilerStage {
+    pub(crate) fn physical_cohort(&self) -> PhysicalCohortInputs<'_> {
+        PhysicalCohortInputs { stage: self }
+    }
+
+    pub(crate) fn output(&self) -> &IssuedOriginalOutput {
+        &self.output
+    }
+
+    pub(crate) fn compiler_inputs(&self) -> &Arc<OriginalCompilerInputs> {
+        &self.output.inputs
+    }
+
+    pub(crate) fn issued_artifacts(&self) -> &ArtifactView {
+        self.output.artifacts()
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        self.output.source_selection()
+    }
+
+    /// Issue the physical output cohort once, then carry its exact own offers
+    /// through each later type and target projection.
+    pub(crate) fn issue(
+        selection: &mut crate::certified_products::CertifiedSourceSelection,
+        baseline: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Self, CompileError> {
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "products.segment_native_availability",
+            "initial_admission",
+        );
+        let mut facts = BTreeMap::new();
+        for entry in &entries {
+            if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
+                continue;
+            }
+            validation
+                .inventory
+                .reserve::<(ArtifactId, crate::artifact_inventory::ArtifactFactsHandle)>(1)
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            facts.insert(entry.descriptor.id, entry.fact_owner().clone());
+        }
+        let physical = baseline.inventory().admit_certified_with_demand(
+            baseline,
+            entries,
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            selection,
+        )?;
+        let projection = selection
+            .compiler_projection(&physical)
+            .map_err(compiler_evidence_failure)?;
+        timing.advance("issue_current_cohort");
+        let validated = physical
+            .inventory()
+            .issue_current_cohort_availability(&physical, selection, validation)?;
+        let issued = RequestNativeAvailability::from_current_cohort(
+            &physical,
+            validated,
+            &projection,
+            &validation.inventory,
+        )?;
+        selection
+            .finish_new_product_availability(&issued)
+            .map_err(compiler_evidence_failure)?;
+        timing.advance("carry_completed_availability");
+        let mut inputs = OriginalCompilerInputs::normalize_selection(selection, &issued.artifacts)?;
+        let metadata = inputs
+            .projection
+            .project_metadata(inputs.artifacts.metadata_snapshot())?;
+        let native = NativeInputSelection::receive(
+            &inputs.projection,
+            &metadata,
+            &inputs.artifacts,
+            &inputs.native_availability,
+            &inputs.native_offers,
+        )?;
+        inputs.native_availability = native.availability;
+        let inputs = Arc::new(inputs);
+        let output = IssuedOriginalOutput {
+            selection: selection.clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs,
+        };
+        timing.finish(true);
+        Ok(Self {
+            output,
+            operation: Arc::clone(&validation.inventory),
+            facts,
+            groups: Default::default(),
+        })
+    }
+
+}
+
 /// One strict output issuer binds source decisions and the target view to its
 /// completed compiler inputs. Publication borrows this owner without reissuance.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct IssuedOriginalOutput {
     selection: crate::certified_products::CertifiedSourceSelection,
     artifacts: ArtifactView,
@@ -724,7 +819,7 @@ impl IssuedOriginalOutput {
     fn from_segment_physical(
         originals: &crate::certified_products::CertifiedSegmentOriginals,
     ) -> Self {
-        let inputs = Arc::clone(originals.physical_inputs());
+        let inputs = Arc::clone(originals.captured_stage().compiler_inputs());
         Self {
             selection: originals.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
@@ -881,22 +976,6 @@ impl CompletedRequestNativeAvailability {
 }
 
 impl OriginalCompilerInputs {
-    pub(crate) fn physical_cohort(&self) -> Result<PhysicalCohortInputs<'_>, CompileError> {
-        let captures = self
-            .physical
-            .as_deref()
-            .ok_or_else(|| failure("target requires its actual physical output cohort"))?;
-        Ok(PhysicalCohortInputs {
-            inputs: self,
-            captures,
-        })
-    }
-
-    pub(crate) fn native_fact_base(
-        &self,
-    ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
-        self.native_fact_base.as_ref()
-    }
     pub(crate) fn native_availability(&self) -> &RequestNativeAvailability {
         &self.native_availability
     }
@@ -922,75 +1001,6 @@ impl OriginalCompilerInputs {
 
     pub(crate) fn native_offers(&self) -> &[crate::artifact_inventory::IssuedNativeOffer] {
         &self.native_offers
-    }
-
-    /// Issue the physical output cohort once, then carry its exact own offers
-    /// through each later type and target projection.
-    pub(crate) fn issue_segment_native_availability(
-        selection: &mut crate::certified_products::CertifiedSourceSelection,
-        baseline: &ArtifactView,
-        entries: Vec<Arc<ArtifactEntry>>,
-        validation: &mut PackageInterfaceValidation,
-    ) -> Result<Self, CompileError> {
-        let mut timing = crate::timing::InvocationTiming::start_scoped(
-            "products.segment_native_availability",
-            "initial_admission",
-        );
-        let mut captures = PhysicalValueCaptures {
-            operation: Arc::clone(&validation.inventory),
-            facts: BTreeMap::new(),
-            groups: Default::default(),
-        };
-        for entry in &entries {
-            if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
-                continue;
-            }
-            validation
-                .inventory
-                .reserve::<(ArtifactId, crate::artifact_inventory::ArtifactFactsHandle)>(1)
-                .map_err(|error| compiler_evidence_failure(error.into()))?;
-            captures
-                .facts
-                .insert(entry.descriptor.id, entry.fact_owner().clone());
-        }
-        let physical = baseline.inventory().admit_certified_with_demand(
-            baseline,
-            entries,
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-            selection,
-        )?;
-        let projection = selection
-            .compiler_projection(&physical)
-            .map_err(compiler_evidence_failure)?;
-        timing.advance("issue_current_cohort");
-        let validated = physical
-            .inventory()
-            .issue_current_cohort_availability(&physical, selection, validation)?;
-        let issued = RequestNativeAvailability::from_current_cohort(
-            &physical,
-            validated,
-            &projection,
-            &validation.inventory,
-        )?;
-        selection
-            .finish_new_product_availability(&issued)
-            .map_err(compiler_evidence_failure)?;
-        timing.advance("carry_completed_availability");
-        let mut inputs = Self::normalize_selection(selection, &issued.artifacts)?;
-        let metadata = inputs
-            .projection
-            .project_metadata(inputs.artifacts.metadata_snapshot())?;
-        let native = NativeInputSelection::receive(
-            &inputs.projection,
-            &metadata,
-            &inputs.artifacts,
-            &inputs.native_availability,
-            &inputs.native_offers,
-        )?;
-        inputs.native_availability = native.availability;
-        inputs.physical = Some(Arc::new(captures));
-        timing.finish(true);
-        Ok(inputs)
     }
 
     /// Reuse exact authored availability already carried by the context.
@@ -1066,8 +1076,7 @@ impl OriginalCompilerInputs {
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
-                physical: None,
-                native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+                    native_fact_base: Some(Arc::clone(source.native_fact_owner())),
                 native_completions: source.native_completions().clone(),
                 native_availability: source
                     .native_availability()
@@ -1094,7 +1103,6 @@ impl OriginalCompilerInputs {
         }
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
-            physical: None,
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
             native_completions: source.native_completions().clone(),
             native_availability: source.native_availability().clone(),
@@ -1155,7 +1163,6 @@ impl OriginalCompilerInputs {
         source: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Self {
         Self {
-            physical: None,
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
             native_completions: source.native_completions().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
@@ -1217,7 +1224,6 @@ impl OriginalCompilerInputs {
         }
         let artifacts = retain_native_offers(artifacts, &native_offers)?;
         Ok(Self {
-            physical: None,
             native_fact_base: selection.native_fact_base().cloned(),
             native_completions: selection.native_completions(),
             native_availability,
@@ -1271,7 +1277,6 @@ impl OriginalCompilerInputs {
             }
         };
         Ok(Self {
-            physical: None,
             native_fact_base: self.native_fact_base.clone(),
             native_completions: self.native_completions.clone(),
             native_availability: self
@@ -1297,7 +1302,6 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
-            physical: None,
             native_completions: self.native_completions.append(&other.native_completions)?,
             native_fact_base: self
                 .native_fact_base
@@ -11434,7 +11438,7 @@ impl WorldProgramSegment {
         let originals = output
             .source_selection()
             .produced_authored_original_publication(
-                output.compiler_inputs().physical_cohort()?,
+                self.originals.captured_stage().physical_cohort(),
                 owner,
             )
             .map_err(compiler_evidence_failure)?;
@@ -11754,16 +11758,15 @@ pub(crate) struct WorldStageSourceAdmission {
 /// issuer. They do not manufacture a completed product or a World admission.
 #[cfg(test)]
 pub(crate) fn assert_completed_nominal_program_support(
-    physical: &OriginalCompilerInputs,
-    selection: &crate::certified_products::CertifiedSourceSelection,
+    physical: &CapturedCompilerStage,
     receiving: &RequestCompilerInputs,
     owner: &ExactModuleIdentity,
     offered: Option<u32>,
     blocked: u32,
 ) {
-    let cohort = physical.physical_cohort().unwrap();
-    let operation = &cohort.captures.operation;
-    let expected = selection
+    let cohort = physical.physical_cohort();
+    let operation = &cohort.stage.operation;
+    let expected = physical.source_selection()
         .produced_source_receipt(owner, physical.issued_artifacts())
         .unwrap()
         .expect("the existing physical issuer owns a completed receipt");
@@ -11785,16 +11788,14 @@ pub(crate) fn assert_completed_nominal_program_support(
         .source_support
         .implementation_entry(owner)
         .is_none());
-    let output =
-        IssuedOriginalOutput::issue(selection.clone(), physical.issued_artifacts().clone())
-            .unwrap();
+    let output = physical.output();
     let fragment =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical).unwrap();
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical.compiler_inputs()).unwrap();
     let support = ProgramSourceSupport::append_fragment(
         None,
         &fragment,
         [(owner.clone(), Vec::new())],
-        &output,
+        output,
     )
     .unwrap();
     let inputs = ProductCompilerInputs::from_exact(receiving).with_program_support(Some(&support));
@@ -16014,7 +16015,7 @@ pub(crate) fn issue_certified_product_native_availability(
     products: &mut crate::certified_products::CertifiedProducts,
     baseline: Option<&ArtifactView>,
     validation: &mut PackageInterfaceValidation,
-) -> Result<Arc<OriginalCompilerInputs>, CompileError> {
+) -> Result<Arc<CapturedCompilerStage>, CompileError> {
     let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
     let entries = certified_product_artifact_entries(
         producer,
@@ -16024,13 +16025,14 @@ pub(crate) fn issue_certified_product_native_availability(
         &view,
         validation,
     )?;
-    let inputs = Arc::new(OriginalCompilerInputs::issue_segment_native_availability(
+    let inputs = Arc::new(crate::declaration_context::CapturedCompilerStage::issue(
         &mut products.source_selection,
         &view,
         entries,
         validation,
     )?);
-    products.original_inputs = Some(Arc::clone(&inputs));
+    products.original_inputs = Some(Arc::clone(inputs.compiler_inputs()));
+    products.captured_stage = Some(Arc::clone(&inputs));
     Ok(inputs)
 }
 
@@ -18910,7 +18912,7 @@ mod tests {
                     &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-            OriginalCompilerInputs::issue_segment_native_availability(
+            crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 &inventory.empty_view(),
                 entries,
@@ -21117,7 +21119,7 @@ mod tests {
                 &validation.inventory,
             )
             .unwrap();
-        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+        let physical = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selected,
             inputs.artifacts(),
             Vec::new(),
@@ -21130,7 +21132,7 @@ mod tests {
             .artifacts()
             .inventory()
             .select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selected,
                 observed,
                 None,
@@ -21360,7 +21362,7 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            let physical = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selected,
                 actual.artifacts(),
                 Vec::new(),
@@ -21374,7 +21376,7 @@ mod tests {
                 .artifacts()
                 .inventory()
                 .select_native_target(
-                    physical.physical_cohort().unwrap(),
+                    physical.physical_cohort(),
                     &selected,
                     observed,
                     None,
@@ -26137,7 +26139,7 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            let physical = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 inputs.artifacts(),
                 Vec::new(),
@@ -26168,7 +26170,7 @@ mod tests {
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let target = inputs.artifacts().inventory().select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -26806,7 +26808,7 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            let physical = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 inputs.artifacts(),
                 Vec::new(),
@@ -26840,7 +26842,7 @@ mod tests {
                 .artifacts()
                 .inventory()
                 .select_native_target(
-                    physical.physical_cohort().unwrap(),
+                    physical.physical_cohort(),
                     &selection,
                     observed,
                     None,
@@ -31073,7 +31075,7 @@ mod tests {
                 &validation.inventory,
             )
             .unwrap();
-        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+        let physical = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             inputs.artifacts(),
             Vec::new(),
@@ -31131,7 +31133,7 @@ mod tests {
             .artifacts()
             .inventory()
             .select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selection,
                 observed,
                 None,

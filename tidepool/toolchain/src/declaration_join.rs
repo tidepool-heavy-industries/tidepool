@@ -3097,7 +3097,7 @@ mod authored_tests {
                     &validation.inventory,
                 )
                 .unwrap();
-            let physical = crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            let physical = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 inputs.artifacts(),
                 Vec::new(),
@@ -3155,7 +3155,7 @@ mod authored_tests {
                 .artifacts()
                 .inventory()
                 .select_native_target(
-                    physical.physical_cohort().unwrap(),
+                    physical.physical_cohort(),
                     &selection,
                     observed,
                     None,
@@ -3197,7 +3197,7 @@ mod authored_tests {
                     .artifacts()
                     .inventory()
                     .select_native_target(
-                        physical.physical_cohort().unwrap(),
+                        physical.physical_cohort(),
                         &selection,
                         denied,
                         None,

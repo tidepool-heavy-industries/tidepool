@@ -483,7 +483,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     selection.bind_produced_originals(
                         &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&product)).unwrap(),
                     ).unwrap();
-                    let completed = OriginalCompilerInputs::issue_segment_native_availability(
+                    let completed = crate::declaration_context::CapturedCompilerStage::issue(
                         &mut selection, request.compiler_inputs().artifacts(), vec![output.clone()],
                         &mut PackageInterfaceValidation::default(),
                     ).unwrap();
@@ -709,7 +709,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         &prepared, &observations, &validation.inventory,
                     ).unwrap();
                     let target = inventory.select_native_target(
-                        physical.physical_cohort().unwrap(), selection,
+                        physical.physical_cohort(), selection,
                         observed, None, None, &[], &BTreeMap::new(), &mut validation,
                     ).unwrap();
                     let groups = target.resolve().unwrap().groups().clone();

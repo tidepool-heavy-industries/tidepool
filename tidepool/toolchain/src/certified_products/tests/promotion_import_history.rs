@@ -1079,12 +1079,12 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert!(!shared.package_availability().contains_key(&owner));
         let observed =
             AuthenticatedTargetImports::issue(&target, &globals, &validation.inventory).unwrap();
-        let physical = shared.physical_inputs();
+        let physical = shared.captured_stage();
         let admitted = physical
             .issued_artifacts()
             .inventory()
             .select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selected.source_selection,
                 observed,
                 None,

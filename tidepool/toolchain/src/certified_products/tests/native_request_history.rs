@@ -751,7 +751,7 @@ fn replay_native_transport_history(
             AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
                 .unwrap();
         let admitted = inputs.artifacts().inventory().select_native_target(
-            fixed.physical_inputs().physical_cohort().unwrap(),
+            fixed.captured_stage().physical_cohort(),
             fixed.source_selection(),
             observed,
             None,
@@ -784,7 +784,7 @@ fn replay_native_transport_history(
     let observed =
         AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory).unwrap();
     let demanded = inputs.artifacts().inventory().select_native_target(
-        fixed.physical_inputs().physical_cohort().unwrap(),
+        fixed.captured_stage().physical_cohort(),
         fixed.source_selection(),
         observed,
         None,
@@ -898,7 +898,7 @@ fn replay_native_transport_history(
             &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&dependent)).unwrap(),
         )
         .unwrap();
-    let produced = OriginalCompilerInputs::issue_segment_native_availability(
+    let produced = crate::declaration_context::CapturedCompilerStage::issue(
         &mut output_selection,
         actual_request.compiler_inputs().artifacts(),
         vec![dependent_entry.clone()],
@@ -1072,7 +1072,7 @@ fn replay_native_transport_history(
         let admitted = view
             .inventory()
             .select_native_target(
-                fixed.physical_inputs().physical_cohort().unwrap(),
+                fixed.captured_stage().physical_cohort(),
                 fixed.source_selection(),
                 observed,
                 None,

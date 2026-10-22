@@ -733,7 +733,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
                 &validation.inventory,
             )
             .unwrap();
-        let output = OriginalCompilerInputs::issue_segment_native_availability(
+        let output = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             vec![b.clone()],
@@ -875,7 +875,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
                 &validation.inventory,
             )
             .unwrap();
-        let output = OriginalCompilerInputs::issue_segment_native_availability(
+        let output = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             vec![a.clone()],
@@ -1240,7 +1240,6 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
         )
         .unwrap();
         let private = OriginalCompilerInputs {
-            physical: None,
             native_fact_base:None,
             native_completions: Default::default(),
             native_availability: RequestNativeAvailability::issue_checked(

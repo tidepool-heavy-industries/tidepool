@@ -1782,7 +1782,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
                    accepted: &[AcceptedGlobal],
                    validation: &mut PackageInterfaceValidation| {
         let mut selected = selection.clone();
-        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+        let physical = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selected,
             view,
             Vec::new(),
@@ -1791,7 +1791,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         let observed = AuthenticatedTargetImports::issue(target, accepted, &validation.inventory)
             .map_err(compiler_evidence_failure)?;
         let demanded = view.inventory().select_native_target(
-            physical.physical_cohort()?,
+            physical.physical_cohort(),
             &selected,
             observed,
             None,
@@ -2133,8 +2133,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         );
         for chosen in [&left, &right] {
             let private = OriginalCompilerInputs {
-                physical: None,
-                native_fact_base: None,
+                    native_fact_base: None,
                 native_completions: Default::default(),
                 native_availability: RequestNativeAvailability::issue_checked(
                     &projection,
@@ -2728,7 +2727,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
                 &validation.inventory,
             )
             .unwrap();
-        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+        let physical = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             inputs.artifacts(),
             Vec::new(),
@@ -2766,7 +2765,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         let target = source
             .inventory()
             .select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -2970,7 +2969,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         &validation.inventory,
     )
     .unwrap();
-    let physical = OriginalCompilerInputs::issue_segment_native_availability(
+    let physical = crate::declaration_context::CapturedCompilerStage::issue(
         &mut selection,
         inputs.artifacts(),
         Vec::new(),
@@ -3023,7 +3022,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let result = inputs.artifacts().inventory().select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -3214,7 +3213,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             &validation.inventory,
         )
         .unwrap();
-    let acquired_physical = OriginalCompilerInputs::issue_segment_native_availability(
+    let acquired_physical = crate::declaration_context::CapturedCompilerStage::issue(
         &mut acquired_selection,
         acquisition_inputs.artifacts(),
         Vec::new(),
@@ -3239,7 +3238,6 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
     let mut expected_keys = acquired_physical
         .physical_cohort()
-        .unwrap()
         .artifacts()
         .selected_native_groups();
     expected_keys.insert(NativeGroupKey {
@@ -3250,7 +3248,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .artifacts()
         .inventory()
         .select_native_target(
-            acquired_physical.physical_cohort().unwrap(),
+            acquired_physical.physical_cohort(),
             &acquired_selection,
             observed,
             None,
@@ -4532,7 +4530,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     &validation.inventory,
                 )
                 .unwrap();
-            let physical = OriginalCompilerInputs::issue_segment_native_availability(
+            let physical = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 inputs.artifacts(),
                 Vec::new(),
@@ -4568,7 +4566,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let demanded = inputs.artifacts().inventory().select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -7099,7 +7097,6 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         let private = OriginalCompilerInputs {
-            physical: None,
             native_fact_base: None,
             native_completions: Default::default(),
             native_availability: RequestNativeAvailability::issue_checked(
@@ -7160,7 +7157,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         });
         // This target has no fresh native products. Empty physical issuance
         // records that cohort without changing its request's input permissions.
-        let physical = OriginalCompilerInputs::issue_segment_native_availability(
+        let physical = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             inputs.artifacts(),
             Vec::new(),
@@ -7203,7 +7200,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
                     .unwrap();
             let admitted = inputs.artifacts().inventory().select_native_target(
-                physical.physical_cohort().unwrap(),
+                physical.physical_cohort(),
                 &selection,
                 observed,
                 None,
@@ -7255,7 +7252,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         let observed =
             AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
         let denied = inputs.artifacts().inventory().select_native_target(
-            physical.physical_cohort().unwrap(),
+            physical.physical_cohort(),
             &selection,
             observed,
             None,
@@ -7563,7 +7560,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                         &validation.inventory,
                     )
                     .unwrap();
-                let physical = OriginalCompilerInputs::issue_segment_native_availability(
+                let physical = crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     inputs.artifacts(),
                     Vec::new(),
@@ -7614,7 +7611,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                         .artifacts()
                         .inventory()
                         .select_native_target(
-                            physical.physical_cohort().unwrap(),
+                            physical.physical_cohort(),
                             &selection,
                             observed,
                             None,
@@ -10935,7 +10932,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
                         &validation.inventory,
                     )
                     .unwrap();
-                let output = OriginalCompilerInputs::issue_segment_native_availability(
+                let output = crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     &artifacts,
                     Vec::new(),
@@ -11095,7 +11092,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
                 &validation.inventory,
             )
             .map_err(compiler_evidence_failure)?;
-        OriginalCompilerInputs::issue_segment_native_availability(
+        crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &artifacts,
             Vec::new(),

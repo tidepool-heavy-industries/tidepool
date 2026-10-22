@@ -1791,7 +1791,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
         let output =
-            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+            crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 &base,
                 Vec::new(),
@@ -1966,7 +1966,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
             let target = receiving_inventory.select_native_target(
-                physical.physical_inputs().physical_cohort().unwrap(),
+                physical.captured_stage().physical_cohort(),
                 physical.source_selection(),
                 observed,
                 None,

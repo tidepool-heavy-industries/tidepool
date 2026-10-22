@@ -4594,14 +4594,14 @@ fn admit_native_target_products(
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
     let prepared = package_selection.prepared_program();
     let physical = match segment_originals {
-        Some(originals) => originals.physical_inputs().physical_cohort()?,
+        Some(originals) => originals.captured_stage().physical_cohort(),
         None => certified
-            .original_inputs
+            .captured_stage
             .as_ref()
             .ok_or_else(|| {
                 CompileError::ExtractFailed("ordinary target lacks physical cohort issuance".into())
             })?
-            .physical_cohort()?,
+            .physical_cohort(),
     };
     let target_admission_start = Instant::now();
     let observed = package_selection.authenticated_imports().clone();
@@ -4610,7 +4610,7 @@ fn admit_native_target_products(
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
             })?;
-            let cohort = originals.physical_inputs().physical_cohort()?;
+            let cohort = originals.captured_stage().physical_cohort();
             let physical = cohort.artifacts();
             let values = originals
                 .selected_value_entries(&certified.value_interfaces)
@@ -4629,14 +4629,14 @@ fn admit_native_target_products(
         }
         None => {
             let physical = certified
-                .original_inputs
+                .captured_stage
                 .as_ref()
                 .ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "ordinary target lacks physical cohort issuance".into(),
                     )
                 })?
-                .physical_cohort()?;
+                .physical_cohort();
             physical.artifacts().inventory().select_native_target(
                 physical,
                 &certified.source_selection,
@@ -6358,6 +6358,7 @@ fn compile_invocation_inner(
             certified_products::CertifiedProducts {
                 home_contracts: None,
                 original_inputs: None,
+                captured_stage: None,
                 groups: certified_products::IssuedGroupCandidates::empty(),
                 recovery_products: Arc::from([]),
                 module_interfaces: Arc::from([]),
@@ -6465,7 +6466,7 @@ fn compile_invocation_inner(
                 )?;
                 let observed = package_selection.authenticated_imports().clone();
                 let selected_target = physical.inventory().select_native_target(
-                    physical_inputs.physical_cohort()?,
+                    physical_inputs.physical_cohort(),
                     &certified.source_selection,
                     observed,
                     None,
@@ -6474,7 +6475,7 @@ fn compile_invocation_inner(
                     &package_catalog,
                     &mut validation,
                 )?;
-                let selected_groups = Arc::new(physical_inputs.physical_cohort()?.certify_groups(
+                let selected_groups = Arc::new(physical_inputs.physical_cohort().certify_groups(
                     selected_target.artifacts(),
                     &certified.groups,
                     exact_request.as_ref().map(|request| {
@@ -6527,7 +6528,7 @@ fn compile_invocation_inner(
         );
         invocation_timing.advance("candidate_publication");
         artifacts.source_selection = Some(certified.source_selection);
-        artifacts.certified_groups = physical_inputs.physical_cohort()?.demanded_products()?;
+        artifacts.certified_groups = physical_inputs.physical_cohort().demanded_products()?;
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
@@ -10030,6 +10031,7 @@ mod module_product_tests {
             retained_core_products: Default::default(),
             source_selection: certified_products::CertifiedSourceSelection::empty_product_output(),
             original_inputs: None,
+            captured_stage: None,
         };
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let receipt = BTreeMap::from([(owner.clone(), observed.clone())]);

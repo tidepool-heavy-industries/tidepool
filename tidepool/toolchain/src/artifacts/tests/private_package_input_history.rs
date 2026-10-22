@@ -385,7 +385,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .issued_artifacts()
         .inventory()
         .select_native_target(
-            physical.physical_cohort().unwrap(),
+            physical.physical_cohort(),
             &issued.source_selection,
             observed,
             None,
@@ -449,7 +449,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     .unwrap();
     let refusal = empty_inventory
         .select_native_target(
-            empty_fixed.physical_inputs().physical_cohort().unwrap(),
+            empty_fixed.captured_stage().physical_cohort(),
             empty_fixed.source_selection(),
             observed,
             None,
@@ -515,7 +515,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     .unwrap();
     let admitted = target_inventory
         .select_native_target(
-            fixed.physical_inputs().physical_cohort().unwrap(),
+            fixed.captured_stage().physical_cohort(),
             fixed.source_selection(),
             observed,
             None,
@@ -601,7 +601,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let public_original_hash = public_original.semantic_sha256();
     let refused = inventory
         .select_native_target(
-            public_fixed.physical_inputs().physical_cohort().unwrap(),
+            public_fixed.captured_stage().physical_cohort(),
             public_fixed.source_selection(),
             observed,
             None,
@@ -809,7 +809,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     .unwrap();
     let refused = late_inventory
         .select_native_target(
-            late_fixed.physical_inputs().physical_cohort().unwrap(),
+            late_fixed.captured_stage().physical_cohort(),
             late_fixed.source_selection(),
             observed,
             None,
@@ -834,7 +834,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     .unwrap();
     let late_admitted = target_inventory
         .select_native_target(
-            fixed.physical_inputs().physical_cohort().unwrap(),
+            fixed.captured_stage().physical_cohort(),
             fixed.source_selection(),
             observed,
             None,

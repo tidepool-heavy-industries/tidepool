@@ -344,7 +344,7 @@ pub(super) fn assert_completed_current_stage_ceiling(
     let mut exercised = 0;
     if let Some(owner) = inputs.initial.stage().identity().original_owner() {
         let selection = originals.source_selection();
-        let physical_inputs = originals.physical_inputs();
+        let physical_inputs = originals.captured_stage();
         let physical = physical_inputs.issued_artifacts();
         'current: for entry in originals.artifact_entries() {
             if entry.descriptor.owner != *owner {
@@ -410,7 +410,7 @@ pub(super) fn assert_completed_current_stage_ceiling(
                     refuse_shortcut();
                     let publication = selection
                         .produced_authored_original_publication(
-                            physical_inputs.physical_cohort().unwrap(),
+                            physical_inputs.physical_cohort(),
                             owner,
                         )
                         .expect("dormant produced body can publish its existing future permission");
