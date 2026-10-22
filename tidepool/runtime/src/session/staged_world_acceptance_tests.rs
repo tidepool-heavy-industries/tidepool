@@ -2,7 +2,8 @@
 
 use super::*;
 use std::collections::BTreeMap;
-use tidepool_toolchain::certified_products::SelectedNativeImport;
+use tidepool_repr::native_code::NativeCodeBody;
+use tidepool_toolchain::linked_native::AcquiredNativeImport;
 
 #[test]
 fn declarations_precede_first_native_demands_and_display_without_replaying_effects() {
@@ -68,24 +69,31 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                     let Some(products) = item.native_products() else {
                         continue;
                     };
-                    let sources = products.native_source_products().unwrap();
+                    let target = products
+                        .linked_native_target()
+                        .expect("an executable item retains its actual linked target");
                     let mut helpers = BTreeMap::new();
-                    for row in sources.groups() {
-                        let product = row.group();
+                    for acquired in target.acquired() {
+                        let NativeCodeBody::Home(product) = acquired.code().body() else {
+                            continue;
+                        };
                         if product.owner().module != "SegmentProbeSupport" {
                             continue;
                         }
                         assert_eq!(product.owner(), available.owner());
-                        for binder in product.group().binders() {
+                        for (binder, _) in product.exported_values() {
                             if matches!(
                                 binder.occurrence.as_str(),
                                 "carrierBaseline" | "lateCarrierTextLength"
                             ) {
-                                let packages = row
+                                let packages = acquired
                                     .imports()
-                                    .iter()
                                     .filter(|slot| {
-                                        matches!(slot, SelectedNativeImport::Package { .. })
+                                        matches!(
+                                            slot,
+                                            AcquiredNativeImport::Code { acquired, .. }
+                                                if matches!(acquired.code().body(), NativeCodeBody::Package(_))
+                                        )
                                     })
                                     .count();
                                 assert!(helpers
