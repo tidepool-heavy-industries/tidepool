@@ -484,9 +484,11 @@ fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() 
 fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     let mut ingress = Vec::new();
     let ((prepared, checked), admission) = settle(|| {
+        // Typed declaration stages import Display in their generated scaffold.
         let (endpoint, world, source) = open_world_with_primary_and_module(
             None,
             include_bytes!("../../tests/fixtures/world-native/PriorSourceModule.hs"),
+            Some(capture_declared_scaffold_sources()?),
         )?;
         let template = include_str!("../../tests/fixtures/world-native/CellTemplate.hs").replace(
             "{{CELL_IMPORTS}}",
@@ -721,12 +723,60 @@ fn open_empty_world_with_primary(
     ),
     CompileError,
 > {
-    open_world_with_primary_and_module(primary, b"module Module where\n")
+    open_world_with_primary_and_module(primary, b"module Module where\n", None)
+}
+
+fn capture_declared_scaffold_sources() -> Result<CapturedCompilerSourceRoot, CompileError> {
+    use std::io::Read;
+
+    let root = PathBuf::from(
+        std::env::var_os(crate::toolchain::ENV_PRELUDE_DIR).ok_or_else(|| {
+            CompileError::ExtractFailed("missing declared World scaffold source resource".into())
+        })?,
+    );
+    let files = crate::cache::source_root_manifest(&root)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let mut remaining = CapturedCompilerSources::capture_byte_allowance()?;
+    let mut bodies = BTreeMap::new();
+    for (relative, digest) in &files {
+        let path = root.join(relative);
+        let length = std::fs::metadata(&path)?.len();
+        let framed = 8u64
+            .checked_add(relative.as_os_str().len() as u64)
+            .and_then(|size| size.checked_add(length))
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("World scaffold source size overflow".into())
+            })?;
+        remaining = remaining.checked_sub(framed).ok_or_else(|| {
+            CompileError::ExtractFailed(
+                "declared World scaffold sources exceed capture allowance".into(),
+            )
+        })?;
+        let mut body = Vec::new();
+        std::fs::File::open(&path)?
+            .take(length.saturating_add(1))
+            .read_to_end(&mut body)?;
+        if body.len() as u64 != length || blake3::hash(&body).to_hex().as_str() != digest {
+            return Err(CompileError::ExtractFailed(
+                "declared World scaffold source changed during capture".into(),
+            ));
+        }
+        bodies.insert(relative.clone(), Arc::<[u8]>::from(body));
+    }
+    if !bodies.contains_key(Path::new("Tidepool/Inspection/Display.hs")) {
+        return Err(CompileError::ExtractFailed(
+            "declared World scaffold sources lack Tidepool.Inspection.Display".into(),
+        ));
+    }
+    let manifest = crate::cache::SourceRootManifest::from_file_digests(files)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    Ok(CapturedCompilerSourceRoot { manifest, bodies })
 }
 
 fn open_world_with_primary_and_module(
     primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
     body: &[u8],
+    scaffold: Option<CapturedCompilerSourceRoot>,
 ) -> Result<
     (
         AdmittedCompilerEndpoint,
@@ -741,17 +791,19 @@ fn open_world_with_primary_and_module(
         .expect("configured compiler endpoint");
     let endpoint =
         AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
-    let root = Arc::new(tempfile::tempdir()?);
+    let root = Arc::new(test_support::compiler_input_directory()?);
     std::fs::write(root.path().join("Module.hs"), body)?;
+    let mut roots = vec![CapturedCompilerSourceRoot {
+        manifest: crate::cache::SourceRootManifest::from_file_digests([(
+            PathBuf::from("Module.hs"),
+            blake3::hash(body).to_hex().to_string(),
+        )])
+        .expect("actual captured source manifest"),
+        bodies: BTreeMap::from([(PathBuf::from("Module.hs"), Arc::<[u8]>::from(body))]),
+    }];
+    roots.extend(scaffold);
     let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
-        vec![CapturedCompilerSourceRoot {
-            manifest: crate::cache::SourceRootManifest::from_file_digests([(
-                PathBuf::from("Module.hs"),
-                blake3::hash(body).to_hex().to_string(),
-            )])
-            .expect("actual captured source manifest"),
-            bodies: BTreeMap::from([(PathBuf::from("Module.hs"), Arc::<[u8]>::from(body))]),
-        }],
+        roots,
         Arc::from(&b"world-selection-source"[..]),
         root,
     )?);
