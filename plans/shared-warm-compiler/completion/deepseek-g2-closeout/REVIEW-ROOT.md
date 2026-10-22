@@ -11,7 +11,7 @@ explicitly unqualified.
 | Base | `90a5456584acb541c104f8da50d8c75e3aaa471d` |
 | Review branch | `root/g2-final-20261021` |
 | Code candidate | `29231ed3236bb4dd6d13b6e459315533cd171a3e` |
-| Remote | `github`, same branch and OID |
+| Remote branch tip | `b98a4bc70a9f644ff4c253fd8df4e1cb9eb52096` |
 | Tree | Clean before this documentation note |
 | G2 status | Unqualified; no matched bundle or fresh Persona run |
 
@@ -136,3 +136,6 @@ The unrelated `/srv/swarm/checkouts/tidepool` checkout was not edited. Prior
 dirty H instrumentation and D's retained patch remain preserved at their
 recorded locations. P has a later uncommitted follow-up on its lane branch and
 must not be represented by this checkpoint until committed and re-reviewed.
+The current uncommitted P, T and N follow-ups are additionally retained as
+binary-safe patches and status files under
+`/srv/swarm/evidence/inanna/g2-next-wave-90a54565/{p,t,n}/`.
