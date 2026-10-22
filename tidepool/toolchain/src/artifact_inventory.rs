@@ -18,11 +18,12 @@ mod properties;
 
 mod compiler_projection;
 mod native_availability;
-pub use compiler_projection::{
-    CompilerInputProjection, CompilerInputRole, CompletedNativeImport, CompletedNativeSelection,
-    CompletedNativeSourceRow, CompletedNativeTargetImport, IssuedNativeSelectionCompletion,
-    PublicationNativeAuthority,
+pub(crate) use compiler_projection::{
+    AcquiredNativeClosures, CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection,
+    InputNativeDecision, IssuedInputNativeDecisions, RecordedCompilerRole,
+    RecordedInputNativeDecision,
 };
+pub use compiler_projection::{CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority};
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
     NativeOfferContribution, ValidatedFreshNativeAvailability,
@@ -640,7 +641,7 @@ impl CertifiedTargetNativeInputs {
             output,
             packages,
             selection,
-            inherited.native_completions(),
+            inherited.acquired_native_closures(),
             operation,
         )?;
         self.completed = Some(completed);

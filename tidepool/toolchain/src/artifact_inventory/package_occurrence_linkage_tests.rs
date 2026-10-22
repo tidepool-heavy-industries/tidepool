@@ -219,6 +219,52 @@ fn compile_fixture(source: &str, targets: &[&str]) -> crate::artifacts::Compiled
     .expect("actual finite native package output through common admission")
 }
 
+fn assert_current_handles_are_target_bound(
+    output: &crate::artifacts::CompiledArtifacts,
+    target: &str,
+) {
+    use crate::linked_native::NativeCodeGrant;
+    let linked = output.targets[target]
+        .linked_native_target()
+        .expect("actual finite target owns its linked code");
+    let sources = output
+        .native_source_products(target)
+        .expect("actual source receipt resolves")
+        .expect("finite target source receipt");
+    let mut checked = 0;
+    for acquired in linked.acquired() {
+        let NativeCodeGrant::Home {
+            binding,
+            current: Some(_),
+            ..
+        } = acquired.grant()
+        else {
+            continue;
+        };
+        assert!(sources
+            .physical_current_for(linked, &acquired)
+            .expect("receiving target handle retains Current")
+            .is_some());
+        let historical = linked
+            .closure()
+            .home(binding)
+            .expect("same exact closure lends a historical handle");
+        assert!(matches!(
+            historical.grant(),
+            NativeCodeGrant::Home { current: None, .. }
+        ));
+        assert!(
+            sources.physical_current_for(linked, &historical).is_err(),
+            "a historical handle cannot borrow receiving Current authority"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "the fresh multi-ordinal fixture demands Current HOME code"
+    );
+}
+
 fn completed_selection(
     output: &crate::artifacts::CompiledArtifacts,
     target: &str,
@@ -364,6 +410,7 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
         |_, _, _| {},
     )
     .expect("fresh multi-ordinal HOME module compiles through common admission");
+    assert_current_handles_are_target_bound(&output, "result");
 
     let selection = completed_selection(&output, "result");
     let roots = home_package_roots(&selection);

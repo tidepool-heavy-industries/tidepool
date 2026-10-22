@@ -3655,9 +3655,9 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         selected: &crate::linked_native::AcquiredNativeCode,
     ) -> Result<Option<PhysicalCurrentNativeGroup<'s>>, CompileError> {
         self.validate_source_target(selection)?;
-        if !Arc::ptr_eq(selection.closure(), selected.closure()) {
+        if !selection.owns_acquired(selected) {
             return Err(CompileError::ExtractFailed(
-                "native source receipt names another acquired closure".into(),
+                "native source receipt belongs to another receiving target".into(),
             ));
         }
         let crate::linked_native::NativeCodeGrant::Home {
@@ -9440,19 +9440,16 @@ mod module_product_tests {
             let mut completed = Vec::new();
             for item in program.items() {
                 if let Some(products) = item.native_products() {
-                    completed.push(Arc::clone(
-                        products
-                            .target_native_inputs()
-                            .linked_native_target()
-                            .expect("actual World target completion")
-                            .completion(),
-                    ));
+                    let linked = products
+                        .linked_native_target()
+                        .expect("actual World linked target");
+                    completed.push(Arc::clone(linked.closure()));
                 }
                 for prior in &completed {
                     assert!(
                         item.compiler_context()
                             .compiler_source_support()
-                            .native_completions()
+                            .acquired_native_closures()
                             .iter()
                             .any(|held| Arc::ptr_eq(held, prior)),
                         "every item context retains its actual completed target prefix"

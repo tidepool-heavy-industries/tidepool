@@ -532,7 +532,7 @@ enum OriginalInputDemand {
 #[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
     native_fact_base: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
-    native_completions: crate::artifact_inventory::AcquiredNativeClosures,
+    native_closures: crate::artifact_inventory::AcquiredNativeClosures,
     demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -671,7 +671,7 @@ impl PartialEq for OriginalCompilerInputs {
         }) && self.projection == other.projection
             && self.artifacts == other.artifacts
             && self.native_offers == other.native_offers
-            && self.native_completions == other.native_completions
+            && self.native_closures == other.native_closures
             && self.native_availability == other.native_availability
     }
 }
@@ -1091,8 +1091,8 @@ impl OriginalCompilerInputs {
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
-                    native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-                native_completions: source.native_completions().clone(),
+                native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+                native_closures: source.acquired_native_closures().clone(),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -1119,7 +1119,7 @@ impl OriginalCompilerInputs {
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-            native_completions: source.native_completions().clone(),
+            native_closures: source.acquired_native_closures().clone(),
             native_availability: source.native_availability().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -1179,7 +1179,7 @@ impl OriginalCompilerInputs {
     ) -> Self {
         Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-            native_completions: source.native_completions().clone(),
+            native_closures: source.acquired_native_closures().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().clone(),
             artifacts: source.artifacts().clone(),
@@ -1196,10 +1196,10 @@ impl OriginalCompilerInputs {
         self.native_fact_base.as_ref()
     }
 
-    pub(crate) fn issued_native_completions(
+    pub(crate) fn acquired_native_closures(
         &self,
     ) -> &crate::artifact_inventory::AcquiredNativeClosures {
-        &self.native_completions
+        &self.native_closures
     }
 
     fn normalize_selection(
@@ -1241,7 +1241,7 @@ impl OriginalCompilerInputs {
         let artifacts = retain_native_offers(artifacts, &native_offers)?;
         Ok(Self {
             native_fact_base: selection.native_fact_base().cloned(),
-            native_completions: selection.native_completions(),
+            native_closures: selection.acquired_native_closures(),
             native_availability,
             demand: OriginalInputDemand::Issued(
                 crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
@@ -1294,7 +1294,7 @@ impl OriginalCompilerInputs {
         };
         Ok(Self {
             native_fact_base: self.native_fact_base.clone(),
-            native_completions: self.native_completions.clone(),
+            native_closures: self.native_closures.clone(),
             native_availability: self
                 .native_availability
                 .for_compiler_roles(&projection, &artifacts)?,
@@ -1318,7 +1318,7 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
-            native_completions: self.native_completions.append(&other.native_completions)?,
+            native_closures: self.native_closures.append(&other.native_closures)?,
             native_fact_base: self
                 .native_fact_base
                 .clone()
@@ -3556,7 +3556,7 @@ impl DemandNativeInputs {
                     let held_owner = self
                         .cold
                         .source_support
-                        .native_completions()
+                        .acquired_native_closures()
                         .group_owner(binding, &operation)?;
                     let held = held_owner.as_ref().and_then(|owner| match owner.grant() {
                         crate::linked_native::NativeCodeGrant::Home { product, .. } => {
@@ -4407,10 +4407,10 @@ impl RequestCompilerInputs {
         }
         let support = self
             .source_support
-            .with_native_completions_from(issued.compiler_source_support())?;
+            .with_acquired_native_closures_from(issued.compiler_source_support())?;
         if support
-            .native_completions()
-            .same_held_owners(self.source_support.native_completions())
+            .acquired_native_closures()
+            .same_held_owners(self.source_support.acquired_native_closures())
         {
             return Ok(WorldPrimaryProgramSupport {
                 inputs: Arc::clone(self),
@@ -14013,7 +14013,7 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .recorded_input_decisions()
                 .clone(),
-            native_completions: self
+            native_closures: self
                 .owner
                 .facts
                 .compiler_support
@@ -14041,7 +14041,7 @@ impl ExactDeclarationContext {
             || self.owner.facts.compiler_support.recorded_input_decisions()
                 != &snapshot.input_decisions
             || self.owner.facts.compiler_support.native_completion_facts()
-                != &snapshot.native_completions
+                != &snapshot.native_closures
         {
             return Err(failure(
                 "restored compiler availability differs from exact snapshot",

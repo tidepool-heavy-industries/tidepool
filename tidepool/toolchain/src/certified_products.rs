@@ -5835,9 +5835,11 @@ impl CertifiedSourceSelection {
         Self::new_product_ingress()
     }
 
-    pub(crate) fn native_completions(&self) -> crate::artifact_inventory::AcquiredNativeClosures {
+    pub(crate) fn acquired_native_closures(
+        &self,
+    ) -> crate::artifact_inventory::AcquiredNativeClosures {
         match &self.input_origin {
-            CertifiedInputOrigin::Continuation(source) => source.native_completions().clone(),
+            CertifiedInputOrigin::Continuation(source) => source.acquired_native_closures().clone(),
             CertifiedInputOrigin::NewProducts => Default::default(),
         }
     }
