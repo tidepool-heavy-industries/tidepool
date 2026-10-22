@@ -101,7 +101,7 @@ impl NativePackageReceipt {
 #[derive(Clone, Debug)]
 pub(crate) enum NativeAcquisition {
     Home {
-        product: Arc<PendingCertifiedGroup>,
+        grant: crate::certified_products::AcquiredHomeCodeGrant,
     },
     Package {
         product: Arc<CertifiedPackageCodeProduct>,
@@ -144,31 +144,34 @@ pub struct AcquiredNativeClosure {
 impl AcquiredNativeClosure {
     pub(crate) fn issue(
         occurrences: Vec<NativeAcquiredOccurrence>,
-        artifacts: ArtifactView,
+        mut artifacts: ArtifactView,
         operation: &InventoryOperation,
     ) -> Result<Arc<Self>, CompileError> {
         operation
             .reserve::<NativeAcquiredOccurrence>(occurrences.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let mut nodes = BTreeMap::new();
-        let mut receipts = BTreeMap::<[u8; 32], Arc<NativePackageReceiptFacts>>::new();
+        let mut receipts = BTreeMap::<[u8; 32], BTreeMap<u32, NativePackageOccurrenceFacts>>::new();
         for node in occurrences {
             crate::host_work::checkpoint()?;
             match (&node.occurrence, &node.acquisition, node.code.body()) {
                 (
                     NativeOccurrenceId::Home(binding),
-                    NativeAcquisition::Home { product },
+                    NativeAcquisition::Home { grant },
                     NativeCodeBody::Home(code),
                 ) => {
+                    let product = grant.product();
                     let expected = CertifiedGroupCode::admit(
                         product.owner().clone(),
                         product.group().clone(),
                     )?;
-                    if binding.original_ordinal != product.group().original_ordinal()
+                    if *binding != grant.binding()
+                        || binding.original_ordinal != product.group().original_ordinal()
                         || &expected != code
                     {
                         return Err(refusal("HOME code differs from its exact acquired product"));
                     }
+                    artifacts = artifacts.retain_custody(grant.artifacts())?;
                 }
                 (
                     NativeOccurrenceId::Package {
@@ -197,11 +200,10 @@ impl AcquiredNativeClosure {
                     if row.product != product.artifact_id() {
                         return Err(refusal("package receipt changed its exact product"));
                     }
-                    if let Some(prior) = receipts.insert(*stage_id, Arc::clone(&receipt.facts)) {
-                        if prior != receipt.facts {
-                            return Err(refusal("competing selected package receipt projections"));
-                        }
-                    }
+                    receipts
+                        .entry(*stage_id)
+                        .or_default()
+                        .insert(*occurrence, row.clone());
                 }
                 _ => return Err(refusal("code body and acquired occurrence kinds differ")),
             }
@@ -214,10 +216,77 @@ impl AcquiredNativeClosure {
             if imports.len() != node.imports.len() {
                 return Err(refusal("acquired occurrence slot count differs"));
             }
+            if let NativeAcquisition::Home { grant } = &node.acquisition {
+                if grant.imports().len() != imports.len() {
+                    return Err(refusal("HOME grant slot count differs"));
+                }
+                for (slot, ((edge, selector), actual)) in imports
+                    .iter()
+                    .zip(node.imports.iter())
+                    .zip(grant.imports())
+                    .enumerate()
+                {
+                    use crate::certified_products::SelectedNativeImport;
+                    let valid = match (edge, selector, actual) {
+                        (
+                            NativeCodeImport::Code { value, .. },
+                            NativeGrantSelector::Code(NativeOccurrenceId::Home(selected)),
+                            SelectedNativeImport::Source {
+                                binding,
+                                value: expected,
+                            },
+                        ) => selected == binding && value == expected,
+                        (
+                            NativeCodeImport::Code { value, .. },
+                            NativeGrantSelector::Code(selected),
+                            SelectedNativeImport::Package {
+                                identity,
+                                interface_digest,
+                            },
+                        ) => {
+                            let child = nodes
+                                .get(selected)
+                                .ok_or_else(|| refusal("HOME package grant is absent"))?;
+                            let NativeAcquisition::Package { product, .. } = &child.acquisition
+                            else {
+                                return Err(refusal("HOME package grant changed kind"));
+                            };
+                            let definitions = grant.product().group().definitions();
+                            let global = &definitions.globals()[slot];
+                            identity == &global.identity
+                                && resolve_package_export(
+                                    product,
+                                    global,
+                                    definitions,
+                                    interface_digest,
+                                )? == *value
+                        }
+                        (
+                            NativeCodeImport::Retained(requirement),
+                            NativeGrantSelector::Retained { binding: selected },
+                            SelectedNativeImport::Retained {
+                                binding,
+                                identity,
+                                generation,
+                            },
+                        ) => {
+                            selected == binding
+                                && requirement.identity() == identity
+                                && requirement.generation() == *generation
+                        }
+                        _ => false,
+                    };
+                    if !valid {
+                        return Err(refusal(
+                            "linked slot differs from its exact acquired HOME grant",
+                        ));
+                    }
+                }
+            }
             for (index, (edge, grant)) in imports.iter().zip(node.imports.iter()).enumerate() {
                 match (edge, grant) {
                     (
-                        NativeCodeImport::Code { code, .. },
+                        NativeCodeImport::Code { code, value },
                         NativeGrantSelector::Code(occurrence),
                     ) => {
                         let child = nodes
@@ -227,6 +296,7 @@ impl AcquiredNativeClosure {
                             return Err(refusal("acquired child changed its linked code"));
                         }
                         if let NativeAcquisition::Package {
+                            product,
                             receipt,
                             occurrence,
                             ..
@@ -238,6 +308,25 @@ impl AcquiredNativeClosure {
                                 .iter()
                                 .find(|row| row.occurrence == *occurrence)
                                 .ok_or_else(|| refusal("selected package receipt row is absent"))?;
+                            if row.children.len() != product.code().globals().len()
+                                || row.children.len() != imports.len()
+                            {
+                                return Err(refusal(
+                                    "package receipt changed its exact ordered slot count",
+                                ));
+                            }
+                            let NativeAcquisition::Package {
+                                product: child_product,
+                                ..
+                            } = &child.acquisition
+                            else {
+                                return Err(refusal("package child has a nonpackage grant"));
+                            };
+                            if resolve_package_import(product, index, child_product)? != *value {
+                                return Err(refusal(
+                                    "package child changed its exact certified slot obligation",
+                                ));
+                            }
                             let expected = row
                                 .children
                                 .get(index)
@@ -279,7 +368,15 @@ impl AcquiredNativeClosure {
                     imports: Arc::clone(&node.imports),
                 })
                 .collect(),
-            package_receipts: receipts.into_values().collect(),
+            package_receipts: receipts
+                .into_iter()
+                .map(|(stage_id, rows)| {
+                    Arc::new(NativePackageReceiptFacts {
+                        stage_id,
+                        occurrences: rows.into_values().collect(),
+                    })
+                })
+                .collect(),
         });
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(recorded.as_ref(), &mut bytes)
@@ -380,10 +477,10 @@ impl AcquiredNativeCode {
     }
     pub fn grant(&self) -> NativeCodeGrant<'_> {
         match (&self.occurrence, &self.node().acquisition) {
-            (NativeOccurrenceId::Home(binding), NativeAcquisition::Home { product }) => {
+            (NativeOccurrenceId::Home(binding), NativeAcquisition::Home { grant }) => {
                 NativeCodeGrant::Home {
                     binding: *binding,
-                    product,
+                    product: grant.product(),
                     current: self
                         .sources
                         .as_ref()
@@ -471,6 +568,13 @@ pub struct LinkedNativeTarget {
     pub(crate) sources: Arc<NativeTargetSources>,
 }
 impl LinkedNativeTarget {
+    pub(crate) fn owns_acquired(&self, selected: &AcquiredNativeCode) -> bool {
+        Arc::ptr_eq(&self.closure, &selected.owner)
+            && selected
+                .sources
+                .as_ref()
+                .is_some_and(|sources| Arc::ptr_eq(sources, &self.sources))
+    }
     pub fn prepared(&self) -> &Arc<PreparedProgram> {
         &self.prepared
     }
@@ -494,4 +598,75 @@ impl LinkedNativeTarget {
 }
 fn refusal(detail: &str) -> CompileError {
     CompileError::ExtractFailed(format!("native acquisition: {detail}"))
+}
+
+pub(crate) fn resolve_package_export(
+    product: &crate::certified_products::CertifiedPackageCodeProduct,
+    global: &tidepool_repr::execution_schema::GlobalDecl,
+    importer: tidepool_repr::execution_schema::DefinitionsView<'_>,
+    interface: &[u8; 32],
+) -> Result<tidepool_repr::execution_schema::ValueId, CompileError> {
+    let code = product.code();
+    if global.identity.unit != code.owner().unit
+        || global.identity.module != code.owner().module
+        || interface != product.defining_interface().sha256()
+    {
+        return Err(refusal(
+            "selected package defining interface differs from its exact obligation",
+        ));
+    }
+    let value = code
+        .exported_values()
+        .find_map(|(identity, value)| (identity == &global.identity).then_some(value))
+        .ok_or_else(|| refusal("selected package does not export the demanded identity"))?;
+    let contract = code
+        .definitions()
+        .export_contract(value)?
+        .ok_or_else(|| refusal("selected package export has no contract"))?;
+    let signature = global
+        .entry_signature
+        .map(|id| {
+            importer
+                .signatures()
+                .get(id.0 as usize)
+                .ok_or_else(|| refusal("package slot signature is out of range"))
+        })
+        .transpose()?;
+    if contract.rep != global.rep
+        || signature.is_some_and(|required| contract.entry_signature != Some(required))
+        || global.required_evaluated && !contract.evaluated
+        || global.required_generation.is_some()
+    {
+        return Err(refusal(
+            "selected package export contract differs from the importer",
+        ));
+    }
+    Ok(value)
+}
+pub(crate) fn resolve_package_import(
+    product: &crate::certified_products::CertifiedPackageCodeProduct,
+    slot: usize,
+    child: &crate::certified_products::CertifiedPackageCodeProduct,
+) -> Result<tidepool_repr::execution_schema::ValueId, CompileError> {
+    let code = product.code();
+    let owner = code.owner();
+    let child_owner = child.code().owner();
+    let global = code
+        .globals()
+        .get(slot)
+        .ok_or_else(|| refusal("package ordered slot is absent"))?;
+    let witness = product
+        .import_interface_witnesses()
+        .get(slot)
+        .ok_or_else(|| refusal("package slot lacks its certified interface"))?;
+    if owner.compiler_sha256 != child_owner.compiler_sha256
+        || owner.profile_sha256 != child_owner.profile_sha256
+        || witness.unit() != global.identity.unit
+        || witness.module() != global.identity.module
+    {
+        return Err(refusal(
+            "selected package child differs from its certified compiler/interface contract",
+        ));
+    }
+    resolve_package_export(child, global, code.definitions(), witness.sha256())
 }

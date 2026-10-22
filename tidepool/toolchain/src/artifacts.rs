@@ -3630,6 +3630,10 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
+    pub(crate) fn acquired_home(&self, binding: crate::artifact_inventory::NativeGroupBinding) -> Result<crate::certified_products::AcquiredHomeCodeGrant, CompileError> {
+        self._resolved.acquired_home(binding)
+    }
+
     pub fn validate_source_target(
         &self,
         selection: &Arc<crate::linked_native::LinkedNativeTarget>,
@@ -4662,7 +4666,7 @@ fn admit_native_target_products(
     Ok(AdmittedNativeTargetProducts {
         target: selected_target
             .with_certified_groups(Arc::clone(&selected_groups))?
-            .complete_native_selection(
+            .link_native_target(
                 output,
                 packages,
                 package_selection,
@@ -6476,7 +6480,7 @@ fn compile_invocation_inner(
                     .map_err(compiler_evidence_failure)?;
                 let native_inputs = selected_target
                     .with_certified_groups(Arc::clone(&selected_groups))?
-                    .complete_native_selection(
+                    .link_native_target(
                         &native_output,
                         &package_products,
                         package_selection,

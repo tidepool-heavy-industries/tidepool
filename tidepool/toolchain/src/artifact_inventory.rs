@@ -552,7 +552,7 @@ impl TargetNativeInputs {
         let links = Arc::clone(&self.slots.links);
         Ok(CertifiedTargetNativeInputs {
             target: self,
-            completed: None,
+            linked_target: None,
             groups,
             links,
         })
@@ -602,7 +602,7 @@ impl TargetNativeInputs {
 /// products. Graph-only compiler consumers cannot issue runtime source proofs.
 #[derive(Debug)]
 pub(crate) struct CertifiedTargetNativeInputs {
-    completed: Option<Arc<CompletedNativeSelection>>,
+    linked_target: Option<Arc<crate::linked_native::LinkedNativeTarget>>,
     target: TargetNativeInputs,
     groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
     links: Arc<[crate::certified_products::SelectedNativeTargetImport]>,
@@ -618,7 +618,7 @@ impl std::ops::Deref for CertifiedTargetNativeInputs {
 impl CertifiedTargetNativeInputs {
     /// Complete this exact physical target without changing its selected HOME
     /// roots or compiler roles. Missing package code remains a refusal.
-    pub(crate) fn complete_native_selection(
+    pub(crate) fn link_native_target(
         mut self,
         output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
@@ -636,7 +636,7 @@ impl CertifiedTargetNativeInputs {
             self.resolve_sources()?,
             &prepared,
         )?;
-        let completed = compiler_projection::complete_native_selection(
+        let linked_target = compiler_projection::link_native_target(
             &sources,
             output,
             packages,
@@ -644,12 +644,12 @@ impl CertifiedTargetNativeInputs {
             inherited.acquired_native_closures(),
             operation,
         )?;
-        self.completed = Some(completed);
+        self.linked_target = Some(linked_target);
         Ok(self)
     }
 
-    pub(crate) fn completed_selection(&self) -> Option<&Arc<CompletedNativeSelection>> {
-        self.completed.as_ref()
+    pub(crate) fn linked_native_target(&self) -> Option<&Arc<crate::linked_native::LinkedNativeTarget>> {
+        self.linked_target.as_ref()
     }
 
     pub(crate) fn certified_groups(
@@ -663,7 +663,7 @@ impl CertifiedTargetNativeInputs {
             target: self.target.resolve()?,
             groups: &self.groups,
             links: &self.links,
-            completed: self.completed.as_ref(),
+            linked_target: self.linked_target.as_ref(),
         })
     }
 }
@@ -673,7 +673,7 @@ pub(crate) struct ResolvedNativeSourceTarget<'a> {
     target: ResolvedNativeTarget<'a>,
     groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
     links: &'a [crate::certified_products::SelectedNativeTargetImport],
-    completed: Option<&'a Arc<CompletedNativeSelection>>,
+    linked_target: Option<&'a Arc<crate::linked_native::LinkedNativeTarget>>,
 }
 
 impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
@@ -684,6 +684,10 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn acquired_home(&self, binding: NativeGroupBinding) -> Result<crate::certified_products::AcquiredHomeCodeGrant, CompileError> {
+        if !self.target.groups().contains(&binding) { return Err(failure("HOME acquisition is outside its exact target")); }
+        crate::certified_products::AcquiredHomeCodeGrant::from_certified(self.groups,self.target.artifacts(),binding)
+    }
     pub(crate) fn shared_group_imports(
         &self,
         binding: NativeGroupBinding,
@@ -698,8 +702,8 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
             .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
     }
 
-    pub(crate) fn completed_selection(&self) -> Option<&'a Arc<CompletedNativeSelection>> {
-        self.completed
+    pub(crate) fn linked_native_target(&self) -> Option<&'a Arc<crate::linked_native::LinkedNativeTarget>> {
+        self.linked_target
     }
 
     pub(crate) fn target_requirements(
@@ -852,7 +856,7 @@ impl IssuedArtifactCustody {
 }
 
 /// An original offer carries its issuer's exact selected native rows independently
-/// of compiler namespace policy and completed compiler receipts.
+/// of compiler namespace policy and linked_target compiler receipts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeOriginalRequirement {
     pub(crate) original: ArtifactId,
