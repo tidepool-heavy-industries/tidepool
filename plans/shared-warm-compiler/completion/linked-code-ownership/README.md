@@ -12,10 +12,14 @@ snapshots is explicitly unwanted. Preserve authored files, memory and evidence.
 ## Contracts and owners
 
 - [Code identity and linkage](code.md): B (`review_private_progress`).
+- Codegen image/export bridge: root; bounded caller tests: `linked_codegen_tests`.
+- Canonical encoder/export contracts: `linked_graph_review`, coordinated with B.
 - [Physical stage and prefix](phases.md): P (`review_package_selection`).
 - [Source admission](source.md): S (`g2_package_demand_binding`).
 - [Runtime and persistence](consumers.md): A (`g2_actor_custody`) and D
   (`g2_demand_closure`) respectively.
+- Live acquired-prefix collection and issued-output consumers: C
+  (`review_support_text`), coordinated with B/P/D.
 - [Verification](verification.md): T (`review_g2_completeness`) and V
   (`g2_validation`); root reviews independent oracles and integrated consumers.
 
@@ -70,6 +74,11 @@ The diagnostic-only `d21d74b242` is preserved, not integrated or behavior-qualif
 
 ## Progress
 
-- Contract: recorded; implementation dispatched.
-- Code/phase/source/runtime/snapshot migrations: pending.
+- Contract recorded; implementation active in isolated branches. P owns the
+  coherent phase/source/consumer join; root owns the graph/codegen join.
+- Snapshot preflight integrated at `2e6ff0abd2`: compilation and three counted
+  controls pass. This is current-format-7 evidence, not Context8 qualification.
+- Graph, codegen, phase, source and staged-test checkpoints exist; joined
+  migrations and execution remain pending. Two independent graph findings
+  (distinct PACKAGE groups, private helper exports) require repair before acceptance.
 - Joined compilation/execution, frozen bundle, Persona: pending.

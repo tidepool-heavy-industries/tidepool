@@ -1,7 +1,9 @@
 # One demanded linked-code graph
 
-B owns the toolchain graph/issuer and required pure identity types. Coordinate
-runtime and snapshot APIs directly with A/D, with root copied on contract changes.
+B owns the pure immutable graph in `tidepool-repr` and the acquisition/target
+issuer in `tidepool-toolchain`. Codegen, runtime and snapshots consume that same
+graph; none defines a parallel projection. Root owns the codegen bridge; A/D own
+runtime and snapshots. Coordinate APIs directly, copying root on contract changes.
 
 Replace the executable portions of `IssuedNativeSelectionCompletion`,
 `CompletedNativeSelection` and `IssuedPackageCodeGraph`; do not layer a new graph
@@ -60,6 +62,14 @@ Delete inherited-candidate reconciliation used to rescue unstable executable
 identity, completion-row uniqueness keyed only by raw HOME binding, and consumer
 reconstruction after their replacements are in production. Acquisition graphs may
 remain where they prove acquisition; they no longer define executable identity.
+
+PACKAGE acquisition retains the existing authenticated `PackageLinks` receipt,
+not the obsolete executable `ArtifactBinding` scope. Its durable reached
+projection retains stage identity, exact occurrence/product references, ordered
+child occurrence IDs and occurrence-to-CodeLocation correlation. Restore acquires
+the exact certified products and checks the same selected edges through the issuer.
+An envelope plus interface seals alone cannot establish the selected child body.
+Neither bare ArtifactId lookup nor CodeId equality substitutes for that receipt.
 
 ## Acceptance
 
