@@ -23220,6 +23220,263 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn home_source_certificate_keeps_promoted_normalized_owner() {
+        let product = full_native_fixture("PromotedMetadata", vec![(3, vec![])], 7);
+        let mut staged = product.owner().clone();
+        staged.module_version = ModuleVersion([0; 32]);
+        let binder = testing::identity("PromotedMetadata", "entry_3");
+        let mut validation = PackageInterfaceValidation::default();
+        let mut sources = SourceGroupMap::new();
+        sources.insert(
+            (staged.clone(), 3, binder.clone()),
+            (staged.clone(), ProductOrigin::RetainedCore),
+        );
+        let mut selection = CertifiedSourceSelection::new_product_ingress();
+        selection
+            .admit_current(
+                &staged,
+                ProductOrigin::RetainedCore,
+                product.module_interface().unwrap(),
+                &validation.inventory,
+            )
+            .unwrap();
+        let version = ModuleVersion([3; 32]);
+        selection
+            .promote(&BTreeMap::from([(
+                (staged.unit.clone(), staged.module.clone()),
+                version.clone(),
+            )]))
+            .unwrap();
+        sources
+            .promote(
+                &BTreeMap::from([(staged.clone(), version.clone())]),
+                &ValidatedPromotionSharing::default(),
+            )
+            .unwrap();
+        let mut promoted = staged;
+        promoted.module_version = version;
+        let mut metadata = HomeSourceMetadata::default();
+        let normalized = normalize_receipt_metadata(
+            ReceiptImportOwner::Source {
+                unit: promoted.unit.clone(),
+                module: promoted.module.clone(),
+                module_version: None,
+                original_ordinal: 3,
+                binder: binder.clone(),
+            },
+            &sources,
+            &selection,
+            &BTreeMap::new(),
+            &mut metadata,
+            &mut validation,
+        )
+        .unwrap();
+        let ReceiptImportOwner::Source { module_version, .. } = normalized else {
+            panic!("Source normalization")
+        };
+        assert_eq!(module_version.as_ref(), Some(&promoted.module_version));
+        // RetainedCore's raw receipt requires None. Re-selecting the normalized
+        // Some version would misclassify evidence that was already admitted.
+        assert!(matches!(
+            authenticate_source_receipt_metadata(
+                &promoted.unit,
+                &promoted.module,
+                module_version.as_ref(),
+                3,
+                &binder,
+                &sources,
+                &selection,
+            ),
+            Err(CertificationError::Mismatch(
+                "retained source version must be derived"
+            ))
+        ));
+        let consumer = full_native_fixture(
+            "PromotedMetadataConsumer",
+            vec![(
+                7,
+                vec![PendingImportOwner::Source {
+                    owner: promoted.clone(),
+                    original_ordinal: 3,
+                    binder: binder.clone(),
+                }],
+            )],
+            9,
+        );
+        let native = consumer.original_native().unwrap();
+        let witness = issue_home_certification_with_validation(
+            consumer.owner(),
+            &native.groups,
+            &metadata,
+            &BTreeMap::new(),
+            &native.interface_requirements,
+            None,
+            None,
+            &mut validation,
+        )
+        .unwrap();
+        assert_eq!(
+            witness
+                .sources
+                .get(&(promoted.unit.clone(), promoted.module.clone())),
+            Some(&promoted)
+        );
+        let bytes = encode_home_witness_with_operation(&witness, &validation.inventory).unwrap();
+        validate_home_certification_with_validation(&bytes, consumer.owner(), &mut validation)
+            .unwrap();
+        assert_eq!(
+            decode_home_witness(&bytes).unwrap().sources,
+            witness.sources
+        );
+        for (version, ordinal, observed_binder) in [
+            (Some(ModuleVersion([4; 32])), 3, binder.clone()),
+            (Some(promoted.module_version.clone()), 4, binder.clone()),
+            (
+                Some(promoted.module_version.clone()),
+                3,
+                testing::identity("PromotedMetadata", "wrong"),
+            ),
+        ] {
+            assert!(matches!(
+                metadata.owner(
+                    &promoted.unit,
+                    &promoted.module,
+                    version.as_ref(),
+                    ordinal,
+                    &observed_binder,
+                    &validation.inventory
+                ),
+                Err(CertificationError::Mismatch("home source metadata owner"))
+            ));
+        }
+        assert!(matches!(
+            metadata.owner(
+                &promoted.unit,
+                &promoted.module,
+                None,
+                3,
+                &binder,
+                &validation.inventory
+            ),
+            Err(CertificationError::Mismatch(
+                "home source metadata lacks normalized version"
+            ))
+        ));
+    }
+
+    #[test]
+    fn home_source_certificate_keeps_historical_owner_and_refuses_conflicting_metadata() {
+        let old = full_native_fixture("HistoricalMetadata", vec![(3, vec![])], 7);
+        let new = full_native_fixture("HistoricalMetadata", vec![(3, vec![])], 9);
+        assert_ne!(old.owner(), new.owner());
+        let mut validation = PackageInterfaceValidation::default();
+        let sources =
+            available_original_source_map(&[old.clone(), new.clone()], &[], &validation.inventory)
+                .unwrap();
+        let old_selection = CertifiedSourceSelection::from_projected_originals(
+            std::slice::from_ref(&old),
+            &validation.inventory,
+        )
+        .unwrap();
+        let binder = testing::identity("HistoricalMetadata", "entry_3");
+        let mut metadata = HomeSourceMetadata::default();
+        let normalized = normalize_receipt_metadata(
+            ReceiptImportOwner::Source {
+                unit: old.owner().unit.clone(),
+                module: old.owner().module.clone(),
+                module_version: Some(old.owner().module_version.clone()),
+                original_ordinal: 3,
+                binder: binder.clone(),
+            },
+            &sources,
+            &old_selection,
+            &BTreeMap::new(),
+            &mut metadata,
+            &mut validation,
+        )
+        .unwrap();
+        let ReceiptImportOwner::Source { module_version, .. } = normalized else {
+            panic!("Source normalization")
+        };
+        let receiving = CertifiedSourceSelection::from_projected_originals(
+            std::slice::from_ref(&new),
+            &validation.inventory,
+        )
+        .unwrap();
+        assert!(matches!(
+            authenticate_source_receipt_metadata(
+                &old.owner().unit,
+                &old.owner().module,
+                module_version.as_ref(),
+                3,
+                &binder,
+                &sources,
+                &receiving
+            ),
+            Err(CertificationError::Mismatch("source module version"))
+        ));
+        let consumer = full_native_fixture(
+            "HistoricalMetadataConsumer",
+            vec![(
+                7,
+                vec![PendingImportOwner::Source {
+                    owner: old.owner().clone(),
+                    original_ordinal: 3,
+                    binder: binder.clone(),
+                }],
+            )],
+            11,
+        );
+        let native = consumer.original_native().unwrap();
+        let witness = issue_home_certification_with_validation(
+            consumer.owner(),
+            &native.groups,
+            &metadata,
+            &BTreeMap::new(),
+            &native.interface_requirements,
+            None,
+            None,
+            &mut validation,
+        )
+        .unwrap();
+        assert_eq!(
+            witness
+                .sources
+                .get(&(old.owner().unit.clone(), old.owner().module.clone())),
+            Some(old.owner())
+        );
+        let bytes = encode_home_witness_with_operation(&witness, &validation.inventory).unwrap();
+        validate_home_certification_with_validation(&bytes, consumer.owner(), &mut validation)
+            .unwrap();
+        assert_eq!(
+            decode_home_witness(&bytes).unwrap().sources,
+            witness.sources
+        );
+        // Same normalized wire coordinates cannot conceal another full owner.
+        let mut conflicting = old.owner().clone();
+        conflicting.product_sha256[0] ^= 1;
+        assert!(matches!(
+            metadata.record(&conflicting, 3, &binder, &validation.inventory),
+            Err(CertificationError::Mismatch(
+                "ambiguous home source metadata"
+            ))
+        ));
+        assert_eq!(
+            metadata
+                .owner(
+                    &old.owner().unit,
+                    &old.owner().module,
+                    module_version.as_ref(),
+                    3,
+                    &binder,
+                    &validation.inventory
+                )
+                .unwrap(),
+            old.owner()
+        );
+    }
+
+    #[test]
     fn retained_promotion_rekeys_only_its_exact_source_owner() {
         let original = full_native_fixture("Promoted", vec![(3, vec![])], 7);
         let old = original.owner().clone();
