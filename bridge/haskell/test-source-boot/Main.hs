@@ -4,7 +4,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredIn
 import Test.Tasty (withResource)
 import SourceBootCases
 import CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
-import CompilerRequestTest (checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries)
+import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
@@ -27,6 +27,8 @@ tests = testGroup "source-boot"
   , testCase "completed compiler request histories" completedRequestHistories
   , testCase "compiler service boot admission boundaries" compilerServiceBootBoundaries
   , testCase "public module checking guards transitive source execution" checkedPublicModuleHistories
+  , testCase "world request diagnostics bound UTF-8 and preserve cancellation" worldAcquisitionDiagnostics
+  , testCase "world request slots preserve Lib and Val identity" worldRequestSlotBoundaries
   , testCase "world requests require rooted boot hold and fresh executor" worldRequestBoundaries
   , testCase "unissued world materialization preserves failure and cleanup" worldMaterializationBoundaries
   , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
