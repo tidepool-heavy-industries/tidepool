@@ -1098,13 +1098,18 @@ mod tests {
             let [PreparedResult::Managed(returned)] = returned.values.as_slice() else {
                 panic!("linked consumer returns the selected provider CAF")
             };
-            let provider = machine.retain_top(programs[1], ValueId(0)).unwrap();
+            let provider_thunk = machine.retain_top(programs[1], ValueId(0)).unwrap();
+            assert!(machine.handle_is_evaluated(provider_thunk).unwrap());
+            // Entry evaluation forces the provider CAF, whose result is its
+            // second top-level closure. The original thunk is a different object.
+            let provider_result = machine.retain_top(programs[1], ValueId(1)).unwrap();
             assert_eq!(
                 machine.handle_current_pointer(*returned),
-                machine.handle_current_pointer(provider)
+                machine.handle_current_pointer(provider_result)
             );
             assert!(machine.release(*returned));
-            assert!(machine.release(provider));
+            assert!(machine.release(provider_result));
+            assert!(machine.release(provider_thunk));
         }
         release_scope(&mut table, &mut machine, &mut tree, scope);
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
