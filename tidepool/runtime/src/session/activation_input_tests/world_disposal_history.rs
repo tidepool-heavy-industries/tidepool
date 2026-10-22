@@ -96,7 +96,7 @@ fn disposed_world(world: &str, after: u64) -> WorldObservation {
 #[test]
 #[ignore = "requires the rooted runtime_world_disposal_history_test resources"]
 fn released_compiler_world_restores_while_retained_native_custody_executes() {
-    use tidepool_toolchain::host_work::{HostWorkCounter as Counter, HostWorkObservation};
+    use tidepool_toolchain::timing::{HostWorkCounter as Counter, HostWorkObservation};
     assert_eq!(
         std::env::var("TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES").as_deref(),
         Ok("0")
