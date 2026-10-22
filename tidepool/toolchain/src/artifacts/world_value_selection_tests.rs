@@ -333,9 +333,12 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     };
     let primary = Arc::new(
         crate::declaration_join::ExactDeclarationContext::from_source_selection(
-            compiled_home
-                .producer_identity
-                .expect("the production compiler binds its producer identity"),
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &compiled_home
+                    .producer_identity
+                    .expect("the production compiler binds its producer identity"),
+            )
+            .sha256(),
             compiled_home
                 .source_selection
                 .as_ref()
