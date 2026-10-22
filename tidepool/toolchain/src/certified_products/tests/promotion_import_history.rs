@@ -871,6 +871,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
     });
     let mut facts = empty_product_facts();
     facts.as_array_mut().unwrap()[2] = value_array(modules);
+    facts.as_array_mut().unwrap()[3] = value_array([value_array([
+        value_text("item"),
+        value_array([]),
+    ])]);
     let mut wire = dictionary_receipt(&facts);
     let payload = receipt_payload_mut(&mut wire);
     payload[0] = value_text("segment-originals");
@@ -1104,7 +1108,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 SegmentItemReceipt {
                     globals: vec![],
                     packages: BTreeMap::new(),
-                    selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
+                    selection: PackageSelection {
+                        program_sha256: *prepared_binding.sha256(),
+                        ..empty_item_selection(*shared.receipt.package_links.stage_id())
+                    },
                 },
                 &prepared_binding,
                 None,
@@ -1114,6 +1121,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert!(!next_packages.contains_key(&owner));
         let mut unused = addition();
         unused.globals.clear();
+        unused.selection.program_sha256 = *prepared_binding.sha256();
         assert!(matches!(
             shared.select_item(
                 &mut cursor,
@@ -1148,7 +1156,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
             SegmentItemReceipt {
                 globals: vec![],
                 packages: BTreeMap::new(),
-                selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
+                selection: PackageSelection {
+                        program_sha256: *prepared_binding.sha256(),
+                        ..empty_item_selection(*shared.receipt.package_links.stage_id())
+                    },
             },
             &prepared_binding,
             None,
