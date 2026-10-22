@@ -5625,7 +5625,7 @@ impl CertifiedSourceSelection {
                 unit: unit.clone(),
                 module: module.clone(),
             };
-            let Some(product) = inputs.prior_source_product(&owner)? else {
+            let Some(product) = inputs.prior_nominal_source_product(&owner)? else {
                 continue;
             };
             if module_version
@@ -5669,7 +5669,7 @@ impl CertifiedSourceSelection {
             };
             let product =
                 inputs
-                    .prior_source_product(&owner)?
+                    .prior_nominal_source_product(&owner)?
                     .ok_or(CertificationError::Mismatch(
                         "prior HOME lacks its exact program issuer",
                     ))?;

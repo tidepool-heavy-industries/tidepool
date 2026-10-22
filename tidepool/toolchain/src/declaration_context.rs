@@ -8941,7 +8941,10 @@ impl<'a> ProductCompilerInputs<'a> {
         self
     }
 
-    pub(crate) fn prior_source_product(
+    /// Borrow nominal physical membership from this program's actual prior
+    /// output. The receiving projection may omit a metadata-only Source owner;
+    /// compiler roles and executable groups remain with their separate issuers.
+    pub(crate) fn prior_nominal_source_product(
         &self,
         owner: &ExactModuleIdentity,
     ) -> Result<
@@ -8951,38 +8954,7 @@ impl<'a> ProductCompilerInputs<'a> {
         let Some(support) = self.program_support else {
             return Ok(None);
         };
-        let Some(row) = support.imports.get(owner) else {
-            return Ok(None);
-        };
-        let Some(receipt) = &row.physical_product else {
-            return Ok(None);
-        };
-        let actual = support.compiler_support.implementation_entry(owner);
-        let selected = self.source_support.implementation_entry(owner);
-        let actual_matches = actual.is_some_and(|entry| row.matches_domain_entry(entry));
-        let selected_matches = selected.is_some_and(|entry| row.matches_domain_entry(entry));
-        let direct_canonical_matches =
-            receipt.matches_direct_canonical_binding(self.source_support.artifacts());
-        if !actual_matches || !selected_matches || !direct_canonical_matches {
-            tracing::warn!(
-                issuer_check = "consulted_prior_source",
-                ?owner,
-                expected_original = ?receipt.row().original_artifact_id(),
-                expected_canonical = ?receipt.row().canonical,
-                actual_artifact = ?actual.map(|entry| entry.descriptor.id),
-                actual_kind = ?actual.map(|entry| entry.descriptor.kind),
-                selected_artifact = ?selected.map(|entry| entry.descriptor.id),
-                selected_kind = ?selected.map(|entry| entry.descriptor.kind),
-                actual_matches,
-                selected_matches,
-                direct_canonical_matches,
-                "prior program physical issuer mismatch"
-            );
-            return Err(crate::certified_products::CertificationError::Mismatch(
-                "prior program Source has another physical issuer",
-            ));
-        }
-        Ok(Some(receipt))
+        support.physical_product(owner)
     }
 
     pub(crate) fn produced_source(
@@ -12034,7 +12006,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
                     for (owner, row) in support.imports.iter() {
                         let Some(receipt) = &row.physical_product else { continue };
                         let Some(physical) = output.produced_source(owner).unwrap() else {
-                            assert!(Arc::ptr_eq(initial_inputs.prior_source_product(owner).unwrap().unwrap(), receipt),
+                            assert!(Arc::ptr_eq(initial_inputs.prior_nominal_source_product(owner).unwrap().unwrap(), receipt),
                                 "carried canonical SOURCE keeps its prior physical issuer");
                             continue;
                         };
