@@ -322,7 +322,15 @@ pub(super) fn assert_actual_available_prior_source_inputs(
         exercised > 0,
         "named prior Source fixture owns an actually available group"
     );
-    eprintln!("actual World prior Source controls: stage {}, prior {exercised}, wrong version {exercised}, wrong binder {exercised}, absent ordinal {exercised}, carried provenance {exercised}", inputs.initial.stage().index());
+    tracing::info!(
+        stage = inputs.initial.stage().index(),
+        prior = exercised,
+        wrong_version = exercised,
+        wrong_binder = exercised,
+        absent_ordinal = exercised,
+        carried_provenance = exercised,
+        "actual World prior Source controls"
+    );
 }
 
 /// A completed dormant body can publish future permission while its current
