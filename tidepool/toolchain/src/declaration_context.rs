@@ -778,20 +778,6 @@ pub(crate) struct IssuedOriginalOutput {
 }
 
 impl IssuedOriginalOutput {
-    pub(crate) fn issue(
-        selection: crate::certified_products::CertifiedSourceSelection,
-        artifacts: ArtifactView,
-    ) -> Result<Self, CompileError> {
-        let inputs = Arc::new(OriginalCompilerInputs::from_selection(
-            &selection, &artifacts,
-        )?);
-        Ok(Self {
-            selection,
-            artifacts,
-            inputs,
-        })
-    }
-
     pub(crate) fn from_segment_item(
         products: &crate::certified_products::CertifiedProducts,
     ) -> Result<Self, CompileError> {
@@ -1177,13 +1163,6 @@ impl OriginalCompilerInputs {
         &self,
     ) -> &crate::artifact_inventory::NativeSelectionCompletions {
         &self.native_completions
-    }
-
-    pub(crate) fn from_selection(
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        artifacts: &ArtifactView,
-    ) -> Result<Self, CompileError> {
-        Self::normalize_selection(selection, artifacts)
     }
 
     fn normalize_selection(
@@ -9719,16 +9698,8 @@ impl<'a> ExactProductAdmission<'a> {
             projection =
                 projection.merge(&support.compiler_support.projection().within_view(artifacts))?;
         }
-        let selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &projection,
-                &artifacts.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .map_err(compiler_evidence_failure)?;
-        self.original_execution_context(&OriginalCompilerInputs::from_selection(
-            &selection, artifacts,
-        )?)
+        let support = issue_fixture_compiler_support(projection, artifacts.clone())?;
+        self.original_execution_context(&OriginalCompilerInputs::from_issued_support(&support))
     }
 
     /// Retain the complete original compiler selection before publication.
@@ -19138,9 +19109,11 @@ mod tests {
         let source_text = std::str::from_utf8(&source).unwrap();
         let hidden = support_product("Hidden");
         let issued = support_offer(&[generated.clone(), hidden.clone()]);
+        let CompilerSupportFixture::Complete(issued_inputs) = &issued else {
+            panic!("this history transfers its actual completed compiler owner");
+        };
         let private =
-            OriginalCompilerInputs::from_selection(&selection(&issued), issued.artifacts())
-                .unwrap();
+            OriginalCompilerInputs::from_issued_support(issued_inputs.compiler_source_support());
         let support = support_view(std::slice::from_ref(&hidden));
         let continued = private
             .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
@@ -19220,9 +19193,11 @@ mod tests {
             foreign.owner().skinny_iface_sha256,
         );
         let issued = support_offer(&[generated, hidden.clone(), foreign.clone()]);
+        let CompilerSupportFixture::Complete(issued_inputs) = &issued else {
+            panic!("this history transfers its actual completed compiler owner");
+        };
         let private =
-            OriginalCompilerInputs::from_selection(&selection(&issued), issued.artifacts())
-                .unwrap();
+            OriginalCompilerInputs::from_issued_support(issued_inputs.compiler_source_support());
         assert!(
             private
                 .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
@@ -21059,16 +21034,25 @@ mod tests {
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let selected =
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selected =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &PackageInterfaceValidation::default().inventory,
+                    &validation.inventory,
                 )
                 .unwrap();
-            let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                .unwrap()
+            let output = CapturedCompilerStage::issue(
+                &mut selected,
+                &artifacts,
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                output.compiler_inputs(),
+            )
+            .unwrap()
         };
         let mut context = publication
             .context()
@@ -25299,14 +25283,8 @@ mod tests {
         // its base context is unchanged while private exact scopes differ.
         let scaffold = ProtectedScaffoldRequirements::default();
         let request_inputs = |view: &ArtifactView| {
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &view.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-            let private = OriginalCompilerInputs::from_selection(&selection, view).unwrap();
+            let support = issue_fixture_compiler_support(projection.clone(), view.clone()).unwrap();
+            let private = OriginalCompilerInputs::from_issued_support(&support);
             let request = scaffold.compiler_inputs(&context, Some(&private)).unwrap();
             (request, private)
         };
@@ -25621,14 +25599,16 @@ mod tests {
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )?;
             let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-            let selection =
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+                .map(|stage| stage.compiler_inputs().as_ref().clone())
         })()
         .unwrap();
         let late = ancestor
@@ -25681,14 +25661,16 @@ mod tests {
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )?;
             let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-            let selection =
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+                .map(|stage| stage.compiler_inputs().as_ref().clone())
         })()
         .unwrap();
         let private_support =
@@ -26088,16 +26070,25 @@ mod tests {
                         .collect::<BTreeSet<_>>(),
                     BTreeSet::from([original])
                 );
-                let selected =
+                let mut validation = PackageInterfaceValidation::default();
+                let mut selected =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
                         &artifacts.metadata_snapshot(),
-                        &PackageInterfaceValidation::default().inventory,
+                        &validation.inventory,
                     )
                     .unwrap();
-                let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .unwrap()
+                let output = CapturedCompilerStage::issue(
+                    &mut selected,
+                    &artifacts,
+                    Vec::new(),
+                    &mut validation,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    output.compiler_inputs(),
+                )
+                .unwrap()
             };
             Arc::new(
                 context
@@ -26748,16 +26739,25 @@ mod tests {
                         .collect::<BTreeSet<_>>(),
                     BTreeSet::from([original])
                 );
-                let selected =
+                let mut validation = PackageInterfaceValidation::default();
+                let mut selected =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
                         &artifacts.metadata_snapshot(),
-                        &PackageInterfaceValidation::default().inventory,
+                        &validation.inventory,
                     )
                     .unwrap();
-                let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .unwrap()
+                let output = CapturedCompilerStage::issue(
+                    &mut selected,
+                    &artifacts,
+                    Vec::new(),
+                    &mut validation,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    output.compiler_inputs(),
+                )
+                .unwrap()
             };
         let context = Arc::new(
             initial
@@ -28001,11 +28001,13 @@ mod tests {
         crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
     )?;
     let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+    let mut validation = PackageInterfaceValidation::default();
+let mut selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
         &projection, &artifacts.metadata_snapshot(),
-        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        &validation.inventory,
     ).map_err(compiler_evidence_failure)?;
-    OriginalCompilerInputs::from_selection(&selection, &artifacts)
+    CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+    .map(|stage| stage.compiler_inputs().as_ref().clone())
 })()
             .unwrap();
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
@@ -28338,16 +28340,25 @@ mod tests {
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let selected =
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selected =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &PackageInterfaceValidation::default().inventory,
+                    &validation.inventory,
                 )
                 .unwrap();
-            let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                .unwrap()
+            let output = CapturedCompilerStage::issue(
+                &mut selected,
+                &artifacts,
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                output.compiler_inputs(),
+            )
+            .unwrap()
         };
         let context = Arc::new(
             initial
@@ -30942,14 +30953,16 @@ mod tests {
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )?;
             let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-            let selection =
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+                .map(|stage| stage.compiler_inputs().as_ref().clone())
         })()
         .unwrap();
         let support = context
@@ -31454,14 +31467,16 @@ mod tests {
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )?;
             let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-            let selection =
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+            CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+                .map(|stage| stage.compiler_inputs().as_ref().clone())
         })()
         .unwrap();
         let private = baseline
@@ -33419,13 +33434,7 @@ mod tests {
             .unwrap();
         assert!(without_certificate.protected_scaffold.native.is_empty());
         let inputs = request.compiler_inputs();
-        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-            inputs,
-            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-        )
-        .unwrap();
-        let private =
-            OriginalCompilerInputs::from_selection(&selection, context.artifact_view()).unwrap();
+        let private = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
         assert!(private
             .native_offers()
             .iter()
@@ -33493,17 +33502,9 @@ mod tests {
                 .selected_native_groups(),
             inputs.artifacts().selected_native_groups()
         );
-        let private_receipt =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                private_request.compiler_inputs(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap();
-        let received_private = OriginalCompilerInputs::from_selection(
-            &private_receipt,
-            private_request.compiler_inputs().artifacts(),
-        )
-        .unwrap();
+        let received_private = OriginalCompilerInputs::from_issued_support(
+            private_request.compiler_inputs().compiler_source_support(),
+        );
         assert_eq!(
             received_private
                 .native_availability()
