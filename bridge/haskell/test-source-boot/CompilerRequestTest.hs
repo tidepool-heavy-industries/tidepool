@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization, homeRootResolutionAgreement) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization, homeRootResolutionAgreement, homeRootFreshRestriction) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -50,7 +50,7 @@ import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
   , PackageLink(..), PackageOccurrence(..), RawOccurrence(..), RawLink(..)
-  , canonicalizeOccurrences, resolveHomeRoots )
+  , canonicalizeOccurrences, resolveHomeRoots, restrictFreshHomeRoots )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 
 -- The Rust receipt consumer expects null/text, independently of the execution
@@ -170,6 +170,22 @@ homeRootResolutionAgreement = do
   case resolveHomeRoots indexMap missingIndex onlyFirstTarget of
     Left reason | "canonical occurrence" `isInfixOf` reason -> pure ()
     other -> fail ("missing canonical occurrence was not refused: " ++ show other)
+
+-- A non-fresh HOME group with package imports must not emit a home_roots
+-- entry; only fresh HOME groups publish their links in this receipt.
+homeRootFreshRestriction :: IO ()
+homeRootFreshRestriction = do
+  let unit = Text.pack "unit"
+      moduleNameText = Text.pack "Module"
+      freshKey = (unit, moduleNameText, 0 :: Word)
+      retainedKey = (unit, moduleNameText, 1 :: Word)
+      roots = Map.fromList
+        [ (freshKey, [PackageLinkLocal 0])
+        , (retainedKey, [PackageLinkLocal 1]) ]
+      fresh = Set.singleton freshKey
+      expected = Map.singleton freshKey [PackageLinkLocal 0]
+  unless (restrictFreshHomeRoots fresh roots == expected)
+    (fail ("non-fresh HOME root was not dropped: " ++ show (restrictFreshHomeRoots fresh roots)))
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do

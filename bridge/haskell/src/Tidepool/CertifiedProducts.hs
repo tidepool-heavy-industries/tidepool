@@ -10,7 +10,8 @@ module Tidepool.CertifiedProducts
   , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
   , PackageLink(..), PackageOccurrence(..), PackageLinks(..), PackageLinkIndex(..)
   , RawOccurrence(..), RawLink(..), canonicalizeOccurrences
-  , resolveHomeRoots, emptyPackageLinks, emptyPackageLinkIndex, linkForOccurrence, encodePackageLinks ) where
+  , resolveHomeRoots, restrictFreshHomeRoots
+  , emptyPackageLinks, emptyPackageLinkIndex, linkForOccurrence, encodePackageLinks ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -278,6 +279,13 @@ resolveHomeRoots indexMap targetOwners targetHomeImports =
       Just prior | prior == links -> Right known
       Just prior -> Left ("targets disagree on HOME group " ++ show key
         ++ ": " ++ show prior ++ " /= " ++ show links)
+
+-- Non-fresh (retained/cached) HOME groups pass their prior imports through
+-- unchanged; only fresh HOME groups emit a home_roots entry in this receipt.
+restrictFreshHomeRoots
+  :: Set.Set (T.Text,T.Text,Word) -> Map.Map (T.Text,T.Text,Word) [PackageLink]
+  -> Map.Map (T.Text,T.Text,Word) [PackageLink]
+restrictFreshHomeRoots fresh roots = Map.restrictKeys roots fresh
 
 data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
@@ -728,12 +736,20 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
+              freshHomeKeys = Set.fromList
+                [ (productUnit product, productModule product, candidateGroupOrdinal group)
+                | (product, group, _) <- moduleRows
+                , productOrigin product == FreshProduct ]
               targetOwners = packageLinkIndexTargetOwners packageLinks
               targetRoots = Map.fromList
                 [ (T.pack target,
                     packageRootLinks (Map.findWithDefault Map.empty (T.pack target) targetOwners) witnesses)
                 | (target, witnesses) <- targetRowsReady ]
-              homeRoots = packageLinkIndexHomeRoots packageLinks
+              -- Non-fresh (retained/cached) HOME groups pass their prior
+              -- imports through unchanged; only fresh HOME groups emit a
+              -- home_roots entry in this receipt.
+              homeRoots = restrictFreshHomeRoots freshHomeKeys
+                (packageLinkIndexHomeRoots packageLinks)
               encodedPackageLinks = encodePackageLinks
                 (PackageLinks (packageLinkIndexOccurrences packageLinks) targetRoots homeRoots)
               originalFields =
@@ -769,13 +785,9 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             if or (Map.elems packageConflicts)
               then Left "prior native package owner changed its captured interface"
               else Right ()
-            let freshHomeKeys = Set.fromList
-                  [ (productUnit product, productModule product, candidateGroupOrdinal group)
-                  | (product, group, _) <- moduleRows
-                  , productOrigin product == FreshProduct ]
             if Map.keysSet homeRoots /= freshHomeKeys
-              then Left ("HOME group package links do not match certified fresh HOME groups: links="
-                  ++ show (Map.keysSet homeRoots) ++ " fresh=" ++ show freshHomeKeys)
+              then Left ("fresh HOME group lacks package links: fresh="
+                  ++ show freshHomeKeys ++ " links=" ++ show (Map.keysSet homeRoots))
               else Right ()
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
             Right (certificateBytes,versions,context,packageInterfaceWrites)
