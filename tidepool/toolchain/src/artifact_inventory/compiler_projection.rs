@@ -1187,6 +1187,20 @@ fn append_native_completion_rows(
     for (binding, row) in incoming {
         match rows.get(binding) {
             Some(prior) if prior != row => {
+                let slot = prior
+                    .imports
+                    .iter()
+                    .zip(row.imports.iter())
+                    .position(|(old, incoming)| old != incoming)
+                    .unwrap_or_else(|| prior.imports.len().min(row.imports.len()));
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    binding = ?binding,
+                    slot,
+                    prior_slots = prior.imports.len(),
+                    incoming_slots = row.imports.len(),
+                    prior_import = ?prior.imports.get(slot),
+                    incoming_import = ?row.imports.get(slot),
+                    "completed HOME ordered slot identity refused");
                 return Err(failure("native completion changed an exact HOME slot"));
             }
             Some(_) => {}
