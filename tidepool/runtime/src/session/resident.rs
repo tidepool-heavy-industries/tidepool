@@ -6572,7 +6572,9 @@ where
         {
             return Err(SessionError::WorldCellPublicationBaseStale.into());
         }
-        execution.register_pending_visible_host(id)?;
+        if !hidden {
+            execution.register_pending_visible_host(id)?;
+        }
         let write = match self.mount_checked_host_input_settled(
             carrier,
             payload,
@@ -6581,7 +6583,9 @@ where
         ) {
             Ok(write) => write,
             Err(error) => {
-                execution.settle_pending_visible_host(id)?;
+                if !hidden {
+                    execution.settle_pending_visible_host(id)?;
+                }
                 return Err(error);
             }
         };
@@ -6640,7 +6644,9 @@ where
         match result {
             Ok(write) => Ok(write),
             Err(error) => {
-                execution.settle_pending_visible_host(id)?;
+                if !hidden {
+                    execution.settle_pending_visible_host(id)?;
+                }
                 self.retire_binding_owner_settled(id);
                 Err(error.into())
             }
@@ -6967,12 +6973,17 @@ where
                     .compile_view_key_in(scope)
                     .ok_or(SessionError::StaleStagedDeclaration)?;
                 let mut records = execution.host_retirements.lock();
-                let mut expected = &association.base.key;
-                for record in records.iter() {
-                    expected = record
-                        .following_key(&self.state, &target, expected)
-                        .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                }
+                let expected = if let Some(first) = records.first() {
+                    let mut expected = &first.before;
+                    for record in records.iter() {
+                        expected = record
+                            .following_key(&self.state, &target, expected)
+                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                    }
+                    expected
+                } else {
+                    &association.base.key
+                };
                 if expected != &before
                     || !association
                         .base

@@ -19295,6 +19295,142 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn hidden_private_input_retires_then_allows_publication() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut public, source, _root) = actor_registry_fixture();
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[], &source.base_include);
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            let (workbench, private) = workbench
+                .admit_private_cell_with_source_for_test(public, captured, source_owner)
+                .await;
+            let (carrier, dependencies) = workbench
+                .prepare_host_input(private.clone(), HostCarrierKind::Json, None)
+                .await
+                .expect("prepare the hidden private JSON carrier");
+            let hidden = workbench
+                .mount_prepared_json_input(
+                    private.clone(),
+                    carrier,
+                    serde_json::json!({"hidden": true}),
+                )
+                .await
+                .expect("mount the hidden private input");
+            let hidden_name = hidden.mounted_input().name.clone();
+            drop(dependencies);
+            drop(hidden);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let name = hidden_name.clone();
+                    if workbench
+                        .access
+                        .with_machine(private.clone(), move |session, context, _| {
+                            Ok(session
+                                .current_binding_in(context.placement.lexical_scope, &name)
+                                .is_none())
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("hidden owner retirement reaches the private transition owner");
+            workbench
+                .execute_cell_for_test(private.clone(), "afterHidden <- pure (44 :: Int)")
+                .await
+                .expect("valid work follows hidden input retirement");
+            let execution = workbench.private_execution.as_ref().unwrap().clone();
+            assert!(matches!(
+                workbench_runner_for_test(&workbench)
+                    .publish_private_execution(private, execution)
+                    .await
+                    .unwrap(),
+                PrivateExecutionPublication::Manifest {
+                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    ..
+                }
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn two_abandoned_visible_host_mounts_retire_before_publication() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut public, source, _root) = actor_registry_fixture();
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[], &source.base_include);
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            let (workbench, private) = workbench
+                .admit_private_cell_with_source_for_test(public, captured, source_owner)
+                .await;
+            let first = workbench
+                .bind_tool_result(private.clone(), "abandonOne".into(), "one".into())
+                .await
+                .unwrap();
+            let second = workbench
+                .bind_tool_result(private.clone(), "abandonTwo".into(), "two".into())
+                .await
+                .unwrap();
+            let names = [first.name().to_owned(), second.name().to_owned()];
+            drop(first);
+            drop(second);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let current = names.to_vec();
+                    let absent = workbench
+                        .access
+                        .with_machine(private.clone(), move |session, context, _| {
+                            Ok(current.iter().all(|name| {
+                                session
+                                    .current_binding_in(context.placement.lexical_scope, name)
+                                    .is_none()
+                            }))
+                        })
+                        .await
+                        .unwrap();
+                    if absent {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("both visible abandonments join the private retirement chain");
+            workbench
+                .execute_cell_for_test(private.clone(), "afterTwo <- pure (45 :: Int)")
+                .await
+                .unwrap();
+            let execution = workbench.private_execution.as_ref().unwrap().clone();
+            assert!(matches!(
+                workbench_runner_for_test(&workbench)
+                    .publish_private_execution(private, execution)
+                    .await
+                    .unwrap(),
+                PrivateExecutionPublication::Manifest {
+                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    ..
+                }
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution() {
         with_test_compiler_owner(|preparation_client| cancelled_unaccepted_host_write_cannot_publish_or_transfer_to_another_execution_with_compiler_owner(preparation_client.clone(), )).await
     }
