@@ -99,6 +99,13 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   requires exact owner/seal references and byte custody, including TYPE-only
   interfaces. Sealed package-selection origins and receiving copy paths are
   separate facts: equal bytes never rebind current compiler or source authority.
+- HOME package annotations are conditional contracts, not executable roots.
+  Authenticate every supplied row at receipt issuance, including unused rows;
+  apply ordered slot obligations only to the exact selected physical group.
+  Never require annotation inventory to equal executable demand. Empty contracts
+  remain distinct from missing contracts, and neither creates native authority.
+  Test malformed unused metadata as well as missing selected-slot coverage;
+  an outer byte/hash refusal alone does not exercise semantic authentication.
 - Package-code artifacts retain immutable envelopes and their captured defining
   and ordered import interfaces as custody. They grant no compiler role, HOME
   original, source authority or executable readiness. Restore their explicit

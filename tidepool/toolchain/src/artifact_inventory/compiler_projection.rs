@@ -1436,9 +1436,9 @@ pub(crate) fn complete_native_selection(
                 }
                 let home_link = match home_links {
                     Some(links) => {
-                        let link = links
-                            .get(home_slot)
-                            .ok_or_else(|| failure("selected HOME contract has too few package links"))?;
+                        let link = links.get(home_slot).ok_or_else(|| {
+                            failure("selected HOME contract has too few package links")
+                        })?;
                         home_slot += 1;
                         Some(link)
                     }
@@ -1492,7 +1492,9 @@ pub(crate) fn complete_native_selection(
         }
         if let Some(links) = home_links {
             if home_slot != links.len() {
-                return Err(failure("selected HOME package links were not fully consumed"));
+                return Err(failure(
+                    "selected HOME package links were not fully consumed",
+                ));
             }
         }
     }
