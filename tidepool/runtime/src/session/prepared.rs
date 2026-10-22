@@ -317,6 +317,12 @@ pub enum PreparedRuntimeError {
     NativeSourceEvidence(#[source] Box<tidepool_toolchain::CompileError>),
     #[error("prepared installation failed: {0}")]
     Install(ExecutionError),
+    #[error("prepared installation refused: {primary}; cleanup unconfirmed: {cleanup}")]
+    InstallCleanup {
+        primary: Box<PreparedRuntimeError>,
+        #[source]
+        cleanup: Box<PreparedRuntimeError>,
+    },
     #[error(transparent)]
     Demand(DemandError),
     #[error("Ready renderer lacks the exact prepared native image")]
@@ -556,6 +562,7 @@ impl PreparedRuntimeError {
             | Self::Compile(_)
             | Self::NativeSourceEvidence(_)
             | Self::Install(_)
+            | Self::InstallCleanup { .. }
             | Self::Demand(_)
             | Self::MissingPreparedNativeImage
             | Self::TypeEvidence(_)
@@ -661,7 +668,9 @@ impl PreparedRuntimeError {
                 }
                 _ => PreparedFailureKind::Integrity,
             },
-            Self::MissingPreparedNativeImage => PreparedFailureKind::Integrity,
+            Self::MissingPreparedNativeImage | Self::InstallCleanup { .. } => {
+                PreparedFailureKind::Integrity
+            }
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) | Self::NativeSourceEvidence(_) | Self::SourceAdmission(_) => {
                 PreparedFailureKind::Rejected
@@ -960,6 +969,10 @@ pub(crate) struct CertifiedTurnInstall {
     pub groups: Vec<ProgramId>,
     pub leases: Vec<NativeInstanceLease>,
     pub domain_leases: Vec<NativeInstanceAttachment>,
+    package_slots: Vec<(
+        tidepool_codegen::binding_table::WorldPackageSlotPermit,
+        tidepool_codegen::prepared_program::GroupInstanceId,
+    )>,
     admitted: Vec<AdmittedProgramFacts>,
 }
 
@@ -3300,10 +3313,44 @@ impl PreparedEngine {
         bindings.register_source_instances_in_domains(scopes, scope, attachments, &self.machine)
     }
 
+    pub(in crate::session) fn lookup_world_package_slot(
+        &mut self,
+        permit: &tidepool_codegen::binding_table::WorldPackageSlotPermit,
+        selected: Option<&NativeInstanceLease>,
+    ) -> Result<
+        Option<tidepool_codegen::prepared_program::WorldPackageInstanceWitness>,
+        PreparedRuntimeError,
+    > {
+        self.machine
+            .lookup_world_package_slot(permit, selected)
+            .map_err(PreparedRuntimeError::Install)
+    }
+
+    pub(in crate::session) fn prepare_package_slot_publication(
+        &mut self,
+        staged: &mut CertifiedTurnInstall,
+    ) -> Result<tidepool_codegen::prepared_program::PreparedWorldPackageSlots, PreparedRuntimeError>
+    {
+        self.machine
+            .prepare_world_package_slot_publication(std::mem::take(&mut staged.package_slots))
+            .map_err(PreparedRuntimeError::Install)
+    }
+
+    pub(in crate::session) fn retire_world_package_domains(
+        &mut self,
+        retired: impl IntoIterator<Item = tidepool_codegen::binding_table::WorldPackageDomainRetirement>,
+    ) {
+        self.machine.retire_world_package_domains(retired);
+    }
+
     /// Publish the staged native batch only after scope custody accepted all
     /// source lease tokens. Its machine programs are pinned but invisible to
     /// the session's facts, site ledgers until this call.
-    pub(crate) fn commit_certified_turn(&mut self, staged: CertifiedTurnInstall) -> ProgramId {
+    pub(crate) fn commit_certified_turn(
+        &mut self,
+        staged: CertifiedTurnInstall,
+        package_slots: tidepool_codegen::prepared_program::PreparedWorldPackageSlots,
+    ) -> ProgramId {
         assert!(
             staged.leases.is_empty(),
             "source leases must enter scope custody"
@@ -3321,6 +3368,7 @@ impl PreparedEngine {
         for (id, admitted) in programs.zip(staged.admitted) {
             self.publish_admitted_program(id, admitted);
         }
+        self.machine.commit_world_package_slots(package_slots);
         self.installs_since_major += staged.groups.len() + 1;
         for group in staged.groups {
             assert!(self.unpin(group), "scoped source root replaces install pin");

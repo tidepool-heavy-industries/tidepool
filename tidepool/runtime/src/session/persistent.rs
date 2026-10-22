@@ -803,7 +803,7 @@ impl PersistentSession {
     }
 
     pub(super) fn resolve_native_turn_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         code: &super::turn::TurnCode<'_>,
         plan: Arc<super::prepared::NativeInstantiationPlan>,
@@ -828,7 +828,7 @@ impl PersistentSession {
             .bindings
             .scope_snapshot(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-        let instantiation = plan.instantiate(selection)?;
+        let instantiation = self.instantiate_native_plan_in(scope, &plan, selection)?;
         let scoped = self.scoped_prepared_bindings_in(scope);
         let mut captures = BTreeMap::new();
         for requirement in instantiation.retained_requirements() {
@@ -864,6 +864,42 @@ impl PersistentSession {
             captures,
             snapshot,
         })
+    }
+
+    fn instantiate_native_plan_in(
+        &mut self,
+        scope: ScopeId,
+        plan: &Arc<super::prepared::NativeInstantiationPlan>,
+        selection: tidepool_codegen::prepared_program::NativeDomainSelection,
+    ) -> Result<super::prepared::NativeInstantiation, PreparedRuntimeError> {
+        let Self {
+            bindings,
+            scopes,
+            machine,
+            ..
+        } = self;
+        Self::settle_package_domain_retirements(bindings, machine.as_mut());
+        plan.instantiate(selection, |request, selected| {
+            let permit = bindings
+                .package_slot_permit_in(scopes, scope, request)
+                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+            let witness = match machine.as_mut() {
+                Some(engine) => engine.lookup_world_package_slot(&permit, selected)?,
+                None if selected.is_none() => None,
+                None => return Err(PreparedRuntimeError::SourceScopeAdmission),
+            };
+            Ok((permit, witness))
+        })
+    }
+
+    fn settle_package_domain_retirements(
+        bindings: &mut BindingTable,
+        machine: Option<&mut PreparedEngine>,
+    ) {
+        let retired = bindings.take_package_domain_retirements();
+        if let Some(engine) = machine {
+            engine.retire_world_package_domains(retired);
+        }
     }
 
     pub(super) fn install_native_turn_in(
@@ -906,6 +942,8 @@ impl PersistentSession {
             &resolved.instantiation,
             &resolved.sources,
             &self.bindings,
+            &self.scopes,
+            scope,
             &resolved.captures,
         )?;
         self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
@@ -936,7 +974,7 @@ impl PersistentSession {
     }
 
     pub(super) fn resolve_closed_turn_in(
-        &self,
+        &mut self,
         scope: ScopeId,
         plan: &super::prepared::ClosedInstantiationPlan,
         origin: &super::resident::CapturedSourceOrigin,
@@ -960,8 +998,9 @@ impl PersistentSession {
             .bindings
             .scope_snapshot(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        let instantiation = self.instantiate_native_plan_in(scope, plan.native(), selection)?;
         Ok(ResolvedNativeTurn {
-            instantiation: plan.native().instantiate(selection)?,
+            instantiation,
             sources: super::prepared::NativeInstallationSources::closed(plan, origin),
             captures: BTreeMap::new(),
             snapshot,
@@ -990,6 +1029,22 @@ impl PersistentSession {
             .as_mut()
             .or(self.machine.as_mut())
             .expect("staged machine remains installed");
+        // The staged groups exist and remain pinned. Reserve weak occupancy
+        // metadata now; publish it only after the exact source tokens enter
+        // this scope's custody.
+        let package_slots = match engine.prepare_package_slot_publication(&mut staged) {
+            Ok(prepared) => prepared,
+            Err(primary) => {
+                let tokens = std::mem::take(&mut staged.leases);
+                if let Err(cleanup) = engine.abort_certified_turn(staged, tokens) {
+                    return Err(PreparedRuntimeError::InstallCleanup {
+                        primary: Box::new(primary),
+                        cleanup: Box::new(cleanup),
+                    });
+                }
+                return Err(primary);
+            }
+        };
         let tokens = std::mem::take(&mut staged.leases);
         let admitted = engine
             .admit_source_instances(
@@ -1006,7 +1061,7 @@ impl PersistentSession {
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 let native_sources = staged.native_sources.clone();
-                let target = engine.commit_certified_turn(staged);
+                let target = engine.commit_certified_turn(staged, package_slots);
                 self.session_table = admitted_metadata;
                 if let Some(engine) = bootstrap {
                     self.machine = Some(engine);
@@ -1026,7 +1081,12 @@ impl PersistentSession {
                     .as_mut()
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
-                engine.abort_certified_turn(staged, tokens)?;
+                if let Err(cleanup) = engine.abort_certified_turn(staged, tokens) {
+                    return Err(PreparedRuntimeError::InstallCleanup {
+                        primary: Box::new(PreparedRuntimeError::SourceScopeAdmission),
+                        cleanup: Box::new(cleanup),
+                    });
+                }
                 Err(PreparedRuntimeError::SourceScopeAdmission)
             }
         }
@@ -2476,6 +2536,7 @@ impl PersistentSession {
             next_epoch,
         )?;
         let bindings = &mut self.bindings;
+        let machine = &mut self.machine;
         let epochs = &mut self.public_visibility_epochs;
         self.lib
             .as_mut()
@@ -2485,6 +2546,7 @@ impl PersistentSession {
                     bindings.commit_source_owner_origin(source_origin);
                 }
                 bindings.commit_declaration_binding_changes(binding_changes);
+                Self::settle_package_domain_retirements(bindings, machine.as_mut());
                 epochs.insert(scope, next_epoch);
                 activate(lib);
                 DeclarationPlaneCommit {
@@ -4363,6 +4425,7 @@ impl PersistentSession {
         let Self {
             lib,
             bindings,
+            machine,
             public_visibility_epochs,
             ..
         } = self;
@@ -4392,6 +4455,7 @@ impl PersistentSession {
             .expect("preflight library")
             .publish_staged_public_manifest_unchecked(ticket, declaration, |lib| {
                 bindings.commit_exact_binding_promotion(prepared);
+                Self::settle_package_domain_retirements(bindings, machine.as_mut());
                 public_visibility_epochs.insert(public_scope, next_epoch);
                 if let Some(world) = promoted_world {
                     lib.tips
@@ -4981,6 +5045,7 @@ impl PersistentSession {
             retired.extend(drained.bindings);
             source_instances.extend(drained.source_instances);
         }
+        Self::settle_package_domain_retirements(&mut self.bindings, self.machine.as_mut());
         retired.extend(self.bindings.collect_observations());
         receipt.bindings_retired = retired.len();
         receipt.roots_released = self.release_binding_roots(retired)

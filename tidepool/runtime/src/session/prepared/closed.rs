@@ -1,10 +1,11 @@
 //! Scope-neutral native installation choices from one completed source output.
 
 use super::*;
+use tidepool_codegen::binding_table::WorldPackageSlotPermit;
 use tidepool_codegen::prepared_program::{DemandedHomeImage, DemandedPackageImage, LiteralOwner};
 use tidepool_codegen::prepared_program::{
     NativeArtifactBinding, NativeBindingKey, NativeDomainSelection, NativeExportRequest,
-    NativeHomeBinding, ScopedNativeExport, SourceInstanceDomain,
+    NativeHomeBinding, ScopedNativeExport, SourceInstanceDomain, WorldPackageInstanceWitness,
 };
 use tidepool_toolchain::artifact_inventory::{
     ArtifactBinding, CompletedNativeImport, CompletedNativeSelection, CompletedNativeSourceRow,
@@ -623,6 +624,8 @@ pub(in crate::session) struct NativeInstantiation {
     plan: Arc<NativeInstantiationPlan>,
     selection: NativeDomainSelection,
     anchors: BTreeMap<NativeOccurrence, NativeInstanceLease>,
+    package_anchors: BTreeMap<NativeOccurrence, WorldPackageInstanceWitness>,
+    package_permits: BTreeMap<(NativeOccurrence, ValueId), WorldPackageSlotPermit>,
     programs: BTreeMap<NativeOccurrence, Vec<ScopedNativeSlot>>,
     target_imports: Vec<ScopedNativeSlot>,
 }
@@ -698,6 +701,13 @@ impl NativeInstantiationPlan {
     pub(in crate::session) fn instantiate(
         self: &Arc<Self>,
         selection: NativeDomainSelection,
+        mut package_slot: impl FnMut(
+            &NativeExportRequest,
+            Option<&NativeInstanceLease>,
+        ) -> Result<
+            (WorldPackageSlotPermit, Option<WorldPackageInstanceWitness>),
+            PreparedRuntimeError,
+        >,
     ) -> Result<NativeInstantiation, PreparedRuntimeError> {
         let slots =
             |caller, imports: &[NativeImportSlot]| -> Result<Vec<_>, PreparedRuntimeError> {
@@ -733,14 +743,16 @@ impl NativeInstantiationPlan {
         let mut pending = target_imports
             .iter()
             .filter_map(|slot| match slot {
-                ScopedNativeSlot::Local { occurrence, .. } => Some(*occurrence),
+                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
                 ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<Vec<_>>();
         let mut visited = BTreeSet::new();
         let mut anchors = BTreeMap::new();
+        let mut package_anchors = BTreeMap::new();
+        let mut package_permits = BTreeMap::new();
         let mut programs = BTreeMap::new();
-        while let Some(occurrence) = pending.pop() {
+        while let Some((occurrence, value)) = pending.pop() {
             if !visited.insert(occurrence) {
                 continue;
             }
@@ -759,21 +771,65 @@ impl NativeInstantiationPlan {
                 .and_then(|(key, lease)| {
                     (key.domain == occurrence.domain && key.binding == binding).then_some(lease)
                 });
+            let mut package_anchored = false;
+            if matches!(program.native, NativeCompiledProduct::Package { .. }) {
+                let request = program.native.request(occurrence.domain, value)?;
+                let (permit, witness) = package_slot(&request, anchor)?;
+                if anchor.is_some() && witness.is_none() {
+                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                }
+                package_permits.insert((occurrence, value), permit);
+                if let Some(witness) = witness {
+                    package_anchors.insert(occurrence, witness);
+                    package_anchored = true;
+                }
+            }
             if let Some(anchor) = anchor {
                 anchors.insert(occurrence, anchor.clone());
+            }
+            if anchor.is_some() || package_anchored {
                 continue;
             }
             let imports = slots(occurrence.domain, &program.imports)?;
             pending.extend(imports.iter().filter_map(|slot| match slot {
-                ScopedNativeSlot::Local { occurrence, .. } => Some(*occurrence),
+                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
                 ScopedNativeSlot::Retained(_) => None,
             }));
             programs.insert(occurrence, imports);
+        }
+        let requested = programs
+            .values()
+            .flatten()
+            .chain(&target_imports)
+            .filter_map(|slot| match slot {
+                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
+                ScopedNativeSlot::Retained(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for (occurrence, value) in requested {
+            let program = &self.programs[occurrence.program];
+            if !matches!(program.native, NativeCompiledProduct::Package { .. })
+                || package_permits.contains_key(&(occurrence, value))
+            {
+                continue;
+            }
+            let request = program.native.request(occurrence.domain, value)?;
+            let (permit, witness) = package_slot(&request, anchors.get(&occurrence))?;
+            if witness.as_ref().map(|witness| witness.instance())
+                != package_anchors
+                    .get(&occurrence)
+                    .map(|witness| witness.instance())
+            {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+            package_permits.insert((occurrence, value), permit);
         }
         Ok(NativeInstantiation {
             plan: Arc::clone(self),
             selection,
             anchors,
+            package_anchors,
+            package_permits,
             programs,
             target_imports,
         })
@@ -818,9 +874,34 @@ impl PreparedEngine {
         instantiation: &NativeInstantiation,
         sources: &NativeInstallationSources,
         bindings: &BindingTable,
+        scopes: &tidepool_codegen::scope::ScopeTree,
+        scope: tidepool_codegen::scope::ScopeId,
         captures: &BTreeMap<(SymbolIdentity, u64), ResolvedNativeCapture>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
         let plan = &instantiation.plan;
+        // Resolution retains weak choices, including observed vacancies. Check
+        // them under the final source/snapshot admission before staging a batch;
+        // a caller cannot turn an intervening sibling install into a duplicate.
+        for ((occurrence, _), permit) in &instantiation.package_permits {
+            if !bindings.validate_package_slot_permit(scopes, scope, permit) {
+                return Err(PreparedRuntimeError::SourceScopeAdmission);
+            }
+            let observed = self
+                .machine
+                .lookup_world_package_slot(permit, instantiation.anchors.get(occurrence))
+                .map_err(PreparedRuntimeError::Install)?;
+            let expected = instantiation.package_anchors.get(occurrence);
+            if observed.as_ref().map(|witness| witness.instance())
+                != expected.map(|witness| witness.instance())
+            {
+                return Err(PreparedRuntimeError::SourceScopeAdmission);
+            }
+            if let Some(witness) = expected {
+                self.machine
+                    .validate_world_package_witness(witness, permit)
+                    .map_err(PreparedRuntimeError::Install)?;
+            }
+        }
         let fresh = instantiation.programs.keys().copied().collect::<Vec<_>>();
         let remapped = fresh
             .iter()
@@ -857,6 +938,7 @@ impl PreparedEngine {
             })
             .collect::<Result<BTreeMap<_, _>, PreparedRuntimeError>>()?;
         let mut late_roots = Vec::<NativeInstanceLease>::new();
+        let mut package_slots = Vec::with_capacity(instantiation.package_permits.len());
         let result = (|| {
             let mut attachments = Vec::new();
             let mut existing = BTreeMap::new();
@@ -869,10 +951,48 @@ impl PreparedEngine {
                     .export_contract(value)
                     .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
                 if contract.rep == RuntimeRep::Address {
+                    if let Some(witness) = instantiation.package_anchors.get(&occurrence) {
+                        let held = self
+                            .programs
+                            .get(&witness.instance().program())
+                            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                        if !Arc::ptr_eq(
+                            &held.definitions,
+                            program.native.image().definition_facts(),
+                        ) {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        }
+                    }
                     continue;
                 }
                 let request = program.native.request(occurrence.domain, value)?;
-                if let Some(anchor) = instantiation.anchors.get(&occurrence) {
+                if let Some(witness) = instantiation.package_anchors.get(&occurrence) {
+                    let held = self
+                        .programs
+                        .get(&witness.instance().program())
+                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    if !Arc::ptr_eq(&held.definitions, program.native.image().definition_facts()) {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    }
+                    let permit = instantiation
+                        .package_permits
+                        .get(&(occurrence, value))
+                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    let attachment =
+                        match bindings.retained_world_package_attachment(permit, witness) {
+                            Some(held) => held,
+                            None => {
+                                let issued = self
+                                    .machine
+                                    .retain_world_package_export(witness, permit)
+                                    .map_err(PreparedRuntimeError::Install)?;
+                                late_roots.push(issued.lease().clone());
+                                issued
+                            }
+                        };
+                    existing.insert((occurrence, value), attachment.lease().clone());
+                    attachments.push(attachment);
+                } else if let Some(anchor) = instantiation.anchors.get(&occurrence) {
                     let held = self
                         .programs
                         .get(&anchor.instance().program())
@@ -908,6 +1028,16 @@ impl PreparedEngine {
                                     handle: lease.handle(),
                                     entry_signature: lease.entry_signature().cloned(),
                                 })
+                            } else if let Some(witness) =
+                                instantiation.package_anchors.get(occurrence)
+                            {
+                                let permit = instantiation
+                                    .package_permits
+                                    .get(&(*occurrence, *value))
+                                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                                self.machine
+                                    .world_package_literal_import(witness, permit)
+                                    .map_err(PreparedRuntimeError::Install)
                             } else {
                                 Ok(BatchImport::Source {
                                     group: *remapped
@@ -993,8 +1123,13 @@ impl PreparedEngine {
                 for import in imports {
                     match import {
                         ScopedNativeSlot::Local { occurrence, value } => {
-                            if let Some(lease) = existing.get(&(*occurrence, *value)) {
-                                let held = self.programs.get(&lease.instance().program()).ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                            // Reused literal imports have no heap lease, but
+                            // retain the same original defining source facts.
+                            let reused = instantiation.package_anchors.get(occurrence)
+                                .map(|witness| witness.instance())
+                                .or_else(|| existing.get(&(*occurrence, *value)).map(|lease| lease.instance()));
+                            if let Some(instance) = reused {
+                                let held = self.programs.get(&instance.program()).ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
                                 facts.native_sources.merge(&held.native_sources);
                             }
                         }
@@ -1037,6 +1172,13 @@ impl PreparedEngine {
                     .pin(*program)
                     .expect("batch returned installed program");
             }
+            for ((occurrence, _), permit) in &instantiation.package_permits {
+                let instance = match instantiation.package_anchors.get(occurrence) {
+                    Some(witness) => witness.instance(),
+                    None => installed.programs[remapped[occurrence]].into(),
+                };
+                package_slots.push((permit.clone(), instance));
+            }
             let target = *installed.programs.last().expect("target is final");
             attachments.extend(installed.source_attachments);
             Ok(CertifiedTurnInstall {
@@ -1050,6 +1192,7 @@ impl PreparedEngine {
                 groups: installed.programs[..installed.programs.len() - 1].to_vec(),
                 leases: installed.leases,
                 domain_leases: attachments,
+                package_slots,
                 admitted,
             })
         })();
