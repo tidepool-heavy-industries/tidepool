@@ -1959,7 +1959,6 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             .unwrap();
             let target = receiving_inventory.select_native_target(
                 physical.captured_stage().physical_cohort(),
-                physical.source_selection(),
                 observed,
                 None,
                 Some(inputs.artifacts()),

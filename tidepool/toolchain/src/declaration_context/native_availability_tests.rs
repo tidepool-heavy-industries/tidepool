@@ -1797,7 +1797,6 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .map_err(compiler_evidence_failure)?;
         let demanded = view.inventory().select_native_target(
             physical.physical_cohort(),
-            &selected,
             observed,
             None,
             None,
@@ -2764,7 +2763,6 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             .inventory()
             .select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -3021,7 +3019,6 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
                     .unwrap();
             let result = inputs.artifacts().inventory().select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -3247,7 +3244,6 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .inventory()
         .select_native_target(
             acquired_physical.physical_cohort(),
-            &acquired_selection,
             observed,
             None,
             None,
@@ -4569,7 +4565,6 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     .unwrap();
             let demanded = inputs.artifacts().inventory().select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -7230,7 +7225,6 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                     .unwrap();
             let admitted = inputs.artifacts().inventory().select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -7282,7 +7276,6 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
         let denied = inputs.artifacts().inventory().select_native_target(
             physical.physical_cohort(),
-            &selection,
             observed,
             None,
             None,
@@ -7641,7 +7634,6 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                         .inventory()
                         .select_native_target(
                             physical.physical_cohort(),
-                            &selection,
                             observed,
                             None,
                             None,

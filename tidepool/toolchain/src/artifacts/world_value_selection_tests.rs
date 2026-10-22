@@ -1112,7 +1112,7 @@ fn assert_physical_selection(
                 .module_name(),
         };
         assert_eq!(
-            certified.source_selection.interface_only_artifact(&owner),
+            certified.source_selection().interface_only_artifact(&owner),
             expected
         );
     }
@@ -1159,16 +1159,14 @@ fn assert_physical_selection(
         module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(52)).module_name(),
     };
     assert!(!certified
-        .original_inputs
-        .as_ref()
+        .compiler_inputs()
         .expect("first compiler owner")
         .role_projection()
         .snapshot_roles()
         .contains_key(&owner));
     assert_eq!(
         second
-            .original_inputs
-            .as_ref()
+            .compiler_inputs()
             .expect("second compiler owner")
             .role_projection()
             .snapshot_roles()

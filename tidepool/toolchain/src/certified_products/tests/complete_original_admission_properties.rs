@@ -149,7 +149,6 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     let staged = inventory
         .select_native_target(
             fixed.captured_stage().physical_cohort(),
-            fixed.source_selection(),
             observed,
             None,
             None,

@@ -1224,16 +1224,63 @@ impl AsRef<[Arc<AuthenticatedOriginalGroup>]> for IssuedGroupCandidates {
     }
 }
 
+/// Physical issuance and its current compiler prefix travel together. Only
+/// this module can advance the prefix after item admission.
+pub(crate) struct IssuedCompilerProducts {
+    stage: Arc<crate::declaration_context::CapturedCompilerStage>,
+    prefix: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    selection: CertifiedSourceSelection,
+}
+
 pub(crate) struct CertifiedProducts {
     pub groups: IssuedGroupCandidates,
     pub recovery_products: Arc<[crate::recovery_artifacts::CertifiedRecoveryProduct]>,
     pub module_interfaces: Arc<[CertifiedModuleInterface]>,
     pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
-    pub(crate) source_selection: CertifiedSourceSelection,
+    // Decoded receipt data remains separate from the immutable selection owned
+    // by issued. It cannot supply a target cohort after physical issuance.
+    pub(crate) unissued_source_selection: CertifiedSourceSelection,
     pub(crate) home_contracts: Option<Arc<ValidatedHomeContracts>>,
-    pub(crate) original_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
-    pub(crate) captured_stage: Option<Arc<crate::declaration_context::CapturedCompilerStage>>,
+    pub(crate) issued: Option<IssuedCompilerProducts>,
+}
+
+impl CertifiedProducts {
+    pub(crate) fn bind_captured_stage(
+        &mut self,
+        stage: Arc<crate::declaration_context::CapturedCompilerStage>,
+    ) {
+        self.issued = Some(IssuedCompilerProducts {
+            prefix: Arc::clone(stage.compiler_inputs()),
+            selection: stage.source_selection().clone(),
+            stage,
+        });
+    }
+
+    pub(crate) fn source_selection(&self) -> &CertifiedSourceSelection {
+        match &self.issued {
+            Some(issued) => &issued.selection,
+            None => &self.unissued_source_selection,
+        }
+    }
+
+    pub(crate) fn compiler_inputs(
+        &self,
+    ) -> Option<&Arc<crate::declaration_context::OriginalCompilerInputs>> {
+        self.issued.as_ref().map(|issued| &issued.prefix)
+    }
+
+    pub(crate) fn captured_stage(
+        &self,
+    ) -> Option<&Arc<crate::declaration_context::CapturedCompilerStage>> {
+        self.issued.as_ref().map(|issued| &issued.stage)
+    }
+
+    pub(crate) fn physical_cohort(
+        &self,
+    ) -> Result<crate::declaration_context::PhysicalCohortInputs<'_>, CompileError> {
+        crate::declaration_context::PhysicalCohortInputs::from_issued_products(self)
+    }
 }
 
 /// Exact original facts admitted once by the physical segment owner. Captured
@@ -1300,7 +1347,12 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
-        for prior in self.products.source_selection.prior_program_products.iter() {
+        for prior in self
+            .products
+            .source_selection()
+            .prior_program_products
+            .iter()
+        {
             let owner = prior.row().original_owner();
             if self
                 .receipt
@@ -1347,7 +1399,7 @@ impl CertifiedSegmentOriginals {
         let issue = |receipt: &CertifiedReceipt| {
             ValidatedHomeContracts::issue(
                 receipt,
-                &self.products.source_selection,
+                &self.products.source_selection(),
                 &self.products.groups,
                 self.operation(),
             )
@@ -1462,7 +1514,7 @@ impl CertifiedSegmentOriginals {
         observed
     }
     pub(crate) fn source_selection(&self) -> &CertifiedSourceSelection {
-        &self.products.source_selection
+        &self.products.source_selection()
     }
     pub(crate) fn value_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
         &self.value_entries
@@ -1508,7 +1560,7 @@ impl CertifiedSegmentOriginals {
             package_interfaces,
             validation,
         )?;
-        products.source_selection.produced_types = produced.cloned();
+        products.unissued_source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
         let mut package_availability =
             inherited_package_interfaces_with_validation(&products.recovery_products, validation)?;
@@ -1618,7 +1670,7 @@ impl CertifiedSegmentOriginals {
             .collect();
         let admitted = if authored.is_some() {
             crate::declaration_context::CapturedCompilerStage::issue(
-                &mut products.source_selection,
+                &mut products.unissued_source_selection,
                 compiler_inputs.artifacts(),
                 entries,
                 validation,
@@ -1631,11 +1683,11 @@ impl CertifiedSegmentOriginals {
                 .bind_segment(
                     compiler_inputs.artifacts(),
                     entries,
-                    &products.source_selection,
+                    &products.source_selection(),
                     validation,
                 )
                 .map(|bound| {
-                    products.source_selection = bound.source_selection().clone();
+                    products.unissued_source_selection = bound.source_selection().clone();
                     SegmentOriginalAdmission::Executable(bound)
                 })
         };
@@ -1646,9 +1698,9 @@ impl CertifiedSegmentOriginals {
                         let incoming = artifact_entries.iter().chain(&value_entries)
                             .find(|entry| entry.descriptor.id == *artifact);
                         let retained = compiler_inputs.artifacts().observed_payload(artifact);
-                        let selected = products.source_selection.native_selections()
+                        let selected = products.source_selection().native_selections()
                             .find(|native| native.original_artifact_id().ok() == Some(*artifact));
-                        let offered = products.source_selection.issued_native_availability()
+                        let offered = products.source_selection().issued_native_availability()
                             .any(|offer| offer.original_artifact_id() == *artifact);
                         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                             stage = "segment_native_availability", ?artifact,
@@ -1666,6 +1718,11 @@ impl CertifiedSegmentOriginals {
                 "compiler original selection refused");
             CertificationError::OriginalClosure(Box::new(error))
         })?;
+        let stage = match &admission {
+            SegmentOriginalAdmission::OriginalOnly(stage) => stage,
+            SegmentOriginalAdmission::Executable(bound) => bound.captured_stage(),
+        };
+        products.bind_captured_stage(Arc::clone(stage));
         timing.advance("finish_segment");
         let value_entry_index = value_entries
             .iter()
@@ -1801,7 +1858,7 @@ impl CertifiedSegmentOriginals {
         // The closed segment authenticated every current/prior HOME membership
         // and its ordered slots once. Exact equality with that immutable stage
         // manifest above binds this item without reconstructing a membership map.
-        match (&self.products.source_selection.produced_types, produced) {
+        match (&self.products.source_selection().produced_types, produced) {
             (None, None) => {}
             (Some(segment), Some(item)) if item.is_item_of(segment) => {}
             _ => {
@@ -1900,7 +1957,7 @@ impl CertifiedSegmentOriginals {
                 "item produced type output missing",
             ));
         }
-        let mut source_selection = self.products.source_selection.clone();
+        let mut source_selection = self.products.source_selection().clone();
         source_selection.produced_types = produced.cloned();
         for value in &value_interfaces {
             if value.requirements().iter().any(|owner| {
@@ -1916,7 +1973,7 @@ impl CertifiedSegmentOriginals {
         // substitute an arbitrary source selection or another emitted stage.
         let original_demand = match self
             .products
-            .source_selection
+            .source_selection()
             .original_bindings
             .as_ref()
             .map(|bindings| &bindings.execution)
@@ -1948,14 +2005,17 @@ impl CertifiedSegmentOriginals {
             .advance_compiler_prefix(self.captured_stage(), produced, &validation.inventory)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let products = CertifiedProducts {
-            original_inputs: Some(original_inputs),
-            captured_stage: Some(Arc::clone(self.captured_stage())),
+            issued: Some(IssuedCompilerProducts {
+                prefix: original_inputs,
+                stage: Arc::clone(self.captured_stage()),
+                selection: source_selection,
+            }),
             groups: self.products.groups.clone(),
             recovery_products: self.products.recovery_products.clone(),
             module_interfaces: self.products.module_interfaces.clone(),
             value_interfaces: value_interfaces.into(),
             retained_core_products: self.products.retained_core_products.clone(),
-            source_selection,
+            unissued_source_selection: self.products.unissued_source_selection.clone(),
             home_contracts: self.products.home_contracts.clone(),
         };
         Ok((products, item.globals, additions, package_selection))
@@ -14878,14 +14938,13 @@ pub(crate) fn certify_products_with_validation(
         ValidatedHomeContracts::issue(receipt, &source_selection, &groups, &validation.inventory)?;
     Ok(CertifiedProducts {
         home_contracts: Some(home_contracts),
-        original_inputs: None,
-        captured_stage: None,
+        issued: None,
         groups,
         recovery_products: recovery_products.into(),
         module_interfaces: module_interfaces.into(),
         value_interfaces: value_interfaces.into(),
         retained_core_products,
-        source_selection,
+        unissued_source_selection: source_selection,
     })
 }
 
@@ -19952,7 +20011,6 @@ pub(crate) mod tests {
                         .unwrap();
                         stage.issued_artifacts().inventory().select_native_target(
                             stage.physical_cohort(),
-                            stage.source_selection(),
                             observed,
                             None,
                             Some(request.artifacts()),
@@ -20342,7 +20400,6 @@ pub(crate) mod tests {
                             .unwrap();
                             stage.issued_artifacts().inventory().select_native_target(
                                 stage.physical_cohort(),
-                                stage.source_selection(),
                                 observed,
                                 None,
                                 Some(input.artifacts()),
@@ -21741,7 +21798,6 @@ pub(crate) mod tests {
                         .inventory()
                         .select_native_target(
                             completed.physical_cohort(),
-                            completed.source_selection(),
                             observed,
                             None,
                             Some(input.artifacts()),
@@ -22270,7 +22326,6 @@ pub(crate) mod tests {
                     .unwrap();
             stage.issued_artifacts().inventory().select_native_target(
                 stage.physical_cohort(),
-                stage.source_selection(),
                 observed,
                 None,
                 Some(request.artifacts()),
@@ -24042,7 +24097,6 @@ pub(crate) mod tests {
                 let outcome = inventory
                     .select_native_target(
                         physical.captured_stage().physical_cohort(),
-                        physical.source_selection(),
                         observed_target,
                         None,
                         None,
@@ -24447,7 +24501,6 @@ pub(crate) mod tests {
                         .inventory()
                         .select_native_target(
                             physical.captured_stage().physical_cohort(),
-                            physical.source_selection(),
                             observed_target,
                             None,
                             None,
@@ -24596,6 +24649,84 @@ pub(crate) mod tests {
                 "issued compiler interface artifact"
             ))
         ));
+    }
+
+    #[test]
+    fn captured_products_keep_their_selection_when_unissued_metadata_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let producer = [0x63; 32];
+        let mut issued = planned_original_history_tests::issue_planned_original_with_source_value(
+            root.path(),
+            tidepool_repr::SessionModule::lib(tidepool_repr::Generation(7)),
+            &producer,
+            &[root.path().to_path_buf()],
+            1,
+            2,
+            3,
+        )
+        .complete_native_availability(&producer);
+        let product = issued.certified.recovery_products[0].clone();
+        let stage = Arc::clone(issued.certified.captured_stage().unwrap());
+        let before = issued
+            .certified
+            .source_selection()
+            .artifact_ids_from_entries(stage.issued_artifacts())
+            .unwrap();
+        assert!(!before.is_empty());
+        let prefix = Arc::clone(issued.certified.compiler_inputs().unwrap());
+        let scopes = stage
+            .issued_artifacts()
+            .inventory()
+            .metrics()
+            .issued_scope_nodes;
+
+        // This is decoded DATA, not a replacement for the issued selection.
+        issued.certified.unissued_source_selection =
+            CertifiedSourceSelection::empty_product_output();
+        assert_eq!(
+            issued
+                .certified
+                .source_selection()
+                .artifact_ids_from_entries(stage.issued_artifacts(),)
+                .unwrap(),
+            before
+        );
+        assert!(Arc::ptr_eq(
+            issued.certified.compiler_inputs().unwrap(),
+            &prefix
+        ));
+        assert!(Arc::ptr_eq(
+            issued.certified.captured_stage().unwrap(),
+            &stage
+        ));
+        let observations = source_target_observations(&[(&product, 7)]);
+        let prepared = prepared_target_fixture(&observations);
+        let mut validation = PackageInterfaceValidation::default();
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                .unwrap();
+        let target = stage
+            .issued_artifacts()
+            .inventory()
+            .select_native_target(
+                issued.certified.physical_cohort().unwrap(),
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        assert_eq!(target.resolve().unwrap().groups().len(), 1);
+        assert_eq!(
+            stage
+                .issued_artifacts()
+                .inventory()
+                .metrics()
+                .issued_scope_nodes,
+            scopes
+        );
     }
 
     #[test]
@@ -24837,7 +24968,6 @@ pub(crate) mod tests {
         let current = inventory
             .select_native_target(
                 completed.physical_cohort(),
-                &item,
                 observed,
                 None,
                 Some(&inventory.empty_view()),
@@ -24856,29 +24986,6 @@ pub(crate) mod tests {
             }])
         );
         assert!(!current.artifact_ids().contains(&future.descriptor.id));
-        let observations = source_target_observations(&[(&product, 17)]);
-        let prepared = prepared_target_fixture(&observations);
-        let observed = AuthenticatedTargetImports::issue(
-            &prepared,
-            &observations,
-            &target_validation.inventory,
-        )
-        .unwrap();
-        assert!(
-            inventory
-                .select_native_target(
-                    completed.physical_cohort(),
-                    &item,
-                    observed,
-                    None,
-                    Some(&current),
-                    &[],
-                    &BTreeMap::new(),
-                    &mut target_validation,
-                )
-                .is_err(),
-            "issued availability cannot authorize future item type demand"
-        );
         let observations = source_target_observations(&[(&product, 0), (&product, 17)]);
         let prepared = prepared_target_fixture(&observations);
         let observed = AuthenticatedTargetImports::issue(
@@ -24890,7 +24997,6 @@ pub(crate) mod tests {
         let next = inventory
             .select_native_target(
                 completed.physical_cohort(),
-                &physical,
                 observed,
                 None,
                 Some(&current),
@@ -25648,7 +25754,6 @@ pub(crate) mod tests {
         let admitted_target = owner
             .select_native_target(
                 finished.physical_cohort(),
-                &current,
                 observed,
                 None,
                 Some(&owner.empty_view()),
@@ -25711,7 +25816,6 @@ pub(crate) mod tests {
         let mixed_target = owner
             .select_native_target(
                 finished.physical_cohort(),
-                &current,
                 observed,
                 None,
                 Some(&owner.empty_view()),
@@ -25990,7 +26094,6 @@ pub(crate) mod tests {
             let bound = inventory
                 .select_native_target(
                     bound.captured_stage().physical_cohort(),
-                    bound.source_selection(),
                     observed,
                     None,
                     Some(&output),
@@ -26362,7 +26465,6 @@ pub(crate) mod tests {
                     .unwrap();
                     let denied = inventory.select_native_target(
                         issued.captured_stage().physical_cohort(),
-                        issued.source_selection(),
                         observed,
                         None,
                         Some(&output),
@@ -26430,7 +26532,6 @@ pub(crate) mod tests {
                 let bound = inventory
                     .select_native_target(
                         issued.captured_stage().physical_cohort(),
-                        issued.source_selection(),
                         observed,
                         None,
                         Some(&output),
@@ -26601,7 +26702,6 @@ pub(crate) mod tests {
                 let error = inventory
                     .select_native_target(
                         bound.captured_stage().physical_cohort(),
-                        &input_selection,
                         observed,
                         None,
                         Some(input_view),
@@ -26682,7 +26782,6 @@ pub(crate) mod tests {
             let selected = inventory
                 .select_native_target(
                     completed.captured_stage().physical_cohort(),
-                    completed.source_selection(),
                     observed,
                     None,
                     None,
@@ -26719,7 +26818,6 @@ pub(crate) mod tests {
             let repeated = inventory
                 .select_native_target(
                     completed.captured_stage().physical_cohort(),
-                    completed.source_selection(),
                     observed,
                     None,
                     None,
@@ -26759,7 +26857,6 @@ pub(crate) mod tests {
             assert!(matches!(
                 inventory.select_native_target(
                     completed.captured_stage().physical_cohort(),
-                    completed.source_selection(),
                     observed,
                     None,
                     None,
@@ -26919,7 +27016,6 @@ pub(crate) mod tests {
             let early = inventory
                 .select_native_target(
                     completed.captured_stage().physical_cohort(),
-                    completed.source_selection(),
                     observed,
                     None,
                     None,
@@ -27332,7 +27428,6 @@ pub(crate) mod tests {
         let admitted = inventory
             .select_native_target(
                 physical.captured_stage().physical_cohort(),
-                physical.source_selection(),
                 observed,
                 None,
                 None,
@@ -27383,7 +27478,6 @@ pub(crate) mod tests {
         let foreign = inventory
             .select_native_target(
                 physical.captured_stage().physical_cohort(),
-                physical.source_selection(),
                 observed,
                 None,
                 None,
@@ -27418,7 +27512,6 @@ pub(crate) mod tests {
         let independent = inventory
             .select_native_target(
                 physical.captured_stage().physical_cohort(),
-                physical.source_selection(),
                 observed,
                 None,
                 None,
@@ -27463,7 +27556,6 @@ pub(crate) mod tests {
         let narrowed = inventory
             .select_native_target(
                 physical.captured_stage().physical_cohort(),
-                physical.source_selection(),
                 observed,
                 None,
                 None,
@@ -27620,7 +27712,6 @@ pub(crate) mod tests {
             let target = inventory
                 .select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    selection,
                     observed,
                     None,
                     None,
@@ -29965,7 +30056,6 @@ pub(crate) mod tests {
         assert!(matches!(
             inventory.select_native_target(
                 completed.captured_stage().physical_cohort(),
-                completed.source_selection(),
                 observed,
                 None,
                 None,
@@ -31919,7 +32009,7 @@ pub(crate) mod tests {
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
-                let mut selection = initial.source_selection.clone();
+                let mut selection = initial.source_selection().clone();
                 let stage = crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     &inventory.empty_view(),
@@ -32175,7 +32265,7 @@ None,
             });
             assert_eq!(
                 issued
-                    .source_selection
+                    .source_selection()
                     .receipt_native_body_owners()
                     .collect::<Vec<_>>(),
                 vec![&owner]
@@ -32324,7 +32414,7 @@ None,
                     )
                     .unwrap(),
                 );
-                let mut selection = issued.source_selection.clone();
+                let mut selection = issued.source_selection().clone();
                 let stage = crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     inputs.artifacts(),
@@ -32853,7 +32943,7 @@ None,
         );
         let raw_projection = planned
             .certified
-            .source_selection
+            .source_selection()
             .compiler_projection(&rebound)
             .unwrap();
         let prior_identity = ExactModuleIdentity {
@@ -32929,14 +33019,14 @@ None,
                 artifact: *id,
                 original_ordinal: 7,
             };
-            assert!(planned.certified.source_selection.permits_native_group(
+            assert!(planned.certified.source_selection().permits_native_group(
                 *id,
                 product.owner(),
                 7
             ));
             let NativeGroupCandidates::IssuedAvailability(candidates) = planned
                 .certified
-                .source_selection
+                .source_selection()
                 .native_group_candidates(key, product.owner())
                 .unwrap()
             else {
@@ -32946,7 +33036,7 @@ None,
             let candidate = *candidates.first().unwrap();
             let Some(CertifiedNativeGroupSupport::Issued(offer)) = planned
                 .certified
-                .source_selection
+                .source_selection()
                 .native_group_support(key, product.owner(), candidate)
             else {
                 panic!("the exact root candidate retains its opaque issuer");
@@ -32978,7 +33068,7 @@ None,
         .id;
         let rebound_result = planned
             .certified
-            .source_selection
+            .source_selection()
             .selected_original_closure(&rebound);
         let rebound_outcome = match &rebound_result {
             Ok(selected) => format!(
@@ -33116,7 +33206,7 @@ None,
         );
         let selected = planned
             .certified
-            .source_selection
+            .source_selection()
             .selected_original_closure(&view)
             .unwrap();
         let selected_fresh = selected
@@ -33344,7 +33434,7 @@ None,
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
-                let mut selection = initial.source_selection.clone();
+                let mut selection = initial.source_selection().clone();
                 let stage = crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     &inventory.empty_view(),
@@ -33443,7 +33533,7 @@ None,
                         })
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
-                    let mut selection = marker_certified.source_selection.clone();
+                    let mut selection = marker_certified.source_selection().clone();
                     let stage = crate::declaration_context::CapturedCompilerStage::issue(
                         &mut selection,
                         &inventory.empty_view(),
@@ -33634,7 +33724,7 @@ None,
             // Production certification issues a complete current product even
             // when the target has not demanded every body. The private-input
             // handoff must preserve that issuance for a later notebook cell.
-            let mut selection = certified.source_selection.clone();
+            let mut selection = certified.source_selection().clone();
             let output_entries = certified
                 .recovery_products
                 .iter()
@@ -33709,7 +33799,7 @@ None,
             assert_eq!(current.execution_source().unwrap().bytes(), issued.bytes());
             assert_eq!(
                 certified
-                    .source_selection
+                    .source_selection()
                     .receipt_native_body_owners()
                     .collect::<Vec<_>>(),
                 vec![&owner]
@@ -33782,7 +33872,7 @@ None,
                         resolve_receipt_owner_with_validation(
                             import.clone(),
                             &sources,
-                            Some(&certified.source_selection),
+                            Some(&certified.source_selection()),
                             &BTreeMap::new(),
                             &mut PackageInterfaceValidation::default(),
                         )
@@ -33801,7 +33891,7 @@ None,
                     assert!(resolve_receipt_owner_with_validation(
                         old_import.clone(),
                         &sources,
-                        Some(&certified.source_selection),
+                        Some(&certified.source_selection()),
                         &BTreeMap::new(),
                         &mut PackageInterfaceValidation::default(),
                     )
@@ -33969,7 +34059,7 @@ None,
                 let cached = certify_cached(&cached_packet).unwrap();
                 assert_eq!(
                     cached
-                        .source_selection
+                        .source_selection()
                         .receipt_native_body_owners()
                         .collect::<Vec<_>>(),
                     vec![&owner]
@@ -34162,7 +34252,7 @@ None,
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
                     let inputs = request.compiler_inputs();
-                    let mut selection = certified.source_selection.clone();
+                    let mut selection = certified.source_selection().clone();
                     let stage = crate::declaration_context::CapturedCompilerStage::issue(
                         &mut selection,
                         inputs.artifacts(),

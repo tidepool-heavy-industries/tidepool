@@ -709,7 +709,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         &prepared, &observations, &validation.inventory,
                     ).unwrap();
                     let target = inventory.select_native_target(
-                        physical.physical_cohort(), selection,
+                        physical.physical_cohort(),
                         observed, None, None, &[], &BTreeMap::new(), &mut validation,
                     ).unwrap();
                     let groups = target.resolve().unwrap().groups().clone();

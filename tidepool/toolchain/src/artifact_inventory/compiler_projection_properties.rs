@@ -815,13 +815,6 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let initial_bindings = selected_bindings(inputs.artifacts());
             assert!(expected.is_subset(&initial_bindings));
             let inventory = inputs.artifacts().inventory();
-            assert!(
-                crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-                    inputs.compiler_source_support(),
-                )
-                .physical_cohort()
-                .is_err()
-            );
             let physical = inventory
                 .bind_segment(inputs.artifacts(), vec![], &receipt, &mut validation)
                 .unwrap();
@@ -834,7 +827,6 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let target = inventory
                 .select_native_target(
                     physical.captured_stage().physical_cohort(),
-                    &receipt,
                     observed,
                     None,
                     None,
@@ -871,7 +863,6 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let refused = inventory
                 .select_native_target(
                     physical.captured_stage().physical_cohort(),
-                    &receipt,
                     observed,
                     None,
                     None,

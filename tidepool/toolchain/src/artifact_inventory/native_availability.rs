@@ -4711,7 +4711,6 @@ mod normalized_dependency_tests {
         let error = inventory
             .select_native_target(
                 cohort,
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&inventory.empty_view()),

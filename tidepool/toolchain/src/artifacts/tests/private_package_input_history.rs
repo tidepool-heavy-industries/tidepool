@@ -343,8 +343,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         },
     }];
     let physical = issued
-        .original_inputs
-        .as_ref()
+        .compiler_inputs()
         .expect("completed products retain their actual physical inputs")
         .as_ref();
     assert!(physical
@@ -352,7 +351,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .selected_native_groups()
         .is_empty());
     let completed = issued
-        .source_selection
+        .source_selection()
         .produced_source_receipt(
             &crate::declaration_join::ExactModuleIdentity {
                 unit: "main".into(),
@@ -385,8 +384,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .issued_artifacts()
         .inventory()
         .select_native_target(
-            physical.physical_cohort(),
-            &issued.source_selection,
+            issued.physical_cohort().unwrap(),
             observed,
             None,
             None,
@@ -400,7 +398,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         [initial_binding]
     );
     let closure = issued
-        .source_selection
+        .source_selection()
         .selected_original_closure(initial_target.artifacts())
         .unwrap();
     let published =
@@ -450,7 +448,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let refusal = empty_inventory
         .select_native_target(
             empty_fixed.captured_stage().physical_cohort(),
-            empty_fixed.source_selection(),
             observed,
             None,
             None,
@@ -516,7 +513,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let admitted = target_inventory
         .select_native_target(
             fixed.captured_stage().physical_cohort(),
-            fixed.source_selection(),
             observed,
             None,
             None,
@@ -591,7 +587,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let refused = inventory
         .select_native_target(
             public_fixed.captured_stage().physical_cohort(),
-            public_fixed.source_selection(),
             observed,
             None,
             None,
@@ -793,7 +788,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let refused = late_inventory
         .select_native_target(
             late_fixed.captured_stage().physical_cohort(),
-            late_fixed.source_selection(),
             observed,
             None,
             None,
@@ -818,7 +812,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let late_admitted = target_inventory
         .select_native_target(
             fixed.captured_stage().physical_cohort(),
-            fixed.source_selection(),
             observed,
             None,
             None,

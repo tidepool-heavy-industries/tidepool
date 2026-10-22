@@ -752,7 +752,6 @@ fn replay_native_transport_history(
                 .unwrap();
         let admitted = inputs.artifacts().inventory().select_native_target(
             fixed.captured_stage().physical_cohort(),
-            fixed.source_selection(),
             observed,
             None,
             Some(inputs.artifacts()),
@@ -785,7 +784,6 @@ fn replay_native_transport_history(
         AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory).unwrap();
     let demanded = inputs.artifacts().inventory().select_native_target(
         fixed.captured_stage().physical_cohort(),
-        fixed.source_selection(),
         observed,
         None,
         Some(inputs.artifacts()),
@@ -1073,7 +1071,6 @@ fn replay_native_transport_history(
             .inventory()
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(view),

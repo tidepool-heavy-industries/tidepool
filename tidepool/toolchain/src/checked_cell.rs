@@ -5979,7 +5979,6 @@ mod tests {
         let authored_admission = inventory
             .select_native_target(
                 physical,
-                fixed.source_selection(),
                 observed,
                 Some(authored_entry.clone()),
                 None,
@@ -5995,7 +5994,6 @@ mod tests {
         let wrong_body = inventory
             .select_native_target(
                 physical,
-                fixed.source_selection(),
                 observed,
                 Some(changed_entry),
                 None,
@@ -6027,7 +6025,6 @@ mod tests {
         let complete_admission = inventory
             .select_native_target(
                 physical,
-                fixed.source_selection(),
                 observed,
                 Some(entry.clone()),
                 None,
@@ -6101,7 +6098,6 @@ mod tests {
             let denied = inventory
                 .select_native_target(
                     physical,
-                    fixed.source_selection(),
                     observed.unwrap(),
                     Some(entry.clone()),
                     None,
@@ -6156,7 +6152,6 @@ mod tests {
         assert!(missing_inventory
             .select_native_target(
                 missing_fixed.captured_stage().physical_cohort(),
-                missing_fixed.source_selection(),
                 observed,
                 Some(entry),
                 None,

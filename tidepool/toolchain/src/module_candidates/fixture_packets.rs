@@ -216,14 +216,13 @@ fn admit_fixture_scope(
     // Admit the complete interface closure before selecting any native
     // owner. Type-only dependencies cannot be inferred as packages.
     let view = certified
-        .original_inputs
-        .as_ref()
+        .compiler_inputs()
         .expect("fixture products passed physical cohort issuance")
         .issued_artifacts()
         .clone();
     let support = crate::declaration_context::recover_fixture_compiler_support(
         certified
-            .source_selection
+            .source_selection()
             .compiler_projection(&view)
             .unwrap(),
         view.clone(),
@@ -312,8 +311,7 @@ fn admit_fixture_scope(
                 .expect("native custody must match its certified canonical module");
         }
         let output = certified
-            .original_inputs
-            .as_ref()
+            .compiler_inputs()
             .expect("fixture native products passed physical cohort issuance");
         let closed =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)

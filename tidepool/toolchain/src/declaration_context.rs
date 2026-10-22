@@ -566,9 +566,28 @@ impl std::fmt::Debug for CapturedCompilerStage {
 #[derive(Clone, Copy)]
 pub(crate) struct PhysicalCohortInputs<'a> {
     stage: &'a CapturedCompilerStage,
+    selection: &'a crate::certified_products::CertifiedSourceSelection,
 }
 
 impl<'a> PhysicalCohortInputs<'a> {
+    pub(crate) fn from_issued_products(
+        products: &'a crate::certified_products::CertifiedProducts,
+    ) -> Result<Self, CompileError> {
+        let stage = products
+            .captured_stage()
+            .ok_or_else(|| failure("compiler products lack their captured stage owner"))?;
+        Ok(Self {
+            stage,
+            selection: products.source_selection(),
+        })
+    }
+
+    pub(crate) fn source_selection(
+        &self,
+    ) -> &'a crate::certified_products::CertifiedSourceSelection {
+        self.selection
+    }
+
     pub(crate) fn artifacts(&self) -> &'a ArtifactView {
         self.stage.issued_artifacts()
     }
@@ -683,7 +702,10 @@ fn retain_native_offers(
 
 impl CapturedCompilerStage {
     pub(crate) fn physical_cohort(&self) -> PhysicalCohortInputs<'_> {
-        PhysicalCohortInputs { stage: self }
+        PhysicalCohortInputs {
+            stage: self,
+            selection: self.source_selection(),
+        }
     }
 
     pub(crate) fn output(&self) -> &IssuedOriginalOutput {
@@ -774,11 +796,10 @@ impl CapturedCompilerStage {
             groups: Default::default(),
         })
     }
-
 }
 
-/// One strict output issuer binds source decisions and the target view to its
-/// completed compiler inputs. Publication borrows this owner without reissuance.
+/// One carried output binds its source decisions and view to the completed
+/// compiler prefix. Publication borrows this owner without physical reissuance.
 #[derive(Clone, Debug)]
 pub(crate) struct IssuedOriginalOutput {
     selection: crate::certified_products::CertifiedSourceSelection,
@@ -791,11 +812,10 @@ impl IssuedOriginalOutput {
         products: &crate::certified_products::CertifiedProducts,
     ) -> Result<Self, CompileError> {
         let inputs = products
-            .original_inputs
-            .as_ref()
-            .ok_or_else(|| failure("item lacks its physical compiler prefix owner"))?;
+            .compiler_inputs()
+            .ok_or_else(|| failure("item lacks its issued compiler prefix owner"))?;
         Ok(Self {
-            selection: products.source_selection.clone(),
+            selection: products.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
             inputs: Arc::clone(inputs),
         })
@@ -16003,13 +16023,12 @@ pub(crate) fn issue_certified_product_native_availability(
         validation,
     )?;
     let inputs = Arc::new(crate::declaration_context::CapturedCompilerStage::issue(
-        &mut products.source_selection,
+        &mut products.unissued_source_selection,
         &view,
         entries,
         validation,
     )?);
-    products.original_inputs = Some(Arc::clone(inputs.compiler_inputs()));
-    products.captured_stage = Some(Arc::clone(&inputs));
+    products.bind_captured_stage(Arc::clone(&inputs));
     Ok(inputs)
 }
 
@@ -21154,7 +21173,6 @@ mod tests {
             .inventory()
             .select_native_target(
                 physical.physical_cohort(),
-                &selected,
                 observed,
                 None,
                 None,
@@ -21398,7 +21416,6 @@ mod tests {
                 .inventory()
                 .select_native_target(
                     physical.physical_cohort(),
-                    &selected,
                     observed,
                     None,
                     None,
@@ -26199,7 +26216,6 @@ mod tests {
                     .unwrap();
             let target = inputs.artifacts().inventory().select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -26880,7 +26896,6 @@ mod tests {
                 .inventory()
                 .select_native_target(
                     physical.physical_cohort(),
-                    &selection,
                     observed,
                     None,
                     None,
@@ -31263,7 +31278,6 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .inventory()
             .select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,

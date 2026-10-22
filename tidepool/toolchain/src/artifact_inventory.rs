@@ -3801,7 +3801,6 @@ impl ArtifactInventory {
     pub(crate) fn select_native_target(
         &self,
         cohort: crate::declaration_context::PhysicalCohortInputs<'_>,
-        selection: &crate::certified_products::CertifiedSourceSelection,
         observed: crate::certified_products::AuthenticatedTargetImports,
         typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
         cursor: Option<&ArtifactView>,
@@ -3812,6 +3811,7 @@ impl ArtifactInventory {
         use crate::certified_products::{
             PendingImportOwner, ReceiptImportOwner, SelectedNativeTargetImport,
         };
+        let selection = cohort.source_selection();
         let physical = cohort.artifacts();
         if !Arc::ptr_eq(&self.0, &physical.lease.inventory.0)
             || cursor.is_some_and(|cursor| !Arc::ptr_eq(&self.0, &cursor.lease.inventory.0))
@@ -11540,7 +11540,6 @@ mod tests {
             .unwrap();
             inventory.select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&inventory.empty_view()),
@@ -11711,7 +11710,6 @@ mod tests {
         let target = inventory
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -11788,7 +11786,6 @@ mod tests {
         let empty_target = inventory
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -12009,7 +12006,6 @@ mod tests {
             let target = inventory
                 .select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&prefix),
@@ -12477,7 +12473,6 @@ mod tests {
                 .unwrap();
                 inventory.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&inventory.empty_view()),
@@ -12601,7 +12596,6 @@ mod tests {
                 .unwrap();
                 owner.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&owner.empty_view()),
@@ -12680,7 +12674,6 @@ mod tests {
                 .unwrap();
                 owner.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&owner.empty_view()),
@@ -12871,7 +12864,6 @@ mod tests {
                 .unwrap();
                 inventory.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&inventory.empty_view()),
@@ -12982,7 +12974,6 @@ mod tests {
                 .unwrap();
                 inventory.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&inventory.empty_view()),
@@ -13861,7 +13852,6 @@ mod tests {
                 let target = inventory
                     .select_native_target(
                         fixed.captured_stage().physical_cohort(),
-                        fixed.source_selection(),
                         observed,
                         None,
                         None,
@@ -13989,7 +13979,6 @@ mod tests {
             .unwrap();
             inventory.select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&inventory.empty_view()),
@@ -14018,7 +14007,6 @@ mod tests {
             .unwrap();
             inventory.select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&cursor),
@@ -14053,7 +14041,6 @@ mod tests {
             .unwrap();
             inventory.select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&cursor),
@@ -14173,7 +14160,6 @@ mod tests {
         let target = inventory
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&inventory.empty_view()),
@@ -14197,7 +14183,6 @@ mod tests {
         assert!(inventory
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(cursor),
@@ -14271,7 +14256,6 @@ mod tests {
             .unwrap();
             inventory.select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(&cursor),
@@ -16313,7 +16297,6 @@ mod tests {
                     .unwrap();
                     inventory.select_native_target(
                         fixed.captured_stage().physical_cohort(),
-                        fixed.source_selection(),
                         observed,
                         None,
                         Some(&inventory.empty_view()),
@@ -16376,7 +16359,6 @@ mod tests {
                     .unwrap();
                     cold.select_native_target(
                         fixed.captured_stage().physical_cohort(),
-                        fixed.source_selection(),
                         observed,
                         None,
                         Some(&cold.empty_view()),
@@ -17769,7 +17751,6 @@ mod tests {
                 .unwrap();
                 inventory.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&inventory.empty_view()),
@@ -18581,7 +18562,6 @@ mod tests {
                     .unwrap();
                     recovered_inventory.select_native_target(
                         bound.captured_stage().physical_cohort(),
-                        bound.source_selection(),
                         observed,
                         None,
                         Some(&recovered),
@@ -18603,7 +18583,7 @@ mod tests {
                 let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let (prepared, accepted) = source_target_data(&[(&helper, 7)]);
                 let observed = crate::certified_products::AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
-                recovered_inventory.select_native_target(bound.captured_stage().physical_cohort(), bound.source_selection(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
+                recovered_inventory.select_native_target(bound.captured_stage().physical_cohort(), observed, None, Some(&recovered), &[], &BTreeMap::new(), &mut validation)
                 }.map(|admitted| admitted.artifacts().clone()), Err(CompileError::ArtifactInventory(error))
                                    if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
                                        original: helper.descriptor.id,
@@ -18673,7 +18653,6 @@ mod tests {
                     .unwrap();
                     chosen.inventory().select_native_target(
                         chosen_bound.captured_stage().physical_cohort(),
-                        chosen_bound.source_selection(),
                         observed,
                         None,
                         Some(&chosen),
@@ -19582,7 +19561,6 @@ mod tests {
                     .unwrap();
                     issuer.select_native_target(
                         fixed.captured_stage().physical_cohort(),
-                        fixed.source_selection(),
                         observed,
                         None,
                         Some(&cursor),
@@ -19706,7 +19684,6 @@ mod tests {
                 .unwrap();
                 issuer.select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(&projected),
@@ -19953,7 +19930,6 @@ mod tests {
             let selected = inventory
                 .select_native_target(
                     fixed.captured_stage().physical_cohort(),
-                    fixed.source_selection(),
                     observed,
                     None,
                     Some(view),
