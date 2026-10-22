@@ -314,12 +314,12 @@ import Tidepool.ExactHydration
   , noCheckedValueImports, checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes
-  , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
-  , generatedCheckingTemplateRecipe
+  , CheckedTemplateImports(..), captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedTypedSegmentRecipeWithImportRendering, generatedCheckingTemplateRecipeWithImportRendering
   , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
-import Tidepool.TurnSource (importRenderingSource)
+import Tidepool.TurnSource (ImportOrigin(..), literalImportRendering, locatedImportRendering
+  , appendImportRendering, replaceImportRendering, importRenderingSource)
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
@@ -2744,11 +2744,18 @@ prepareWorldObservationStage universe baseEnv timing
       declarationImports = case worldLexicalDeclaration lexical of
         Nothing -> []
         Just declaration -> ["import " ++ exactModule (worldDeclarationInterface declaration)]
-      imports = map ("import " ++) (worldObservationImports scaffold)
-        ++ worldLexicalImportLines lexical ++ declarationImports
+      protectedImports = map ("import " ++) (worldObservationImports scaffold)
+      inheritedImports = worldLexicalImportLines lexical ++ declarationImports
+      header = "module " ++ owner ++ " where\n"
   createDirectoryIfMissing True directory
-  protected <- either fail pure (replaceTemplateModuleHeader
-    ("module " ++ owner ++ " where\n" ++ unlines imports) (worldObservationFragment scaffold))
+  protectedTemplate <- either fail pure (replaceTemplateModuleHeader
+    (header ++ unlines protectedImports) (worldObservationFragment scaffold))
+  let inherited = foldl appendImportRendering (literalImportRendering "")
+        [locatedImportRendering InheritedLexical (line ++ "\n") | line <- inheritedImports]
+  renderedPrefix <- either fail pure $ replaceImportRendering header
+    (appendImportRendering (literalImportRendering header) inherited)
+    (literalImportRendering protectedTemplate)
+  let protected = importRenderingSource renderedPrefix
   let inert = "(let observation = observation in observation)"
       indent = unlines . map ("  " ++) . lines
       typeProbeHeader = "\n__tidepool_type_search_query :: " :: String
@@ -2780,15 +2787,18 @@ prepareWorldObservationStage universe baseEnv timing
           , Map.notMember name (worldInputsBindings facts)]
       demandProbes = unlines [name ++ " () = " ++ expression alias
         | (name,alias) <- zip probeNames candidates]
-      source = protected ++ probes ++ "\n" ++ demandProbes
+      rendering = appendImportRendering renderedPrefix (literalImportRendering (probes ++ "\n" ++ demandProbes))
+      source = importRenderingSource rendering
       operand = case query of
         WorldObservationExpression {} -> ObservationExpressionOperand
         WorldObservationTypeSearch _ expression _ -> ObservationTypeOperand
           (length protected + length typeProbeHeader + length expression + 1)
         _ -> ObservationNoOperand
   writeFile path source
-  recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
-    protected source path owner >>= either fail pure
+  mapped <- either fail pure (captureProtectedTemplateImports flags protectedTemplate
+    >>= renderProtectedTemplateImports (length (filter (== '\n') (importRenderingSource inherited))))
+  recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
+    mapped protectedTemplate rendering path owner >>= either fail pure
   scope <- heldWorldDemandScope universe timing world
   pure (WorldObservationStage scaffold query (GeneratedScaffoldCompile recipe WorldObservationCompile)
     path directory (length protected) operand probeNames scope)
@@ -5400,30 +5410,33 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         -- Compiled selected-source qualification belongs to its own receipt.
         -- Fresh completion evidence cannot replace an admitted exact owner.
         sourceCaptureGraph = if isJust worldSources then freshGraph else modGraphRaw
-    targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
-        , ms_mod summary == targetOwner] of
-      [summary] -> pure summary
-      _ -> liftIO (fail "source imports lack their actual parsed target")
-    parsedTarget <- parseModule targetSummary
-    let home = moduleUnit targetOwner
-        homeNodes = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
-          , moduleUnit (ms_mod summary) == home]
-        homeQualifier NoPkgQual = True
-        homeQualifier (ThisPkg unit) = unitString unit == unitString home
-        homeQualifier _ = False
-        freshHome = [(renderDependencyQualifier (dependencyQualifier qualifier),moduleNameString (unLoc name),boot,unitString home)
-          | (boot,imports) <- [(False,ms_textual_imps targetSummary),(True,ms_srcimps targetSummary)]
-          , (qualifier,name) <- imports, homeQualifier qualifier, unLoc name `Set.member` homeNodes]
-        exactHome = [(renderDependencyQualifier qualifier,name,boot,unit)
-          | ((unit',name',False),edges) <- exactImports
-          , (unit',name') == (unitString home,moduleNameString (moduleName targetOwner))
-          , (qualifier,name,boot,unit) <- edges]
-    sourceImports <- liftIO (issueSourceImports (pvGeneratedScaffold variant) parsedTarget (freshHome ++ exactHome))
-      >>= either (liftIO . fail) pure
-    forM_ (pvWorldSources variant) $ \(WorldSourceInputBasis _ _ receipt _ _ _ _) ->
-      liftIO (writeIORef receipt ((\selected -> (selected,sourceImports)) <$> worldSources))
-    let exactCompilation = (\scope -> ExactCompilation scope requestIdentity sourceImports exactImports sourceSelection)
-          <$> pvExactScope variant
+    exactCompilation <- if isNothing (pvExactScope variant) && isNothing (pvWorldSources variant)
+      then pure Nothing
+      else do
+        targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+            , ms_mod summary == targetOwner] of
+          [summary] -> pure summary
+          _ -> liftIO (fail "source imports lack their actual parsed target")
+        parsedTarget <- parseModule targetSummary
+        let home = moduleUnit targetOwner
+            homeNodes = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+              , moduleUnit (ms_mod summary) == home]
+            homeQualifier NoPkgQual = True
+            homeQualifier (ThisPkg unit) = unitString unit == unitString home
+            homeQualifier _ = False
+            freshHome = [(renderDependencyQualifier (dependencyQualifier qualifier),moduleNameString (unLoc name),boot,unitString home)
+              | (boot,imports) <- [(False,ms_textual_imps targetSummary),(True,ms_srcimps targetSummary)]
+              , (qualifier,name) <- imports, homeQualifier qualifier, unLoc name `Set.member` homeNodes]
+            exactHome = [(renderDependencyQualifier qualifier,name,boot,unit)
+              | ((unit',name',False),edges) <- exactImports
+              , (unit',name') == (unitString home,moduleNameString (moduleName targetOwner))
+              , (qualifier,name,boot,unit) <- edges]
+        sourceImports <- liftIO (issueSourceImports (pvGeneratedScaffold variant) parsedTarget (freshHome ++ exactHome))
+          >>= either (liftIO . fail) pure
+        forM_ (pvWorldSources variant) $ \(WorldSourceInputBasis _ _ receipt _ _ _ _) ->
+          liftIO (writeIORef receipt ((\selected -> (selected,sourceImports)) <$> worldSources))
+        pure ((\scope -> ExactCompilation scope requestIdentity sourceImports exactImports sourceSelection)
+          <$> pvExactScope variant)
     when (any (\(_, imports) -> any (\(_, _, boot, _) -> boot) imports) exactImports) $
       liftIO $ ioError $ userError "exact scope does not admit SOURCE boot imports"
     let sourceFreeOwners = Set.fromList (pvDownsweepExcludes variant

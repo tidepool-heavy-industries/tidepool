@@ -41,7 +41,7 @@ module Tidepool.ExactHydration
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
   , capturedSourceImportOrigins
-  , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot, sourceImportsRoot
+  , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot
   , sourceImportsHomeRoles
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
@@ -613,9 +613,6 @@ instance Show IssuedSourceImports where
 
 sourceImportsSnapshot :: IssuedSourceImports -> (FilePath,BS.ByteString)
 sourceImportsSnapshot (IssuedSourceImports path _ digest _ _ _) = (path,digest)
-
-sourceImportsRoot :: IssuedSourceImports -> (String,String)
-sourceImportsRoot (IssuedSourceImports _ _ _ root _ _) = root
 
 sourceImportsHomeRoles :: IssuedSourceImports -> [(String,String,Bool,String,Int)]
 sourceImportsHomeRoles (IssuedSourceImports _ _ _ _ _ roles) = roles
