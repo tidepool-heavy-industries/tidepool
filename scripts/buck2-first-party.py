@@ -1354,7 +1354,7 @@ def runtime_test_cases(binary):
         f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
         f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
-    package_race = "session::persistent::package_runtime_tests::sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group"
+    package_race = "session::persistent::package_runtime_tests::sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group"
     package_env, package_resources, package_worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_package_slot_race_test"
     )

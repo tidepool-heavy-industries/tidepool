@@ -1162,13 +1162,13 @@ tidepool_rust_test_cases(
     name = "runtime_package_slot_race_test",
     binary = ":tidepool_runtime_unit_tests",
     exact_tests = [
-        "session::persistent::package_runtime_tests::sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group",
+        "session::persistent::package_runtime_tests::sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group",
     ],
     expected_count = 1,
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 660000,
-    case_compiler_modes = {"session::persistent::package_runtime_tests::sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group": "owned-resident"},
+    case_compiler_modes = {"session::persistent::package_runtime_tests::sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
