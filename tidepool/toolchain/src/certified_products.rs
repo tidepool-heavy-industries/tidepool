@@ -25962,9 +25962,7 @@ pub(crate) mod tests {
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
             NativeArtifactDemand,
         };
-        use crate::declaration_context::{
-            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
-        };
+        use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
         let producer_bytes = b"current-product-full-dependency";
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let dependency = fixture_finalized_product(
@@ -26040,14 +26038,22 @@ pub(crate) mod tests {
                     .unwrap();
                 let output_projection =
                     CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                let mut output_validation = PackageInterfaceValidation::default();
                 let output_selection = CertifiedSourceSelection::from_compiler_projection(
                     &output_projection,
                     &output_artifacts.metadata_snapshot(),
-                    &InventoryOperation::new(Default::default()),
+                    &output_validation.inventory,
                 )
                 .unwrap();
-                OriginalCompilerInputs::from_selection(&output_selection, &output_artifacts)
-                    .unwrap()
+                let issued = output_inventory
+                    .bind_segment(
+                        &output_artifacts,
+                        vec![],
+                        &output_selection,
+                        &mut output_validation,
+                    )
+                    .unwrap();
+                issued.physical_inputs().as_ref().clone()
             });
             let (context, private) = if interface_only {
                 let support = match &private {
