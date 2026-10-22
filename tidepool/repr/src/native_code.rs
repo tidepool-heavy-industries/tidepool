@@ -38,6 +38,13 @@ impl NativeCodeBody {
             Self::Package(code) => code.definitions(),
         }
     }
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        match self {
+            Self::Home(code) => code.projected_group(),
+            Self::Package(code) => code.projected_group(),
+        }
+        .exported_values()
+    }
     fn key(&self, operation: &InventoryOperation) -> Result<NativeCodeBodyKey, NativeCodeError> {
         let (kind, nominal, group) = match self {
             Self::Home(code) => {
@@ -66,6 +73,18 @@ impl NativeCodeBody {
                         owner.profile_sha256,
                         owner.interface_sha256,
                         owner.defining_version_sha256,
+                        code.binders()
+                            .iter()
+                            .map(|symbol| {
+                                (
+                                    &symbol.unit,
+                                    &symbol.module,
+                                    &symbol.namespace,
+                                    &symbol.occurrence,
+                                    &symbol.record_parent,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
                     ))?,
                     code.projected_group(),
                 )
@@ -450,6 +469,7 @@ impl NativeCodeComponent {
                                     *value,
                                     declaration,
                                     plans[index].body.definitions(),
+                                    operation,
                                 )?;
                                 if let Some(member) = local.get(occurrence) {
                                     (
@@ -485,6 +505,7 @@ impl NativeCodeComponent {
                                     *value,
                                     declaration,
                                     plans[index].body.definitions(),
+                                    operation,
                                 )?;
                                 (
                                     ComponentImport::External {
@@ -656,7 +677,25 @@ fn validate_export(
     value: ValueId,
     declaration: &crate::execution_schema::GlobalDecl,
     importer: DefinitionsView<'_>,
+    operation: &InventoryOperation,
 ) -> Result<(), NativeCodeError> {
+    let count = body
+        .definitions()
+        .bindings()
+        .iter()
+        .map(|group| match group {
+            crate::execution_schema::Group::NonRecursive(_) => 1,
+            crate::execution_schema::Group::Recursive(group) => group.len(),
+        })
+        .sum::<usize>();
+    operation.charge(count.saturating_mul(2))?;
+    if !body
+        .exported_values()
+        .any(|(identity, exported)| exported == value && identity == &declaration.identity)
+    {
+        return Err(NativeCodeError::ImportContract);
+    }
+
     let exported = body
         .definitions()
         .export_contracts()
