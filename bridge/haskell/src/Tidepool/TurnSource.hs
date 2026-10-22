@@ -17,6 +17,7 @@ module Tidepool.TurnSource
   , qualifyCompilerDefault, qualifyCompilerDefaultWithLineOffset
   , preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker, importQualifierNamespaces
   , PreparedDeclarationTemplate, prepareDeclarationTemplate, renderPreparedDeclaration
+  , ImportOrigin(..)
   ) where
 
 import GHC (GhcPs, ImportDecl(..), ModuleName, hsmodImports, hsmodName, unLoc, moduleNameString, mkModuleName)
@@ -43,6 +44,11 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Tidepool.ExtractUtil (shaHex)
+
+-- Import origin is recorded before rendering merges compiler and authored
+-- syntax. It classifies source reachability, never TYPE or native permission.
+data ImportOrigin = AuthoredCurrent | InheritedLexical | ProtectedCompiler
+  deriving (Eq, Ord, Show)
 
 -- The import slot and protected default recipe have independent Rust/Haskell
 -- ABI markers. Installer templates need imports without primitive defaulting.

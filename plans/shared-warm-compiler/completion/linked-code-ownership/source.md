@@ -60,3 +60,41 @@ Verification is pending. P owns the coherent phase/source integration and T the
 pure-reader property migration. B's linked-code API is not yet joined. V owns warm
 compilation and actual selected test execution. Formatting and source inspection
 do not qualify source classification or Text/Display.
+
+## Source import provenance protocol
+
+The next source cut starts from P `95a1ec7e4f`. Haskell owns one private
+source-import owner pairing captured source path/bytes, parsed root, complete
+per-occurrence origin census and its resolved HOME-edge projection. Origins are
+`AuthoredCurrent`, `InheritedLexical`, and `ProtectedCompiler`; they are recorded
+at import creation, before static templates, automatic Display/Generic imports,
+compiler defaults and authored/inherited prologues are rendered together.
+Checked exact-interface import permission stays independent.
+
+Both source envelopes gain the same mandatory final field, a sorted unique list
+of `[qualifier, module, boot, homeUnit, roleMask]` rows for every resolved direct
+HOME edge of the authenticated compilation root. Bits are 1 authored, 2 inherited,
+4 protected; only nonzero combinations 1 through 7 are valid. Repeated parsed
+occurrences coalesce only after their physical ranges, shapes and source bytes
+have been authenticated; overlapping roles union. Package imports participate
+in the complete private syntactic census but add no HOME row.
+
+World `TPCWSOURCE3` array 11 becomes `TPCWSOURCE4` array 12, with roles at field
+11. Finite `TPEXACTCOMPILE` version `3` array 10 becomes version `4` array 11,
+with roles at field 10. Old versions and missing fields refuse; there is no
+missing-census fallback. Existing source/receipt/stage digests bind the new bytes.
+No unrelated package, native or context format changes with this protocol.
+
+Rust parses and budgets raw rows, then the owning source admission checks exact
+root HOME-edge coverage and issues one private role owner. Current-source
+reachability and lexical claim issuance borrow that owner. Authored overlap keeps
+current reproof requirements; inherited roles require actual earlier lexical
+admission; protected-only edges remain compiler dependencies and never create
+lexical roots. Nonroot source imports keep their authenticated ordinary/canonical
+source meaning. No blanket Canonical-owner refusal is part of this change.
+
+Qualification requires actual paired finite and World producers over the same
+captured inventory, protected-only versus authored overlap; automatic Display,
+inherited continuation, current reproof, malformed roles and honest retry. The
+protocol scaffold is not compilation or executed evidence. V owns the joined
+warm lane; no cold output graph is being created.
