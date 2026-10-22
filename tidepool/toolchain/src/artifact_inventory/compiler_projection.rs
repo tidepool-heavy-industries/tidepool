@@ -550,9 +550,11 @@ impl AcquiredNativeClosures {
                 }))
     }
 
-    /// Lend only the exact demanded HOME occurrence. Other prefix choices do
-    /// not compete until this binding is consumed, and no payload census fills
-    /// a missing acquired owner.
+    /// Lend one intact issued witness for a new demand. The full HOME binding
+    /// fixes source/retained edges; root issuance and closed code must agree.
+    /// Package receipt cohort IDs may differ and do not choose a capability.
+    /// Never mix child grants or reselect an already owned witness here. The
+    /// returned prefix handle has no receiving-target Current correlation.
     pub(crate) fn group_owner(
         &self,
         binding: NativeGroupBinding,
@@ -7492,72 +7494,6 @@ mod tests {
             repeated.acquired_native_closures(),
             rebuilt.acquired_native_closures()
         );
-    }
-
-    #[test]
-    fn source_support_preserves_completion_custody_after_role_narrowing() {
-        let inventory = ArtifactInventory::default();
-        let selected = Arc::new(crate::artifact_inventory::tests::entry("SourceRoot", &[]));
-        let completion_only = Arc::new(crate::artifact_inventory::tests::entry(
-            "CompletionOnly",
-            &[],
-        ));
-        let full = inventory
-            .admit_shared(
-                &inventory.empty_view(),
-                vec![Arc::clone(&selected), Arc::clone(&completion_only)],
-            )
-            .unwrap();
-        let projection =
-            CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
-        let support =
-            CompilerSourceSupport::from_selected_issuance(projection, full.clone()).unwrap();
-
-        let operation =
-            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-        let completion_view = full
-            .select_roots(vec![completion_only.descriptor.id])
-            .unwrap();
-        let packages = super::super::package_code::IssuedPackageCodeGraph::issue(
-            &completion_view,
-            Vec::new(),
-            Vec::new(),
-            &[],
-            &operation,
-        )
-        .unwrap();
-        let completion = IssuedNativeSelectionCompletion::issue_parts(
-            [7; 32],
-            [9; 32],
-            completion_view,
-            Default::default(),
-            packages,
-            Arc::from([]),
-            &operation,
-        )
-        .unwrap();
-        let mut draft = support.reopen();
-        draft
-            .append_acquired_closures(&AcquiredNativeClosures::one(Arc::clone(&completion)))
-            .unwrap();
-        let support = draft.close().unwrap();
-
-        let narrowed = support
-            .source_support(&BTreeSet::from([selected.descriptor.owner.clone()]))
-            .unwrap();
-        assert!(narrowed
-            .artifacts
-            .artifact_ids()
-            .contains(&completion_only.descriptor.id));
-        assert_eq!(narrowed.acquired_native_closures().iter().count(), 1);
-        assert!(narrowed
-            .acquired_native_closures()
-            .iter()
-            .any(|actual| Arc::ptr_eq(actual, &completion)));
-        assert!(!narrowed
-            .projection()
-            .snapshot_roles()
-            .contains_key(&completion_only.descriptor.owner));
     }
 
     #[test]

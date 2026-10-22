@@ -231,6 +231,29 @@ fn assert_current_handles_are_target_bound(
         .native_source_products(target)
         .expect("actual source receipt resolves")
         .expect("finite target source receipt");
+    let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        output
+            .issued_output
+            .as_ref()
+            .expect("actual compiler output owner")
+            .compiler_inputs(),
+    )
+    .unwrap()
+    .with_linked_native_target(linked)
+    .unwrap();
+    let narrowed = support.selected_interfaces().unwrap();
+    assert!(narrowed
+        .projection()
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(narrowed.artifacts().selected_native_groups().is_empty());
+    assert!(
+        narrowed
+            .acquired_native_closures()
+            .contains_owner(linked.closure()),
+        "role narrowing keeps the actual acquired code owner without selecting execution"
+    );
     let mut checked = 0;
     for acquired in linked.acquired() {
         let NativeCodeGrant::Home {
