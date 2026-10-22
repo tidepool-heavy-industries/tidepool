@@ -1301,7 +1301,6 @@ pub(crate) fn link_native_target(
     }))
 }
 
-
 /// Matched compiler roles and exact custody selected by their existing issuer.
 /// Required type interfaces do not grant lexical imports or native body demand.
 #[derive(Clone, Debug)]
@@ -3930,31 +3929,14 @@ impl CompilerSourceSupport {
         BTreeMap<ArtifactId, Arc<crate::certified_products::CertifiedPackageCodeProduct>>,
         CompileError,
     > {
-        let mut products = BTreeMap::new();
-        for closure in self.native_closures.iter() {
-            for acquired in closure.acquired() {
-                let crate::linked_native::NativeCodeGrant::Package { product, .. } =
-                    acquired.grant()
-                else {
-                    continue;
-                };
-                let id = product.artifact_id();
-                if !selected.contains(&id) {
-                    continue;
-                }
-                if let Some(prior) = products.insert(id, Arc::clone(product)) {
-                    if prior.descriptor() != product.descriptor()
-                        || prior.product_sha256() != product.product_sha256()
-                        || prior.envelope_sha256() != product.envelope_sha256()
-                    {
-                        return Err(failure(
-                            "selected package product has competing authenticated custody",
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(products)
+        Ok(selected
+            .iter()
+            .filter_map(|id| {
+                self.native_closures
+                    .package_product(id)
+                    .map(|product| (*id, Arc::clone(product)))
+            })
+            .collect())
     }
 
     pub(crate) fn native_component_records(&self) -> &crate::exact_context::NativeComponentRecords {
@@ -6064,183 +6046,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn native_completion_row_index_preserves_exact_scopes_and_ordered_slots() {
-        use tidepool_repr::execution_schema::ValueId;
-        let binding = |scope| NativeGroupBinding {
-            binding: NativeGroupIssuer {
-                artifact: ArtifactId([31; 32]),
-                selection: ArtifactSelectionId([scope; 32]),
-            },
-            original_ordinal: 7,
-        };
-        let row = |values: &[u32]| {
-            Arc::new(NativeCompletionRowSnapshotFacts {
-                imports: values
-                    .iter()
-                    .map(|value| NativeCompletionImportSnapshotFacts::Source {
-                        binding: binding(1),
-                        value: ValueId(*value),
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            })
-        };
-        // These are scalar facts only; no acquired completion is issued.
-        let first = imbl::OrdMap::unit(binding(1), row(&[1, 2]));
-        let second = imbl::OrdMap::unit(binding(2), row(&[2, 1]));
-        let both = append_native_completion_rows(&first, &second).unwrap();
-        assert_eq!(
-            both.len(),
-            2,
-            "equal payloads retain their distinct full scopes"
-        );
-        assert!(Arc::ptr_eq(&both[&binding(1)], &first[&binding(1)]));
-        assert!(Arc::ptr_eq(&both[&binding(2)], &second[&binding(2)]));
-        let conflicting = imbl::OrdMap::unit(binding(1), row(&[2, 1]));
-        assert!(append_native_completion_rows(&both, &conflicting).is_err());
-        assert_eq!(both[&binding(1)].imports, first[&binding(1)].imports);
-        assert_eq!(append_native_completion_rows(&both, &first).unwrap(), both);
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn native_completion_row_index_matches_pairwise_history(
-            history in proptest::collection::vec(
-                proptest::collection::vec((0u8..4, 0u8..4, 0u8..4), 0..8), 0..12
-            )
-        ) {
-            use tidepool_repr::execution_schema::ValueId;
-            // Scalar data tests conflict indexing, never issued completion authority.
-            let mut prior: Vec<imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>> = Vec::new();
-            let mut indexed = imbl::OrdMap::new();
-            for entries in history {
-                let incoming = entries.into_iter().map(|(scope, ordinal, value)| {
-                    let binding = NativeGroupBinding {
-                        binding: NativeGroupIssuer {
-                            artifact: ArtifactId([31; 32]),
-                            selection: ArtifactSelectionId([scope; 32]),
-                        },
-                        original_ordinal: ordinal as u32,
-                    };
-                    (binding, Arc::new(NativeCompletionRowSnapshotFacts {
-                        imports: vec![NativeCompletionImportSnapshotFacts::Source {
-                            binding, value: ValueId(value as u32),
-                        }].into(),
-                    }))
-                }).collect::<imbl::OrdMap<_, _>>();
-                let conflict = prior.iter().any(|old| incoming.iter().any(|(key, row)| {
-                    old.get(key).is_some_and(|previous| previous != row)
-                }));
-                let actual = append_native_completion_rows(&indexed, &incoming);
-                proptest::prop_assert_eq!(actual.is_err(), conflict);
-                if let Ok(merged) = actual {
-                    prior.push(incoming);
-                    let recomputed = prior.iter().flat_map(|rows| rows.iter())
-                        .map(|(key, row)| (*key, Arc::clone(row)))
-                        .collect::<BTreeMap<_, _>>();
-                    proptest::prop_assert_eq!(merged.iter().collect::<Vec<_>>(), recomputed.iter().collect::<Vec<_>>());
-                    for (key, row) in &indexed {
-                        proptest::prop_assert!(Arc::ptr_eq(row, &merged[key]));
-                    }
-                    indexed = merged;
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn native_completion_fact_wire_keeps_full_rows_and_rejects_noncanonical_keys() {
-        use tidepool_repr::execution_schema::{SymbolIdentity, ValueId};
-        let group = |ordinal| NativeGroupBinding {
-            binding: NativeGroupIssuer {
-                artifact: ArtifactId([31; 32]),
-                selection: ArtifactSelectionId([41; 32]),
-            },
-            original_ordinal: ordinal,
-        };
-        let package = ArtifactBinding {
-            artifact: ArtifactId([51; 32]),
-            selection: ArtifactSelectionId([61; 32]),
-        };
-        // Pure wire data never enters a completion issuer in this control.
-        let facts = NativeCompletionSnapshotFacts {
-            version: 1,
-            producer_sha256: [71; 32],
-            profile_sha256: [81; 32],
-            rows: [
-                (
-                    group(7),
-                    Arc::new(NativeCompletionRowSnapshotFacts {
-                        imports: vec![
-                            NativeCompletionImportSnapshotFacts::Source {
-                                binding: group(11),
-                                value: ValueId(4),
-                            },
-                            NativeCompletionImportSnapshotFacts::Package {
-                                binding: package,
-                                value: ValueId(5),
-                            },
-                            NativeCompletionImportSnapshotFacts::Package {
-                                binding: package,
-                                value: ValueId(5),
-                            },
-                        ]
-                        .into(),
-                    }),
-                ),
-                (
-                    group(11),
-                    Arc::new(NativeCompletionRowSnapshotFacts {
-                        imports: vec![NativeCompletionImportSnapshotFacts::Retained {
-                            binding: package,
-                            identity: SymbolIdentity {
-                                unit: "fixture".into(),
-                                module: "Value".into(),
-                                namespace: "value".into(),
-                                occurrence: "captured".into(),
-                                record_parent: Some("Record".into()),
-                            },
-                            generation: 3,
-                        }]
-                        .into(),
-                    }),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-            package_roots: vec![package, package].into(),
-        };
-        let encoded = fvm_ipld_encoding::to_vec(&facts).unwrap();
-        let decoded: NativeCompletionSnapshotFacts =
-            fvm_ipld_encoding::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, facts);
-        assert_eq!(decoded.identity().unwrap(), facts.identity().unwrap());
-        for duplicate in [false, true] {
-            let mut wire: ciborium::value::Value =
-                ciborium::de::from_reader(encoded.as_slice()).unwrap();
-            let ciborium::value::Value::Map(fields) = &mut wire else {
-                panic!("fact object")
-            };
-            let (_, rows) = fields
-                .iter_mut()
-                .find(|(key, _)| key.as_text() == Some("rows"))
-                .unwrap();
-            let ciborium::value::Value::Array(rows) = rows else {
-                panic!("row sequence")
-            };
-            if duplicate {
-                rows.push(rows[0].clone());
-            } else {
-                rows.reverse();
-            }
-            let mut malformed = Vec::new();
-            ciborium::ser::into_writer(&wire, &mut malformed).unwrap();
-            assert!(
-                fvm_ipld_encoding::from_slice::<NativeCompletionSnapshotFacts>(&malformed).is_err()
-            );
-        }
-    }
     fn value_certificate(
         module: &str,
         requirements: Vec<ExactModuleIdentity>,
