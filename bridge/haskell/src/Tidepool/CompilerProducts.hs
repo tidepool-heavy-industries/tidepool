@@ -109,7 +109,7 @@ import Tidepool.ExecutionProjection
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity
   , PreparedPackageTarget
-  , packageTargetName, packageTargetGroups, packageTargetImports, packageTargetHomeImports
+  , packageTargetName, packageTargetGroups, packageTargetImports, packageTargetHomeImports, packageTargetOriginalImports
   , projectedPackageModule
   , projectedPackageInterfaceSha256, projectedPackageDefiningVersion, projectedPackageEncoding )
 import Tidepool.PlannedDeclaration
@@ -533,15 +533,16 @@ retainPreparedPackageTargets provenance targets captures context = do
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
           bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
       pure (name, group, bytes)
-    let ownersByTarget = Map.fromList
-          [ (packageTargetName target,
-              Map.fromList
+    unless (length targets == Set.size (Set.fromList (map packageTargetName targets)))
+      (fail "package projections repeat a target")
+    ownersByTarget <- Map.fromList <$> forM targets (\target -> do
+      owners <- foldM insertOwner Map.empty
                 [ (binder, fromIntegral index)
                 | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
                 , name == packageTargetName target
                 , binder <- projectedBinders
-                    (projectedGroupEncodingInput (projectedPackageEncoding group)) ])
-          | target <- targets ]
+                    (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
+      pure (packageTargetName target,owners))
     occurrenceFacts <- forM encodings $ \(name, group, bytes) -> do
       imports <- forM
         [ globalIdentity global
@@ -569,6 +570,14 @@ retainPreparedPackageTargets provenance targets captures context = do
           , (unit,name,ordinal, _) <- packageTargetHomeImports target ]
     unless (Map.keysSet homeRoots == expectedHomeRoots)
       (fail "fresh HOME package roots are incomplete or crossed")
+    originalRoots <- Map.fromList . concat <$> forM targets (\target ->
+      forM (Map.toAscList (packageTargetOriginalImports target)) $ \((reference,binder), identities) -> do
+        unless (identities == Set.toAscList (Set.fromList identities))
+          (fail "Original use package identities repeat or are unordered")
+        links <- forM identities $ \identity -> do
+          occurrence <- resolveOwner ownersByTarget (packageTargetName target) identity
+          pure (identity,occurrence)
+        pure ((packageTargetName target,reference,binder),links))
     let packageWrites = Map.toAscList (Map.fromList
           [("package-products" </> shaHex bytes ++ ".cbor",bytes)
           | (_,_,bytes) <- encodings])
@@ -580,9 +589,13 @@ retainPreparedPackageTargets provenance targets captures context = do
         writes = packageWrites
     links <- either fail pure
       (issuePackageLinkIndex occurrenceFacts ownersByTarget targetRoots
-        homeRoots expectedHomeRoots products)
+        homeRoots expectedHomeRoots originalRoots products)
     pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
   where
+    insertOwner owners (binder,occurrence)
+      | Map.member binder owners = fail ("package target repeats an exported binder: " ++ show binder)
+      | otherwise = pure (Map.insert binder occurrence owners)
+
     insertHomeRoot owners known (key, identities) = do
       target <- case key of
         (target,_,_,_) -> pure target

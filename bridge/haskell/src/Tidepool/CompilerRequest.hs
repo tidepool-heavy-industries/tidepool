@@ -845,6 +845,9 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           obligations <- foldM (\selected use -> do
             rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
             mergePackageObligations selected (Map.toAscList rows)) Map.empty (Set.toAscList uses)
+          originalImports <- Map.fromList <$> forM (Set.toAscList uses) (\use@(identity,reference) -> do
+            rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
+            pure ((reference,identity),Map.keys rows))
           let additions = Set.toAscList ((packages `Set.union` Map.keysSet obligations)
                 `Set.difference` Set.fromList roots)
           if null additions then do
@@ -860,7 +863,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
                 let homeProducts = homeProductGroups
                 paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  finalContext homeProducts candidates reachedHome
+                  finalContext homeProducts candidates reachedHome originalImports
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired

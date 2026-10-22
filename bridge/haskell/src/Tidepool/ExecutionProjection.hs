@@ -10,7 +10,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedPackageTarget, projectPreparedPackageTarget
   , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups
-  , packageTargetImports, packageTargetHomeImports
+  , packageTargetImports, packageTargetHomeImports, packageTargetOriginalImports
   , ProjectedPackageGroup, projectPreparedPackageGroups
   , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
@@ -75,6 +75,7 @@ import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
+import Tidepool.ExactScope (WorldOriginalReference)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -954,14 +955,18 @@ data PreparedPackageTarget = PreparedPackageTarget
   , packageTargetGroups :: [ProjectedPackageGroup]
   , packageTargetImports :: [SymbolIdentity]
   , packageTargetHomeImports :: [(Text, Text, Word, [SymbolIdentity])]
+  -- These are this target's reached uses, including uses with no package leaves.
+  -- The stage-wide acquisition is not an executable root for every target.
+  , packageTargetOriginalImports :: Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
   }
 
 projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
   -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
   -> Set (String, String, Word)
+  -> Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings targetName context homeProducts cached reachedHome
+projectPreparedPackageTarget env hostBindings targetName context homeProducts cached reachedHome originalImports
     home components reach = do
   let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
@@ -1066,7 +1071,7 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
         [ globalIdentity global
         | global <- programGlobals program
         , isPackageImport global ]
-  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports)
+  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports originalImports)
   where
     insertHomeImport known row@(unit,name,ordinal,identities) =
       case Map.lookup (unit,name,ordinal) known of

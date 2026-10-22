@@ -19,7 +19,7 @@ import Codec.CBOR.Encoding
   , encodeWord64 )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try)
-import Control.Monad (foldM, forM, when)
+import Control.Monad (foldM, forM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
@@ -61,7 +61,8 @@ import Tidepool.ExecutionSchema
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
-  ( PreparedPackageTarget, packageTargetName, packageTargetProgram, packageTargetImports )
+  ( PreparedPackageTarget, packageTargetName, packageTargetProgram, packageTargetImports
+  , packageTargetOriginalImports )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducts, scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , WorldOriginalReference, worldOriginalReferenceOwner, worldOriginalReferenceBindings
@@ -101,16 +102,19 @@ data PackageOccurrence = PackageOccurrence
 -- The complete frozen linkage manifest. Target roots name the original
 -- projection key. HOME roots qualify that key once more by unit, module and
 -- original ordinal so equal module names from separate projections never merge.
+-- Original-use roots retain the occurrence choices for external native demand;
+-- Rust joins these exact uses to its already acquired group and slot obligations.
 data PackageLinks = PackageLinks
   { packageLinksStageId :: !BS.ByteString
   , packageLinksOccurrences :: [PackageOccurrence]
   , packageLinksTargetRoots :: Map.Map T.Text [Word32]
   , packageLinksHomeRoots :: Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
+  , packageLinksOriginalRoots :: Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   , packageLinksProducts :: [(FilePath, BS.ByteString)]
   } deriving (Eq, Show)
 
 emptyPackageLinks :: PackageLinks
-emptyPackageLinks = PackageLinks (BS.replicate 32 0) [] Map.empty Map.empty []
+emptyPackageLinks = PackageLinks (BS.replicate 32 0) [] Map.empty Map.empty Map.empty []
 
 -- The stage owns one occurrence table. Each ordinary/item consumer retains its
 -- ordered links, and fresh HOME groups retain the links issued by their actual
@@ -122,12 +126,13 @@ data PackageLinkIndex = PackageLinkIndex
   , packageLinkIndexTargetRoots :: Map.Map T.Text [Word32]
   , packageLinkIndexHomeRoots :: Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
   , packageLinkIndexExpectedHomeRoots :: Set.Set (T.Text,T.Text,T.Text,Word)
+  , packageLinkIndexOriginalRoots :: Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   , packageLinkIndexProducts :: [(FilePath, BS.ByteString)]
   } deriving (Eq, Show)
 
 emptyPackageLinkIndex :: PackageLinkIndex
 emptyPackageLinkIndex = PackageLinkIndex (BS.replicate 32 0) [] Map.empty Map.empty
-  Map.empty Set.empty []
+  Map.empty Set.empty Map.empty []
 
 issuePackageLinkIndex
   :: [(BS.ByteString, T.Text, T.Text, BS.ByteString, BS.ByteString, [Word32])]
@@ -135,9 +140,10 @@ issuePackageLinkIndex
   -> Map.Map T.Text [Word32]
   -> Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
   -> Set.Set (T.Text,T.Text,T.Text,Word)
+  -> Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   -> [(FilePath, BS.ByteString)]
   -> Either String PackageLinkIndex
-issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected products
+issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected originalRoots products
   | Map.keysSet homeRoots /= expected =
       Left "fresh HOME package roots are incomplete or crossed"
   | any (\(envelope,unit,name,interface,version,_) ->
@@ -160,21 +166,27 @@ issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected prod
       Left "fresh HOME package root is out of range"
   | not (all (\(target,_,_,_) -> Map.member target owners) (Set.toList expected)) =
       Left "fresh HOME package root names an unissued target"
+  | any (\((target,_,_),roots) -> Map.notMember target owners
+      || map fst roots /= Set.toAscList (Set.fromList (map fst roots))
+      || any ((>= fromIntegral (length occurrenceFacts)) . snd) roots)
+      (Map.toAscList originalRoots) =
+      Left "Original use package roots are invalid or name an unissued target"
   | any (\(_, seal) -> BS.length seal /= 32) products =
       Left "package product seal is malformed"
   | otherwise =
       let occurrences = [PackageOccurrence envelope unit name interface version imports
                         | (envelope,unit,name,interface,version,imports) <- occurrenceFacts]
-          stageId = packageStageIdentity occurrences targetRoots homeRoots products
-      in Right (PackageLinkIndex stageId occurrences owners targetRoots homeRoots expected products)
+          stageId = packageStageIdentity occurrences targetRoots homeRoots originalRoots products
+      in Right (PackageLinkIndex stageId occurrences owners targetRoots homeRoots expected originalRoots products)
 
 encodePackageLinks :: PackageLinks -> Encoding
 encodePackageLinks links = array
-  [ encodeWord 3
+  [ encodeWord 4
   , encodeBytes (packageLinksStageId links)
   , list encodeOccurrenceRow (zip [0 :: Word32 ..] (packageLinksOccurrences links))
   , list encodeTargetRoots (Map.toAscList (packageLinksTargetRoots links))
   , list encodeHomeRoots (Map.toAscList (packageLinksHomeRoots links))
+  , list encodeOriginalUseRoot (Map.toAscList (packageLinksOriginalRoots links))
   , list encodeProduct (packageLinksProducts links)
   ]
   where
@@ -199,18 +211,34 @@ encodeLink :: Word32 -> Encoding
 encodeLink occurrence =
   array [encodeString "local", encodeWord (fromIntegral occurrence)]
 
+encodeOriginalUseRoot
+  :: ((T.Text,WorldOriginalReference,SymbolIdentity),[(SymbolIdentity,Word32)]) -> Encoding
+encodeOriginalUseRoot ((target,reference,binder),roots) = array
+  [ array [encodeString target,encodeOriginalUse reference binder]
+  , list (\(identity,occurrence) -> array [encodeReceiptIdentity identity,encodeLink occurrence]) roots
+  ]
+
+encodeOriginalUse :: WorldOriginalReference -> SymbolIdentity -> Encoding
+encodeOriginalUse reference binder =
+  let (unit,name) = worldOriginalReferenceOwner reference
+      (interface,original) = worldOriginalReferenceBindings reference
+      binding (artifact,scope) = array [encodeBytes artifact,encodeBytes scope]
+  in array [encodeString unit,encodeString name,binding interface,binding original,encodeReceiptIdentity binder]
+
 packageStageIdentity
   :: [PackageOccurrence]
   -> Map.Map T.Text [Word32]
   -> Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
+  -> Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   -> [(FilePath, BS.ByteString)]
   -> BS.ByteString
-packageStageIdentity occurrences targetRoots homeRoots products = SHA256.hash
+packageStageIdentity occurrences targetRoots homeRoots originalRoots products = SHA256.hash
   (toStrictByteString (array
-    [ encodeWord 1
+    [ encodeWord 2
     , list encodeOccurrence occurrences
     , list encodeTarget (Map.toAscList targetRoots)
     , list encodeHome (Map.toAscList homeRoots)
+    , list encodeOriginalUseRoot (Map.toAscList originalRoots)
     , list encodeProduct products
     ]))
   where
@@ -259,6 +287,7 @@ data ItemPackageSelection = ItemPackageSelection
   , itemSelectionTarget :: !T.Text
   , itemSelectionTargetRoots :: [Word32]
   , itemSelectionHomeRoots :: Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
+  , itemSelectionOriginalRoots :: Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   }
 
 selectItemPackage :: TargetCertificationContext -> PreparedPackageTarget
@@ -272,6 +301,13 @@ selectItemPackage context target = do
     maybe (Left ("item target package import lacks occurrence: " ++ show identity))
       Right
       (Map.lookup identity owners)
+  let originalRoots = Map.filterWithKey (\(targetName,_,_) _ -> targetName == name)
+        (packageLinkIndexOriginalRoots index)
+      originalIdentities = Map.fromList
+        [ ((reference,binder),map fst roots)
+        | ((_,reference,binder),roots) <- Map.toAscList originalRoots ]
+  unless (originalIdentities == packageTargetOriginalImports target)
+    (Left "item Original use package roots differ from its issued target")
   pure ItemPackageSelection
     { itemSelectionProgram = packageTargetProgram target
     , itemSelectionStageSha256 = packageLinkIndexStageId index
@@ -282,6 +318,7 @@ selectItemPackage context target = do
         | ((homeTarget,unit,moduleName,original), roots) <-
             Map.toAscList (packageLinkIndexHomeRoots index)
         , homeTarget == name ]
+    , itemSelectionOriginalRoots = originalRoots
     }
 
 certifiedContextBinders :: TargetCertificationContext -> Set.Set SymbolIdentity
@@ -874,6 +911,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   (packageLinkIndexOccurrences packageLinks)
                   targetRoots
                   homeRoots
+                  (packageLinkIndexOriginalRoots packageLinks)
                   (packageLinkIndexProducts packageLinks))
               originalFields =
                 [list id encodedModules, list id encodedPackages
@@ -1002,12 +1040,13 @@ certifyItemProducts env context selection = do
 
 encodeItemPackageSelection :: ItemPackageSelection -> Encoding
 encodeItemPackageSelection selection = array
-  [ encodeWord 1
+  [ encodeWord 2
   , encodeBytes (itemSelectionStageSha256 selection)
   , encodeBytes (SHA256.hash (encodeWireProgram (itemSelectionProgram selection)))
   , encodeString (itemSelectionTarget selection)
   , list encodeLink (itemSelectionTargetRoots selection)
   , list encodeHomeRoot (Map.toAscList (itemSelectionHomeRoots selection))
+  , list encodeOriginalUseRoot (Map.toAscList (itemSelectionOriginalRoots selection))
   ]
   where
     encodeHomeRoot ((target,unit,name,ordinal), roots) = array

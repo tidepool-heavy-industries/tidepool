@@ -1078,7 +1078,7 @@ scenario = do
                 (projectPreparedModuleProducts context (closureHomeModules closure)) ]
       assert (Map.size homeProducts == length (closureHomeModules closure))
         "every fresh HOME owner has its actual projected product"
-      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context homeProducts [] Set.empty
+      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context homeProducts [] Set.empty Map.empty
         (closureHomeModules closure) (closureComponentSelections closure) (closureReachability closure))
       assert (null (Projection.packageTargetHomeImports paired))
         "fresh embedded HOME bodies require no external HOME coordinate"
