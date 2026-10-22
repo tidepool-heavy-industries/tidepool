@@ -7990,11 +7990,17 @@ impl ProgramSourceSupport {
         let Some(product) = &row.physical_product else {
             return Ok(None);
         };
-        if self
-            .compiler_support
-            .implementation_entry(owner)
-            .is_none_or(|entry| !row.matches_domain_entry(entry))
-        {
+        let actual = self.compiler_support.implementation_entry(owner);
+        if actual.is_none_or(|entry| !row.matches_domain_entry(entry)) {
+            tracing::warn!(
+                issuer_check = "predecessor_home_membership",
+                ?owner,
+                expected_original = ?product.row().original_artifact_id(),
+                expected_canonical = ?product.row().canonical,
+                actual_artifact = ?actual.map(|entry| entry.descriptor.id),
+                actual_kind = ?actual.map(|entry| entry.descriptor.kind),
+                "prior program physical issuer mismatch"
+            );
             return Err(crate::certified_products::CertificationError::Mismatch(
                 "prior program Source has another physical issuer",
             ));
@@ -8953,10 +8959,25 @@ impl<'a> ProductCompilerInputs<'a> {
         };
         let actual = support.compiler_support.implementation_entry(owner);
         let selected = self.source_support.implementation_entry(owner);
-        if actual.is_none_or(|entry| !row.matches_domain_entry(entry))
-            || selected.is_none_or(|entry| !row.matches_domain_entry(entry))
-            || !receipt.matches_direct_canonical_binding(self.source_support.artifacts())
-        {
+        let actual_matches = actual.is_some_and(|entry| row.matches_domain_entry(entry));
+        let selected_matches = selected.is_some_and(|entry| row.matches_domain_entry(entry));
+        let direct_canonical_matches =
+            receipt.matches_direct_canonical_binding(self.source_support.artifacts());
+        if !actual_matches || !selected_matches || !direct_canonical_matches {
+            tracing::warn!(
+                issuer_check = "consulted_prior_source",
+                ?owner,
+                expected_original = ?receipt.row().original_artifact_id(),
+                expected_canonical = ?receipt.row().canonical,
+                actual_artifact = ?actual.map(|entry| entry.descriptor.id),
+                actual_kind = ?actual.map(|entry| entry.descriptor.kind),
+                selected_artifact = ?selected.map(|entry| entry.descriptor.id),
+                selected_kind = ?selected.map(|entry| entry.descriptor.kind),
+                actual_matches,
+                selected_matches,
+                direct_canonical_matches,
+                "prior program physical issuer mismatch"
+            );
             return Err(crate::certified_products::CertificationError::Mismatch(
                 "prior program Source has another physical issuer",
             ));
@@ -8980,13 +9001,28 @@ impl<'a> ProductCompilerInputs<'a> {
         let Some(receipt) = &row.physical_product else {
             return Ok(None);
         };
-        if !receipt.matches_direct_canonical_binding(self.source_support.artifacts())
-            || support
-                .compiler_support
-                .implementation_entry(&entry.descriptor.owner)
-                .is_none_or(|actual| actual.as_ref() != entry.as_ref())
-            || !row.matches_original_entry(entry)
-        {
+        let actual = support
+            .compiler_support
+            .implementation_entry(&entry.descriptor.owner);
+        let actual_matches = actual.is_some_and(|actual| actual.as_ref() == entry.as_ref());
+        let original_matches = row.matches_original_entry(entry);
+        let direct_canonical_matches =
+            receipt.matches_direct_canonical_binding(self.source_support.artifacts());
+        if !direct_canonical_matches || !actual_matches || !original_matches {
+            tracing::warn!(
+                issuer_check = "explicit_original_role",
+                owner = ?entry.descriptor.owner,
+                expected_original = ?receipt.row().original_artifact_id(),
+                expected_canonical = ?receipt.row().canonical,
+                claimed_artifact = ?entry.descriptor.id,
+                claimed_kind = ?entry.descriptor.kind,
+                actual_artifact = ?actual.map(|entry| entry.descriptor.id),
+                actual_kind = ?actual.map(|entry| entry.descriptor.kind),
+                actual_matches,
+                original_matches,
+                direct_canonical_matches,
+                "prior program physical issuer mismatch"
+            );
             return Err(crate::certified_products::CertificationError::Mismatch(
                 "prior program Source has another physical issuer",
             ));
@@ -12202,6 +12238,15 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &validation.inventory,
             &prepared.prior,
         )
+        .inspect_err(|_| {
+            tracing::warn!(
+                issuer_phase = "world_receipt_decode",
+                stage = self.binding.stage.index(),
+                first_item = ?self.binding.stage.ordinals().first(),
+                last_item = ?self.binding.stage.ordinals().last(),
+                "World segment original admission failed"
+            );
+        })
         .map_err(compiler_evidence_failure)?;
 
         let package_interfaces =
@@ -12311,6 +12356,15 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &package_interfaces,
             validation,
         )
+        .inspect_err(|_| {
+            tracing::warn!(
+                issuer_phase = "world_product_certification",
+                stage = self.binding.stage.index(),
+                first_item = ?self.binding.stage.ordinals().first(),
+                last_item = ?self.binding.stage.ordinals().last(),
+                "World segment original admission failed"
+            );
+        })
         .map_err(compiler_evidence_failure)?;
         #[cfg(test)]
         stage_type_anchor_tests::assert_actual_prior_source_inputs(
