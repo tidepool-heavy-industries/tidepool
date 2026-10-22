@@ -284,6 +284,29 @@ impl PrivateCellPreparation {
     }
 }
 
+/// A narrow internal carrier uses the current idle World or the active
+/// program's exact parked predecessor, without draining accepted host deltas.
+pub struct PrivateHostCarrierPreparation {
+    execution: Arc<PrivateExecutionAdmission>,
+    association: Arc<super::inspection::InspectionWorldAssociation>,
+    mode: PrivateCarrierMode,
+}
+
+enum PrivateCarrierMode {
+    Ready(Arc<PrivateSettledFrontier>),
+    Active { admission_digest: [u8; 32] },
+}
+
+impl PrivateHostCarrierPreparation {
+    pub fn world(&self) -> &Arc<tidepool_toolchain::compiler_world::CompilerWorld> {
+        &self.association.world
+    }
+
+    pub(super) fn scope(&self) -> ScopeId {
+        self.execution.private_scope()
+    }
+}
+
 impl PrivatePreparationSnapshot {
     pub fn world(&self) -> &Arc<tidepool_toolchain::compiler_world::CompilerWorld> {
         &self.association.world
@@ -415,6 +438,7 @@ impl RuntimeBindingInterfaceReservation {
 pub struct RuntimeHostBindingAdmission {
     reservation: Arc<RuntimeBindingInterfaceReservation>,
     pub(super) prototype: Arc<super::resident::HostBindingPrototype>,
+    private_preparation: Option<Arc<PrivateHostCarrierPreparation>>,
 }
 
 impl std::ops::Deref for RuntimeHostBindingAdmission {
@@ -512,6 +536,40 @@ impl PersistentSession {
         binding: String,
         prototype: Arc<super::resident::HostBindingPrototype>,
     ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
+        self.admit_host_binding_interface_with_preparation(scope, binding, prototype, None)
+    }
+
+    pub(super) fn admit_private_host_binding_interface(
+        &mut self,
+        preparation: Arc<PrivateHostCarrierPreparation>,
+        binding: String,
+        prototype: Arc<super::resident::HostBindingPrototype>,
+    ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
+        self.validate_private_host_carrier(&preparation)?;
+        self.admit_host_binding_interface_with_preparation(
+            preparation.scope(),
+            binding,
+            prototype,
+            Some(preparation),
+        )
+    }
+
+    fn admit_host_binding_interface_with_preparation(
+        &mut self,
+        scope: ScopeId,
+        binding: String,
+        prototype: Arc<super::resident::HostBindingPrototype>,
+        private_preparation: Option<Arc<PrivateHostCarrierPreparation>>,
+    ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
+        if private_preparation.is_none()
+            && self
+                .source_lease_in(scope)?
+                .private_lifecycle
+                .get()
+                .is_some()
+        {
+            return Err(SessionError::WorldCellRequiresServicePreparation);
+        }
         let reservation = self.admit_binding_interface(
             scope,
             binding,
@@ -521,6 +579,7 @@ impl PersistentSession {
         Ok(Arc::new(RuntimeHostBindingAdmission {
             reservation,
             prototype,
+            private_preparation,
         }))
     }
 
@@ -571,6 +630,9 @@ impl PersistentSession {
         admission: &RuntimeHostBindingAdmission,
         interface: &tidepool_toolchain::checked_cell::ExactHostBindingInterface,
     ) -> Result<(), SessionError> {
+        if let Some(preparation) = &admission.private_preparation {
+            self.validate_private_host_carrier(preparation)?;
+        }
         self.consume_binding_interface(&admission.reservation, interface)
     }
 }
@@ -1346,6 +1408,7 @@ enum RuntimeCellPurpose {
         binding: String,
         expected: super::resident::HostBindingType,
         authority_digest: [u8; 32],
+        private_preparation: Option<Arc<PrivateHostCarrierPreparation>>,
     },
 }
 
@@ -1376,6 +1439,7 @@ impl RuntimeCellPurpose {
                 binding,
                 expected,
                 authority_digest,
+                ..
             } => {
                 frame(b"TidepoolHostCarrierAdmission2");
                 frame(authority_digest);
@@ -3656,6 +3720,69 @@ impl PersistentSession {
             })
             .collect()
     }
+    pub fn prepare_private_host_carrier(
+        &self,
+        execution: Arc<PrivateExecutionAdmission>,
+    ) -> Result<Arc<PrivateHostCarrierPreparation>, SessionError> {
+        let association = self.current_private_world_association(&execution)?;
+        let state = execution.state.lock();
+        if state.phase != PrivateExecutionPhase::Open {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let mode = match &state.authored {
+            PrivateAuthoredProgram::Ready(frontier)
+                if frontier.matches_world(&association.world) =>
+            {
+                PrivateCarrierMode::Ready(frontier.clone())
+            }
+            PrivateAuthoredProgram::Active {
+                admission_digest,
+                predecessor,
+                ..
+            } if Arc::ptr_eq(predecessor, &association.world) => PrivateCarrierMode::Active {
+                admission_digest: *admission_digest,
+            },
+            _ => return Err(SessionError::WorldCellPublicationIncomplete),
+        };
+        drop(state);
+        Ok(Arc::new(PrivateHostCarrierPreparation {
+            execution,
+            association,
+            mode,
+        }))
+    }
+
+    fn validate_private_host_carrier(
+        &self,
+        preparation: &PrivateHostCarrierPreparation,
+    ) -> Result<(), SessionError> {
+        let current = self.current_private_world_association(&preparation.execution)?;
+        let state = preparation.execution.state.lock();
+        let same_mode = match (&preparation.mode, &state.authored) {
+            (PrivateCarrierMode::Ready(captured), PrivateAuthoredProgram::Ready(current)) => {
+                Arc::ptr_eq(captured, current)
+            }
+            (
+                PrivateCarrierMode::Active {
+                    admission_digest: captured,
+                },
+                PrivateAuthoredProgram::Active {
+                    admission_digest: current,
+                    predecessor,
+                    ..
+                },
+            ) => captured == current && Arc::ptr_eq(predecessor, preparation.world()),
+            _ => false,
+        };
+        if state.phase != PrivateExecutionPhase::Open
+            || !same_mode
+            || !Arc::ptr_eq(&current.world, preparation.world())
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(())
+    }
+
     pub(super) fn consume_host_carrier_reservation(
         &self,
         admission: &Arc<RuntimeCheckedItemAdmission>,
@@ -3666,6 +3793,13 @@ impl PersistentSession {
         let store = self.held_admission_store()?;
         let prefix = admission.prefix();
         prefix.settled.checkpoint()?;
+        if let RuntimeCellPurpose::HostCarrier {
+            private_preparation: Some(preparation),
+            ..
+        } = &prefix.admission.purpose
+        {
+            self.validate_private_host_carrier(preparation)?;
+        }
         let mut state = prefix.state.lock();
         let scope = prefix.admission.scope;
         if prefix.admission.host_carrier() != Some((binding, expected))
@@ -4610,6 +4744,13 @@ impl PersistentSession {
         else {
             return Err(SessionError::StaleStagedDeclaration);
         };
+        if let RuntimeCellPurpose::HostCarrier {
+            private_preparation: Some(preparation),
+            ..
+        } = &admission.purpose
+        {
+            self.validate_private_host_carrier(preparation)?;
+        }
         let execution = admission.private_execution();
         let preparation = match (execution, preparation.as_ref()) {
             (Some(execution), Some(snapshot)) if Arc::ptr_eq(&snapshot.execution, execution) => {
@@ -4854,6 +4995,8 @@ impl PersistentSession {
             .cloned()
             .ok_or(SessionError::MissingPublishedCompilerWorld(scope))?;
         let original_source = execution.original_source()?;
+        original_source.validate_source_issuer()?;
+        self.validate_lexical_scope_lease(scope, &execution.scope_lease)?;
         if !Arc::ptr_eq(&association.base.owner, self.admission_owner())
             || association.base.epoch != self.admission_owner().epoch()
             || !self.inspection_world_base_is_current(
@@ -5473,6 +5616,14 @@ impl PersistentSession {
         expected: super::resident::HostBindingType,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        if self
+            .source_lease_in(scope)?
+            .private_lifecycle
+            .get()
+            .is_some()
+        {
+            return Err(SessionError::WorldCellRequiresServicePreparation);
+        }
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         if plan.items().len() != 1
             || plan.items()[0].kind() != Kind::Bind
@@ -5499,6 +5650,7 @@ impl PersistentSession {
                 binding,
                 expected,
                 authority_digest,
+                private_preparation: None,
             },
             compile_inputs,
         )
@@ -6329,6 +6481,52 @@ impl PersistentSession {
         expected: super::resident::HostBindingType,
         authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        if self
+            .source_lease_in(scope)?
+            .private_lifecycle
+            .get()
+            .is_some()
+        {
+            return Err(SessionError::WorldCellRequiresServicePreparation);
+        }
+        self.admit_world_planned_host_carrier(
+            scope,
+            plan,
+            binding,
+            expected,
+            authority_digest,
+            None,
+        )
+    }
+
+    pub fn admit_world_planned_private_host_carrier(
+        &mut self,
+        preparation: Arc<PrivateHostCarrierPreparation>,
+        plan: super::turn::RuntimeWorldCellPlan,
+        binding: String,
+        expected: super::resident::HostBindingType,
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.validate_private_host_carrier(&preparation)?;
+        self.admit_world_planned_host_carrier(
+            preparation.scope(),
+            plan,
+            binding,
+            expected,
+            authority_digest,
+            Some(preparation),
+        )
+    }
+
+    fn admit_world_planned_host_carrier(
+        &mut self,
+        scope: ScopeId,
+        plan: super::turn::RuntimeWorldCellPlan,
+        binding: String,
+        expected: super::resident::HostBindingType,
+        authority_digest: [u8; 32],
+        private_preparation: Option<Arc<PrivateHostCarrierPreparation>>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         let (plan, operand) = plan.into_parts();
         if operand.is_some() || plan.operand().is_some() {
             return Err(SessionError::StaleStagedDeclaration);
@@ -6401,6 +6599,7 @@ impl PersistentSession {
                 binding,
                 expected,
                 authority_digest,
+                private_preparation,
             },
             retained_scope,
             original_source,

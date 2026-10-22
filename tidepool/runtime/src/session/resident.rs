@@ -4624,6 +4624,26 @@ where
         Ok(super::PrivateCellPreparation { snapshot, operand })
     }
 
+    pub fn prepare_private_host_carrier(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+    ) -> Result<Arc<super::PrivateHostCarrierPreparation>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.prepare_private_host_carrier(execution)
+    }
+
+    pub fn admit_world_planned_private_host_carrier(
+        &mut self,
+        preparation: Arc<super::PrivateHostCarrierPreparation>,
+        plan: super::turn::RuntimeWorldCellPlan,
+        binding: String,
+        expected: HostBindingType,
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_world_planned_private_host_carrier(preparation, plan, binding, expected, authority_digest)
+    }
+
     pub fn private_publication_diagnostic(
         &self,
         execution: &super::PrivateExecutionAdmission,
@@ -6598,6 +6618,22 @@ where
         }
         self.state
             .admit_host_binding_interface(scope, binding, prototype)
+            .map_err(ResidentError::Session)
+    }
+
+    pub fn admit_private_host_binding_interface(
+        &mut self,
+        preparation: Arc<super::PrivateHostCarrierPreparation>,
+        binding: String,
+        prototype: Arc<HostBindingPrototype>,
+    ) -> Result<Arc<super::RuntimeHostBindingAdmission>, ResidentError> {
+        self.settle_dropped_custody();
+        if self.run_context.lexical_scope != preparation.scope()
+            || !self.host_binding_prototypes.iter().any(|original| Arc::ptr_eq(original, &prototype))
+        {
+            return Err(ResidentError::UnsupportedCheckedTurn);
+        }
+        self.state.admit_private_host_binding_interface(preparation, binding, prototype)
             .map_err(ResidentError::Session)
     }
 
