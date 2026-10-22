@@ -120,6 +120,7 @@ fn transitive_oracle(
                     .planned_edges(
                         &state,
                         &selected,
+                        &selected,
                         &BTreeSet::from([PlannedTarget::NewGroup(key)]),
                         NativeClosureStage::ColdValidation,
                         &BTreeMap::new(),
