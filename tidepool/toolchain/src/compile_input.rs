@@ -852,9 +852,31 @@ mod tests {
                 .unwrap();
         let artifacts = crate::artifact_inventory::ArtifactInventory::default().empty_view();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let entries = vec![Arc::new(
+            crate::artifact_inventory::ArtifactEntry::canonical(
+                crate::certified_products::fixture_source_module_interface(
+                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                        producer,
+                    )
+                    .sha256(),
+                    "main",
+                    "Root",
+                    Sha256::digest(source).into(),
+                    BTreeMap::new(),
+                    None,
+                ),
+            ),
+        )];
+        let artifacts = artifacts
+            .inventory()
+            .admit_shared(&artifacts, entries.clone())
+            .unwrap();
+        let projection =
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)
+                .unwrap();
         let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &crate::artifact_inventory::CompilerInputProjection::default(),
+                &projection,
                 &artifacts.metadata_snapshot(),
                 &validation.inventory,
             )
@@ -862,14 +884,25 @@ mod tests {
         let physical = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &artifacts,
-            Vec::new(),
+            entries,
             &mut validation,
         )
         .unwrap();
-        seal(
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("Root.hs");
+        std::fs::write(&input, source).unwrap();
+        let worker_bytes = serde_json::to_vec(&evidence).unwrap();
+        let admission = crate::artifacts::admit_compiler_source(
+            &validation.inventory,
+            &worker_bytes,
+            &input,
+            source,
+        )
+        .unwrap();
+        let proof = seal(
             producer,
             &[],
-            &evidence,
+            &admission,
             &ValidatedInputPackages::fixture(BTreeMap::new()),
             source,
             "root",
@@ -883,13 +916,19 @@ mod tests {
             Default::default(),
         )
         .unwrap()
-        .expect("ordinary compiler issuer admits complete fixture inputs")
+        .expect("ordinary compiler issuer admits complete fixture inputs");
+        let roots = proof.original_execution.source_scope().rows();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].owner.unit, "main");
+        assert_eq!(roots[0].owner.module, "Root");
+        assert!(roots[0].imports.is_empty());
+        proof
     }
 
     fn original_context(
         proof: &SealedOriginalCompileInput,
     ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
-        proof
+        let context = proof
             .validated_original_source(
                 &proof.target,
                 &proof.groups,
@@ -901,7 +940,9 @@ mod tests {
             .unwrap()
             .project_type_interfaces(&[], &[])
             .map(Arc::new)
-            .unwrap()
+            .unwrap();
+        assert!(context.source_scope().rows().is_empty());
+        context
     }
 
     #[test]

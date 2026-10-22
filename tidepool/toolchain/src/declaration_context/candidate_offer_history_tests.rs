@@ -61,6 +61,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     let context = |offers: Vec<IssuedNativeOffer>| {
         ExactDeclarationContext::from_facts(DeclarationContextFacts {
             producer: producer.sha256(),
+            source_scope: SourceLexicalScope::default(),
             compiler_support: recover_fixture_compiler_support(
                 projection.clone(),
                 view.clone(),
@@ -200,6 +201,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     // Optional availability cannot compete with an explicitly selected A.
     let selected_a = ExactDeclarationContext::from_facts(DeclarationContextFacts {
         producer: producer.sha256(),
+        source_scope: SourceLexicalScope::default(),
         compiler_support: issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[a.clone()]).unwrap(),
             historical,
