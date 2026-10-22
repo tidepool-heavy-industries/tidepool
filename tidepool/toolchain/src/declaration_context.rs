@@ -2007,6 +2007,28 @@ impl RequestNativeAvailability {
         self.0.values()
     }
 
+    /// Exact offer contributions named by these issued permissions. Retaining
+    /// their payload and group nodes keeps native custody without granting
+    /// compiler roles or selecting executable target roots.
+    pub(crate) fn custody_contributions(
+        &self,
+    ) -> Vec<(
+        ArtifactId,
+        Arc<crate::artifact_inventory::NativeOfferContribution>,
+    )> {
+        let mut contributions = Vec::new();
+        let mut seen = BTreeSet::new();
+        for row in self.rows() {
+            let id = row.original_artifact_id();
+            for contribution in row.contributions.iter() {
+                if seen.insert(Arc::as_ptr(contribution) as usize) {
+                    contributions.push((id, Arc::clone(contribution)));
+                }
+            }
+        }
+        contributions
+    }
+
     /// Select one exact payload before checking its issued owner and ordinal.
     /// Classification does not filter these normalized dependency permissions.
     pub(crate) fn dependency_support(

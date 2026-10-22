@@ -7258,6 +7258,25 @@ impl OriginalBindingSelection {
         self.authenticated.belongs_to(basis, operation)
     }
 
+    /// The exact emitted-stage owner, not merely the request-wide acquisition.
+    /// Empty and metadata-only stages share the latter and still require this
+    /// pointer-identity check before they can lend native custody.
+    pub(crate) fn belongs_to_world_stage(
+        &self,
+        stage: &crate::compiler_world::native_demand::CheckedWorldStageNativeInputs,
+        operation: &Arc<InventoryOperation>,
+    ) -> bool {
+        match &self.execution {
+            OriginalBindingExecution::WorldStage(issued) => {
+                Arc::ptr_eq(issued.stage(), stage.stage())
+                    && Arc::ptr_eq(issued.initial_inputs(), stage.initial_inputs())
+                    && Arc::ptr_eq(issued.operation(), stage.operation())
+                    && Arc::ptr_eq(issued.operation(), operation)
+            }
+            OriginalBindingExecution::MetadataOnly | OriginalBindingExecution::Acquired(_) => false,
+        }
+    }
+
     pub(crate) fn metadata_references<'a>(
         &'a self,
         operation: &InventoryOperation,
@@ -7392,15 +7411,9 @@ impl OriginalBindingSelection {
         reference: &ReceiptImportOwner,
         operation: &InventoryOperation,
     ) -> Result<crate::declaration_context::ChosenNativeGroupSupport, crate::CompileError> {
-        let same_stage = match &self.execution {
-            OriginalBindingExecution::WorldStage(issued) => {
-                Arc::ptr_eq(issued.stage(), stage.stage())
-                    && Arc::ptr_eq(issued.initial_inputs(), stage.initial_inputs())
-                    && Arc::ptr_eq(issued.operation(), stage.operation())
-            }
-            _ => false,
-        };
-        if !same_stage {
+        if !std::ptr::eq(operation, stage.operation().as_ref())
+            || !self.belongs_to_world_stage(stage, stage.operation())
+        {
             return Err(crate::CompileError::CompilerEvidence(Box::new(
                 CertificationError::Mismatch(
                     "Original contribution belongs to another World stage",

@@ -192,6 +192,7 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
             request.acquired_uses.keys(),
         )
         .expect("actual request acquisitions authenticate metadata for each emitted stage");
+        assert!(scoped.belongs_to_world_stage(&selected, selected.operation()));
         let other_stage = program
             .stages()
             .iter()
@@ -206,6 +207,15 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
             other.initial_inputs()
         ));
         assert!(Arc::ptr_eq(selected.operation(), other.operation()));
+        let other_scoped = crate::certified_products::OriginalBindingSelection::from_world_stage(
+            Arc::new(other.clone()),
+            request.acquired_uses.keys(),
+        )
+        .expect("actual request acquisitions authenticate metadata for the other emitted stage");
+        assert!(
+            !other_scoped.belongs_to_world_stage(&selected, selected.operation()),
+            "same request, operation and initial basis cannot substitute another emitted stage"
+        );
         for (reference, acquisition) in &request.acquired_uses {
             let acquired = &request.acquisitions[*acquisition];
             let (acquired_binding, _) = acquired

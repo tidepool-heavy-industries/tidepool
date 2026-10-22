@@ -1703,6 +1703,23 @@ impl SupportDraft {
         self.native_completions = completions;
         Ok(())
     }
+
+    /// Restore the draft invariant after a narrowing operation: every carried
+    /// completion and every issued native permission must still name custody
+    /// owned by the final artifact view.
+    fn retain_runtime_custody(
+        mut self,
+        availability_source: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        let native_custody =
+            availability_source.retain_native_availability_custody(&self.native_availability)?;
+        self.artifacts = self.artifacts.retain_custody(&native_custody)?;
+        for completion in self.native_completions.iter() {
+            crate::host_work::checkpoint()?;
+            self.artifacts = self.artifacts.retain_custody(completion.artifacts())?;
+        }
+        Ok(self)
+    }
 }
 
 /// One authenticated program insertion retains whether the existing full
@@ -2816,14 +2833,14 @@ impl CompilerSourceSupport {
 
     /// Derive a semantic owner from the same acquired cold roles, rows and
     /// exact executable choices. The cold owner is not retained as a parent.
-    pub(crate) fn project_demanded_inputs(
+    fn project_demanded_inputs_draft(
         self: &Arc<Self>,
         demand: &DemandCompilerProjection,
         availability: &crate::declaration_context::RequestNativeAvailability,
         issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
         groups: &crate::declaration_context::DemandCertifiedGroups,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
-    ) -> Result<Arc<Self>, CompileError> {
+    ) -> Result<SupportDraft, CompileError> {
         if !Arc::ptr_eq(self, demand.source_support()) || !groups.belongs_to_source(self) {
             return Err(failure(
                 "demanded semantic inputs have another acquired source owner",
@@ -2980,24 +2997,42 @@ impl CompilerSourceSupport {
             operation,
         )?;
         charge(operation.reserve::<IssuedNativeOffer>(offers.len()))?;
+        Ok(SupportDraft {
+            projection: demand.projection().clone(),
+            artifacts,
+            native_offers: offers.into_values().collect::<Vec<_>>().into(),
+            native_availability: availability.clone(),
+            input_decisions: self
+                .input_decisions
+                .with_recorded_facts(facts.input_decisions.clone()),
+            native_offer_facts: facts.offers.clone(),
+            native_completions: self.native_completions.clone(),
+            native_fact_owner: Some(facts),
+            // The home census belongs to the demanded rows, not to cold
+            // custody or units merely mentioned by another retained row.
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(
+                selected.into_iter().collect(),
+            )),
+        })
+    }
+
+    pub(crate) fn project_demanded_inputs(
+        self: &Arc<Self>,
+        demand: &DemandCompilerProjection,
+        availability: &crate::declaration_context::RequestNativeAvailability,
+        issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
+        groups: &crate::declaration_context::DemandCertifiedGroups,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<Self>, CompileError> {
         Ok(Arc::new(
-            SupportDraft {
-                projection: demand.projection().clone(),
-                artifacts,
-                native_offers: offers.into_values().collect::<Vec<_>>().into(),
-                native_availability: availability.clone(),
-                input_decisions: self
-                    .input_decisions
-                    .with_recorded_facts(facts.input_decisions.clone()),
-                native_offer_facts: facts.offers.clone(),
-                native_completions: self.native_completions.clone(),
-                native_fact_owner: Some(facts),
-                // The home census belongs to the demanded rows, not to cold
-                // custody or units merely mentioned by another retained row.
-                selected: Arc::new(AdmittedCompilerRoles::from_admitted(
-                    selected.into_iter().collect(),
-                )),
-            }
+            self.project_demanded_inputs_draft(
+                demand,
+                availability,
+                issued_delta,
+                groups,
+                operation,
+            )?
+            .retain_runtime_custody(&self.artifacts)?
             .close()?,
         ))
     }
@@ -3019,6 +3054,7 @@ impl CompilerSourceSupport {
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Arc<Self>, CompileError> {
         if !Arc::ptr_eq(stage.operation(), operation)
+            || !original_bindings.belongs_to_world_stage(stage, operation)
             || !original_bindings.belongs_to(
                 &stage.initial_inputs().shared_compiler_source_support(),
                 operation,
@@ -3029,14 +3065,14 @@ impl CompilerSourceSupport {
                 "World prefix projection cannot issue native group demand",
             ));
         }
-        let projected = self.project_demanded_inputs(
+        let mut projected = self.project_demanded_inputs_draft(
             demand,
             availability,
             issued_delta,
             prefix_groups,
             operation,
         )?;
-        let mut artifacts = projected
+        projected.artifacts = projected
             .artifacts
             .with_world_stage_initial_inputs(stage, original_bindings)?
             .retain_original_binding_metadata(original_bindings, operation)?;
@@ -3150,11 +3186,11 @@ impl CompilerSourceSupport {
                 .iter()
                 .map(|(_, row)| (anchors.artifacts.clone(), row.clone()))
                 .collect::<Vec<_>>();
-            artifacts = artifacts.append_type_interfaces(&additions)?;
+            projected.artifacts = projected.artifacts.append_type_interfaces(&additions)?;
         }
-        let mut support = projected.as_ref().clone();
-        support.artifacts = artifacts;
-        Ok(Arc::new(support))
+        Ok(Arc::new(
+            projected.retain_runtime_custody(&self.artifacts)?.close()?,
+        ))
     }
 
     #[tracing::instrument(
@@ -5318,7 +5354,7 @@ impl CompilerSourceSupport {
         SupportDraft {
             native_availability: self
                 .native_availability
-                .for_compiler_roles(&projection, &artifacts)?,
+                .for_compiler_roles(&projection, &self.artifacts)?,
             projection,
             artifacts,
             native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),
@@ -5328,6 +5364,7 @@ impl CompilerSourceSupport {
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: decisions,
         }
+        .retain_runtime_custody(&self.artifacts)?
         .close()
     }
 
@@ -7852,6 +7889,72 @@ mod tests {
             rebuilt.native_fact_owner()
         ));
         assert_eq!(repeated.native_completions(), rebuilt.native_completions());
+    }
+
+    #[test]
+    fn source_support_preserves_completion_custody_after_role_narrowing() {
+        let inventory = ArtifactInventory::default();
+        let selected = Arc::new(crate::artifact_inventory::tests::entry("SourceRoot", &[]));
+        let completion_only = Arc::new(crate::artifact_inventory::tests::entry(
+            "CompletionOnly",
+            &[],
+        ));
+        let full = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![Arc::clone(&selected), Arc::clone(&completion_only)],
+            )
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
+        let support =
+            CompilerSourceSupport::from_selected_issuance(projection, full.clone()).unwrap();
+
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let completion_view = full
+            .select_roots(vec![completion_only.descriptor.id])
+            .unwrap();
+        let packages = super::super::package_code::IssuedPackageCodeGraph::issue(
+            &completion_view,
+            Vec::new(),
+            Vec::new(),
+            &[],
+            &operation,
+        )
+        .unwrap();
+        let completion = IssuedNativeSelectionCompletion::issue_parts(
+            [7; 32],
+            [9; 32],
+            completion_view,
+            Default::default(),
+            packages,
+            Arc::from([]),
+            &operation,
+        )
+        .unwrap();
+        let mut draft = support.reopen();
+        draft
+            .append_completion_refs(&NativeSelectionCompletions::one(Arc::clone(&completion)))
+            .unwrap();
+        let support = draft.close().unwrap();
+
+        let narrowed = support
+            .source_support(&BTreeSet::from([selected.descriptor.owner.clone()]))
+            .unwrap();
+        assert!(narrowed
+            .artifacts
+            .artifact_ids()
+            .contains(&completion_only.descriptor.id));
+        assert_eq!(narrowed.native_completions().iter().count(), 1);
+        assert!(narrowed
+            .native_completions()
+            .iter()
+            .any(|actual| Arc::ptr_eq(actual, &completion)));
+        assert!(!narrowed
+            .projection()
+            .snapshot_roles()
+            .contains_key(&completion_only.descriptor.owner));
     }
 
     #[test]
