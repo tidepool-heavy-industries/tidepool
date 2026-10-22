@@ -26282,10 +26282,13 @@ pub(crate) mod tests {
                         assert!(
                             matches!(
                                 &denied,
-                                Err(crate::CompileError::ExtractFailed(message))
-                                    if message == "artifact inventory: target produced group was not issued"
+                                Err(crate::CompileError::CompilerEvidence(error))
+                                    if matches!(error.as_ref(),
+                                        CertificationError::OriginalAvailability(reason)
+                                            if reason.owner == *dependency.owner()
+                                                && reason.original_ordinal == 9001)
                             ),
-                            "completed Empty output must refuse its own body: {denied:?}"
+                            "dependent execution must refuse its exact unavailable child: {denied:?}"
                         );
                     }
                 }

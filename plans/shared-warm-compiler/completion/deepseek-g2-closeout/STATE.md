@@ -3,12 +3,15 @@
 **Implementation active; G2 unqualified.** Integration branch
 `root/g2-final-20261021`, checkout
 `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-The current code candidate is `4f41d59996`. Text certificate metadata repair
+The current integrated code checkpoint is `c623435b35`, with a subsequent
+test-assertion repair in progress. Text certificate metadata repair
 compiled and passed its former boundary at `cd2809c410`; Text then failed at
 native planning because an exact acquired historical dependency was looked up
 in the narrower compiler namespace. `2dee420781` separates those input views;
-three focused certificate/availability controls and a strengthened existing
-historical-child test are integrated but not yet executed.
+three focused certificate/availability controls pass. The strengthened existing
+historical-child test required production cohort issuance before its demands;
+it now reaches a typed unavailable-child refusal that its assertion must match.
+Full Text execution after the acquired-payload repair remains pending.
 Root owns integration and publication to `github`; `origin` is local replication.
 
 [NEXT-WAVE](NEXT-WAVE.md) owns the accepted design and assignments;
@@ -44,11 +47,23 @@ Acknowledgement1 failed after 154.10s at final publication. The new structured
 trace identifies `Tidepool.Effects.Core.error`, ordinal 5536, slot 1:
 `GHC.Internal.Err.error` has the same package artifact and ValueId(0), but two
 different package selection scopes. This confirms the conflict rather than
-establishing that those graphs are interchangeable. B/root are reviewing how
-prepared completion custody, actual installed choices and captured instance
-domains should meet. No equality relaxation or broad completion rewrite is
-approved. Dormant declaration birth proofs must remain usable; clearing raw
-completion fields would lose legitimate evidence.
+establishing that those graphs are interchangeable. Completion records are
+compiler proofs needed before execution, not installation receipts. Root has
+withheld the proposed runtime-to-World installed-selector rewrite. The narrower
+candidate is dependency-local PACKAGE proof issuance: currently every fresh
+package in a demand cohort contributes to every binding's scope digest.
+An unrelated root can therefore change a binding's identity. C is adding a
+filterable, bounded, read-only comparison of the actual conflicting reachable
+graphs before this hypothesis can authorize a behavior change. Keep exact
+equality and genuine conflict refusals. Dormant declaration birth proofs remain
+necessary; clearing completion fields would lose legitimate evidence.
+
+At `1eec9c8be1` and `c623435b35`, unit compilation and three certificate/offer
+controls pass; the fourth fails in test setup/assertions, not a proven new
+product defect. The first test repair crosses physical issuance correctly; the
+second checks the actual typed child refusal instead of predicting a later
+generic error. Text was withheld under the four-control gate. No passing joined
+Text or acknowledgement result exists.
 
 Both failed process/compiler cleanups were confirmed. Earlier fixture repairs
 and new component controls still require execution on the joined candidate.
@@ -60,11 +75,12 @@ Do not combine results from different revisions into a qualified suite.
 
 - V: warm joined compilation, then full Text1/acknowledgement1 histories and new
   native/captured-World controls; run both repaired fixture paths.
-- P: actual completed Empty/Partial native-offer controls. Existing sparse
-  representation fixtures do not establish this production boundary.
+- P/root: historical-child control through completed cohort issuance and exact
+  demand refusals; the three other owner-component controls pass.
 - D: independently accepted obsolete sibling API deletion `f23600df8f`, now
   integrated as `e43985078b`; migrated refusal/lifetime tests await execution.
-- B: acknowledgement completion-owner diagnosis and bounded repair.
+- B: dependency-local package issuer proposal; no behavior change authorized
+  before the rooted-graph comparison. C: bounded diagnostic implementation.
 - T: qualification guide integrated; no duplicate exploratory restart needed.
 - Root: critical failure investigation, concrete review, integration and delivery.
 
