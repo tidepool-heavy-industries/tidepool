@@ -416,7 +416,6 @@ pub(crate) fn with_irrelevant_values_named(
 
 pub(crate) fn admit_irrelevant_value_root(
     context: &Arc<ExactDeclarationContext>,
-    selection: &crate::certified_products::CertifiedSourceSelection,
     module: &str,
 ) -> Arc<ExactDeclarationContext> {
     let producer = context.toolchain_identity_sha256();
@@ -442,6 +441,7 @@ pub(crate) fn admit_irrelevant_value_root(
         crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
         Vec::new(),
     ));
+    let interface_id = interface.descriptor.id;
     let view = context
         .artifact_view()
         .inventory()
@@ -451,17 +451,21 @@ pub(crate) fn admit_irrelevant_value_root(
             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    Arc::new(
-        ExactDeclarationContext::from_source_selection(
-            producer,
-            selection,
-            &view,
-            context.lexical_graph().to_vec(),
-            context.original_instance_target().unwrap().clone(),
-            &[],
-        )
-        .unwrap(),
-    )
+    let support = context
+        .compiler_source_support()
+        .retain_custody(&view)
+        .unwrap();
+    let expanded = context
+        .as_ref()
+        .clone()
+        .extend_issued_compiler_support(&support)
+        .unwrap();
+    assert!(expanded.artifact_view().artifact_ids().contains(&interface_id));
+    assert_eq!(
+        expanded.compiler_input_projection(),
+        context.compiler_input_projection()
+    );
+    Arc::new(expanded)
 }
 
 fn display_property_config() -> proptest::test_runner::Config {
@@ -758,17 +762,20 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
         )
         .unwrap();
     let substitute_projection =
-        CompilerInputProjection::from_issued_entries(&[substitute_entry]).unwrap();
-    let substitute_selection =
+        CompilerInputProjection::from_issued_entries(&[substitute_entry.clone()]).unwrap();
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let mut substitute_selection =
         crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
             &substitute_projection,
             &substitute_view.metadata_snapshot(),
-            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            &validation.inventory,
         )
         .unwrap();
-    let substitute_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-        &substitute_selection,
+    let substitute_output = crate::declaration_context::CapturedCompilerStage::issue(
+        &mut substitute_selection,
         &substitute_view,
+        vec![substitute_entry],
+        &mut validation,
     )
     .unwrap();
     let substitution_directory = tempfile::tempdir().unwrap();
@@ -778,7 +785,7 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
                 substitution_directory.path(),
                 PRODUCER,
                 None,
-                Some(substitute_output),
+                Some(substitute_output.compiler_inputs().as_ref().clone()),
             )
             .is_err(),
         "an equal interface cannot substitute another issued implementation"
@@ -882,40 +889,26 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
         .unwrap();
     let projection =
         CompilerInputProjection::from_issued_entries(&[fixture.original.clone()]).unwrap();
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-        &projection,
-        &artifacts.metadata_snapshot(),
-        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
-    let candidate =
-        crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &artifacts)
-            .unwrap();
-    let support =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&candidate)
-            .unwrap();
-    let issued = Arc::new(
-        ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_issued_compiler_support(&support)
-            .unwrap(),
-    );
-    let issued_directory = tempfile::tempdir().unwrap();
-    let issued_request = issued
-        .prepare_compilation(issued_directory.path(), PRODUCER)
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let mut selection =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &artifacts.metadata_snapshot(),
+            &validation.inventory,
+        )
         .unwrap();
-    let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-        issued_request.compiler_inputs(),
-        &validation.inventory,
+    let candidate = crate::declaration_context::CapturedCompilerStage::issue(
+        &mut selection,
+        &artifacts,
+        vec![fixture.original.clone()],
+        &mut validation,
     )
     .unwrap();
     let target = fixture.original.descriptor.owner.clone();
     let context = Arc::new(
-        ExactDeclarationContext::from_source_selection(
+        ExactDeclarationContext::from_issued_output(
             producer,
-            &selection,
-            issued_request.compiler_inputs().artifacts(),
+            candidate.output(),
             vec![ExactLexicalNode {
                 owner: target.clone(),
                 imports: vec![],

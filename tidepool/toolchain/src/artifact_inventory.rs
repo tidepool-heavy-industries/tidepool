@@ -12044,16 +12044,14 @@ mod tests {
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
             );
             let before_source_context = inventory.metrics().issued_scope_nodes;
-            let context =
-                crate::declaration_context::ExactDeclarationContext::from_source_selection(
-                    producer_sha256,
-                    &source_selection,
-                    &prefix,
-                    lexical.clone(),
-                    native.descriptor.owner.clone(),
-                    &[],
-                )
-                .unwrap();
+            let context = crate::declaration_context::ExactDeclarationContext::from_issued_output(
+                producer_sha256,
+                fixed.captured_stage().output(),
+                lexical.clone(),
+                native.descriptor.owner.clone(),
+                &[],
+            )
+            .unwrap();
             assert_eq!(
                 inventory.metrics().issued_scope_nodes,
                 before_source_context
@@ -12068,7 +12066,6 @@ mod tests {
             if test_display_projection {
                 let expanded = crate::activation_preview::native_declaration_input_tests::admit_irrelevant_value_root(
                     &Arc::new(context.clone()),
-                    &source_selection,
                     "Tidepool.Session.ProjectionAudit.G100",
                 );
                 let prototype =
@@ -12225,16 +12222,22 @@ mod tests {
                 .admit_shared(&inventory.empty_view(), vec![hidden.clone()])
                 .unwrap();
             let expanded = prefix.merge_fixture_selections(&hidden_view).unwrap();
-            let missing_role_context =
-                crate::declaration_context::ExactDeclarationContext::from_source_selection(
-                    producer_sha256,
-                    &source_selection,
-                    &expanded,
-                    lexical.clone(),
-                    native.descriptor.owner.clone(),
-                    &[],
-                )
+            let expanded_support = context
+                .compiler_source_support()
+                .retain_custody(&expanded)
                 .unwrap();
+            let missing_role_context = context
+                .clone()
+                .extend_issued_compiler_support(&expanded_support)
+                .unwrap();
+            assert!(missing_role_context
+                .artifact_view()
+                .artifact_ids()
+                .contains(&hidden.descriptor.id));
+            assert_eq!(
+                missing_role_context.compiler_input_projection(),
+                context.compiler_input_projection()
+            );
             let value_with_hidden = value
                 .merge_fixture_selections(&{
                     let projection =
@@ -12319,25 +12322,28 @@ mod tests {
                 let requirements =
                     NativeOriginalRequirement::for_projection(&projection, &view, &[]).unwrap();
                 assert_eq!(requirements.len(), 1);
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let mut selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
                         &view.metadata_snapshot(),
-                        &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                        &validation.inventory,
                     )
                     .unwrap();
                 selection
                     .with_new_product_dependencies(&view.metadata_snapshot(), &requirements)
                     .unwrap();
-                let issued =
-                    crate::declaration_context::CapturedCompilerStage::issue(
-                        &mut selection,
-                        &view,
-                        vec![native.clone()],
-                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default())
-                    .unwrap();
+                let issued = crate::declaration_context::CapturedCompilerStage::issue(
+                    &mut selection,
+                    &view,
+                    vec![native.clone()],
+                    &mut validation,
+                )
+                .unwrap();
                 let output = issued;
-                let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+                let completed =
+                    CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
                 let closure = selection
                     .selected_original_closure(output.issued_artifacts())
                     .unwrap();
@@ -12495,9 +12501,7 @@ mod tests {
         use crate::certified_products::{
             CertificationError, CertifiedSourceSelection, InputDecisionRefusal,
         };
-        use crate::declaration_context::{
-            ExactDeclarationContext, OriginalCompilerInputs, ProtectedScaffoldRequirements,
-        };
+        use crate::declaration_context::{ExactDeclarationContext, ProtectedScaffoldRequirements};
         for physical_choice in [false, true] {
             let inventory = ArtifactInventory::default();
             let native = Arc::new(issued_native_groups(
@@ -12526,15 +12530,21 @@ mod tests {
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            let operation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut operation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let mut current = CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
                 &operation.inventory,
             )
             .unwrap();
-            let initial = OriginalCompilerInputs::from_selection(&current, &physical).unwrap();
-            let unselected = CompilerSourceSupport::close_complete_output(&initial)
+            let issued = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut current,
+                &physical,
+                entries,
+                &mut operation,
+            )
+            .unwrap();
+            let unselected = CompilerSourceSupport::close_complete_output(issued.compiler_inputs())
                 .unwrap()
                 .close_request(None, &ProtectedScaffoldRequirements::default())
                 .unwrap();
@@ -12544,14 +12554,6 @@ mod tests {
                 .iter()
                 .all(|offer| offer.is_full()));
 
-            // Finish and select through the same actual producer before input use.
-            let issued = crate::declaration_context::CapturedCompilerStage::issue(
-                &mut current,
-                &physical,
-                entries,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
             let closure = current
                 .selected_original_closure(issued.issued_artifacts())
                 .unwrap();
@@ -12563,7 +12565,7 @@ mod tests {
             assert_eq!(expected[0].binding.artifact(), key.artifact);
             assert_eq!(expected[0].original_ordinal, key.original_ordinal);
             let output = issued;
-            let selected = CompilerSourceSupport::close_complete_output(&output)
+            let selected = CompilerSourceSupport::close_complete_output(output.compiler_inputs())
                 .unwrap()
                 .certify_original_closure(&closure)
                 .unwrap();
@@ -12755,6 +12757,7 @@ mod tests {
             let requirements =
                 NativeOriginalRequirement::for_projection(&projection, &physical, &[]).unwrap();
             assert_eq!(requirements.len(), 1);
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
@@ -12765,15 +12768,16 @@ mod tests {
             selection
                 .with_new_product_dependencies(&physical.metadata_snapshot(), &requirements)
                 .unwrap();
-            let issued =
-                crate::declaration_context::CapturedCompilerStage::issue(
-                    &mut selection,
-                    &physical,
-                    vec![native.clone()],
-                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default())
-                .unwrap();
+            let issued = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                &physical,
+                vec![native.clone()],
+                &mut validation,
+            )
+            .unwrap();
             let output = issued;
-            let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+            let completed =
+                CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
             let closure = selection
                 .selected_original_closure(output.issued_artifacts())
                 .unwrap();
@@ -12794,18 +12798,24 @@ mod tests {
             // two different canonical artifacts for Values cannot both win.
             let projection =
                 CompilerInputProjection::from_issued_entries(&[values.clone()]).unwrap();
-            let selection =
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &physical.metadata_snapshot(),
                     &validation.inventory,
                 )
                 .unwrap();
-            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &selection, &physical,
+            let output = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                &physical,
+                vec![values.clone()],
+                &mut validation,
             )
             .unwrap();
-            value_sources.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
+            value_sources.push(
+                CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap(),
+            );
         }
         assert!(matches!(&value_sources[0].merge(&value_sources[1]),
             Err(CompileError::ArtifactInventory(error))
@@ -13471,19 +13481,25 @@ mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
-            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let selection =
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &physical.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .unwrap();
-            let inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &selection, &physical,
+            let inputs = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                &physical,
+                vec![entry.clone()],
+                &mut validation,
             )
             .unwrap();
-            let support = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+            let support =
+                CompilerSourceSupport::close_complete_output(inputs.compiler_inputs()).unwrap();
             context = context.extend_issued_compiler_support(&support).unwrap();
             versions.push(Arc::new(context.clone()));
         }
@@ -16059,18 +16075,24 @@ mod tests {
             ),
         ] {
             let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            let selection =
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &physical.metadata_snapshot(),
-                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                    &validation.inventory,
                 )
                 .unwrap();
-            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &selection, physical,
+            let output = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                physical,
+                entries,
+                &mut validation,
             )
             .unwrap();
-            produced.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
+            produced.push(
+                CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap(),
+            );
         }
         let root_output = &produced[0];
         let sibling_output = &produced[1];
@@ -16122,19 +16144,12 @@ mod tests {
         .unwrap();
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let types = ordinary.interface_only();
-        let type_selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &types,
-                &carriers.metadata_snapshot(),
-                &validation.inventory,
-            )
-            .unwrap();
-        let type_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &type_selection,
-            &carriers,
+        let types = crate::declaration_context::recover_fixture_compiler_support(
+            types,
+            carriers.clone(),
+            [],
         )
         .unwrap();
-        let types = CompilerSourceSupport::close_complete_output(&type_output).unwrap();
         let retained = types
             .retain_custody(issuer)
             .unwrap()
@@ -16399,19 +16414,24 @@ mod tests {
             .unwrap();
         let alternate_projection =
             CompilerInputProjection::from_issued_entries(&alternate_entries).unwrap();
-        let alternate_selection =
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut alternate_selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &alternate_projection,
                 &alternate_physical.metadata_snapshot(),
                 &validation.inventory,
             )
             .unwrap();
-        let alternate_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &alternate_selection,
+        let alternate_output = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut alternate_selection,
             &alternate_physical,
+            alternate_entries,
+            &mut validation,
         )
         .unwrap();
-        let alternate = CompilerSourceSupport::close_complete_output(&alternate_output).unwrap();
+        let alternate =
+            CompilerSourceSupport::close_complete_output(alternate_output.compiler_inputs())
+                .unwrap();
         facts.extend(
             NativeOriginalRequirement::for_projection(&projection, alternate.artifacts(), &[])
                 .unwrap(),
@@ -22103,17 +22123,23 @@ mod tests {
             after.admission_owner_lookups
         );
         let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
-        let selection =
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &view.metadata_snapshot(),
-                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                &validation.inventory,
             )
             .unwrap();
-        let output =
-            crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &view)
-                .unwrap();
-        let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let output = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &view,
+            view.entries(),
+            &mut validation,
+        )
+        .unwrap();
+        let support =
+            CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
         let before_merge = inventory.metrics();
         let merged = support.merge(&support).unwrap();
         assert_eq!(
