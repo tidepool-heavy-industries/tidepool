@@ -1,12 +1,12 @@
 //! Atomic installation of mutually importing native group images.
 
 use super::super::{
-    DemandedHomeImage, DemandedImage, DemandedPackageImage, InheritedSourceDemand,
-    NativeArtifactBinding, NativeHomeBinding, NativeInstanceLease, PackageInstanceLease,
-    SourceBinder, SourceInstanceLease,
+    DemandedPackageImage, InheritedSourceDemand, NativeInstanceLease, PackageInstanceLease,
+    PreparedNativeCode, SourceBinder, SourceInstanceLease,
 };
 use super::*;
 use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
+use tidepool_repr::native_code::{NativeCodeBody, NativeCodeId};
 
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
@@ -157,6 +157,7 @@ pub struct BatchLeaseRequest {
 #[derive(Clone)]
 pub struct NativeExportRequest {
     pub(super) image: Arc<CompiledProgram>,
+    code: Arc<PreparedNativeCode>,
     pub(super) evidence: LeaseRequestEvidence,
     pub(super) binding: ValueId,
     pub(super) domain: super::super::SourceInstanceDomain,
@@ -165,12 +166,13 @@ pub struct NativeExportRequest {
 #[derive(Clone)]
 pub(super) enum LeaseRequestEvidence {
     Home {
-        key: NativeHomeBinding,
+        key: NativeCodeId,
+        original_ordinal: u32,
         owner: CachedHomeOwner,
         binder: SourceBinder,
     },
     Package {
-        key: NativeArtifactBinding,
+        key: NativeCodeId,
         image: Arc<DemandedPackageImage>,
     },
 }
@@ -182,109 +184,82 @@ impl NativeExportRequest {
     pub fn value(&self) -> ValueId {
         self.binding
     }
-    pub fn for_home(
-        demanded: &DemandedImage,
-        key: NativeHomeBinding,
+    /// The sole export constructor derives both image and identity from one
+    /// prepared linked-code owner; callers cannot pair an arbitrary key/image.
+    pub(in crate::prepared_program) fn from_code(
+        code: Arc<PreparedNativeCode>,
         domain: super::super::SourceInstanceDomain,
         value: ValueId,
     ) -> Result<Self, ExecutionError> {
-        Self::home_export(
-            &demanded.group().code_identity(),
-            demanded.image(),
-            key,
-            domain,
-            value,
-        )
-    }
-
-    pub fn for_home_code(
-        demanded: &DemandedHomeImage,
-        key: NativeHomeBinding,
-        domain: super::super::SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<Self, ExecutionError> {
-        Self::home_export(demanded.code(), demanded.image(), key, domain, value)
-    }
-
-    fn home_export(
-        source: &tidepool_repr::execution_schema::CertifiedGroupCode,
-        image: &Arc<CompiledProgram>,
-        key: NativeHomeBinding,
-        domain: super::super::SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<Self, ExecutionError> {
-        let export = image
-            .top_exports
-            .get(&value)
-            .ok_or(ExecutionError::MissingEntry(value))?;
-        if source.original_ordinal() != key.original_ordinal
-            || !source.binders().contains(&export.identity)
-        {
-            return Err(ExecutionError::BatchSourceContract(Box::new(
-                export.identity.clone(),
-            )));
-        }
-        Ok(Self {
-            image: Arc::clone(image),
-            binding: value,
-            domain,
-            evidence: LeaseRequestEvidence::Home {
-                key,
-                owner: source.owner().clone(),
-                binder: SourceBinder {
-                    version: source.owner().module_version.clone(),
-                    binder: export.identity.clone(),
-                },
-            },
-        })
-    }
-
-    pub fn for_package(
-        demanded: Arc<DemandedPackageImage>,
-        key: NativeArtifactBinding,
-        domain: super::super::SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<Self, ExecutionError> {
-        let export = demanded
+        let export = code
             .image()
             .top_exports
             .get(&value)
             .ok_or(ExecutionError::MissingEntry(value))?;
-        if !demanded.group().binders().contains(&export.identity) {
-            return Err(ExecutionError::BatchSourceContract(Box::new(
-                export.identity.clone(),
-            )));
-        }
+        let key = code.code().id();
+        let evidence = match code.code().body() {
+            NativeCodeBody::Home(body) => {
+                if !body.binders().contains(&export.identity) {
+                    return Err(ExecutionError::BatchSourceContract(Box::new(
+                        export.identity.clone(),
+                    )));
+                }
+                LeaseRequestEvidence::Home {
+                    key,
+                    original_ordinal: body.original_ordinal(),
+                    owner: body.owner().clone(),
+                    binder: SourceBinder {
+                        version: body.owner().module_version.clone(),
+                        binder: export.identity.clone(),
+                    },
+                }
+            }
+            NativeCodeBody::Package(body) => {
+                if !body.binders().contains(&export.identity) {
+                    return Err(ExecutionError::BatchSourceContract(Box::new(
+                        export.identity.clone(),
+                    )));
+                }
+                let image = code.package_image().ok_or(ExecutionError::Invariant(
+                    "prepared package code lacks its package image",
+                ))?;
+                LeaseRequestEvidence::Package {
+                    key,
+                    image: Arc::clone(image),
+                }
+            }
+        };
         Ok(Self {
-            image: Arc::clone(demanded.image()),
+            image: Arc::clone(code.image()),
+            code,
+            evidence,
             binding: value,
             domain,
-            evidence: LeaseRequestEvidence::Package {
-                key,
-                image: demanded,
-            },
         })
     }
-    pub fn binding_key(&self) -> super::super::NativeBindingKey {
-        match &self.evidence {
-            LeaseRequestEvidence::Home { key, .. } => super::super::NativeBindingKey::Home(*key),
-            LeaseRequestEvidence::Package { key, .. } => {
-                super::super::NativeBindingKey::Package(*key)
-            }
-        }
+
+    pub fn code(&self) -> &Arc<PreparedNativeCode> {
+        &self.code
+    }
+
+    pub fn binding_key(&self) -> NativeCodeId {
+        self.code.code().id()
     }
     pub(super) fn matches_image_evidence(&self, image: &CompiledProgram) -> bool {
         let Some(export) = image.top_exports.get(&self.binding) else {
             return false;
         };
         match &self.evidence {
-            LeaseRequestEvidence::Home { key, owner, binder } => {
+            LeaseRequestEvidence::Home {
+                key: _,
+                original_ordinal,
+                owner,
+                binder,
+            } => {
                 image
                     .certified_source
                     .as_ref()
-                    .is_some_and(|(actual, ordinal)| {
-                        actual == owner && *ordinal == key.original_ordinal
-                    })
+                    .is_some_and(|(actual, ordinal)| actual == owner && ordinal == original_ordinal)
                     && binder.version == owner.module_version
                     && binder.binder == export.identity
             }
@@ -300,18 +275,21 @@ impl NativeExportRequest {
     ) -> NativeInstanceLease {
         let export = &self.image.top_exports[&self.binding];
         match self.evidence {
-            LeaseRequestEvidence::Home { key, owner, binder } => {
-                NativeInstanceLease::Home(SourceInstanceLease::new(
-                    instance,
-                    key,
-                    owner,
-                    key.original_ordinal,
-                    binder,
-                    self.binding,
-                    handle,
-                    export.entry_signature.clone(),
-                ))
-            }
+            LeaseRequestEvidence::Home {
+                key,
+                original_ordinal,
+                owner,
+                binder,
+            } => NativeInstanceLease::Home(SourceInstanceLease::new(
+                instance,
+                key,
+                owner,
+                original_ordinal,
+                binder,
+                self.binding,
+                handle,
+                export.entry_signature.clone(),
+            )),
             LeaseRequestEvidence::Package { key, image } => {
                 NativeInstanceLease::Package(PackageInstanceLease::new(
                     instance,
@@ -330,37 +308,6 @@ impl NativeExportRequest {
 impl BatchLeaseRequest {
     pub fn new(group: usize, export: NativeExportRequest) -> Self {
         Self { group, export }
-    }
-    pub fn for_home(
-        group: usize,
-        demanded: &DemandedImage,
-        key: NativeHomeBinding,
-        domain: super::super::SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<Self, ExecutionError> {
-        NativeExportRequest::for_home(demanded, key, domain, value)
-            .map(|export| Self::new(group, export))
-    }
-    pub fn for_home_code(
-        group: usize,
-        demanded: &DemandedHomeImage,
-        key: NativeHomeBinding,
-        domain: super::super::SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<Self, ExecutionError> {
-        NativeExportRequest::for_home_code(demanded, key, domain, value)
-            .map(|export| Self::new(group, export))
-    }
-
-    pub fn for_package(
-        group: usize,
-        demanded: Arc<DemandedPackageImage>,
-        key: NativeArtifactBinding,
-        domain: super::super::SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<Self, ExecutionError> {
-        NativeExportRequest::for_package(demanded, key, domain, value)
-            .map(|export| Self::new(group, export))
     }
 }
 
@@ -585,9 +532,14 @@ impl PreparedMachine<'_> {
                 .get(&request.export.binding)
                 .ok_or(ExecutionError::MissingEntry(request.export.binding))?;
             let valid_evidence = match &request.export.evidence {
-                LeaseRequestEvidence::Home { key, owner, binder } => {
+                LeaseRequestEvidence::Home {
+                    original_ordinal,
+                    owner,
+                    binder,
+                    ..
+                } => {
                     candidate.image.certified_source.as_ref()
-                        == Some(&(owner.clone(), key.original_ordinal))
+                        == Some(&(owner.clone(), *original_ordinal))
                         && export.identity == binder.binder
                         && binder.version == owner.module_version
                         && binder.binder.unit == owner.unit

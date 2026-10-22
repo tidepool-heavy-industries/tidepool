@@ -1,12 +1,13 @@
 use super::*;
 use crate::binding_table::source_selections::WorldNativeDomainOwner;
 use crate::binding_table::{WorldNativeDomainRetirement, WorldNativeSlotPermit};
-use crate::prepared_program::{NativeBindingKey, NativeInstanceAttachment, NativeInstanceLease};
+use crate::prepared_program::{NativeInstanceAttachment, NativeInstanceLease};
 use std::sync::Weak;
+use tidepool_repr::native_code::NativeCodeId;
 
 /// A non-rooting identity of one actual roots-attached native installation.
 pub(super) struct WorldNativeGroupMarker {
-    binding: NativeBindingKey,
+    binding: NativeCodeId,
 }
 
 #[derive(Clone)]
@@ -25,12 +26,12 @@ impl WorldNativeInstanceWitness {
 pub struct PreparedWorldNativeSlots {
     entries: Vec<(WorldNativeSlotPermit, GroupInstanceId)>,
     domains: HashMap<usize, NativeDomainSlots>,
-    groups: HashMap<GroupInstanceId, HashSet<(usize, NativeBindingKey)>>,
+    groups: HashMap<GroupInstanceId, HashSet<(usize, NativeCodeId)>>,
 }
 
 pub(super) struct NativeDomainSlots {
     owner: Weak<WorldNativeDomainOwner>,
-    entries: HashMap<NativeBindingKey, GroupInstanceId>,
+    entries: HashMap<NativeCodeId, GroupInstanceId>,
 }
 
 impl PreparedMachine<'_> {
@@ -160,7 +161,7 @@ impl PreparedMachine<'_> {
         entries: Vec<(WorldNativeSlotPermit, GroupInstanceId)>,
     ) -> Result<PreparedWorldNativeSlots, ExecutionError> {
         let mut domains = HashMap::<usize, NativeDomainSlots>::new();
-        let mut groups = HashMap::<GroupInstanceId, HashSet<(usize, NativeBindingKey)>>::new();
+        let mut groups = HashMap::<GroupInstanceId, HashSet<(usize, NativeCodeId)>>::new();
         for (permit, instance) in &entries {
             self.world_native_marker(*instance, permit)?;
             let key = permit.domain_key();
@@ -321,13 +322,16 @@ impl PreparedMachine<'_> {
             && (!slot.required_evaluated || export.evaluated)
             && slot.literal.is_some()
             && match &request.evidence {
-                super::batch::LeaseRequestEvidence::Home { key, owner, binder } => {
-                    slot.literal_source.as_ref().is_some_and(|source| {
-                        &source.owner == owner
-                            && source.original_ordinal == key.original_ordinal
-                            && &source.binder == binder
-                    })
-                }
+                super::batch::LeaseRequestEvidence::Home {
+                    original_ordinal,
+                    owner,
+                    binder,
+                    ..
+                } => slot.literal_source.as_ref().is_some_and(|source| {
+                    &source.owner == owner
+                        && source.original_ordinal == *original_ordinal
+                        && &source.binder == binder
+                }),
                 super::batch::LeaseRequestEvidence::Package { .. } => slot.literal_source.is_none(),
             };
         if !valid {

@@ -8,6 +8,8 @@ use tidepool_repr::execution_schema::{
     ModuleVersion, PackageGroupCode, ProjectedGroup, Signature, SymbolIdentity, ValueId,
 };
 
+use tidepool_repr::native_code::NativeCodeId;
+
 use super::{CompileError, CompiledProgram, GroupInstanceId, ImageRegistry, PreparedHandle};
 
 /// A source binder names one implementation at one compiler-assigned module
@@ -18,31 +20,10 @@ pub struct SourceBinder {
     pub binder: SymbolIdentity,
 }
 
-/// Factual identity of an issued artifact binding. The runtime retains the
-/// acquired proof; these bytes only distinguish physical installation choices.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct NativeArtifactBinding {
-    pub artifact: [u8; 32],
-    pub selection: [u8; 32],
-}
-
-/// A HOME group issuer is distinct from the carrier on its interface edge.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct NativeHomeBinding {
-    pub issuer: NativeArtifactBinding,
-    pub original_ordinal: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum NativeBindingKey {
-    Home(NativeHomeBinding),
-    Package(NativeArtifactBinding),
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ScopedNativeExport {
     pub domain: SourceInstanceDomain,
-    pub binding: NativeBindingKey,
+    pub binding: NativeCodeId,
     pub value: ValueId,
 }
 
@@ -485,7 +466,7 @@ struct PhysicalInstanceRoot {
 
 #[derive(Clone, Debug)]
 struct HomeInstanceEvidence {
-    binding: NativeHomeBinding,
+    binding: NativeCodeId,
     owner: CachedHomeOwner,
     original_ordinal: u32,
     binder: SourceBinder,
@@ -494,7 +475,7 @@ struct HomeInstanceEvidence {
 impl SourceInstanceLease {
     pub(crate) fn new(
         instance: GroupInstanceId,
-        binding: NativeHomeBinding,
+        binding: NativeCodeId,
         owner: CachedHomeOwner,
         original_ordinal: u32,
         binder: SourceBinder,
@@ -523,7 +504,7 @@ impl SourceInstanceLease {
         self.physical.instance
     }
 
-    pub fn binding(&self) -> NativeHomeBinding {
+    pub fn binding(&self) -> NativeCodeId {
         self.evidence.binding
     }
 
@@ -563,7 +544,7 @@ impl SourceInstanceLease {
 #[derive(Clone)]
 pub struct PackageInstanceLease {
     physical: PhysicalInstanceRoot,
-    binding: NativeArtifactBinding,
+    binding: NativeCodeId,
     image: Arc<DemandedPackageImage>,
     export: SymbolIdentity,
 }
@@ -581,7 +562,7 @@ impl std::fmt::Debug for PackageInstanceLease {
 impl PackageInstanceLease {
     pub(in crate::prepared_program) fn new(
         instance: GroupInstanceId,
-        binding: NativeArtifactBinding,
+        binding: NativeCodeId,
         image: Arc<DemandedPackageImage>,
         export: SymbolIdentity,
         value: ValueId,
@@ -601,7 +582,7 @@ impl PackageInstanceLease {
         }
     }
 
-    pub fn binding(&self) -> NativeArtifactBinding {
+    pub fn binding(&self) -> NativeCodeId {
         self.binding
     }
     pub fn image(&self) -> &DemandedPackageImage {
@@ -627,10 +608,10 @@ impl NativeInstanceLease {
             Self::Package(lease) => &lease.physical,
         }
     }
-    pub fn binding_key(&self) -> NativeBindingKey {
+    pub fn binding_key(&self) -> NativeCodeId {
         match self {
-            Self::Home(lease) => NativeBindingKey::Home(lease.binding()),
-            Self::Package(lease) => NativeBindingKey::Package(lease.binding),
+            Self::Home(lease) => lease.binding(),
+            Self::Package(lease) => lease.binding,
         }
     }
     pub fn export(&self) -> &SymbolIdentity {
@@ -658,7 +639,7 @@ pub enum DemandError {
     #[error("conflicting physical instance for {binding:?} in {domain:?}")]
     ConflictingNativeInstance {
         domain: SourceInstanceDomain,
-        binding: NativeBindingKey,
+        binding: NativeCodeId,
     },
     #[error("exact prepared native image is unavailable")]
     MissingPreparedNativeImage,
@@ -2214,8 +2195,8 @@ mod selection_tests {
                     vec![BatchLeaseRequest::for_home(
                         0,
                         &images[0],
-                        NativeHomeBinding {
-                            issuer: NativeArtifactBinding {
+                        NativeCodeId {
+                            issuer: NativeCodeId {
                                 artifact: [1; 32],
                                 selection,
                             },

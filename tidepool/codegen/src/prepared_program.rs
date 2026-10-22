@@ -110,15 +110,16 @@ mod byte_arrays;
 mod bytes_tests;
 mod data_tag;
 mod demand;
+mod native_code;
 pub use demand::{
     DemandError, DemandedHomeImage, DemandedImage, DemandedPackageImage, GroupInventory,
-    InheritedSourceDemand, NativeArtifactBinding, NativeBindingKey, NativeDomainSelection,
-    NativeHomeBinding, NativeInstanceAttachment, NativeInstanceLease, PackageInstanceLease,
-    PendingGroupInventory, PendingScopedSourceDemand, PendingSealedDemand, ScopedCertifiedGroup,
-    ScopedDemandedImage, ScopedInheritedSourceDemand, ScopedNativeExport, ScopedSourceBinder,
-    ScopedSourceGroupDemand, SealedDemand, SourceBinder, SourceDomainSelection, SourceGroupOutline,
-    SourceInstanceDomain, SourceInstanceLease,
+    InheritedSourceDemand, NativeDomainSelection, NativeInstanceAttachment, NativeInstanceLease,
+    PackageInstanceLease, PendingGroupInventory, PendingScopedSourceDemand, PendingSealedDemand,
+    ScopedCertifiedGroup, ScopedDemandedImage, ScopedInheritedSourceDemand, ScopedNativeExport,
+    ScopedSourceBinder, ScopedSourceGroupDemand, SealedDemand, SourceBinder, SourceDomainSelection,
+    SourceGroupOutline, SourceInstanceDomain, SourceInstanceLease,
 };
+pub use native_code::PreparedNativeCode;
 #[cfg(test)]
 mod double_to_int_tests;
 mod entry;

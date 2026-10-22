@@ -230,7 +230,8 @@ pub struct ResidencyCounts {
 
 pub struct PreparedMachine<'code> {
     native_domains: HashMap<usize, native_slots::NativeDomainSlots>,
-    native_groups: HashMap<GroupInstanceId, HashSet<(usize, super::NativeBindingKey)>>,
+    native_groups:
+        HashMap<GroupInstanceId, HashSet<(usize, tidepool_repr::native_code::NativeCodeId)>>,
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
