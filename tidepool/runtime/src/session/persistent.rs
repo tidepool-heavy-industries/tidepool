@@ -4127,21 +4127,14 @@ impl PersistentSession {
         }
         .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let prepared = match &ticket.intent {
-            super::PublicationIntent::Final(intent) => match intent.world_native_snapshots() {
-                Some((_admitted, completed)) => self
+            super::PublicationIntent::Final(intent) => match intent.world() {
+                Some(world) => self
                     .bindings
                     .prepare_world_execution_selection(
                         &self.scopes,
                         ticket.private_scope,
                         ticket.public_scope,
-                        // A concurrent parked cell must promote onto the
-                        // latest public source selection, not the frozen
-                        // admission baseline. The visibility/currentness
-                        // checks above already rebase when the public advanced
-                        // after this restage; the frozen admission snapshot is
-                        // only the pre-publication birth record.
-                        &ticket.semantic.expected_public.source_selection,
-                        completed,
+                        &world.selection,
                         prepared,
                     )
                     .map_err(SessionError::InvalidPublicBindingPromotion)?,
@@ -4158,27 +4151,34 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        {
-            let projection = self
-                .bindings
-                .prepared_promotion_projection(self.scope_tree(), &prepared)
-                .map_err(SessionError::InvalidPublicBindingPromotion)?;
-            for entry in projection.retained_bindings() {
-                let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
-                let handle = entry.value.handle;
-                if self
-                    .prepared()
-                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
-                    != Some(handle)
-                {
-                    return Err(SessionError::InvalidPublicBindingPromotion(
-                        tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
-                    ));
-                }
+        // One projection witnesses both runtime binding retirement and the
+        // compiler World's visible-name delta. It is taken after removals and
+        // from the exact prepared promotion that can commit.
+        let projection = self
+            .bindings
+            .prepared_promotion_projection(self.scope_tree(), &prepared)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        for entry in projection.retained_bindings() {
+            let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
+            let handle = entry.value.handle;
+            if self
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                != Some(handle)
+            {
+                return Err(SessionError::InvalidPublicBindingPromotion(
+                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                ));
             }
         }
-        // The final promotion witness must be taken from the SAME prepared
-        // promotion that would commit. It is only meaningful after removals.
+        let visible_changes = projection
+            .visible_changes()
+            .map(|(name, entry)| (name.0.clone(), entry.map(|entry| (entry.id, entry.scope.0))))
+            .collect::<Vec<_>>();
+        if projection.target_scope() != ticket.public_scope {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        drop(projection);
         let promoted_world = if let Some(intent) = &world_execution {
             let world = intent.world().expect("World execution was selected");
             let public = self
@@ -4194,13 +4194,6 @@ impl PersistentSession {
                 &public_custody.original_source,
             ) || !public.base.target.matches(&world.target)
             {
-                return Err(SessionError::WorldCellPublicationBaseStale);
-            }
-            let projection = self
-                .bindings
-                .prepared_promotion_projection(self.scope_tree(), &prepared)
-                .map_err(SessionError::InvalidPublicBindingPromotion)?;
-            if projection.target_scope() != ticket.public_scope {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
             let declaration = ticket
@@ -4237,20 +4230,26 @@ impl PersistentSession {
                     if declaration.is_some() {
                         return Err(SessionError::WorldCellPublicationIncomplete);
                     }
-                    public.world.clone()
+                    public.world.promote_unchanged_private_bindings(
+                        &world.association.world,
+                        &world.private.world,
+                        ticket.public_scope.0,
+                        visible_changes
+                            .iter()
+                            .map(|(name, entry)| (name.as_str(), *entry)),
+                        world.host_bindings.iter().cloned(),
+                    )?
                 }
                 tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked => {
-                    public.world.promote_private_bindings(
+                    public.world.promote_checked_private_bindings(
                         &world.association.world,
                         &world.private.world,
                         ticket.public_scope.0,
                         declaration,
-                        projection.visible_changes().map(|(name, entry)| {
-                            (
-                                name.0.as_str(),
-                                entry.map(|entry| (entry.id, entry.scope.0)),
-                            )
-                        }),
+                        visible_changes
+                            .iter()
+                            .map(|(name, entry)| (name.as_str(), *entry)),
+                        world.host_bindings.iter().cloned(),
                     )?
                 }
                 tidepool_toolchain::compiler_world::PrivateCompilerProgress::Incomplete => {

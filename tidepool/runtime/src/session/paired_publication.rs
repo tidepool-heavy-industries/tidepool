@@ -6,10 +6,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tidepool_codegen::binding_table::PreparedWorldExecutionSelection;
 use tidepool_codegen::binding_table::SourceLeaseKey;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
-use tidepool_toolchain::compiler_world::{CompilerWorld, PrivateCompilerProgress};
+use tidepool_toolchain::compiler_world::{
+    CompilerWorld, CompilerWorldHostBinding, PrivateCompilerProgress,
+};
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
     DeclarationWrite, ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
@@ -73,21 +76,6 @@ pub struct FinalExecutionIntent {
     world: Option<WorldExecutionIntent>,
 }
 
-impl FinalExecutionIntent {
-    pub(super) fn world_native_snapshots(
-        &self,
-    ) -> Option<(
-        &tidepool_codegen::binding_table::BindingScopeSnapshot,
-        &tidepool_codegen::binding_table::BindingScopeSnapshot,
-    )> {
-        self.world.as_ref()?;
-        Some((
-            &self.admitted.source_selection,
-            &self.private.source_selection,
-        ))
-    }
-}
-
 /// The exact published World association and admitted source facts a final
 /// publication must revalidate before installing anything. Cloning shares the
 /// same association, source and lease Arcs; it issues no compiler authority.
@@ -103,6 +91,12 @@ pub(super) struct WorldExecutionIntent {
     /// `Checked`; started/refused/uncertain work is `Incomplete` and can never
     /// become either successful publication branch.
     pub(super) progress: PrivateCompilerProgress,
+    /// The exact private source-selection suffix, issued from the private
+    /// execution's actual admissions. Publication composes it over the latest
+    /// public selection without treating the frozen public base as current.
+    pub(super) selection: PreparedWorldExecutionSelection,
+    /// Exact accepted host-interface rows visible in the private snapshot.
+    pub(super) host_bindings: Vec<CompilerWorldHostBinding>,
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -529,6 +523,7 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        admission.begin_freeze()?;
         let completed_values = admission.completed_values.lock();
         self.freeze_execution_intent_locked(admission, write_ids, source_keys, &completed_values)
     }
@@ -630,8 +625,48 @@ impl PersistentSession {
         {
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
-        let progress =
+        let classified =
             CompilerWorld::classify_private_publication(&private.world, &facts.published.world);
+        let progress = match admission.checked_progress() {
+            super::admission::PrivateCheckedProgress::NotStarted => {
+                if classified == PrivateCompilerProgress::Unchanged {
+                    PrivateCompilerProgress::Unchanged
+                } else {
+                    PrivateCompilerProgress::Incomplete
+                }
+            }
+            super::admission::PrivateCheckedProgress::Started => {
+                PrivateCompilerProgress::Incomplete
+            }
+            super::admission::PrivateCheckedProgress::Completed => {
+                if classified == PrivateCompilerProgress::Checked {
+                    PrivateCompilerProgress::Checked
+                } else {
+                    PrivateCompilerProgress::Incomplete
+                }
+            }
+        };
+        let private_snapshot = self
+            .public_visibility_snapshot_in(admission.private_scope())
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let visible_private_ids = private_snapshot
+            .bindings
+            .iter()
+            .map(|(_, id)| *id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut host_bindings = admission
+            .confirmed_host_bindings()
+            .map_err(SessionError::from)?;
+        host_bindings.retain(|binding| visible_private_ids.contains(&binding.session_var()));
+        host_bindings.sort_by_key(|binding| binding.session_var().raw());
+        let selection = self
+            .bindings()
+            .prepare_world_execution_selection_delta(
+                self.scope_tree(),
+                admission.private_scope(),
+                &private_snapshot.source_selection,
+            )
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let world = Some(WorldExecutionIntent {
             association: facts.published,
             source: facts.source,
@@ -639,6 +674,8 @@ impl PersistentSession {
             target: facts.public_target,
             private,
             progress,
+            selection,
+            host_bindings,
         });
         let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
         let intent = self.freeze_execution_intent_from_snapshot(

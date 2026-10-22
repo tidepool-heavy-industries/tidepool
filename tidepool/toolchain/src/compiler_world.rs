@@ -1558,6 +1558,106 @@ fn classify_private_world(
     }
 }
 
+/// One visible host row accepted by a private execution's actual effect owner.
+/// The compiler World can project its issued type fact without treating it as a
+/// checked authored item.
+#[derive(Clone, Debug)]
+pub struct CompilerWorldHostBinding {
+    occurrence: String,
+    symbol: tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: tidepool_repr::SessionVarId,
+    defining_scope: u64,
+    row: Arc<CheckedValueArtifact>,
+}
+
+impl CompilerWorldHostBinding {
+    pub fn from_host_interface(
+        world: &CompilerWorld,
+        symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        interface: &Arc<crate::checked_cell::ExactHostBindingInterface>,
+    ) -> Result<Self, CompileError> {
+        Self::from_binder(
+            world,
+            symbol,
+            session_var,
+            defining_scope,
+            interface.binder(),
+            interface.value_interface_certificate(),
+        )
+    }
+
+    pub fn from_checked_host_execution(
+        world: &CompilerWorld,
+        symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        execution: &Arc<crate::checked_cell::ExactCompiledItem>,
+    ) -> Result<Self, CompileError> {
+        let row = execution
+            .value_interface_certificate()
+            .ok_or_else(|| source_failure("host execution has no checked value interface"))?;
+        let mut binders = execution.checked_bound_binders();
+        let binder = binders
+            .next()
+            .ok_or_else(|| source_failure("host execution has no bound operand"))?;
+        if binders.next().is_some() {
+            return Err(source_failure("host execution has more than one operand"));
+        }
+        Self::from_binder(world, symbol, session_var, defining_scope, binder, row)
+    }
+
+    fn from_binder(
+        world: &CompilerWorld,
+        symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        binder: &ciborium::value::Value,
+        row: Arc<CheckedValueArtifact>,
+    ) -> Result<Self, CompileError> {
+        let fields = crate::checked_cell::row(binder, 7)?;
+        let occurrence = crate::checked_cell::string(&fields[0])?;
+        let raw = match &fields[1] {
+            ciborium::value::Value::Integer(value) => u64::try_from(*value)
+                .map_err(|_| source_failure("visible host binding identity"))?,
+            _ => return Err(source_failure("visible host binding identity")),
+        };
+        let module = crate::checked_cell::string(&fields[2])?;
+        if raw != session_var.raw()
+            || symbol.namespace != "value"
+            || symbol.occurrence != occurrence
+            || symbol.module != module
+            || row.owner().module_name() != module
+            || row.world_issuer().0 != world.restoration.producer
+        {
+            return Err(source_failure(
+                "visible host binding differs from its issued row",
+            ));
+        }
+        Ok(Self {
+            occurrence: occurrence.to_owned(),
+            symbol: symbol.clone(),
+            session_var,
+            defining_scope,
+            row,
+        })
+    }
+
+    pub fn session_var(&self) -> tidepool_repr::SessionVarId {
+        self.session_var
+    }
+
+    fn into_fact(self) -> WorldBindingFact {
+        WorldBindingFact {
+            symbol: self.symbol,
+            session_var: self.session_var,
+            defining_scope: self.defining_scope,
+            row: self.row,
+        }
+    }
+}
+
 /// A successful checked item's next compiler state. The context is borrowed
 /// from the same World, so callers cannot pair a warm World with older cold
 /// restoration facts. Only checked item advancement issues this owner.
@@ -1878,16 +1978,17 @@ impl CompilerWorld {
         })
     }
 
-    /// Project the actual prepared runtime promotion onto the current public
-    /// compiler product. Runtime still owns source gates, binding publication
-    /// and the atomic installation of this prospective immutable product.
-    pub fn promote_private_bindings<'a>(
+    /// Project a completed checked execution onto the latest public compiler
+    /// product. Runtime still owns source gates, binding publication and the
+    /// atomic installation of this prospective immutable product.
+    pub fn promote_checked_private_bindings<'a>(
         self: &Arc<Self>,
         original_public: &Arc<Self>,
         private: &Arc<Self>,
         target_scope: u64,
         declaration: Option<CompilerWorldDeclarationPublication>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+        host_bindings: impl IntoIterator<Item = CompilerWorldHostBinding>,
     ) -> Result<Arc<Self>, CompileError> {
         let position = private
             .position
@@ -1895,23 +1996,12 @@ impl CompilerWorld {
             .ok_or_else(|| source_failure("private publication lacks a checked cell prefix"))?;
         if position.original_base != *original_public.logical_id()
             || position.next_item != position.total_items
-            || private.restoration.producer != original_public.restoration.producer
-            || private.restoration.profile != original_public.restoration.profile
-            || self.restoration.producer != private.restoration.producer
-            || self.restoration.profile != private.restoration.profile
-            || original_public.restoration.inputs.sources.seal()
-                != private.restoration.inputs.sources.seal()
-            || self.restoration.inputs.sources.seal() != private.restoration.inputs.sources.seal()
         {
             return Err(source_failure(
                 "private publication has an incomplete or foreign checked lineage",
             ));
         }
-        if self.restoration.inputs.bindings.query_scope != target_scope {
-            return Err(source_failure(
-                "public compiler projection belongs to another scope",
-            ));
-        }
+        self.validate_private_promotion(original_public, private, target_scope)?;
         let declaration = declaration
             .map(|declaration| {
                 if !Arc::ptr_eq(&declaration.base, self) {
@@ -1936,6 +2026,75 @@ impl CompilerWorld {
                 },
                 Ok,
             )?;
+        let changes = Self::private_binding_changes(private, self, visible_changes, host_bindings)?;
+        self.project_bindings_with_primary(target_scope, changes, None, Some(declaration))
+    }
+
+    /// Project visible retained host facts from an authenticated unchanged
+    /// compiler basis. No declaration, checked position, or compiler successor
+    /// is manufactured.
+    pub fn promote_unchanged_private_bindings<'a>(
+        self: &Arc<Self>,
+        original_public: &Arc<Self>,
+        private: &Arc<Self>,
+        target_scope: u64,
+        visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+        host_bindings: impl IntoIterator<Item = CompilerWorldHostBinding>,
+    ) -> Result<Arc<Self>, CompileError> {
+        if private.position.is_some() || private.logical_id() != original_public.logical_id() {
+            return Err(source_failure(
+                "host publication has a changed or foreign private compiler basis",
+            ));
+        }
+        self.validate_private_promotion(original_public, private, target_scope)?;
+        let changes = Self::private_binding_changes(private, self, visible_changes, host_bindings)?;
+        if changes.is_empty() {
+            return Ok(self.clone());
+        }
+        self.project_bindings_with_primary(target_scope, changes, None, None)
+    }
+
+    fn validate_private_promotion(
+        self: &Arc<Self>,
+        original_public: &Arc<Self>,
+        private: &Arc<Self>,
+        target_scope: u64,
+    ) -> Result<(), CompileError> {
+        if private.restoration.producer != original_public.restoration.producer
+            || private.restoration.profile != original_public.restoration.profile
+            || self.restoration.producer != private.restoration.producer
+            || self.restoration.profile != private.restoration.profile
+            || original_public.restoration.inputs.sources.seal()
+                != private.restoration.inputs.sources.seal()
+            || self.restoration.inputs.sources.seal() != private.restoration.inputs.sources.seal()
+        {
+            return Err(source_failure(
+                "private publication has an incomplete or foreign checked lineage",
+            ));
+        }
+        if self.restoration.inputs.bindings.query_scope != target_scope {
+            return Err(source_failure(
+                "public compiler projection belongs to another scope",
+            ));
+        }
+        Ok(())
+    }
+
+    fn private_binding_changes<'a>(
+        private: &Arc<Self>,
+        latest: &Arc<Self>,
+        visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+        host_bindings: impl IntoIterator<Item = CompilerWorldHostBinding>,
+    ) -> Result<BTreeMap<String, Option<WorldBindingFact>>, CompileError> {
+        let mut host_facts = BTreeMap::new();
+        for host in host_bindings {
+            let name = host.occurrence.clone();
+            if host_facts.insert(name, host).is_some() {
+                return Err(source_failure(
+                    "duplicate visible host binding in compiler promotion",
+                ));
+            }
+        }
         let mut changes = BTreeMap::new();
         for (name, binding) in visible_changes {
             crate::host_work::checkpoint()?;
@@ -1943,35 +2102,55 @@ impl CompilerWorld {
                 return Err(source_failure("invalid or duplicate promotion occurrence"));
             }
             let fact = match binding {
-                None => None,
+                None => {
+                    host_facts.remove(name);
+                    None
+                }
                 Some((id, defining_scope)) => {
-                    let matches = |fact: &&WorldBindingFact| {
-                        fact.session_var == id && fact.defining_scope == defining_scope
-                    };
-                    let fact = private
-                        .restoration
-                        .inputs
-                        .bindings
-                        .entries
-                        .get(name)
-                        .filter(matches)
-                        .or_else(|| {
-                            self.restoration
-                                .inputs
-                                .bindings
-                                .entries
-                                .get(name)
-                                .filter(matches)
-                        })
-                        .ok_or_else(|| {
-                            source_failure("runtime promotion has no same issued compiler binding")
-                        })?;
-                    Some(fact.clone())
+                    if let Some(host) = host_facts.remove(name) {
+                        if host.session_var != id || host.defining_scope != defining_scope {
+                            return Err(source_failure(
+                                "visible host promotion has another runtime binding",
+                            ));
+                        }
+                        Some(host.into_fact())
+                    } else {
+                        let matches = |fact: &&WorldBindingFact| {
+                            fact.session_var == id && fact.defining_scope == defining_scope
+                        };
+                        let fact = private
+                            .restoration
+                            .inputs
+                            .bindings
+                            .entries
+                            .get(name)
+                            .filter(matches)
+                            .or_else(|| {
+                                latest
+                                    .restoration
+                                    .inputs
+                                    .bindings
+                                    .entries
+                                    .get(name)
+                                    .filter(matches)
+                            })
+                            .ok_or_else(|| {
+                                source_failure(
+                                    "runtime promotion has no same issued compiler binding",
+                                )
+                            })?;
+                        Some(fact.clone())
+                    }
                 }
             };
             changes.insert(name.to_owned(), fact);
         }
-        self.project_bindings_with_primary(target_scope, changes, None, Some(declaration))
+        if let Some((name, _)) = host_facts.into_iter().next() {
+            return Err(source_failure(format!(
+                "accepted visible host binding {name:?} is absent from runtime promotion",
+            )));
+        }
+        Ok(changes)
     }
 
     /// Extend the held primary with only canonical TYPE roles selected by

@@ -923,6 +923,9 @@ mod tests {
         let public = tree.mint_isolated();
         let private = tree.mint_isolated();
         let capture = tree.mint_isolated();
+        let parked = tree.mint_isolated();
+        let later = tree.mint_isolated();
+        let merged_private = tree.mint_isolated();
         let mut table = crate::binding_table::BindingTable::new();
         let admitted = table.scope_snapshot(&tree, public).unwrap();
         let domain = table
@@ -950,6 +953,9 @@ mod tests {
         );
         let stale_private = table.scope_snapshot(&tree, private).unwrap();
         let capture_before = table.scope_snapshot(&tree, capture).unwrap();
+        let stale_delta = table
+            .prepare_world_execution_selection_delta(&tree, private, &stale_private)
+            .unwrap();
         assert!(matches!(
             table.seed_world_execution_scope(&tree, public, capture, &admitted,),
             Err(BindingPromotionError::UnverifiableSourceSelection)
@@ -994,23 +1000,23 @@ mod tests {
             .prepare_exact_publication_in(&tree, private, public, &[], &owned)
             .unwrap();
         assert!(matches!(
-            table.prepare_world_execution_selection(
-                &tree,
-                private,
-                public,
-                &admitted,
-                &stale_private,
-                stale,
-            ),
+            table.prepare_world_execution_selection(&tree, private, public, &stale_delta, stale,),
             Err(BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
+        let completed_delta = table
+            .prepare_world_execution_selection_delta(&tree, private, &completed)
+            .unwrap();
         let missing = table
             .prepare_exact_publication_in(&tree, private, public, &[], &[])
             .unwrap();
         assert!(matches!(
             table.prepare_world_execution_selection(
-                &tree, private, public, &admitted, &completed, missing,
+                &tree,
+                private,
+                public,
+                &completed_delta,
+                missing,
             ),
             Err(BindingPromotionError::MissingOrForeignSourceInstance)
         ));
@@ -1027,28 +1033,11 @@ mod tests {
                 .is_empty(),
             "generic custody publication does not select a package instance"
         );
-        let foreign = table.scope_snapshot(&tree, capture).unwrap();
-        let prepared = table
-            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
-            .unwrap();
-        assert!(matches!(
-            table.prepare_world_execution_selection(
-                &tree, private, public, &foreign, &completed, prepared,
-            ),
-            Err(BindingPromotionError::ConflictingSourceOrigin)
-        ));
-        assert!(table
-            .native_domain_selection_in(&tree, public)
-            .unwrap()
-            .roots()
-            .is_empty());
         let prepared = table
             .prepare_exact_publication_in(&tree, private, public, &[], &owned)
             .unwrap();
         let prepared = table
-            .prepare_world_execution_selection(
-                &tree, private, public, &admitted, &completed, prepared,
-            )
+            .prepare_world_execution_selection(&tree, private, public, &completed_delta, prepared)
             .unwrap();
         table.commit_exact_binding_promotion(prepared);
         let selected = table.native_domain_selection_in(&tree, public).unwrap();
@@ -1074,16 +1063,160 @@ mod tests {
         let stale = table
             .prepare_exact_publication_in(&tree, private, public, &[], &owned)
             .unwrap();
-        assert!(
-            matches!(
-                table.prepare_world_execution_selection(
-                    &tree, private, public, &admitted, &completed, stale,
-                ),
-                Err(BindingPromotionError::ConflictingSourceOrigin)
-            ),
-            "a changed public selection refuses even within the SAME domain"
-        );
+        let repeated = table
+            .prepare_world_execution_selection(&tree, private, public, &completed_delta, stale)
+            .unwrap();
+        drop(repeated);
         assert_eq!(table.scope_snapshot(&tree, public).unwrap(), published);
+
+        table
+            .seed_world_execution_scope(&tree, public, parked, &published)
+            .unwrap();
+        table
+            .seed_world_execution_scope(&tree, public, later, &published)
+            .unwrap();
+        table
+            .seed_world_execution_scope(&tree, public, merged_private, &published)
+            .unwrap();
+        let merged_domain = table
+            .native_domain_selection_in(&tree, merged_private)
+            .unwrap()
+            .current();
+        let merged_install = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: Arc::clone(package.image()),
+                    imports: vec![],
+                }],
+                vec![BatchLeaseRequest::for_package(
+                    0,
+                    Arc::clone(&package),
+                    super::super::NativeArtifactBinding {
+                        artifact: [9; 32],
+                        selection: [10; 32],
+                    },
+                    merged_domain,
+                    ValueId(0),
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let merged_actual = merged_install.leases[0].clone();
+        let merged_owned = table
+            .register_source_instances_in_domains(
+                &tree,
+                merged_private,
+                merged_install.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        let merged_completed = table.scope_snapshot(&tree, merged_private).unwrap();
+        let merged_delta = table
+            .prepare_world_execution_selection_delta(&tree, merged_private, &merged_completed)
+            .unwrap();
+        let later_domain = table
+            .native_domain_selection_in(&tree, later)
+            .unwrap()
+            .current();
+        let later_install = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: Arc::clone(package.image()),
+                    imports: vec![],
+                }],
+                vec![BatchLeaseRequest::for_package(
+                    0,
+                    Arc::clone(&package),
+                    super::super::NativeArtifactBinding {
+                        artifact: [7; 32],
+                        selection: [8; 32],
+                    },
+                    later_domain,
+                    ValueId(0),
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let later_actual = later_install.leases[0].clone();
+        let later_owned = table
+            .register_source_instances_in_domains(
+                &tree,
+                later,
+                later_install.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        let later_completed = table.scope_snapshot(&tree, later).unwrap();
+        let later_delta = table
+            .prepare_world_execution_selection_delta(&tree, later, &later_completed)
+            .unwrap();
+        let later_prepared = table
+            .prepare_exact_publication_in(&tree, later, public, &[], &later_owned)
+            .unwrap();
+        let later_prepared = table
+            .prepare_world_execution_selection(&tree, later, public, &later_delta, later_prepared)
+            .unwrap();
+        table.commit_exact_binding_promotion(later_prepared);
+        let merged_prepared = table
+            .prepare_exact_publication_in(&tree, merged_private, public, &[], &merged_owned)
+            .unwrap();
+        let merged_prepared = table
+            .prepare_world_execution_selection(
+                &tree,
+                merged_private,
+                public,
+                &merged_delta,
+                merged_prepared,
+            )
+            .unwrap();
+        table.commit_exact_binding_promotion(merged_prepared);
+        let latest = table.scope_snapshot(&tree, public).unwrap();
+        let latest_roots = table
+            .native_domain_selection_in(&tree, public)
+            .unwrap()
+            .roots()
+            .clone();
+        assert_eq!(latest_roots.len(), 3);
+        assert!(latest_roots
+            .values()
+            .any(|lease| lease.handle() == later_actual.handle()));
+        assert!(latest_roots
+            .values()
+            .any(|lease| lease.handle() == merged_actual.handle()));
+
+        let parked_completed = table.scope_snapshot(&tree, parked).unwrap();
+        let parked_delta = table
+            .prepare_world_execution_selection_delta(&tree, parked, &parked_completed)
+            .unwrap();
+        let unchanged = table
+            .prepare_exact_publication_in(&tree, parked, public, &[], &[])
+            .unwrap();
+        let unchanged = table
+            .prepare_world_execution_selection(&tree, parked, public, &parked_delta, unchanged)
+            .unwrap();
+        table.commit_exact_binding_promotion(unchanged);
+        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), latest);
+        let after_roots = table
+            .native_domain_selection_in(&tree, public)
+            .unwrap()
+            .roots()
+            .clone();
+        assert_eq!(after_roots.len(), latest_roots.len());
+        for (key, before) in &latest_roots {
+            let after = after_roots
+                .get(key)
+                .expect("later public source remains selected");
+            assert_eq!(after.instance(), before.instance());
+            assert_eq!(after.handle(), before.handle());
+        }
+
+        for scope in [parked, later, merged_private] {
+            for lease in table.drain_scope_with_sources(scope).source_instances {
+                assert!(machine.release(lease.handle()));
+            }
+        }
         assert!(table
             .drain_scope_with_sources(private)
             .source_instances
@@ -2240,8 +2373,11 @@ mod tests {
                 )
             },
         );
-        eprintln!("image owner campaign configured_cases={cases} callbacks_including_replay_and_shrinking={} coverage={:?}",
-            callbacks.get(), coverage.borrow());
+        eprintln!(
+            "image owner campaign configured_cases={cases} callbacks_including_replay_and_shrinking={} coverage={:?}",
+            callbacks.get(),
+            coverage.borrow()
+        );
         result.unwrap();
     }
 

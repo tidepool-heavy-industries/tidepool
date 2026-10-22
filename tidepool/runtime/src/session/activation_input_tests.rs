@@ -6149,6 +6149,154 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
 }
 
 #[test]
+fn started_world_item_refuses_freeze_before_completion() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1720),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let (_, compiled, reservation) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "pendingPrivate <- pure (41 :: Int)",
+        execution.clone(),
+    );
+    let checked = compiled
+        .certification
+        .as_ref()
+        .as_ref()
+        .and_then(|certification| certification.checked_execution())
+        .expect("checked bind retains its exact execution")
+        .clone();
+    let public_before = resident
+        .public_visibility_snapshot_in(execution.public_scope())
+        .unwrap();
+    let private_before = resident
+        .public_visibility_snapshot_in(execution.private_scope())
+        .unwrap();
+    let completion = resident
+        .start_checked_item_for_test(reservation.prefix(), execution.private_scope(), checked)
+        .expect("start through the actual checked-prefix owner");
+    let intent = resident
+        .freeze_private_execution(&execution)
+        .expect("freeze carries started work as terminal incomplete progress");
+    let error = source_action(&mut resident, |resident, _| {
+        let publication = resident
+            .restage_ephemeral_execution_publication(intent)
+            .expect("restage the frozen incomplete execution");
+        let crate::session::ExecutionPublication::Bindings(base) = publication else {
+            panic!("a bind-only fixture cannot reserve a declaration publication");
+        };
+        let ticket = base.stage().expect("stage the frozen binding promotion");
+        match resident.attempt_public_manifest(ticket, &crate::session::PublicationDecision::new())
+        {
+            Ok(_) => panic!("started work without a completed successor cannot publish"),
+            Err(error) => error,
+        }
+    });
+    assert!(
+        matches!(error, SessionError::WorldCellPublicationIncomplete),
+        "{error:?}"
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(execution.public_scope()),
+        Some(public_before)
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(execution.private_scope()),
+        Some(private_before)
+    );
+    drop(completion);
+}
+
+#[test]
+fn frozen_private_execution_refuses_a_later_checked_start() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1719),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let (_, compiled, reservation) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "frozenPrivate <- pure (41 :: Int)",
+        execution.clone(),
+    );
+    let checked = compiled
+        .certification
+        .as_ref()
+        .as_ref()
+        .and_then(|certification| certification.checked_execution())
+        .expect("checked bind retains its exact execution")
+        .clone();
+    let private_before = resident
+        .public_visibility_snapshot_in(execution.private_scope())
+        .unwrap();
+    resident
+        .freeze_private_execution(&execution)
+        .expect("an unstarted private execution freezes as unchanged");
+    let error = resident
+        .start_checked_item_for_test(reservation.prefix(), execution.private_scope(), checked)
+        .expect_err("a frozen execution is terminal for checked work");
+    assert!(
+        matches!(error, SessionError::StaleStagedDeclaration),
+        "{error:?}"
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(execution.private_scope()),
+        Some(private_before)
+    );
+}
+
+#[test]
 fn checked_binding_survives_export_and_executes_in_later_cell() {
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();

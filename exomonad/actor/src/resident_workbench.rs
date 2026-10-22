@@ -5500,6 +5500,17 @@ impl RetainedHostBinding {
 
 impl Drop for HostInputRetirement {
     fn drop(&mut self) {
+        if let (Some(write), Some(retire)) = (self.write.take(), self.retire_private.take()) {
+            tokio::spawn(async move {
+                if let Err(error) = retire(write).await {
+                    tracing::warn!(
+                        %error,
+                        "failed to retire an abandoned private host binding"
+                    );
+                }
+            });
+            return;
+        }
         let background = std::mem::replace(&mut self.background_retire, Box::new(|| {}));
         background();
     }
@@ -10989,8 +11000,14 @@ where
                     OwnedHostPayload::Text(value) => HostPayload::Text(value),
                     OwnedHostPayload::Job(value) => HostPayload::Job(value),
                 };
-                let write = match private.as_ref().filter(|_| hidden) {
-                    Some(execution) => session.mount_private_hidden_host_input(
+                let write = match private.as_ref() {
+                    Some(execution) if hidden => session.mount_private_hidden_host_input(
+                        execution,
+                        &carrier,
+                        host_payload,
+                        settlement,
+                    ),
+                    Some(execution) => session.mount_private_visible_host_input(
                         execution,
                         &carrier,
                         host_payload,
@@ -19006,10 +19023,18 @@ pub(crate) mod request_tests {
             .unwrap();
         assert_eq!(
             workbench
-                .host_binding_identity_for_test(public, "tool_one")
+                .host_binding_identity_for_test(public.clone(), "tool_one")
                 .await,
             original
         );
+        let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+        workbench
+            .execute_cell_for_test(
+                fresh,
+                "freshText <- pure tool_two\nfreshMatch <- pure (tool_one == \"output one\")",
+            )
+            .await
+            .expect("fresh private execution reads both published retained Text values");
     }
 
     #[tokio::test]
@@ -19092,12 +19117,16 @@ pub(crate) mod request_tests {
         assert!(native_bindings.contains(&accepted));
         assert!(native_bindings.contains(&"completedNative".to_owned()));
         assert!(!native_bindings.contains(&unaccepted_name));
+        let accepted_for_read = accepted.clone();
         workbench
             .access
-            .with_machine(public, move |session, context, _| {
+            .with_machine(public.clone(), move |session, context, _| {
                 let scope = context.placement.lexical_scope;
                 assert_eq!(
-                    session.current_binding_in(scope, &accepted).unwrap().0,
+                    session
+                        .current_binding_in(scope, &accepted_for_read)
+                        .unwrap()
+                        .0,
                     original.0
                 );
                 assert_eq!(
@@ -19118,6 +19147,17 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
+        let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+        workbench
+            .execute_cell_for_test(
+                fresh,
+                &format!(
+                    "freshHost <- pure ({accepted} :: {})\nfreshNative <- pure (completedNative :: Int)",
+                    crate::resident_workbench::HostCarrierKind::Job.type_name(),
+                ),
+            )
+            .await
+            .expect("fresh private execution reads the published host type and checked value");
         assert!(
             unaccepted.accept().is_err(),
             "a sealed cell refuses late effect acceptance"
