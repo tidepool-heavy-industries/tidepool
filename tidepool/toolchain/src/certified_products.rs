@@ -495,6 +495,7 @@ impl ValidatedHomeContracts {
                 )?;
                 HomeMembership::CurrentReceipt { original }
             } else {
+                operation.charge(source_selection.prior_program_products.len())?;
                 let (product_index, product) = source_selection
                     .prior_program_products
                     .iter()
