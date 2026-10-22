@@ -586,6 +586,25 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
                     && row.product().group().binders().contains(actual_binder)),
             "actual non-inline prior Source export must be selected"
         );
+        for row in completed
+            .rows()
+            .filter(|row| row.product().owner().module == "Module")
+        {
+            let exact = products
+                .target_native_inputs()
+                .certified_groups()
+                .get(row.binding())
+                .expect("the selected prior Source group has its actual exact physical binding");
+            assert!(
+                row.product().same_issuance(exact),
+                "completion must preserve the exact prior Source physical product and issuer"
+            );
+            assert_eq!(row.product().owner(), exact.owner());
+            assert_eq!(
+                row.product().group().original_ordinal(),
+                exact.group().original_ordinal()
+            );
+        }
         let packages = completed
             .rows()
             .filter(|row| row.product().owner().module == "Module")
