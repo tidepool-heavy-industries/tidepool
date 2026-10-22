@@ -55,14 +55,15 @@ import Tidepool.CompilerProducts
 import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts)
 import Tidepool.ExactScope
-import Tidepool.ExecutionSchema (SymbolIdentity(..), WireProgram(..), SiteRow(..))
+import Tidepool.ExecutionSchema (SymbolIdentity(..), WireProgram(..), SiteRow(..), ProjectedGroup(..))
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, projectedGroupEncodingInput)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability
   , projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate
   , preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedModuleProductOutcomes
-  , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget, packageTargetProgram, packageTargetConstructors, packageTargetGroups
+  , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget
+  , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups, packageTargetImports
   , projectedPackageModule, projectedPackageInterfaceSha256, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites )
 import Tidepool.HostBindingAuthority (HostBindingRepresentation, hostBindingRepresentationJsonAuthority)
@@ -545,11 +546,11 @@ withBoundExactInterfaceTransaction (BoundCompilerRequest scope args admitted _ e
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
-  , paPackageTarget :: String
   , paProgram :: WireProgram
   , paBytes :: BS.ByteString
   , paConstructors :: [IssuedConstructor]
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
+  , paPackageTarget :: Maybe PreparedPackageTarget
   }
 
 -- These replies are obligations from the held Rust input owner, not new
@@ -752,12 +753,12 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
             , binder <- candidateGroupBinders group])]
     (originalModules,productContext,originalBindings,admittedOriginalBinders,
-      originalConstructors,originalSites,originalPackageGlobals) <- case intent of
+      originalConstructors,originalSites,originalPackageGlobals,homeProductGroups) <- case intent of
       PortableExecutable -> do
         unless (isNothing exactScope && null candidates && Map.null retainedGenerations
             && null hostBindings) $
           fail "portable output cannot consume retained native or host-binding inputs"
-        pure (modules,Nothing,Map.empty,Set.empty,[],[],const (Right []))
+        pure (modules,Nothing,Map.empty,Set.empty,[],[],const (Right []),Map.empty)
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
@@ -768,6 +769,10 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
         originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
         let products = preparedProductInventory productContext
+            homeProductGroups = Map.fromList
+              [ (owner, Map.fromList
+                  [(projectedOriginalOrdinal group, group) | group <- groups])
+              | (owner, Right groups) <- preparedModuleProductOutcomes products ]
             outputRoots = Set.fromList (map (projectionEntry . contextFor) targets
               ++ projectionAuxiliaryRoots firstContext)
             originalBindings = currentOriginalBindingsExcept inventory outputRoots
@@ -787,7 +792,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                 Just _ -> Right (Just (Set.singleton identity))
                 Nothing -> stagedOriginalExternalDemand priorNative identity)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
-          originalConstructors,originalSites,originalPackageGlobals)
+          originalConstructors,originalSites,originalPackageGlobals,homeProductGroups)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
     finalProjections <- newIORef Map.empty
     nativeUseObligations <- newIORef Map.empty
@@ -841,7 +846,13 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                       (moduleUnit (fatOriginalOwner (preparedComponentVersion component)))
                     homeComponents = filter isHome (closureComponentSelections recovered)
                     packageComponents = filter (not . isHome) (closureComponentSelections recovered)
-                paired <- project (projectPreparedPackageTarget hscEnv hostBindings (contextFor target) finalContext
+                    home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
+                let homeProducts = Map.fromList
+                      [(pmModule preparedModule',
+                        Map.findWithDefault Map.empty (pmModule preparedModule') homeProductGroups)
+                      | preparedModule' <- home]
+                paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
+                  finalContext homeProducts
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired
@@ -896,12 +907,12 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
       let recovered = preparedRecoveryClosure closed
       final <- readIORef finalProjections >>= maybe
         (fail "closed recovery did not issue its final projection") pure . Map.lookup (projectionEntry context)
-      let (program,constructors,packageGroups,roots) = case final of
-            PortableFinal output declarations required -> (output,declarations,[],required)
+      let (program,constructors,packageGroups,roots,packageTarget) = case final of
+            PortableFinal output declarations required -> (output,declarations,[],required,Nothing)
             NativeFinal output _ required ->
               let groups = packageTargetGroups output in
               (packageTargetProgram output,packageTargetConstructors output
-                ++ concatMap projectedPackageConstructors groups,groups,required)
+                ++ concatMap projectedPackageConstructors groups,groups,required,Just output)
       reportRecoveryResiduals target (closureFailures recovered)
       when (intent == PortableExecutable) $ do
         let homeUnit = T.pack (unitString (moduleUnit targetModule))
@@ -933,8 +944,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
-      pure (PreparedArtifact target target program bytes
-        (constructors ++ originalConstructors) sealedSites)
+      pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites
+        packageTarget)
     finalResults <- forM targets $ \target -> do
       let entry = projectionEntry (contextFor target)
       final <- readIORef finalProjections >>= maybe
@@ -952,7 +963,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         provenance <- preparedCompilationNativeProvenance completion
         products <- maybe (fail "native projection lacks its actual product context") pure productContext
         Just <$> retainPreparedPackageTargets provenance
-          [(name, paired) | (name, paired, _) <- packageTargets] captures products
+          [paired | (_, paired, _) <- packageTargets] captures products
     pure (artifacts, completedContext)
 
 -- The pure preview boundary preserves only this chosen executable-demand
@@ -1284,11 +1295,13 @@ prepareWorldCellQuestion bound question = do
               child = directory </> "item-" ++ show ordinal
               output = artifact {paTarget=preparedScaffoldTargetName}
               turn = TBind (map (T.pack . bbName) selected) 0 selected (paYieldSites output) (T.pack rendered)
+          packageTarget <- maybe (fail "World item lost its paired package projection") pure
+            (paPackageTarget output)
           createDirectoryIfMissing True child
           sidecarFiles <- writePreparedSidecars InlineYieldSites child binds Nothing (map T.pack (prWarnings result)) [output]
           programFiles <- writePreparedArtifacts child [output]
           (productFile,executionInputs) <- writeCertifiedSegmentItemProductsWithInputs
-            prepared staged child (T.pack (paPackageTarget output)) (paProgram output)
+            prepared staged child packageTarget
           let turnFile = "turn.cbor"
           BS.writeFile (child </> turnFile) (encodeTurnOut turn)
           valueFiles <- case worldCellItemInterface correlatedItem of

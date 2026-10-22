@@ -74,9 +74,9 @@ import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, art
 import qualified Crypto.Hash.SHA256 as SHA256
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
-  , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
-  , PackageLink(..), PackageOccurrence(..), PackageLinkIndex(..)
-  , emptyPackageLinkIndex, linkForOccurrence )
+  , selectItemPackage, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
+  , issuePackageLinkIndex
+  , PackageLinkIndex, emptyPackageLinkIndex )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -108,7 +108,9 @@ import Tidepool.ExecutionProjection
   , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity
-  , PreparedPackageTarget, packageTargetGroups, packageTargetHomeImports, projectedPackageModule
+  , PreparedPackageTarget
+  , packageTargetName, packageTargetGroups, packageTargetImports, packageTargetHomeImports
+  , projectedPackageModule
   , projectedPackageInterfaceSha256, projectedPackageDefiningVersion, projectedPackageEncoding )
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, plannedOriginalOwner, plannedInterfaceFingerprint )
@@ -505,19 +507,22 @@ emptyPreparedPackageOutputs = PreparedPackageOutputs [] Map.empty emptyPackageLi
 -- The active stage supplies deployment provenance; the paired projection and
 -- its captured interfaces supply code and byte custody. The writer only copies
 -- these immutable inputs, never resolves another package path.
-retainPreparedPackageTargets :: NativeProductProvenance -> [(String, PreparedPackageTarget)]
+retainPreparedPackageTargets :: NativeProductProvenance -> [PreparedPackageTarget]
   -> Map.Map Module ArtifactBytes -> PreparedProductContext -> IO PreparedProductContext
 retainPreparedPackageTargets provenance targets captures context = do
   forM_ (preparedStageInputs context) $ \inputs -> withWorldStageBasis inputs $ \basis ->
     unless (nativeProductProducer provenance == worldInputsProducer basis
       && nativeProductProfile provenance == worldInputsProfile basis)
       (throwIO WorldCellCorrupt)
-  let producer = nativeProductProducer provenance
-      profile = nativeProductProfile provenance
-  unless (BS.length producer == 32 && BS.length profile == 32)
-    (fail "package product deployment commitments are malformed")
-  encodings <- fmap concat $ forM targets $ \(name, target) ->
-    forM (packageTargetGroups target) $ \group -> do
+  do
+    let producer = nativeProductProducer provenance
+        profile = nativeProductProfile provenance
+        targetGroups = [ (packageTargetName target, group)
+                       | target <- targets
+                       , group <- packageTargetGroups target ]
+    unless (BS.length producer == 32 && BS.length profile == 32)
+      (fail "package product deployment commitments are malformed")
+    encodings <- forM targetGroups $ \(name, group) -> do
       let owner = projectedPackageModule group
       body <- maybe (fail "package product lacks its captured defining interface") pure
         (Map.lookup owner captures)
@@ -528,67 +533,69 @@ retainPreparedPackageTargets provenance targets captures context = do
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
           bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
       pure (name, group, bytes)
-  (next, reversedOccurrences, targetOwners, targetHomeKeys, reversedHomeRoots) <-
-    foldM (placeTarget encodings)
-      (0 :: Word32, [], Map.empty, Map.empty, []) targets
-  let occurrences = reverse reversedOccurrences
-      homeRoots = Map.fromList (reverse reversedHomeRoots)
-      interfaces = Map.fromList
-        [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
-          ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
-        | (owner,body) <- Map.toAscList captures]
-      writes = Map.toAscList (Map.fromList
-        [("package-products" </> shaHex bytes ++ ".cbor",bytes)
-        | (_,_,bytes) <- encodings])
-      links = PackageLinkIndex occurrences targetOwners targetHomeKeys homeRoots writes
-  next `seq` pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
+    let ownersByTarget = Map.fromList
+          [ (packageTargetName target,
+              Map.fromList
+                [ (binder, fromIntegral index)
+                | (index, (name, group, _)) <- zip [0 :: Int ..] encodings
+                , name == packageTargetName target
+                , binder <- projectedBinders
+                    (projectedGroupEncodingInput (projectedPackageEncoding group)) ])
+          | target <- targets ]
+    occurrenceFacts <- forM encodings $ \(name, group, bytes) -> do
+      imports <- forM
+        [ globalIdentity global
+        | global <- projectedGlobals (projectedBody
+            (projectedGroupEncodingInput (projectedPackageEncoding group))) ]
+        (resolveOwner ownersByTarget name)
+      pure
+        ( SHA256.hash bytes
+        , T.pack (unitString (moduleUnit (projectedPackageModule group)))
+        , T.pack (moduleNameString (moduleName (projectedPackageModule group)))
+        , projectedPackageInterfaceSha256 group
+        , projectedPackageDefiningVersion group
+        , imports )
+    targetRoots <- Map.fromList <$> forM targets (\target -> do
+      roots <- mapM (resolveOwner ownersByTarget (packageTargetName target))
+        (packageTargetImports target)
+      pure (packageTargetName target, roots))
+    homeRoots <- foldM (insertHomeRoot ownersByTarget) Map.empty
+      [ ((packageTargetName target, unit, name, ordinal), identities)
+      | target <- targets
+      , (unit,name,ordinal, identities) <- packageTargetHomeImports target ]
+    let expectedHomeRoots = Set.fromList
+          [ (packageTargetName target, unit, name, ordinal)
+          | target <- targets
+          , (unit,name,ordinal, _) <- packageTargetHomeImports target ]
+    unless (Map.keysSet homeRoots == expectedHomeRoots)
+      (fail "fresh HOME package roots are incomplete or crossed")
+    let packageWrites = Map.toAscList (Map.fromList
+          [("package-products" </> shaHex bytes ++ ".cbor",bytes)
+          | (_,_,bytes) <- encodings])
+        products = [(path, SHA256.hash bytes) | (path,bytes) <- packageWrites]
+        interfaces = Map.fromList
+          [((T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))),
+            ("package-interfaces" </> artifactSha256 body ++ ".hi",body))
+          | (owner,body) <- Map.toAscList captures]
+        writes = packageWrites
+    links <- either fail pure
+      (issuePackageLinkIndex occurrenceFacts ownersByTarget targetRoots
+        homeRoots expectedHomeRoots products)
+    pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
   where
-    placeTarget encodings (next, known, owners, homeKeys, homes) (name, paired) = do
-      let target = T.pack name
-          groups =
-            [ (group, bytes)
-            | (targetName, group, bytes) <- encodings
-            , targetName == name ]
-          localOwners = Map.fromList
-            [ (binder, next + fromIntegral index)
-            | (index, (group, _)) <- zip [0 :: Int ..] groups
-            , binder <- projectedBinders
-                (projectedGroupEncodingInput (projectedPackageEncoding group)) ]
-      rows <- forM groups $ \(group, bytes) -> do
-        imports <- traverse (\global -> case Map.lookup (globalIdentity global) localOwners of
-          Just occurrence -> pure (PackageLinkLocal occurrence)
-          Nothing -> fail ("target " ++ name
-            ++ " package import lacks its selected occurrence: " ++ show (globalIdentity global))) $
-          projectedGlobals (projectedBody (projectedGroupEncodingInput (projectedPackageEncoding group)))
-        pure PackageOccurrence
-          { packageOccurrenceEnvelopeSha256 = SHA256.hash bytes
-          , packageOccurrenceUnit =
-              T.pack (unitString (moduleUnit (projectedPackageModule group)))
-          , packageOccurrenceModule =
-              T.pack (moduleNameString (moduleName (projectedPackageModule group)))
-          , packageOccurrenceDefiningInterfaceSha256 = projectedPackageInterfaceSha256 group
-          , packageOccurrenceDefiningVersionSha256 = projectedPackageDefiningVersion group
-          , packageOccurrenceImports = imports
-          }
-      selectedHomes <- forM
-        [ row
-        | row@(_, identities) <-
-            Map.toAscList (packageTargetHomeImports paired)
-        , not (null identities) ] $
-        \((unit, moduleName, ordinal), identities) -> do
-          selected <- forM identities $ \identity -> case Map.lookup identity localOwners of
-            Just occurrence -> pure (PackageLinkLocal occurrence)
-            Nothing -> fail ("HOME " ++ T.unpack unit ++ ":" ++ T.unpack moduleName
-              ++ " import lacks target " ++ name ++ " occurrence: " ++ show identity)
-          pure ((target, unit, moduleName, ordinal), selected)
-      let targetKeys = Set.fromList
-            [ (unit, moduleName, ordinal)
-            | ((_, unit, moduleName, ordinal), _) <- selectedHomes ]
-      pure ( next + fromIntegral (length groups)
-           , reverse rows ++ known
-           , Map.insert target localOwners owners
-           , Map.insert target targetKeys homeKeys
-           , reverse selectedHomes ++ homes )
+    insertHomeRoot owners known (key, identities) = do
+      target <- case key of
+        (target,_,_,_) -> pure target
+      links <- mapM (resolveOwner owners target) identities
+      if Map.member key known
+        then fail ("fresh HOME package roots repeat " ++ show key)
+        else pure (Map.insert key links known)
+
+    resolveOwner owners target identity = case Map.lookup identity
+        (Map.findWithDefault Map.empty target owners) of
+      Just occurrence -> pure occurrence
+      Nothing -> fail ("target " ++ T.unpack target
+        ++ " package import lacks its issued occurrence: " ++ show identity)
 
 withWorldStageInputs :: Maybe WorldStageInputs -> PreparedProductContext -> PreparedProductContext
 withWorldStageInputs inputs context = context {preparedStageInputs=inputs}
@@ -1152,29 +1159,27 @@ writeCertifiedSegmentProducts includes originals directory prepared context = do
     (StageInputAdditions additions canonical))
 
 writeCertifiedSegmentItemProducts
-  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> T.Text
-  -> WireProgram -> IO FilePath
-writeCertifiedSegmentItemProducts prepared
-  (StagedOriginalProducts originals _ _ _ _) directory target program = do
+  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> PreparedPackageTarget -> IO FilePath
+writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _ _ _) directory target = do
   context <- maybe (fail "item output lacks its segment original certification") pure
     (certifiedTargetContext originals)
-  certified <- encodeCertifiedItemProducts (prHscEnv (pprPipelineResult prepared))
-    context target program
-  bytes <- either fail pure certified
+  selection <- either fail pure (selectItemPackage context target)
+  certified <- encodeCertifiedItemProductsWithInputs
+    (prHscEnv (pprPipelineResult prepared)) context selection
+  (certifiedBytes,_) <- either fail pure certified
   let name = "certified-products.cbor"
-  BS.writeFile (directory </> name) bytes
+  BS.writeFile (directory </> name) certifiedBytes
   pure name
 
 writeCertifiedSegmentItemProductsWithInputs
-  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> T.Text
-  -> WireProgram
+  :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> PreparedPackageTarget
   -> IO (FilePath,Set.Set (SymbolIdentity,Word64))
-writeCertifiedSegmentItemProductsWithInputs prepared
-  (StagedOriginalProducts originals _ _ _ _) directory target program = do
+writeCertifiedSegmentItemProductsWithInputs prepared (StagedOriginalProducts originals _ _ _ _) directory target = do
   context <- maybe (fail "item output lacks its segment original certification") pure
     (certifiedTargetContext originals)
+  selection <- either fail pure (selectItemPackage context target)
   (bytes,inputs) <- encodeCertifiedItemProductsWithInputs
-    (prHscEnv (pprPipelineResult prepared)) context target program >>= either fail pure
+    (prHscEnv (pprPipelineResult prepared)) context selection >>= either fail pure
   let name = "certified-products.cbor"
   BS.writeFile (directory </> name) bytes
   pure (name,inputs)

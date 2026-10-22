@@ -1209,13 +1209,14 @@ runCellProgramMode bound cellPath exact planned = do
                   (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) [] Nothing
                   generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
                   prefix (scopeValues scope) (checkedTemplateImports admission)
+            packageTarget <- maybe (fail "typed segment item lost its paired package projection") pure
+              (paPackageTarget outputArtifact)
             createDirectoryIfMissing True itemDirectory
             writeFile (itemDirectory </> sourceOwner ++ ".hs") rendered
             void $ writePreparedSidecars InlineYieldSites itemDirectory binds
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             void $ writePreparedArtifacts itemDirectory [outputArtifact]
-            void $ writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory
-              (T.pack (paPackageTarget outputArtifact)) (paProgram outputArtifact)
+            void $ writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory packageTarget
             ordinal <- stagedOriginalEntryOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan

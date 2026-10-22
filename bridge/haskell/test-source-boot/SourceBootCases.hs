@@ -131,7 +131,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs, publishStagedOriginalProducts, stagedOriginalExternalDemand
+  , writeCertifiedSegmentProducts, publishStagedOriginalProducts, stagedOriginalExternalDemand
   , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
@@ -3784,28 +3784,6 @@ originalProjectionProducts = withScratch $ \work -> do
   prematureCertificate <- doesFileExist (segmentDirectory </> "certified-products.cbor")
   when prematureCertificate (fail "staged segment published its original certificate before completion")
   ordinaryFacts <- readCertificateCodecFacts work (captureDirectory </> "certified-products.cbor")
-  let ordinaryTarget = case codecCertificateTargets ordinaryFacts of
-        [("usesGood",references)] -> references
-        _ -> error "ordinary producer lost its selected target"
-      expectedGlobalSeals = map ((codecCertificateGlobalSeals ordinaryFacts) !!) ordinaryTarget
-  forM_ [0 .. 13 :: Int] $ \ordinal -> do
-    let itemDirectory = segmentDirectory </> ("item-" ++ show ordinal)
-        target = if even ordinal then currentProgram else safeProgram
-    createDirectory itemDirectory
-    (_,executionInputs) <- writeCertifiedSegmentItemProductsWithInputs paired
-      sharedCertificate itemDirectory (T.pack ("item-" ++ show ordinal)) target
-    unless (Set.null executionInputs) $
-      fail "source-only native root acquired a retained value obligation"
-    itemFacts <- readSegmentItemCodecFacts work (itemDirectory </> "certified-products.cbor")
-    unless (null (codecCertificateModules itemFacts)
-        && length (codecCertificateOwners itemFacts) == length (programGlobals target)
-        && (not (even ordinal) || codecCertificateGlobalSeals itemFacts == expectedGlobalSeals)) $
-      fail "item delta lost complete target witnesses or repeated module facts"
-    forM_ ["module-products.cbor","module-package-imports.cbor","dependencies.json","execution-source.cbor"] $ \name -> do
-      duplicated <- doesPathExist (itemDirectory </> name)
-      when duplicated (fail ("item copied segment original facts: " ++ name))
-    unchanged <- BS.readFile (segmentDirectory </> "module-products.cbor")
-    unless (unchanged == sharedBytes) (fail "item emission changed immutable original facts")
   receiptsAfterItems <- doesDirectoryExist receiptDirectory >>= \exists ->
     if exists then listDirectory receiptDirectory else pure []
   unless (receiptsAfterItems == receiptsBefore) $

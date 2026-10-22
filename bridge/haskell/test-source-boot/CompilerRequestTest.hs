@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, homeRootFreshRestriction) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -22,7 +22,6 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
-import Data.Word (Word)
 import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName, getSessionDynFlags)
 import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Driver.Session (backend, gopt, GeneralFlag(Opt_ByteCode), parseDynamicFilePragma)
@@ -37,7 +36,9 @@ import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFile
 import System.FilePath ((</>), takeFileName, takeDirectory)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
-  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory, writeCertifiedProductsKeepingWithOriginals )
+  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory
+  , writeCertifiedProductsKeepingWithOriginals, writeCertifiedSegmentProducts
+  , writeCertifiedSegmentItemProductsWithInputs )
 import Tidepool.CompilerRequest
 import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOriginalHomeModuleProducts)
 import Tidepool.ExtractRequest
@@ -48,9 +49,9 @@ import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
-  ( captureSelectedPackageWitnesses, encodeReceiptIdentity
-  , PackageLink(..), restrictFreshHomeRoots )
+  ( captureSelectedPackageWitnesses, encodeReceiptIdentity )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
+import qualified Crypto.Hash.SHA256 as SHA256
 
 -- The Rust receipt consumer expects null/text, independently of the execution
 -- schema's tagged optional parent. The joined World test exercises the actual
@@ -65,22 +66,6 @@ nativeReceiptIdentityChecks = forM_ [Nothing, Just (Text.pack "Record")] $ \pare
   case deserialiseFromBytes decodeTerm (BL.fromStrict (toStrictByteString (encodeReceiptIdentity symbol))) of
     Right (remaining, actual) | BL.null remaining && actual == expected -> pure ()
     other -> fail ("compiler receipt symbol grammar changed: " ++ show other)
-
--- A non-fresh HOME group with package imports must not emit a home_roots
--- entry; only fresh HOME groups publish their links in this receipt.
-homeRootFreshRestriction :: IO ()
-homeRootFreshRestriction = do
-  let unit = Text.pack "unit"
-      moduleNameText = Text.pack "Module"
-      freshKey = (Text.pack "target", unit, moduleNameText, 0 :: Word)
-      retainedKey = (Text.pack "target", unit, moduleNameText, 1 :: Word)
-      roots = Map.fromList
-        [ (freshKey, [PackageLinkLocal 0])
-        , (retainedKey, [PackageLinkLocal 1]) ]
-      fresh = Set.singleton freshKey
-      expected = Map.singleton freshKey [PackageLinkLocal 0]
-  unless (restrictFreshHomeRoots fresh roots == expected)
-    (fail ("non-fresh HOME root was not dropped: " ++ show (restrictFreshHomeRoots fresh roots)))
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do
@@ -679,10 +664,45 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                 (fail "native certificate omitted an emitted package product")
             captured <- listDirectory (work </> "package-interfaces")
             unless (not (null captured)) (fail "native writer omitted captured package interfaces")
-            packageRows <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
+            (packageRows,packageLinks) <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
               Right (rest,TList [TString "TPCERT",TInt 13,TList
-                [TString "ordinary",_,_,TList rows,_,_,_,_,_,_]]) | BL.null rest -> pure rows
+                [TString "ordinary",_,_,TList rows,_,_,_,_,_,links]]) | BL.null rest -> pure (rows,links)
               _ -> fail "native writer emitted a malformed package witness table"
+            ordinaryStageId <- case packageLinks of
+              TList [TInt 3,TBytes stageId,TList occurrences,TList roots,TList _,TList products] -> do
+                let packageRoots = case roots of
+                      [TList [TString "__result",TList ids]] -> ids
+                      _ -> []
+                unless (BS.length stageId == 32
+                    && length products == length paths
+                    && (not wantsCode || not (null packageRoots))
+                    && all (validOccurrence (length occurrences)) packageRoots)
+                  (fail "native writer emitted crossed or out-of-range package links")
+                pure stageId
+              _ -> fail "native writer emitted a malformed package-link manifest"
+            when wantsCode $ case artifacts of
+              artifact:_ -> do
+                let segmentDirectory = work </> "segment"
+                    itemDirectory = segmentDirectory </> "item-0"
+                createDirectory segmentDirectory
+                staged <- writeCertifiedSegmentProducts [work] interfaces segmentDirectory prepared products
+                packageTarget <- maybe (fail "native artifact lost its paired package projection") pure
+                  (paPackageTarget artifact)
+                createDirectory itemDirectory
+                writeCertifiedSegmentItemProductsWithInputs prepared staged itemDirectory packageTarget
+                  >>= \(_,inputs) -> unless (Set.null inputs)
+                    (fail "source-only item acquired retained value inputs")
+                itemCertificate <- BS.readFile (itemDirectory </> "certified-products.cbor")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict itemCertificate) of
+                  Right (rest,TList [TString "TPCERT",TInt 13,TList
+                    [TString "segment-item",_,_,TList
+                      [TInt 1,TBytes stageId,TBytes programSha,TString target,TList _,TList _]]])
+                    | BL.null rest
+                    , stageId == ordinaryStageId
+                    , programSha == SHA256.hash (paBytes artifact)
+                    , target == "__result" -> pure ()
+                  other -> fail ("segment-item package selection is not stage- or program-bound: " ++ show other)
+              [] -> fail "native package fixture has no item target"
             witnesses <- forM packageRows $ \row -> case row of
               TList [TString unit,TString name,TString path,TString seal] -> do
                 unless (takeDirectory (Text.unpack path) == work </> "package-interfaces")
@@ -728,6 +748,10 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
               [] -> fail "native output omitted all selected package witnesses"
 
   where
+    validOccurrence count value = case value of
+      TList [TString "local",TInt occurrence] ->
+        occurrence >= 0 && occurrence < fromIntegral count
+      _ -> False
     cases =
       [("NativePackageTarget",
         ["module NativePackageTarget where", "import Data.List (reverse)"
