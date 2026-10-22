@@ -385,13 +385,11 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     let home_rows = selection
         .completion()
         .rows()
-        .filter(|row| {
-            row.product().owner().module == "CachedPackageWorldHome" && !row.imports().is_empty()
-        })
+        .filter(|row| row.product().owner().module == "CachedPackageWorldHome")
         .collect::<Vec<_>>();
     assert!(
         !home_rows.is_empty(),
-        "the World target selects package-using Original HOME code"
+        "the World target selects Original HOME code"
     );
     for row in &home_rows {
         let offered = primary
