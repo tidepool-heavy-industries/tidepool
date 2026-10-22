@@ -1726,6 +1726,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             "B's IssuedGroups row must not turn its retained Full A proof into A permission"
         );
     }
+    let private = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     drop(inputs);
     drop(b_context);
     drop(dependency_offer);
@@ -1744,7 +1745,6 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         "a B receipt must release unrelated C payload ownership"
     );
 
-    let private = OriginalCompilerInputs::from_selection(&selected, &b).unwrap();
     let continuation =
         ContinuationNativeInputs::from_selection(&selected, &private.projection).unwrap();
     let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_request(&continuation);
@@ -5856,14 +5856,18 @@ fn native_availability_preserves_ambiguity_and_explicit_selection_refuses_confli
         )
         .unwrap();
     let projection_b = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
-    let selection_b =
+    let mut validation = PackageInterfaceValidation::default();
+    let mut selection_b =
         crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
             &projection_b,
             &physical.metadata_snapshot(),
-            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            &validation.inventory,
         )
         .unwrap();
-    let explicit_b = OriginalCompilerInputs::from_selection(&selection_b, &physical).unwrap();
+    let stage =
+        CapturedCompilerStage::issue(&mut selection_b, &physical, Vec::new(), &mut validation)
+            .unwrap();
+    let explicit_b = stage.compiler_inputs().as_ref().clone();
     assert!(matches!(ExactCompileContext::new(Arc::new(ambiguous))
         .prepare_compilation_with_private_input(&root.path().join("selected-b"), PRODUCER, None, Some(explicit_b)),
         Err(CompileError::ArtifactInventory(error))
@@ -6146,14 +6150,22 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .unwrap();
         let projection_a =
             CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
-        let selection_a =
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection_a =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection_a,
                 &physical_a.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let selected_a = OriginalCompilerInputs::from_selection(&selection_a, &physical_a).unwrap();
+        let stage = CapturedCompilerStage::issue(
+            &mut selection_a,
+            &physical_a,
+            Vec::new(),
+            &mut validation,
+        )
+        .unwrap();
+        let selected_a = stage.compiler_inputs().as_ref().clone();
         let support_a =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&selected_a)
                 .unwrap();
@@ -6201,14 +6213,22 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .unwrap();
         let projection_b =
             CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
-        let selection_b =
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection_b =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection_b,
                 &physical_b.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let other = OriginalCompilerInputs::from_selection(&selection_b, &physical_b).unwrap();
+        let stage = CapturedCompilerStage::issue(
+            &mut selection_b,
+            &physical_b,
+            Vec::new(),
+            &mut validation,
+        )
+        .unwrap();
+        let other = stage.compiler_inputs().as_ref().clone();
         let conflict_root = tempfile::tempdir().unwrap();
         assert!(matches!(ExactCompileContext::new(Arc::new(context.clone()))
             .prepare_compilation_with_private_input(conflict_root.path(), PRODUCER, None, Some(other.clone())),
@@ -6623,14 +6643,17 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
                 crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let selection =
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let selected = OriginalCompilerInputs::from_selection(&selection, &physical);
+        let selected =
+            CapturedCompilerStage::issue(&mut selection, &physical, Vec::new(), &mut validation)
+                .map(|stage| stage.compiler_inputs().as_ref().clone());
         if wrong_ordinal {
             assert!(matches!(selected,
                 Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
@@ -8980,23 +9003,12 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     };
     let request = issue(context(vec![offer]), "custodied");
     let inputs = request.compiler_inputs();
-    let validation = PackageInterfaceValidation::default();
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-        inputs,
-        &validation.inventory,
-    )
-    .unwrap();
     let private = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     assert!(private
         .artifacts
         .artifact_ids()
         .contains(&old_entry.descriptor.id));
     let clean = issue(baseline.clone(), "clean");
-    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-        clean.compiler_inputs(),
-        &validation.inventory,
-    )
-    .unwrap();
     let clean = OriginalCompilerInputs::from_issued_support(
         clean.compiler_inputs().compiler_source_support(),
     );
@@ -9491,7 +9503,7 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
             )
             .unwrap();
         let policy_fragment =
-            OriginalCompilerInputs::from_selection(&selection, published.artifact_view()).unwrap();
+            OriginalCompilerInputs::from_issued_support(published.compiler_source_support());
         let owner = &entry.descriptor.owner;
         let fragment_role = policy_fragment
             .projection
