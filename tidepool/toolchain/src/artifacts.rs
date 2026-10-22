@@ -939,6 +939,10 @@ pub fn prepare_world_cell_program(
                 let relative = PathBuf::from(format!("item-{index}"));
                 let bytes =
                     checked_cell::world_output_bytes(&program, &relative.join(prepared_path))?;
+                let program_sha256: [u8; 32] = {
+                    use sha2::{Digest, Sha256};
+                    Sha256::digest(bytes.as_ref()).into()
+                };
                 validation
                     .inventory
                     .charge(bytes.len().checked_mul(64).ok_or_else(|| {
@@ -960,12 +964,13 @@ pub fn prepare_world_cell_program(
                     &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-                let (certified, globals, packages) = segment
+                let (certified, globals, packages, item_selection) = segment
                     .originals
                     .select_item(
                         &mut artifacts,
                         item_receipt,
                         &target,
+                        &program_sha256,
                         Some(&produced),
                         &mut validation,
                     )
@@ -989,8 +994,11 @@ pub fn prepare_world_cell_program(
                     &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
                     segment.package_products(),
-                    segment.originals.package_links(),
-                    None,
+                    crate::artifact_inventory::BoundPackageSelection::item(
+                        segment.originals.package_links(),
+                        &item_selection,
+                        program_sha256,
+                    )?,
                     segment
                         .product_admission()
                         .compiler_inputs()
@@ -4109,14 +4117,41 @@ fn seal_turn_outputs_with_validation(
         }
         return Ok(None);
     };
-    let (certified, item_globals, item_packages) = match segment_originals {
+    let (certified, item_globals, item_packages, item_selection, item_program_sha256) =
+        match segment_originals {
         Some(originals) => {
             let item = certified_products::decode_segment_item_with_operation(
                 &receipt_bytes,
                 &validation.inventory,
             )
             .map_err(compiler_evidence_failure)?;
-            let (products, globals, packages) = originals
+            let prepared_paths = std::fs::read_dir(output_dir)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().and_then(|value| value.to_str()) == Some("cbor")
+                        && path
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|value| value.ends_with(".prepared.cbor"))
+                })
+                .collect::<Vec<_>>();
+            let [prepared_path] = prepared_paths.as_slice() else {
+                return Err(CompileError::ExtractFailed(
+                    "segment item lacks one prepared program".into(),
+                ));
+            };
+            let prepared_bytes = certified_products::read_bounded_with_operation(
+                prepared_path,
+                validation.inventory.limits().max_bytes as u64,
+                &validation.inventory,
+            )
+            .map_err(compiler_evidence_failure)?;
+            let program_sha256: [u8; 32] = {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(&prepared_bytes).into()
+            };
+            let (products, globals, packages, selection) = originals
                 .select_item(
                     segment_cursor
                         .as_mut()
@@ -4128,6 +4163,7 @@ fn seal_turn_outputs_with_validation(
                         .selection,
                     item,
                     prepared,
+                    &program_sha256,
                     Some(produced_types.ok_or_else(|| {
                         CompileError::ExtractFailed(
                             "segment item lacks its checked type selection".into(),
@@ -4136,7 +4172,13 @@ fn seal_turn_outputs_with_validation(
                     validation,
                 )
                 .map_err(compiler_evidence_failure)?;
-            (products, Some(globals), Some(packages))
+            (
+                products,
+                Some(globals),
+                Some(packages),
+                Some(selection),
+                Some(program_sha256),
+            )
         }
         None => {
             let independent_package_interfaces;
@@ -4185,7 +4227,7 @@ fn seal_turn_outputs_with_validation(
                 output_dir,
                 &validation.inventory,
             );
-            (products, None, None)
+            (products, None, None, None, None)
         }
     };
     let accepted = if let Some(globals) = &item_globals {
@@ -4247,16 +4289,34 @@ fn seal_turn_outputs_with_validation(
         .as_ref()
         .map(|inputs| inputs.compiler_source_support())
         .unwrap_or(&no_inherited_inputs);
+    let package_selection = match (segment_originals, item_selection.as_ref()) {
+        (Some(originals), Some(selection)) => {
+            crate::artifact_inventory::BoundPackageSelection::item(
+                originals.package_links(),
+                selection,
+                item_program_sha256.expect("item program digest"),
+            )?
+        }
+        (None, None) => crate::artifact_inventory::BoundPackageSelection::ordinary(
+            &ordinary_receipt
+                .as_ref()
+                .expect("ordinary receipt")
+                .package_links,
+            target,
+            [0; 32],
+        )?,
+        _ => {
+            return Err(CompileError::ExtractFailed(
+                "native target has an incoherent package selection mode".into(),
+            ))
+        }
+    };
     let admitted = admit_native_target_products(
         prepared,
         physical_native_output,
         &certified,
         &package_products,
-        &ordinary_receipt
-            .as_ref()
-            .expect("ordinary receipt")
-            .package_links,
-        Some(target),
+        package_selection,
         inherited_support,
         accepted,
         &package_catalog,
@@ -4473,8 +4533,7 @@ fn admit_native_target_products(
     output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
-    links: &certified_products::PackageLinks,
-    target_name: Option<&str>,
+    package_selection: crate::artifact_inventory::BoundPackageSelection<'_>,
     inherited: &crate::artifact_inventory::CompilerSourceSupport,
     accepted: &[certified_products::AcceptedGlobal],
     package_catalog: &PackageInterfaceCatalog<'_>,
@@ -4578,8 +4637,7 @@ fn admit_native_target_products(
                 prepared,
                 output,
                 packages,
-                links,
-                target_name,
+                package_selection,
                 inherited,
                 &validation.inventory,
             )?,
@@ -6398,8 +6456,11 @@ fn compile_invocation_inner(
                         target.prepared.prepared(),
                         &native_output,
                         &package_products,
-                        &receipt.package_links,
-                        Some(name),
+                        crate::artifact_inventory::BoundPackageSelection::ordinary(
+                            &receipt.package_links,
+                            name,
+                            [0; 32],
+                        )?,
                         &inherited_completion_support,
                         &validation.inventory,
                     )?;

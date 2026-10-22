@@ -7,3 +7,7 @@ import Data.Text (Text)
 
 result :: ([Int] -> [Int], String -> Text)
 result = (byList, byText)
+
+{-# NOINLINE result2 #-}
+result2 :: ([Int] -> [Int], String -> Text)
+result2 = (byList, byText)

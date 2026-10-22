@@ -1214,7 +1214,8 @@ runCellProgramMode bound cellPath exact planned = do
             void $ writePreparedSidecars InlineYieldSites itemDirectory binds
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             void $ writePreparedArtifacts itemDirectory [outputArtifact]
-            void $ writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
+            void $ writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory
+              (T.pack (paPackageTarget outputArtifact)) (paProgram outputArtifact)
             ordinal <- stagedOriginalEntryOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan

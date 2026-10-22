@@ -82,6 +82,33 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             .expect("second target owner");
         let first_bindings = first.target.artifacts().selected_native_binding_rows().1;
         let second_bindings = second.target.artifacts().selected_native_binding_rows().1;
+        let first_packages = first
+            .target
+            .completed_selection()
+            .expect("first item has package completion")
+            .target_imports()
+            .iter()
+            .filter_map(|import| match import {
+                crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                    binding,
+                    ..
+                } => Some((
+                    binding.product().code().owner().unit.clone(),
+                    binding.product().code().owner().module.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !first_packages.is_empty(),
+            "the World declaration item must carry its actual Data.Text package roots"
+        );
+        assert!(
+            first_packages
+                .iter()
+                .all(|(unit, module)| !unit.is_empty() && !module.is_empty()),
+            "World item package roots retain their producer-issued owner"
+        );
         assert!(
             !first_bindings.is_empty(),
             "first item selects executable code"
@@ -342,8 +369,13 @@ fn assert_physical_selection(
                 .is_some_and(|path| path.ends_with(".prepared.cbor"))
         })
         .expect("actual prepared bytes");
+    let prepared_bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
+    let program_sha256: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(prepared_bytes.as_ref()).into()
+    };
     let target = tidepool_repr::execution_schema::parse_program(
-        crate::checked_cell::world_output_bytes(checked, &relative.join(path))?,
+        prepared_bytes,
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
@@ -365,7 +397,14 @@ fn assert_physical_selection(
         let result =
             segment
                 .originals
-                .select_item(&mut cursor, receipt, &target, selected, &mut validation);
+                .select_item(
+                    &mut cursor,
+                    receipt,
+                    &target,
+                    &program_sha256,
+                    selected,
+                    &mut validation,
+                );
         assert!(matches!(
             result,
             Err(certified_products::CertificationError::Mismatch(
@@ -388,6 +427,7 @@ fn assert_physical_selection(
             &mut cursor,
             receipt,
             &target,
+            &program_sha256,
             Some(&later_selector),
             &mut validation,
         ),
@@ -402,9 +442,16 @@ fn assert_physical_selection(
         &validation.inventory,
     )
     .map_err(compiler_evidence_failure)?;
-    let (certified, _, _) = segment
+    let (certified, _, _, _) = segment
         .originals
-        .select_item(&mut cursor, receipt, &target, Some(&first), &mut validation)
+        .select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            &program_sha256,
+            Some(&first),
+            &mut validation,
+        )
         .map_err(compiler_evidence_failure)?;
     let receipt = certified_products::decode_segment_item_with_operation(
         crate::checked_cell::world_output_bytes(
@@ -417,7 +464,14 @@ fn assert_physical_selection(
     assert!(matches!(
         segment
             .originals
-            .select_item(&mut cursor, receipt, &target, Some(&first), &mut validation,),
+            .select_item(
+                &mut cursor,
+                receipt,
+                &target,
+                &program_sha256,
+                Some(&first),
+                &mut validation,
+            ),
         Err(certified_products::CertificationError::OriginalClosure(_))
     ));
     let current = physical.current_interface(51)?.artifact_id();
@@ -458,8 +512,13 @@ fn assert_physical_selection(
                 .is_some_and(|path| path.ends_with(".prepared.cbor"))
         })
         .expect("actual second prepared bytes");
+    let prepared_bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
+    let second_program_sha256: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(prepared_bytes.as_ref()).into()
+    };
     let target = tidepool_repr::execution_schema::parse_program(
-        crate::checked_cell::world_output_bytes(checked, &relative.join(path))?,
+        prepared_bytes,
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
@@ -471,12 +530,13 @@ fn assert_physical_selection(
         &validation.inventory,
     )
     .map_err(compiler_evidence_failure)?;
-    let (second, _, _) = segment
+    let (second, _, _, _) = segment
         .originals
         .select_item(
             &mut cursor,
             receipt,
             &target,
+            &second_program_sha256,
             Some(&later_selector),
             &mut validation,
         )

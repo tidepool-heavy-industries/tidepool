@@ -978,9 +978,24 @@ projectPreparedPackageTarget env hostBindings homeContext context home component
           && toUnitId (moduleUnit (symbolOwner (globalIdentity global))) `Set.notMember` homeUnitIds
   unless (all ((`Set.notMember` packageOwners) . pmModule) home)
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
-  homeRows <- forM home $ \prepared ->
+  products <- projectPreparedPackageGroupsWithIdentities context components reach identities
+  let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
+      imported = Set.fromList exports
+  unless (length exports == Set.size imported)
+    (Left (InvalidPreparedRepresentation "package products repeat an exported binder"))
+  PreparedProjection checkedContext selected checkedIdentities <-
+    finishProjection context modules identities selectedHome
+  candidate <- projectPreparedCandidateWithImports imported hostBindings
+    checkedContext selected checkedIdentities
+  (program, constructors) <- finalizePreparedCandidate candidate
+  homeRows <- forM selectedHome $ \prepared ->
+    let selected = Set.fromList
+          [ ordinal
+          | (ordinal, group) <- preparedBindingGroups prepared
+          , any reachable (pmBindings group) ]
+    in
     forM (projectPreparedModuleGroupResultsFor
-          (OriginalHomeProduct isHomeUnit) homeContext prepared Nothing) $ \(ordinal, _, outcome) ->
+          (OriginalHomeProduct isHomeUnit) homeContext prepared (Just selected)) $ \(ordinal, _, outcome) ->
          case outcome of
            Left failure -> Left failure
            Right evidence ->
@@ -993,16 +1008,6 @@ projectPreparedPackageTarget env hostBindings homeContext context home component
                         | global <- projectedGlobals (projectedBody group)
                         , isPackageImport global ] )
   let homeImports = Map.fromList (concat homeRows)
-  products <- projectPreparedPackageGroupsWithIdentities context components reach identities
-  let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
-      imported = Set.fromList exports
-  unless (length exports == Set.size imported)
-    (Left (InvalidPreparedRepresentation "package products repeat an exported binder"))
-  PreparedProjection checkedContext selected checkedIdentities <-
-    finishProjection context modules identities selectedHome
-  candidate <- projectPreparedCandidateWithImports imported hostBindings
-    checkedContext selected checkedIdentities
-  (program, constructors) <- finalizePreparedCandidate candidate
   pure (PreparedPackageTarget program constructors products homeImports)
 
 -- The exact compiler Names travel with their stable full-owner identities.

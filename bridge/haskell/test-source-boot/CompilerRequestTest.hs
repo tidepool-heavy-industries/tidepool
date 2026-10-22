@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization, homeRootResolutionAgreement, homeRootFreshRestriction) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, homeRootFreshRestriction) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -49,8 +49,7 @@ import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
-  , PackageLink(..), PackageOccurrence(..), RawOccurrence(..), RawLink(..)
-  , canonicalizeOccurrences, resolveHomeRoots, restrictFreshHomeRoots )
+  , PackageLink(..), restrictFreshHomeRoots )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 
 -- The Rust receipt consumer expects null/text, independently of the execution
@@ -67,118 +66,14 @@ nativeReceiptIdentityChecks = forM_ [Nothing, Just (Text.pack "Record")] $ \pare
     Right (remaining, actual) | BL.null remaining && actual == expected -> pure ()
     other -> fail ("compiler receipt symbol grammar changed: " ++ show other)
 
--- Exact cross-target occurrence canonicalization: two targets sharing an
--- identical parent+child graph collapse to shared rows, while a sibling with
--- the same parent envelope but a different child partition stays distinct.
-packageOccurrenceCanonicalization :: IO ()
-packageOccurrenceCanonicalization = do
-  let unit = Text.pack "unit"
-      moduleNameText = Text.pack "Module"
-      interface = BS.replicate 32 1
-      version = BS.replicate 32 2
-      raw envelope imports = RawOccurrence envelope unit moduleNameText interface version imports
-      raws =
-        [ raw (BS.pack [80]) [RawLinkLocal 1]   -- target A parent
-        , raw (BS.pack [67]) []                 -- target A child
-        , raw (BS.pack [80]) [RawLinkLocal 3]   -- target B identical parent
-        , raw (BS.pack [67]) []                 -- target B identical child
-        , raw (BS.pack [80]) [RawLinkLocal 5]   -- sibling: same envelope, different child
-        , raw (BS.pack [68]) []                 -- sibling child
-        ]
-      expectedRows =
-        [ PackageOccurrence (BS.pack [80]) unit moduleNameText interface version [PackageLinkLocal 1]
-        , PackageOccurrence (BS.pack [67]) unit moduleNameText interface version []
-        , PackageOccurrence (BS.pack [80]) unit moduleNameText interface version [PackageLinkLocal 3]
-        , PackageOccurrence (BS.pack [68]) unit moduleNameText interface version []
-        ]
-      expectedIndex = Map.fromList [(0, 0), (1, 1), (2, 0), (3, 1), (4, 2), (5, 3)]
-      (rows, indexMap) = canonicalizeOccurrences raws
-  unless (rows == expectedRows)
-    (fail ("package occurrence canonicalization changed rows: " ++ show rows))
-  unless (indexMap == expectedIndex)
-    (fail ("package occurrence canonicalization changed ids: " ++ show indexMap))
-  -- A supported finite cycle must terminate and collapse to one self-referring
-  -- row rather than hang or emit a second distinct occurrence.
-  let cycleRaws =
-        [ RawOccurrence (BS.pack [69]) unit moduleNameText interface version [RawLinkLocal 1]
-        , RawOccurrence (BS.pack [69]) unit moduleNameText interface version [RawLinkLocal 0]
-        ]
-      expectedCycleRows =
-        [ PackageOccurrence (BS.pack [69]) unit moduleNameText interface version [PackageLinkLocal 0]
-        ]
-      (cycleRows, _) = canonicalizeOccurrences cycleRaws
-  unless (cycleRows == expectedCycleRows)
-    (fail ("package occurrence cyclic canonicalization changed rows: " ++ show cycleRows))
-
--- HOME root links resolve through each target's own occurrence map; a
--- T2-only binder and reversed target order must not change the agreed links,
--- and disagreeing targets must refuse rather than merge.
-homeRootResolutionAgreement :: IO ()
-homeRootResolutionAgreement = do
-  let unit = Text.pack "unit"
-      moduleNameText = Text.pack "Module"
-      binderA = SymbolIdentity (Text.pack "u") (Text.pack "A") (Text.pack "v") (Text.pack "a") Nothing
-      binderB = SymbolIdentity (Text.pack "u") (Text.pack "B") (Text.pack "v") (Text.pack "b") Nothing
-      binderC = SymbolIdentity (Text.pack "u") (Text.pack "C") (Text.pack "v") (Text.pack "c") Nothing
-      indexMap = Map.fromList [(0, 0), (1, 1), (2, 0), (3, 1)]
-      owners = Map.fromList
-        [ (Text.pack "t1", Map.fromList [(binderA, 0), (binderB, 1)])
-        , (Text.pack "t2", Map.fromList [(binderA, 2), (binderC, 3)]) ]
-      home1 = (unit, moduleNameText, 0 :: Word)
-      home2 = (unit, moduleNameText, 1 :: Word)
-      importsForward = Map.fromList
-        [ (Text.pack "t1", Map.fromList [(home1, [binderA])])
-        , (Text.pack "t2", Map.fromList [(home1, [binderA]), (home2, [binderC])]) ]
-      importsReversed = Map.fromList
-        [ (Text.pack "t2", Map.fromList [(home1, [binderA]), (home2, [binderC])])
-        , (Text.pack "t1", Map.fromList [(home1, [binderA])]) ]
-      disagreeing = Map.fromList
-        [ (Text.pack "t1", Map.fromList [(home1, [binderA])])
-        , (Text.pack "t2", Map.fromList [(home1, [binderB])]) ]
-      expected = Map.fromList
-        [ (home1, [PackageLinkLocal 0])
-        , (home2, [PackageLinkLocal 1]) ]
-  case resolveHomeRoots indexMap owners importsForward of
-    Right actual | actual == expected -> pure ()
-    other -> fail ("HOME root resolution changed: " ++ show other)
-  case resolveHomeRoots indexMap owners importsReversed of
-    Right actual | actual == expected -> pure ()
-    other -> fail ("reversed HOME root resolution changed: " ++ show other)
-  case resolveHomeRoots indexMap owners disagreeing of
-    Left _ -> pure ()
-    Right actual -> fail ("disagreeing HOME roots were silently merged: " ++ show actual)
-  -- A symbol exported by two targets at one canonical occurrence resolves to
-  -- that shared occurrence; at two distinct occurrences it refuses.
-  let sharedOwners = Map.fromList
-        [ (Text.pack "t1", Map.singleton binderA 0)
-        , (Text.pack "t2", Map.singleton binderA 1) ]
-      sharedIndex = Map.fromList [(0, 0), (1, 0)]
-      sharedImports = Map.fromList
-        [ (Text.pack "t1", Map.singleton home1 [binderA])
-        , (Text.pack "t2", Map.singleton home1 [binderA]) ]
-      ambiguousIndex = Map.fromList [(0, 0), (1, 1)]
-  case resolveHomeRoots sharedIndex sharedOwners sharedImports of
-    Right actual | actual == Map.singleton home1 [PackageLinkLocal 0] -> pure ()
-    other -> fail ("shared HOME occurrence did not collapse: " ++ show other)
-  case resolveHomeRoots ambiguousIndex sharedOwners sharedImports of
-    Left reason | "multiple occurrences" `isInfixOf` reason -> pure ()
-    other -> fail ("ambiguous HOME occurrence was not refused: " ++ show other)
-  let missingIndex = Map.singleton (Text.pack "t1")
-        (Map.singleton binderA 99)
-      onlyFirstTarget = Map.singleton (Text.pack "t1")
-        (Map.singleton home1 [binderA])
-  case resolveHomeRoots indexMap missingIndex onlyFirstTarget of
-    Left reason | "canonical occurrence" `isInfixOf` reason -> pure ()
-    other -> fail ("missing canonical occurrence was not refused: " ++ show other)
-
 -- A non-fresh HOME group with package imports must not emit a home_roots
 -- entry; only fresh HOME groups publish their links in this receipt.
 homeRootFreshRestriction :: IO ()
 homeRootFreshRestriction = do
   let unit = Text.pack "unit"
       moduleNameText = Text.pack "Module"
-      freshKey = (unit, moduleNameText, 0 :: Word)
-      retainedKey = (unit, moduleNameText, 1 :: Word)
+      freshKey = (Text.pack "target", unit, moduleNameText, 0 :: Word)
+      retainedKey = (Text.pack "target", unit, moduleNameText, 1 :: Word)
       roots = Map.fromList
         [ (freshKey, [PackageLinkLocal 0])
         , (retainedKey, [PackageLinkLocal 1]) ]
@@ -785,7 +680,7 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
             captured <- listDirectory (work </> "package-interfaces")
             unless (not (null captured)) (fail "native writer omitted captured package interfaces")
             packageRows <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
-              Right (rest,TList [TString "TPCERT",TInt 12,TList
+              Right (rest,TList [TString "TPCERT",TInt 13,TList
                 [TString "ordinary",_,_,TList rows,_,_,_,_,_,_]]) | BL.null rest -> pure rows
               _ -> fail "native writer emitted a malformed package witness table"
             witnesses <- forM packageRows $ \row -> case row of

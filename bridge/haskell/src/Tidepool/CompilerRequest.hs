@@ -545,6 +545,7 @@ withBoundExactInterfaceTransaction (BoundCompilerRequest scope args admitted _ e
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
+  , paPackageTarget :: String
   , paProgram :: WireProgram
   , paBytes :: BS.ByteString
   , paConstructors :: [IssuedConstructor]
@@ -932,7 +933,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
-      pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites)
+      pure (PreparedArtifact target target program bytes
+        (constructors ++ originalConstructors) sealedSites)
     finalResults <- forM targets $ \target -> do
       let entry = projectionEntry (contextFor target)
       final <- readIORef finalProjections >>= maybe
@@ -1285,7 +1287,8 @@ prepareWorldCellQuestion bound question = do
           createDirectoryIfMissing True child
           sidecarFiles <- writePreparedSidecars InlineYieldSites child binds Nothing (map T.pack (prWarnings result)) [output]
           programFiles <- writePreparedArtifacts child [output]
-          (productFile,executionInputs) <- writeCertifiedSegmentItemProductsWithInputs prepared staged child (paProgram output)
+          (productFile,executionInputs) <- writeCertifiedSegmentItemProductsWithInputs
+            prepared staged child (T.pack (paPackageTarget output)) (paProgram output)
           let turnFile = "turn.cbor"
           BS.writeFile (child </> turnFile) (encodeTurnOut turn)
           valueFiles <- case worldCellItemInterface correlatedItem of

@@ -25,7 +25,7 @@ pub use compiler_projection::{
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
     IssuedInputNativeDecisions, RecordedCompilerRole, RecordedInputNativeDecision, NativeSelectionCompletions,
-    NativeCompletionSnapshotFacts,
+    NativeCompletionSnapshotFacts, BoundPackageSelection,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -626,8 +626,7 @@ impl CertifiedTargetNativeInputs {
         prepared: &tidepool_repr::execution_schema::PreparedProgram,
         output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
-        links: &crate::certified_products::PackageLinks,
-        target_name: Option<&str>,
+        selection: BoundPackageSelection<'_>,
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
@@ -641,8 +640,7 @@ impl CertifiedTargetNativeInputs {
             &sources,
             output,
             packages,
-            links,
-            target_name,
+            selection,
             inherited.native_completions(),
             operation,
         )?;

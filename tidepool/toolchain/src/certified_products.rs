@@ -209,22 +209,24 @@ pub struct PackageProductOutput {
 /// and never becomes durable authority by itself. Runtime binding authority
 /// stays with `IssuedPackageCodeGraph` / `ScopeProofV3`.
 ///
-/// Wire (one paired value, version 1):
+/// Wire (one paired value, version 3):
 /// ```text
-/// [1, occurrences, target_roots, home_roots]
+/// [3, stage_id, occurrences, target_roots, home_roots, package_products]
 /// occurrence = [id, envelope_sha256, unit, module,
 ///               defining_interface_sha256, defining_version_sha256, imports]
-/// link = ["local", occurrence] | ["inherited"]
+/// link = ["local", occurrence]
 /// target_roots = [[target_name, [link, ..]], ..]
-/// home_roots   = [[[unit, module, original_ordinal], [link, ..]], ..]
+/// home_roots   = [[[target, unit, module, original_ordinal], [link, ..]], ..]
+/// package_products = [[relative_path, sha256], ..]
 /// ```
 /// Digest fields are raw 32-byte CBOR byte strings, matching `package_products`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageLinks {
     version: u8,
+    stage_id: [u8; 32],
     occurrences: Vec<PackageOccurrenceRow>,
     target_roots: BTreeMap<String, Vec<PackageLink>>,
-    home_roots: BTreeMap<(String, String, u32), Vec<PackageLink>>,
+    home_roots: BTreeMap<(String, String, String, u32), Vec<PackageLink>>,
 }
 
 impl PackageLinks {
@@ -233,7 +235,8 @@ impl PackageLinks {
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
-            version: 1,
+            version: 3,
+            stage_id: [0; 32],
             occurrences: Vec::new(),
             target_roots: BTreeMap::new(),
             home_roots: BTreeMap::new(),
@@ -243,13 +246,16 @@ impl PackageLinks {
     pub fn version(&self) -> u8 {
         self.version
     }
+    pub fn stage_id(&self) -> &[u8; 32] {
+        &self.stage_id
+    }
     pub fn occurrences(&self) -> &[PackageOccurrenceRow] {
         &self.occurrences
     }
     pub fn target_roots(&self) -> &BTreeMap<String, Vec<PackageLink>> {
         &self.target_roots
     }
-    pub fn home_roots(&self) -> &BTreeMap<(String, String, u32), Vec<PackageLink>> {
+    pub fn home_roots(&self) -> &BTreeMap<(String, String, String, u32), Vec<PackageLink>> {
         &self.home_roots
     }
     pub fn target_links(&self, name: &str) -> Option<&[PackageLink]> {
@@ -257,19 +263,70 @@ impl PackageLinks {
     }
     pub fn home_links(
         &self,
+        target: &str,
         unit: &str,
         module: &str,
         original_ordinal: u32,
     ) -> Option<&[PackageLink]> {
         self.home_roots
-            .get(&(unit.to_owned(), module.to_owned(), original_ordinal))
+            .get(&(
+                target.to_owned(),
+                unit.to_owned(),
+                module.to_owned(),
+                original_ordinal,
+            ))
             .map(Vec::as_slice)
     }
 }
 
+/// One consumer's authenticated reference into a stage package manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageSelection {
+    stage_id: [u8; 32],
+    program_sha256: [u8; 32],
+    target: String,
+    target_roots: Vec<PackageLink>,
+    home_roots: BTreeMap<(String, String, String, u32), Vec<PackageLink>>,
+}
+
+impl PackageSelection {
+    pub fn stage_id(&self) -> &[u8; 32] {
+        &self.stage_id
+    }
+    pub fn program_sha256(&self) -> &[u8; 32] {
+        &self.program_sha256
+    }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+    pub fn target_roots(&self) -> &[PackageLink] {
+        &self.target_roots
+    }
+    pub fn home_links(
+        &self,
+        target: &str,
+        unit: &str,
+        module: &str,
+        original_ordinal: u32,
+    ) -> Option<&[PackageLink]> {
+        self.home_roots
+            .get(&(
+                target.to_owned(),
+                unit.to_owned(),
+                module.to_owned(),
+                original_ordinal,
+            ))
+            .map(Vec::as_slice)
+    }
+    pub fn home_roots(
+        &self,
+    ) -> &BTreeMap<(String, String, String, u32), Vec<PackageLink>> {
+        &self.home_roots
+    }
+}
+
 /// One exact fresh package occurrence: shared immutable envelope bytes plus its
-/// ordered child links. Two rows may share an envelope only when their ordered
-/// import histories differ; the row identity remains its positional `id`.
+/// ordered child links. Distinct positional rows may carry identical contents.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageOccurrenceRow {
     id: u32,
@@ -306,18 +363,16 @@ impl PackageOccurrenceRow {
 }
 
 /// A single ordered import destination. `Local` names an occurrence row by its
-/// positional `OccurrenceId`; `Inherited` is a demand marker resolved only to
-/// the exact held binding already carried in the inherited completions.
+/// positional `OccurrenceId`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageLink {
     Local { occurrence: u32 },
-    Inherited,
 }
 
 pub(crate) struct SegmentItemReceipt {
-    pub package_products: Vec<PackageProductOutput>,
     pub globals: Vec<AcceptedGlobal>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+    pub selection: PackageSelection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -896,17 +951,39 @@ impl CertifiedSegmentOriginals {
         cursor: &mut crate::artifact_inventory::BoundArtifactSelection,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
+        program_sha256: &[u8; 32],
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
         CertifiedProducts,
         Vec<AcceptedGlobal>,
         BTreeMap<(String, String), PackageInterfaceWitness>,
+        PackageSelection,
     )> {
         if !Arc::ptr_eq(self.operation(), &validation.inventory) {
             return Err(CertificationError::Mismatch(
                 "segment inventory accounting owner",
             ));
+        }
+        if item.selection.stage_id() != self.receipt.package_links.stage_id() {
+            return Err(CertificationError::Mismatch(
+                "item package selection references another stage manifest",
+            ));
+        }
+        if item.selection.program_sha256() != program_sha256 {
+            return Err(CertificationError::Mismatch(
+                "item package selection references another prepared program",
+            ));
+        }
+        check_package_link_range(
+            item.selection.target_roots(),
+            self.receipt.package_links.occurrences().len(),
+        )?;
+        for roots in item.selection.home_roots().values() {
+            check_package_link_range(
+                roots,
+                self.receipt.package_links.occurrences().len(),
+            )?;
         }
         match (&self.products.source_selection.produced_types, produced) {
             (None, None) => {}
@@ -1054,7 +1131,7 @@ impl CertifiedSegmentOriginals {
             retained_core_products: self.products.retained_core_products.clone(),
             source_selection,
         };
-        Ok((products, item.globals, additions))
+        Ok((products, item.globals, additions, item.selection))
     }
 }
 
@@ -2139,7 +2216,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded ordinary `TPCERT12` tuple with exact owner rows shared
+/// Decode the worker's bounded ordinary `TPCERT13` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -2510,11 +2587,11 @@ fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 12 {
+    if version != 13 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 12,
+            expected: 13,
         });
     }
     if header.len() != 3 {
@@ -2556,7 +2633,7 @@ pub(crate) fn decode_segment_item_with_operation(
     }
     let value = operation.decode_value(bytes, limit)?;
     let payload = product_receipt_payload(&value)?;
-    let [tag, globals, packages, package_products] = payload else {
+    let [tag, globals, packages, selection] = payload else {
         return Err(CertificationError::Receipt("segment item output arity"));
     };
     if string(tag)? != "segment-item" {
@@ -2573,11 +2650,20 @@ pub(crate) fn decode_segment_item_with_operation(
         })
         .collect::<CertResult<Vec<_>>>()?;
     let packages = decode_package_rows(packages, operation)?;
-    let package_products = decode_package_product_outputs(package_products, operation)?;
+    let selection = decode_package_selection(selection, operation)?;
+    if selection
+        .home_roots()
+        .keys()
+        .any(|(target, _, _, _)| target != selection.target())
+    {
+        return Err(CertificationError::Receipt(
+            "segment item package HOME target differs from its program target",
+        ));
+    }
     Ok(SegmentItemReceipt {
         globals,
         packages,
-        package_products,
+        selection,
     })
 }
 
@@ -2640,12 +2726,13 @@ fn decode_package_links(
     targets: &BTreeMap<String, Vec<AcceptedGlobal>>,
     operation: &InventoryOperation,
 ) -> CertResult<PackageLinks> {
-    let row = sized(value, 4)?;
+    let row = sized(value, 6)?;
     let version = number(&row[0])?;
-    if version != 1 {
+    if version != 3 {
         return Err(CertificationError::Receipt("package links version"));
     }
-    let occurrences_value = array(&row[1])?;
+    let stage_id = bytes32(&row[1])?;
+    let occurrences_value = array(&row[2])?;
     operation.reserve::<PackageOccurrenceRow>(occurrences_value.len())?;
     let mut occurrences = Vec::with_capacity(occurrences_value.len());
     for (index, value) in occurrences_value.iter().enumerate() {
@@ -2678,37 +2765,30 @@ fn decode_package_links(
             imports,
         });
     }
+    for occurrence in &occurrences {
+        check_package_link_range(&occurrence.imports, occurrences.len())?;
+    }
     // Every occurrence must be an authenticated package product envelope.
     let product_envelopes = package_products
         .iter()
         .map(|output| output.sha256)
         .collect::<BTreeSet<_>>();
-    let mut by_envelope: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
-    for (index, occurrence) in occurrences.iter().enumerate() {
+    for occurrence in &occurrences {
         if !product_envelopes.contains(&occurrence.envelope_sha256) {
             return Err(CertificationError::Receipt(
                 "package occurrence envelope is not a package product",
             ));
         }
-        by_envelope
-            .entry(occurrence.envelope_sha256)
-            .or_default()
-            .push(index);
     }
-    for (_, indices) in &by_envelope {
-        for (position, left) in indices.iter().enumerate() {
-            for right in &indices[position + 1..] {
-                if occurrences[*left].imports == occurrences[*right].imports {
-                    return Err(CertificationError::Receipt(
-                        "duplicate package occurrence row",
-                    ));
-                }
-            }
-        }
+    let encoded_products = decode_package_product_outputs(&row[5], operation)?;
+    if encoded_products != package_products {
+        return Err(CertificationError::Receipt(
+            "package links carry another stage product set",
+        ));
     }
     // Link targets must stay in range, and root keys must be ordinary target keys.
     let mut target_roots = BTreeMap::new();
-    for entry in array(&row[2])? {
+    for entry in array(&row[3])? {
         let entry = sized(entry, 2)?;
         let name = string(&entry[0])?.to_owned();
         if name.is_empty() {
@@ -2728,33 +2808,112 @@ fn decode_package_links(
             ));
         }
     }
+    if target_roots.len() != targets.len() {
+        return Err(CertificationError::Receipt(
+            "package links omit a receipt target",
+        ));
+    }
     let mut home_roots = BTreeMap::new();
-    for entry in array(&row[3])? {
+    for entry in array(&row[4])? {
         let entry = sized(entry, 2)?;
-        let owner = sized(&entry[0], 3)?;
-        let unit = string(&owner[0])?.to_owned();
-        let module = string(&owner[1])?.to_owned();
-        let original_ordinal = u32::try_from(number(&owner[2])?)
+        let owner = sized(&entry[0], 4)?;
+        let target = string(&owner[0])?.to_owned();
+        let unit = string(&owner[1])?.to_owned();
+        let module = string(&owner[2])?.to_owned();
+        let original_ordinal = u32::try_from(number(&owner[3])?)
             .map_err(|_| CertificationError::Receipt("package links home ordinal"))?;
-        if unit.is_empty() || module.is_empty() {
+        if target.is_empty() || unit.is_empty() || module.is_empty() {
             return Err(CertificationError::Receipt("package links home owner"));
         }
         let links = decode_package_links_list(&entry[1], operation)?;
         check_package_link_range(&links, occurrences.len())?;
-        operation.charge(unit.len().saturating_add(module.len()))?;
+        operation.charge(
+            target
+                .len()
+                .saturating_add(unit.len())
+                .saturating_add(module.len()),
+        )?;
         if home_roots
-            .insert((unit, module, original_ordinal), links)
+            .insert((target, unit, module, original_ordinal), links)
             .is_some()
         {
             return Err(CertificationError::Receipt("duplicate package links home"));
         }
     }
+    let expected_stage_id =
+        package_stage_identity(&occurrences, &target_roots, &home_roots, package_products)?;
+    if stage_id != expected_stage_id {
+        return Err(CertificationError::Receipt(
+            "package stage identity differs from its manifest",
+        ));
+    }
     Ok(PackageLinks {
-        version: 1,
+        version: 3,
+        stage_id,
         occurrences,
         target_roots,
         home_roots,
     })
+}
+
+fn package_stage_identity(
+    occurrences: &[PackageOccurrenceRow],
+    target_roots: &BTreeMap<String, Vec<PackageLink>>,
+    home_roots: &BTreeMap<(String, String, String, u32), Vec<PackageLink>>,
+    package_products: &[PackageProductOutput],
+) -> CertResult<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    fn link_value(link: &PackageLink) -> Value {
+        match link {
+            PackageLink::Local { occurrence } => {
+                value_array([value_text("local"), Value::Integer((*occurrence as u64).into())])
+            }
+        }
+    }
+    let links_value = |links: &[PackageLink]| {
+        value_array(links.iter().map(link_value))
+    };
+    let occurrence_value = |occurrence: &PackageOccurrenceRow| {
+        value_array([
+            Value::Bytes(occurrence.envelope_sha256.to_vec()),
+            value_text(&occurrence.unit),
+            value_text(&occurrence.module),
+            Value::Bytes(occurrence.defining_interface_sha256.to_vec()),
+            Value::Bytes(occurrence.defining_version_sha256.to_vec()),
+            links_value(&occurrence.imports),
+        ])
+    };
+    let identity = value_array([
+        Value::Integer(1.into()),
+        value_array(occurrences.iter().map(occurrence_value)),
+        value_array(target_roots.iter().map(|(target, links)| {
+            value_array([value_text(target), links_value(links)])
+        })),
+        value_array(home_roots.iter().map(
+            |((target, unit, module, ordinal), links)| {
+                value_array([
+                    value_array([
+                        value_text(target),
+                        value_text(unit),
+                        value_text(module),
+                        Value::Integer((*ordinal as u64).into()),
+                    ]),
+                    links_value(links),
+                ])
+            },
+        )),
+        value_array(package_products.iter().map(|product| {
+            value_array([
+                value_text(product.relative_path.to_str().unwrap_or("")),
+                Value::Bytes(product.sha256.to_vec()),
+            ])
+        })),
+    ]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&identity, &mut bytes)
+        .map_err(|_| CertificationError::Receipt("package stage identity encoding"))?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 fn decode_package_links_list(
@@ -2767,7 +2926,6 @@ fn decode_package_links_list(
     for value in links {
         let link = array(value)?;
         decoded.push(match link {
-            [tag] if string(tag)? == "inherited" => PackageLink::Inherited,
             [tag, occurrence] if string(tag)? == "local" => PackageLink::Local {
                 occurrence: u32::try_from(number(occurrence)?)
                     .map_err(|_| CertificationError::Receipt("package link occurrence"))?,
@@ -2778,14 +2936,59 @@ fn decode_package_links_list(
     Ok(decoded)
 }
 
+fn decode_package_selection(
+    value: &Value,
+    operation: &InventoryOperation,
+) -> CertResult<PackageSelection> {
+    let row = sized(value, 6)?;
+    if number(&row[0])? != 1 {
+        return Err(CertificationError::Receipt("package selection version"));
+    }
+    let stage_id = bytes32(&row[1])?;
+    let program_sha256 = bytes32(&row[2])?;
+    let target = string(&row[3])?.to_owned();
+    if target.is_empty() {
+        return Err(CertificationError::Receipt("package selection target"));
+    }
+    let target_roots = decode_package_links_list(&row[4], operation)?;
+    let mut home_roots = BTreeMap::new();
+    for entry in array(&row[5])? {
+        let entry = sized(entry, 2)?;
+        let owner = sized(&entry[0], 4)?;
+        let issuer = string(&owner[0])?.to_owned();
+        let unit = string(&owner[1])?.to_owned();
+        let module = string(&owner[2])?.to_owned();
+        let original_ordinal = u32::try_from(number(&owner[3])?)
+            .map_err(|_| CertificationError::Receipt("package selection HOME ordinal"))?;
+        if issuer.is_empty() || unit.is_empty() || module.is_empty() {
+            return Err(CertificationError::Receipt("package selection HOME owner"));
+        }
+        let links = decode_package_links_list(&entry[1], operation)?;
+        if home_roots
+            .insert((issuer, unit, module, original_ordinal), links)
+            .is_some()
+        {
+            return Err(CertificationError::Receipt(
+                "duplicate package selection HOME",
+            ));
+        }
+    }
+    Ok(PackageSelection {
+        stage_id,
+        program_sha256,
+        target,
+        target_roots,
+        home_roots,
+    })
+}
+
 fn check_package_link_range(links: &[PackageLink], occurrences: usize) -> CertResult<()> {
     for link in links {
-        if let PackageLink::Local { occurrence } = link {
-            if *occurrence as usize >= occurrences {
-                return Err(CertificationError::Receipt(
-                    "package link occurrence out of range",
-                ));
-            }
+        let PackageLink::Local { occurrence } = link;
+        if *occurrence as usize >= occurrences {
+            return Err(CertificationError::Receipt(
+                "package link occurrence out of range",
+            ));
         }
     }
     Ok(())
@@ -31747,7 +31950,7 @@ None,
         let item = segment_item_receipt(&SegmentItemReceipt {
             globals: vec![],
             packages: BTreeMap::new(),
-            package_products: vec![],
+            selection: empty_package_selection([0; 32], "item"),
         });
         let decode_originals = |value: &Value| {
             decode_segment_originals_with_operation(
@@ -31879,7 +32082,7 @@ None,
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 9,
-                expected: 12
+                expected: 13
             })
         ));
         let mut trailing = encoded;
@@ -32221,7 +32424,8 @@ None,
                 *binder = right.identity.clone();
             }
             let item = segment_item_receipt(&SegmentItemReceipt {
-                globals: vec![left.clone()], packages: BTreeMap::new(), package_products: vec![],
+                globals: vec![left.clone()], packages: BTreeMap::new(),
+                selection: empty_package_selection([0; 32], "item"),
             });
             let operation = InventoryOperation::new(Default::default());
             let decoded = decode_segment_item_with_operation(&receipt_bytes(&item), &operation).unwrap();
@@ -32492,7 +32696,7 @@ None,
     fn receipt_payload_mut(value: &mut Value) -> &mut Vec<Value> {
         let header = value.as_array_mut().unwrap();
         assert_eq!(header[0], value_text("TPCERT"));
-        assert_eq!(header[1], Value::Integer(12.into()));
+        assert_eq!(header[1], Value::Integer(13.into()));
         header[2].as_array_mut().unwrap()
     }
 
@@ -32502,10 +32706,23 @@ None,
         bytes
     }
 
+    pub(crate) fn empty_package_selection(
+        stage_id: [u8; 32],
+        target: &str,
+    ) -> PackageSelection {
+        PackageSelection {
+            stage_id,
+            program_sha256: [0; 32],
+            target: target.into(),
+            target_roots: Vec::new(),
+            home_roots: BTreeMap::new(),
+        }
+    }
+
     fn segment_item_receipt(receipt: &SegmentItemReceipt) -> Value {
         value_array([
             value_text("TPCERT"),
-            Value::Integer(12.into()),
+            Value::Integer(13.into()),
             value_array([
                 value_text("segment-item"),
                 value_array(receipt.globals.iter().map(value_global)),
@@ -32517,13 +32734,37 @@ None,
                         value_text(hex(&witness.sha256)),
                     ])
                 })),
-                value_array(receipt.package_products.iter().map(|output| {
-                    value_array([
-                        value_text(output.relative_path.display().to_string()),
-                        Value::Bytes(output.sha256.to_vec()),
-                    ])
-                })),
+                package_selection_value(&receipt.selection),
             ]),
+        ])
+    }
+
+    fn package_selection_value(selection: &PackageSelection) -> Value {
+        value_array([
+            Value::Integer(1.into()),
+            Value::Bytes(selection.stage_id().to_vec()),
+            Value::Bytes(selection.program_sha256().to_vec()),
+            value_text(selection.target()),
+            value_array(selection.target_roots().iter().map(|link| match link {
+                PackageLink::Local { occurrence } => package_links_local(*occurrence as u64),
+            })),
+            value_array(selection.home_roots().iter().map(
+                |((target, unit, module, ordinal), links)| {
+                    value_array([
+                        value_array([
+                            value_text(target),
+                            value_text(unit),
+                            value_text(module),
+                            Value::Integer((*ordinal as u64).into()),
+                        ]),
+                        value_array(links.iter().map(|link| match link {
+                            PackageLink::Local { occurrence } => {
+                                package_links_local(*occurrence as u64)
+                            }
+                        })),
+                    ])
+                },
+            )),
         ])
     }
 
@@ -32629,7 +32870,7 @@ None,
         ]));
         let payload =
             value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
-        value_array([value_text("TPCERT"), Value::Integer(12.into()), payload])
+        value_array([value_text("TPCERT"), Value::Integer(13.into()), payload])
     }
 
     fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
@@ -33097,8 +33338,9 @@ None,
         ]), &global.identity), Err(CertificationError::Receipt("retained package owner removed"))));
         let mut encoded_global = value_global(&global);
         encoded_global.as_array_mut().unwrap()[4] = legacy;
-        let item = value_array([value_text("TPCERT"), Value::Integer(12.into()), value_array([
-            value_text("segment-item"), value_array([encoded_global]), value_array([]), value_array([]),
+        let item = value_array([value_text("TPCERT"), Value::Integer(13.into()), value_array([
+            value_text("segment-item"), value_array([encoded_global]), value_array([]),
+            package_selection_value(&empty_package_selection([0; 32], "item")),
         ])]);
         assert!(matches!(decode_segment_item_with_operation(&receipt_bytes(&item),
             &InventoryOperation::new(Default::default())),
@@ -33553,7 +33795,7 @@ None,
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 12,
+                    expected: 13,
                     ..
                 })
             ));
@@ -33578,15 +33820,43 @@ None,
     }
 
     fn package_links_manifest(
+        products: &[PackageProductOutput],
         occurrences: Vec<Value>,
         target_roots: Vec<Value>,
         home_roots: Vec<Value>,
     ) -> Value {
-        value_array([
+        use sha2::{Digest, Sha256};
+        let products_value = value_array(products.iter().map(|product| {
+            value_array([
+                value_text(product.relative_path.to_str().unwrap()),
+                Value::Bytes(product.sha256.to_vec()),
+            ])
+        }));
+        let identity = value_array([
             Value::Integer(1.into()),
+            value_array(occurrences.iter().map(|occurrence| {
+                value_array(
+                    array(occurrence)
+                        .unwrap()
+                        .iter()
+                        .skip(1)
+                        .cloned(),
+                )
+            })),
+            value_array(target_roots.iter().cloned()),
+            value_array(home_roots.iter().cloned()),
+            products_value.clone(),
+        ]);
+        let mut identity_bytes = Vec::new();
+        ciborium::ser::into_writer(&identity, &mut identity_bytes).unwrap();
+        let stage_id: [u8; 32] = Sha256::digest(identity_bytes).into();
+        value_array([
+            Value::Integer(3.into()),
+            Value::Bytes(stage_id.to_vec()),
             value_array(occurrences),
             value_array(target_roots),
             value_array(home_roots),
+            products_value,
         ])
     }
 
@@ -33606,12 +33876,8 @@ None,
         value_array([value_text("local"), Value::Integer(occurrence.into())])
     }
 
-    fn package_links_inherited() -> Value {
-        value_array([value_text("inherited")])
-    }
-
     #[test]
-    fn package_links_decoder_accepts_exact_local_and_inherited_links() {
+    fn package_links_decoder_accepts_target_qualified_local_links() {
         let operation = InventoryOperation::new(Default::default());
         let products = vec![
             PackageProductOutput {
@@ -33624,9 +33890,9 @@ None,
             },
         ];
         let targets = BTreeMap::from([("target".to_owned(), vec![])]);
-        let manifest = package_links_manifest(
+        let manifest = package_links_manifest(&products,
             vec![
-                package_links_occurrence(0, [1; 32], value_array([package_links_inherited()])),
+                package_links_occurrence(0, [1; 32], value_array([])),
                 package_links_occurrence(1, [2; 32], value_array([package_links_local(0)])),
             ],
             vec![value_array([
@@ -33636,6 +33902,7 @@ None,
             vec![
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(3.into()),
@@ -33644,23 +33911,39 @@ None,
                 ]),
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(9.into()),
                     ]),
-                    value_array([package_links_inherited()]),
+                    value_array([]),
                 ]),
             ],
         );
-        let decoded = decode_package_links(&manifest, &products, &targets, &operation).unwrap();
-        assert_eq!(decoded.version(), 1);
+        let decoded =
+            decode_package_links(&manifest, &products, &targets, &operation).unwrap();
+        assert_eq!(decoded.version(), 3);
         assert_eq!(decoded.occurrences().len(), 2);
         assert_eq!(decoded.occurrences()[0].id(), 0);
         assert_eq!(decoded.occurrences()[1].id(), 1);
         assert_eq!(decoded.target_links("target").unwrap().len(), 1);
-        assert_eq!(decoded.home_links("home", "Home", 3).unwrap().len(), 1);
-        assert_eq!(decoded.home_links("home", "Home", 9).unwrap().len(), 1);
-        assert!(decoded.home_links("home", "Home", 7).is_none());
+        assert_eq!(
+            decoded
+                .home_links("target", "home", "Home", 3)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            decoded
+                .home_links("target", "home", "Home", 9)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(decoded
+            .home_links("target", "home", "Home", 7)
+            .is_none());
     }
 
     #[test]
@@ -33671,10 +33954,11 @@ None,
             sha256: [1; 32],
         }];
         let targets = BTreeMap::from([("target".to_owned(), vec![])]);
-        let decode = |value: &Value| decode_package_links(value, &products, &targets, &operation);
+        let decode =
+            |value: &Value| decode_package_links(value, &products, &targets, &operation);
 
         // Wrong version.
-        let mut wrong_version = package_links_manifest(vec![], vec![], vec![]);
+        let mut wrong_version = package_links_manifest(&products, vec![], vec![], vec![]);
         wrong_version.as_array_mut().unwrap()[0] = Value::Integer(0.into());
         assert!(matches!(
             decode(&wrong_version),
@@ -33682,7 +33966,7 @@ None,
         ));
 
         // Row id is its position; a nonzero first id refuses.
-        let bad_position = package_links_manifest(
+        let bad_position = package_links_manifest(&products,
             vec![package_links_occurrence(1, [1; 32], value_array([]))],
             vec![],
             vec![],
@@ -33695,11 +33979,12 @@ None,
         ));
 
         // A Local link must index an occurrence row.
-        let out_of_range = package_links_manifest(
+        let out_of_range = package_links_manifest(&products,
             vec![package_links_occurrence(0, [1; 32], value_array([]))],
-            vec![],
+            vec![value_array([value_text("target"), value_array([])])],
             vec![value_array([
                 value_array([
+                    value_text("target"),
                     value_text("home"),
                     value_text("Home"),
                     Value::Integer(7.into()),
@@ -33714,8 +33999,24 @@ None,
             ))
         ));
 
+        let child_out_of_range = package_links_manifest(&products,
+            vec![package_links_occurrence(
+                0,
+                [1; 32],
+                value_array([package_links_local(7)]),
+            )],
+            vec![value_array([value_text("target"), value_array([])])],
+            vec![],
+        );
+        assert!(matches!(
+            decode(&child_out_of_range),
+            Err(CertificationError::Receipt(
+                "package link occurrence out of range"
+            ))
+        ));
+
         // A foreign envelope is not an authenticated package product.
-        let foreign = package_links_manifest(
+        let foreign = package_links_manifest(&products,
             vec![package_links_occurrence(0, [9; 32], value_array([]))],
             vec![],
             vec![],
@@ -33727,24 +34028,23 @@ None,
             ))
         ));
 
-        // Two rows may share an envelope only with distinct ordered imports.
-        let duplicate = package_links_manifest(
+        // Distinct occurrence ids may carry byte-identical row contents.
+        let identical = package_links_manifest(&products,
             vec![
                 package_links_occurrence(0, [1; 32], value_array([])),
                 package_links_occurrence(1, [1; 32], value_array([])),
             ],
-            vec![],
+            vec![value_array([value_text("target"), value_array([])])],
             vec![],
         );
-        assert!(matches!(
-            decode(&duplicate),
-            Err(CertificationError::Receipt(
-                "duplicate package occurrence row"
-            ))
-        ));
+        assert_eq!(
+            decode(&identical).unwrap().occurrences().len(),
+            2,
+            "occurrence identity is its positional id"
+        );
 
         // A root key must name an ordinary receipt target.
-        let unknown_target = package_links_manifest(
+        let unknown_target = package_links_manifest(&products,
             vec![],
             vec![value_array([value_text("other"), value_array([])])],
             vec![],
@@ -33758,12 +34058,13 @@ None,
 
         // A HOME owner key is (unit, module, original ordinal); a duplicate
         // ordinal refuses, while distinct ordinals of one module are allowed.
-        let duplicate_home = package_links_manifest(
+        let duplicate_home = package_links_manifest(&products,
             vec![],
-            vec![],
+            vec![value_array([value_text("target"), value_array([])])],
             vec![
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(7.into()),
@@ -33772,6 +34073,7 @@ None,
                 ]),
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(7.into()),
@@ -33783,6 +34085,28 @@ None,
         assert!(matches!(
             decode(&duplicate_home),
             Err(CertificationError::Receipt("duplicate package links home"))
+        ));
+
+        let omitted_target = package_links_manifest(&products, vec![], vec![], vec![]);
+        assert!(matches!(
+            decode(&omitted_target),
+            Err(CertificationError::Receipt(
+                "package links omit a receipt target"
+            ))
+        ));
+
+        let mut changed_stage = package_links_manifest(
+            &products,
+            vec![],
+            vec![value_array([value_text("target"), value_array([])])],
+            vec![],
+        );
+        changed_stage.as_array_mut().unwrap()[1] = Value::Bytes(vec![9; 32]);
+        assert!(matches!(
+            decode(&changed_stage),
+            Err(CertificationError::Receipt(
+                "package stage identity differs from its manifest"
+            ))
         ));
     }
 }
