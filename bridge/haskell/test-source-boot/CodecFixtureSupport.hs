@@ -162,6 +162,7 @@ data CertificateCodecFacts = CertificateCodecFacts
   , codecCertificateModules :: [(String,String,[Word32])]
   , codecCertificateTargets :: [(String,[Int])]
   , codecCertificateGlobalSeals :: [String]
+  , codecCertificateModuleReferences :: [(String,String,[(Word32,[Int])])]
   } deriving (Eq,Show)
 
 readCertificateCodecFacts :: FilePath -> FilePath -> IO CertificateCodecFacts
@@ -172,12 +173,13 @@ readSegmentItemCodecFacts = readProductCodecFacts "segment_item_facts"
 
 readProductCodecFacts :: String -> FilePath -> FilePath -> IO CertificateCodecFacts
 readProductCodecFacts operation work path = readFacts work operation [text path] $ \term -> do
-  fields <- closedMap ["owners","packages","modules","targets","global_sha256"] term
+  fields <- closedMap ["owners","packages","modules","targets","global_sha256","module_references"] term
   CertificateCodecFacts <$> field fields "owners" (array importOwner)
     <*> field fields "packages" (array packageFact)
     <*> field fields "modules" (array moduleFact)
     <*> field fields "targets" (array targetFact)
     <*> field fields "global_sha256" (array digestString)
+    <*> field fields "module_references" (array moduleReferences)
   where
     packageFact term = do
       fields <- closedMap ["unit","module","interface_path","interface_sha256"] term
@@ -190,6 +192,13 @@ readProductCodecFacts operation work path = readFacts work operation [text path]
       fields <- closedMap ["unit","module","ordinals"] term
       (,,) <$> field fields "unit" string <*> field fields "module" string
         <*> field fields "ordinals" (array natural)
+    moduleReferences term = do
+      fields <- closedMap ["unit","module","groups"] term
+      (,,) <$> field fields "unit" string <*> field fields "module" string
+        <*> field fields "groups" (array groupReferences)
+    groupReferences term = do
+      fields <- closedMap ["ordinal","references"] term
+      (,) <$> field fields "ordinal" natural <*> field fields "references" (array natural)
 
 data CompilerInputCodecFacts
   = CodecCheckedInputs [((String,String),[(String,String)])] [(String,String)]

@@ -606,15 +606,27 @@ struct TargetFact {
     references: Vec<usize>,
 }
 #[derive(Serialize)]
+struct GroupReferenceFact {
+    ordinal: u32,
+    references: Vec<usize>,
+}
+#[derive(Serialize)]
+struct ModuleReferenceFact {
+    unit: String,
+    module: String,
+    groups: Vec<GroupReferenceFact>,
+}
+#[derive(Serialize)]
 struct CertificateFacts {
     owners: Vec<ImportOwnerFact>,
     global_sha256: Vec<String>,
     packages: Vec<PackageFact>,
     modules: Vec<ModuleFact>,
     targets: Vec<TargetFact>,
+    module_references: Vec<ModuleReferenceFact>,
 }
 fn certificate_facts(root: &Path, path: &Path) {
-    let (receipt, inventory, references, global_sha256) =
+    let (receipt, inventory, references, global_sha256, module_references) =
         crate::certified_products::fixture_decoded_receipt(
             &bounded_bytes(path, MANIFEST_LIMIT),
             path.parent(),
@@ -642,6 +654,20 @@ fn certificate_facts(root: &Path, path: &Path) {
             targets: references
                 .into_iter()
                 .map(|(name, references)| TargetFact { name, references })
+                .collect(),
+            module_references: module_references
+                .into_iter()
+                .map(|((unit, module), groups)| ModuleReferenceFact {
+                    unit,
+                    module,
+                    groups: groups
+                        .into_iter()
+                        .map(|(ordinal, references)| GroupReferenceFact {
+                            ordinal,
+                            references,
+                        })
+                        .collect(),
+                })
                 .collect(),
             modules: receipt
                 .modules
@@ -692,6 +718,7 @@ fn segment_item_facts(root: &Path, path: &Path) {
                 })
                 .collect(),
             modules: vec![],
+            module_references: vec![],
             targets: vec![TargetFact {
                 name: "item".into(),
                 references: (0..item.globals.len()).collect(),

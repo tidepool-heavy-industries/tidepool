@@ -2860,6 +2860,7 @@ pub(crate) fn fixture_decoded_receipt(
     Vec<AcceptedGlobal>,
     BTreeMap<String, Vec<usize>>,
     Vec<[u8; 32]>,
+    BTreeMap<(String, String), Vec<(u32, Vec<usize>)>>,
 )> {
     let decoded = decode_receipt_packet_in(bytes, output_dir)?;
     let key = |global: &AcceptedGlobal| -> CertResult<Vec<u8>> {
@@ -2898,7 +2899,38 @@ pub(crate) fn fixture_decoded_receipt(
             ))
         })
         .collect::<CertResult<_>>()?;
-    Ok((decoded.receipt, decoded.globals, references, global_sha256))
+    let module_references = decoded
+        .receipt
+        .modules
+        .iter()
+        .map(|module| {
+            let groups = module
+                .groups
+                .iter()
+                .map(|group| {
+                    let references = group
+                        .globals
+                        .iter()
+                        .map(|global| {
+                            indices
+                                .get(&key(global)?)
+                                .copied()
+                                .ok_or(CertificationError::Receipt("global dictionary index"))
+                        })
+                        .collect::<CertResult<Vec<_>>>()?;
+                    Ok((group.original_ordinal, references))
+                })
+                .collect::<CertResult<Vec<_>>>()?;
+            Ok(((module.unit.clone(), module.module.clone()), groups))
+        })
+        .collect::<CertResult<_>>()?;
+    Ok((
+        decoded.receipt,
+        decoded.globals,
+        references,
+        global_sha256,
+        module_references,
+    ))
 }
 
 #[cfg(test)]

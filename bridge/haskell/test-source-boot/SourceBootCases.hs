@@ -7,7 +7,7 @@ import Tidepool.CompilerRequest
   , PreparedArtifactOutput(..), paProgram )
 import Tidepool.ExtractRequest (RequestField(..), workerArgv, workerRequestFromArgv)
 
-import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
+import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256, artifactBytes)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
@@ -135,7 +135,7 @@ import Tidepool.CompilerProducts
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
   , writeCertifiedSegmentProducts, publishStagedOriginalProducts, stagedOriginalExternalDemand, validateStagedPriorHomeGroups
   , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
-import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
+import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal, captureSelectedPackageWitnesses)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
   , localFinalizedCore, localFinalizedSourceSha256, revalidateLocalFinalizedAdmissionWith )
@@ -6840,7 +6840,7 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
   putStrLn "selected home instance edges: transitive instance, package exclusion and owner mismatch passed"
 
 verifyPackageAndRetainedWitnesses :: HscEnv -> DependencyEvidence -> IO ()
-verifyPackageAndRetainedWitnesses producer evidence = do
+verifyPackageAndRetainedWitnesses producer evidence = withScratch $ \component -> do
   let package = SymbolIdentity "ghc-internal" "GHC.Internal.Base" "value" "map" Nothing
       home = SymbolIdentity "main" "InstanceConsumer" "value" "result" Nothing
       global identity generation = GlobalDecl identity LiftedRefRep Nothing False generation
@@ -6850,8 +6850,42 @@ verifyPackageAndRetainedWitnesses producer evidence = do
         , programSignatures = [], programGlobals = globals, programConstructors = []
         , programOperations = [], programBindings = [], programEntry = ValueId 0
         , programTypes = TypeGraph IntMap.empty IntMap.empty, programSites = [], programConstructorReplies = [], programJsonLayout = Nothing }
-      encode globals = encodeCertifiedProducts producer OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts producer) [] Nothing []
-        [("target", program globals)] evidence "" ""
+  let owner = mkModule (stringToUnit "main") (mkModuleName "InstanceConsumer")
+      interfacePath = component </> "structural-package-references.hi"
+  (iface, _) <- readExactInterface producer owner >>= either (fail . show) pure
+  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression interfacePath iface
+  interfaceBytes <- BS.readFile interfacePath
+  source <- case [dependencyModuleSource row | row <- dependencyModules evidence
+      , dependencyModuleName row == "InstanceConsumer", not (dependencyModuleBoot row)] of
+    [path] -> pure path
+    _ -> fail "structural package references require the actual compiled HOME source"
+  sourceBytes <- BS.readFile source
+  let sidecar = encodePackageImports
+        (ExactIfaceArtifact "main" "InstanceConsumer" interfacePath (digest interfaceBytes) [])
+        emptyPackageImports
+  BS.writeFile (interfacePath ++ ".packages") sidecar
+  base <- structuralCandidate component
+  -- These groups exercise DATA reference framing only. Real interface/source
+  -- custody does not turn them into an executable package target.
+  let candidate globals = base
+        { candidateUnit = "main", candidateModule = "InstanceConsumer"
+        , candidateSource = source, candidateSourceSha256 = digest sourceBytes
+        , candidateInterface = interfacePath, candidateInterfaceSha256 = digest interfaceBytes
+        , candidateModuleVersion = replicate 64 '1'
+        , candidateProductSha256 = replicate 64 '2'
+        , candidateEvidenceSha256 = replicate 64 '3'
+        , candidateImports = []
+        , candidateGroups = [CandidateGroup 0 []
+            [CandidateGlobal identity rep signature evaluated (fromIntegral <$> generation)
+              | GlobalDecl identity rep signature evaluated generation <- globals]]
+        , candidatePackageImports = interfacePath ++ ".packages"
+        , candidatePackageImportsSha256 = digest sidecar
+        , candidateProductPath = interfacePath ++ ".product.cbor"
+        , candidateExecutionSource = Nothing }
+      encodeIn environment globals = encodeCertifiedProducts environment OrdinaryExecutionSource
+        (Map.singleton (mkModuleName "InstanceConsumer") iface)
+        (emptyFinalizedModuleArtifacts environment) [candidate globals] Nothing [] [] evidence "" ""
+      encode = encodeIn producer
   withTiming $ do
     let repeated = replicate 1000 (global package Nothing)
           ++ [global (package { symbolOccurrence = "id" }) Nothing]
@@ -6872,12 +6906,12 @@ verifyPackageAndRetainedWitnesses producer evidence = do
     unless (first == second) $ fail "repeated package certification changed its wire evidence"
     retainByteOracle "repeated-package" first
     repeatedFacts <- certificateFacts first
-    case codecCertificateTargets repeatedFacts of
-      [("target",references)]
+    case codecCertificateModuleReferences repeatedFacts of
+      [("main","InstanceConsumer",[(0,references)])]
         | length references == 1001
         , length (codecCertificateOwners repeatedFacts) == 2
         , length (codecCertificateGlobalSeals repeatedFacts) == 2
-        , null (codecCertificateModules repeatedFacts) ->
+        , null (codecCertificateTargets repeatedFacts) ->
             unless (sameRepeatedReferences references (codecCertificateOwners repeatedFacts)) $
               fail ("repeated package witnesses lost canonical deduplication or reference indices: "
                 ++ show (take 3 references,drop 999 references,codecCertificateOwners repeatedFacts))
@@ -6897,7 +6931,7 @@ verifyPackageAndRetainedWitnesses producer evidence = do
     encode [global package Nothing, global (package { symbolOccurrence = "$missingSibling" }) Nothing] >>= \case
       Left _ -> pure ()
       Right _ -> fail "checked package interface authorized an absent sibling"
-  verifyChangedPackageInterface producer package evidence program global
+  verifyChangedPackageInterface producer package encodeIn global
   bytes <- encode [global package (Just 0), global home (Just 7)] >>= either fail pure
   retainByteOracle "mixed-retained" bytes
   retainedFacts <- certificateFacts bytes
@@ -6963,10 +6997,10 @@ verifyPackageAndRetainedWitnesses producer evidence = do
     retainDiagnosticOracle "implicit-backward" backwardLog
     forwardFacts <- certificateFacts forward
     backwardFacts <- certificateFacts backward
-    restored <- case codecCertificateTargets backwardFacts of
-      [(name,references)] | length references == 37 -> pure backwardFacts
-        {codecCertificateTargets=[(name,reverse references)]}
-      _ -> fail "package catalog fixture lacks its target reference inventory"
+    restored <- case codecCertificateModuleReferences backwardFacts of
+      [(unit,name,[(ordinal,references)])] | length references == 37 -> pure backwardFacts
+        {codecCertificateModuleReferences=[(unit,name,[(ordinal,reverse references)])]}
+      _ -> fail "package catalog fixture lacks its group reference inventory"
     unless (forwardFacts == restored) $
       fail "package lookup order changed canonical global seals, witnesses or reference order"
     forM_ [forwardLog, backwardLog] $ \diagnostics ->
@@ -7035,11 +7069,12 @@ verifyPackageAndRetainedWitnesses producer evidence = do
           CodecPackageOwner _ _ _ binder -> binder))
       | otherwise = Nothing
 
--- A mutable installed interface exercises the same environment on successive
--- certifications. No successful owner selection may survive into the next one.
-verifyChangedPackageInterface :: HscEnv -> SymbolIdentity -> DependencyEvidence
-  -> ([GlobalDecl] -> WireProgram) -> (SymbolIdentity -> Maybe Word64 -> GlobalDecl) -> IO ()
-verifyChangedPackageInterface producer identity evidence program global = withScratch $ \work -> do
+-- Immutable capture survives origin drift. A new resolution or capture must
+-- authenticate the current origin again before it can issue another selection.
+verifyChangedPackageInterface :: HscEnv -> SymbolIdentity
+  -> (HscEnv -> [GlobalDecl] -> IO (Either String BS.ByteString))
+  -> (SymbolIdentity -> Maybe Word64 -> GlobalDecl) -> IO ()
+verifyChangedPackageInterface producer identity encodeIn global = withScratch $ \work -> do
   let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
         (mkModuleName (T.unpack (symbolModule identity)))
       path = work </> "mutable-package.hi"
@@ -7049,24 +7084,42 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
   finder <- initFinderCache
   addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
   let environment = producer { hsc_FC = finder }
-      encode = encodeCertifiedProducts environment OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts environment) [] Nothing []
-        [("target", program [global identity Nothing, global identity Nothing])] evidence "" ""
+      encode = encodeIn environment [global identity Nothing, global identity Nothing]
+      witness root = (T.pack (packageUnit root), T.pack (packageModule root),
+        packagePath root, T.pack (packageSha256 root))
+      capture output known root = captureSelectedPackageWitnesses (work </> output) known [witness root]
+      requireBytes (captured,writes) = do
+        unless (length writes == 1 && Map.size captured == 1)
+          (fail "one actual package owner must capture one immutable interface")
+        forM_ (Map.elems captured) $ \(owned,body) -> do
+          copied <- BS.readFile owned
+          unless (artifactBytes body == original && copied == original
+              && artifactSha256 body == digest original)
+            (fail "package capture lost its actual issued interface bytes or seal")
+        pure captured
   first <- encode >>= either fail pure
-  (firstId, _) <- resolvePackageGlobal environment identity >>= either fail pure
-  BS.writeFile path "invalid interface"
-  encode >>= \case
-    Left _ -> pure ()
-    Right _ -> fail "package certification reused an owner after its interface changed"
-  resolvePackageGlobal environment identity >>= \case
-    Left _ -> pure ()
-    Right _ -> fail "standalone package lookup reused a changed interface"
-  BS.writeFile path original
+  (firstId, firstRoot) <- resolvePackageGlobal environment identity >>= either fail pure
+  captured <- capture "first" Map.empty firstRoot >>= either fail requireBytes
+  (do
+      BS.writeFile path "invalid interface"
+      _ <- capture "held-after-drift" captured firstRoot >>= either fail requireBytes
+      capture "fresh-after-drift" Map.empty firstRoot >>= \case
+        Left _ -> pure ()
+        Right _ -> fail "fresh capture accepted changed origin bytes"
+      encode >>= \case
+        Left _ -> pure ()
+        Right _ -> fail "fresh structural certification reused an owner after origin drift"
+      resolvePackageGlobal environment identity >>= \case
+        Left _ -> pure ()
+        Right _ -> fail "fresh package lookup reused a changed interface")
+    `finally` BS.writeFile path original
   restored <- encode >>= either fail pure
-  unless (restored == first) $ fail "restored package interface did not recover certification"
-  (restoredId, _) <- resolvePackageGlobal environment identity >>= either fail pure
+  unless (restored == first) $ fail "restored package interface did not recover fresh certification"
+  (restoredId, restoredRoot) <- resolvePackageGlobal environment identity >>= either fail pure
+  _ <- capture "fresh-restored" Map.empty restoredRoot >>= either fail requireBytes
   unless (idName restoredId == idName firstId) $
-    fail "restored standalone package lookup changed its canonical Name"
-  putStrLn "package certification: changed interface refused and restored bytes recovered"
+    fail "restored package lookup changed its canonical Name"
+  putStrLn "package custody: held bytes survive drift; fresh issuance refuses and restored origin recovers"
 
 resolutionSearchOrderHistory :: IO ()
 resolutionSearchOrderHistory = withScratch $ \work -> do
